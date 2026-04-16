@@ -2,6 +2,17 @@
 
 > **IMPORTANT**: Read this entire file before starting any work on FastOwl.
 
+## Git Workflow
+
+**Repository**: `git@github.com:Gilbert09/owl.git` (main branch)
+
+**After completing each task**, commit and push to GitHub:
+1. Stage relevant changes: `git add <files>`
+2. Commit with a descriptive message explaining what was done
+3. Push to main: `git push origin main`
+
+No branches or PRs needed - commit directly to main. Keep commits focused and atomic where possible.
+
 ## Overview
 
 FastOwl is a desktop "mission control" application for AI-assisted software engineering. It orchestrates multiple Claude agents across different environments (local machine, VMs, dev containers), automates routine tasks, and provides a prioritized inbox of work needing human attention.
