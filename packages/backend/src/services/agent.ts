@@ -165,14 +165,9 @@ class AgentService extends EventEmitter {
     const sessionId = `agent:${agentId}`;
     const now = new Date().toISOString();
 
-    // Construct the claude command
-    // Use --print for non-interactive mode when given a prompt (exits after response)
-    let claudeCommand = 'claude';
-    if (prompt) {
-      // Escape the prompt for shell
-      const escapedPrompt = prompt.replace(/'/g, "'\\''");
-      claudeCommand = `claude --print '${escapedPrompt}'`;
-    }
+    // Launch claude interactively - the user can interact with it like Claude Code CLI
+    // If a prompt is provided, we'll send it as the initial input
+    const claudeCommand = 'claude';
 
     // Determine working directory: use task's repo path, then fall back to environment's default
     const env = environmentService.getEnvironment(environmentId);
@@ -185,6 +180,14 @@ class AgentService extends EventEmitter {
       rows: 40,
       cols: 120,
     });
+
+    // If there's a prompt, send it as initial input after a short delay
+    // This allows Claude to start up before receiving input
+    if (prompt) {
+      setTimeout(() => {
+        environmentService.writeToSession(sessionId, prompt + '\n');
+      }, 500);
+    }
 
     // Create active agent tracking
     const activeAgent: ActiveAgent = {

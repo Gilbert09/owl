@@ -144,26 +144,38 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
         />
       </div>
 
-      {/* Input Area (when awaiting input) */}
-      {agentStatus === 'awaiting_input' && (
-        <div className="p-3 border-t bg-yellow-500/10 border-yellow-500/20">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              placeholder="Type your response..."
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              className="flex-1 px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-              autoFocus
-            />
-            <Button size="sm" onClick={handleSendInput} disabled={!inputValue.trim()}>
-              <Send className="w-4 h-4 mr-1" />
-              Send
-            </Button>
-          </div>
+      {/* Input Area - always visible for interactive terminal */}
+      <div
+        className={cn(
+          'p-3 border-t',
+          agentStatus === 'awaiting_input' ? 'bg-yellow-500/10 border-yellow-500/20' : 'bg-card'
+        )}
+      >
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder={
+              agentStatus === 'awaiting_input'
+                ? 'Type your response...'
+                : 'Send a message to Claude...'
+            }
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="flex-1 px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
+            autoFocus={agentStatus === 'awaiting_input'}
+          />
+          <Button size="sm" onClick={handleSendInput} disabled={!inputValue.trim()}>
+            <Send className="w-4 h-4 mr-1" />
+            Send
+          </Button>
         </div>
-      )}
+        {agentStatus === 'awaiting_input' && (
+          <p className="text-xs text-yellow-500 mt-2">
+            Claude is waiting for your input
+          </p>
+        )}
+      </div>
     </div>
   );
 }
