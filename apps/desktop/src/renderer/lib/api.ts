@@ -145,6 +145,10 @@ export interface GitHubRepo {
   private: boolean;
   html_url: string;
   default_branch: string;
+  owner: {
+    login: string;
+    avatar_url: string;
+  };
 }
 
 export interface GitHubPullRequest {
