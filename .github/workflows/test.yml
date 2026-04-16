@@ -12,23 +12,33 @@ jobs:
 
     steps:
       - name: Check out Git repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Node.js and NPM
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
       - name: npm install
-        run: |
-          npm install
+        run: npm install
 
-      - name: npm test
+      - name: Build shared package
+        run: npm run build -w @fastowl/shared
+
+      - name: Build backend
+        run: npm run build -w @fastowl/backend
+
+      - name: Build desktop DLL
+        run: npm run build:dll -w @fastowl/desktop
+
+      - name: Build desktop app
+        run: npm run build -w @fastowl/desktop
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          npm run package
-          npm run lint
-          npm exec tsc
-          npm test
+        run: npm test

@@ -5,9 +5,19 @@ import { dependencies } from '../../package.json';
 
 if (dependencies) {
   const dependenciesKeys = Object.keys(dependencies);
+
+  // In a monorepo, node_modules may be hoisted to the root
+  // Check both local and root node_modules
+  const nodeModulesPath = fs.existsSync('node_modules') ? 'node_modules' : '../../node_modules';
+
+  if (!fs.existsSync(nodeModulesPath)) {
+    // No node_modules found, skip check (likely running before install completes)
+    process.exit(0);
+  }
+
   const nativeDeps = fs
-    .readdirSync('node_modules')
-    .filter((folder) => fs.existsSync(`node_modules/${folder}/binding.gyp`));
+    .readdirSync(nodeModulesPath)
+    .filter((folder) => fs.existsSync(`${nodeModulesPath}/${folder}/binding.gyp`));
   if (nativeDeps.length === 0) {
     process.exit(0);
   }

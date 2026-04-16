@@ -2,36 +2,38 @@ name: Publish
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - 'v*'
 
 jobs:
   publish:
-    # To enable auto publishing to github, update your electron publisher
-    # config in package.json > "build" and remove the conditional below
-    if: ${{ github.repository_owner == 'electron-react-boilerplate' }}
-
     runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
-        os: [macos-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
 
     steps:
       - name: Checkout git repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Node and NPM
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      - name: Install and build
+      - name: Install dependencies
         run: |
           npm install
-          npm run postinstall
-          npm run build
+
+      - name: Build shared package
+        run: |
+          npm run build -w @fastowl/shared
+
+      - name: Build desktop app
+        run: |
+          npm run build -w @fastowl/desktop
 
       - name: Publish releases
         env:
@@ -44,4 +46,4 @@ jobs:
           # This is used for uploading release assets to github
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npm exec electron-builder -- --publish always --win --mac --linux
+          cd apps/desktop && npm exec electron-builder -- --publish always
