@@ -30,9 +30,9 @@ export function inboxRoutes(db: DB): Router {
     }
 
     // Filter out snoozed items that aren't ready
-    query += ' AND (snoozed_until IS NULL OR snoozed_until <= datetime("now"))';
+    query += ` AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))`;
 
-    query += ' ORDER BY CASE priority WHEN "urgent" THEN 1 WHEN "high" THEN 2 WHEN "medium" THEN 3 ELSE 4 END, created_at DESC';
+    query += ` ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`;
 
     const rows = db.prepare(query).all(...params);
     const items = rows.map(rowToInboxItem);

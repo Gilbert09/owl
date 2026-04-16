@@ -30,7 +30,7 @@ export function taskRoutes(db: DB): Router {
       params.push(type);
     }
 
-    query += ' ORDER BY CASE priority WHEN "urgent" THEN 1 WHEN "high" THEN 2 WHEN "medium" THEN 3 ELSE 4 END, created_at DESC';
+    query += ` ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`;
 
     const rows = db.prepare(query).all(...params);
     const tasks = rows.map(rowToTask);
