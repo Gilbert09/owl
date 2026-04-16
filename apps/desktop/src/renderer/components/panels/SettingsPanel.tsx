@@ -14,6 +14,10 @@ import {
   Loader2,
   Unlink,
   RefreshCw,
+  Palette,
+  Sun,
+  Moon,
+  Monitor,
 } from 'lucide-react';
 import { api, GitHubStatus, GitHubUser, GitHubRepo, WatchedRepo } from '../../lib/api';
 import { cn } from '../../lib/utils';
@@ -22,12 +26,12 @@ import { Input } from '../ui/input';
 import { Card } from '../ui/card';
 import { Badge } from '../ui/badge';
 import { ScrollArea } from '../ui/scroll-area';
-import { useWorkspaceStore } from '../../stores/workspace';
+import { useWorkspaceStore, type Theme } from '../../stores/workspace';
 import { useEnvironmentActions, useWorkspaceActions } from '../../hooks/useApi';
 import { AddEnvironmentModal } from '../modals/AddEnvironmentModal';
 import { Select } from '../ui/select';
 
-type SettingsSection = 'workspace' | 'integrations' | 'environments';
+type SettingsSection = 'workspace' | 'integrations' | 'environments' | 'appearance';
 
 export function SettingsPanel() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('workspace');
@@ -36,6 +40,7 @@ export function SettingsPanel() {
     { id: 'workspace' as const, icon: FolderKanban, label: 'Workspace' },
     { id: 'integrations' as const, icon: Settings, label: 'Integrations' },
     { id: 'environments' as const, icon: Server, label: 'Environments' },
+    { id: 'appearance' as const, icon: Palette, label: 'Appearance' },
   ];
 
   return (
@@ -70,6 +75,7 @@ export function SettingsPanel() {
             {activeSection === 'workspace' && <WorkspaceSettings />}
             {activeSection === 'integrations' && <IntegrationsSettings />}
             {activeSection === 'environments' && <EnvironmentsSettings />}
+            {activeSection === 'appearance' && <AppearanceSettings />}
           </div>
         </ScrollArea>
       </div>
@@ -740,6 +746,73 @@ function EnvironmentsSettings() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function AppearanceSettings() {
+  const { theme, setTheme } = useWorkspaceStore();
+
+  const themeOptions: { value: Theme; label: string; icon: typeof Sun; description: string }[] = [
+    {
+      value: 'light',
+      label: 'Light',
+      icon: Sun,
+      description: 'A clean, bright interface for well-lit environments',
+    },
+    {
+      value: 'dark',
+      label: 'Dark',
+      icon: Moon,
+      description: 'Easy on the eyes in low-light conditions',
+    },
+    {
+      value: 'system',
+      label: 'System',
+      icon: Monitor,
+      description: 'Automatically matches your operating system theme',
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-medium mb-1">Appearance</h3>
+        <p className="text-sm text-muted-foreground">
+          Customize the look and feel of FastOwl
+        </p>
+      </div>
+
+      <Card className="p-4">
+        <h4 className="font-medium mb-3">Theme</h4>
+        <div className="grid grid-cols-3 gap-3">
+          {themeOptions.map((option) => (
+            <button
+              key={option.value}
+              onClick={() => setTheme(option.value)}
+              className={cn(
+                'flex flex-col items-center gap-2 p-4 rounded-lg border-2 transition-colors',
+                theme === option.value
+                  ? 'border-primary bg-primary/5'
+                  : 'border-transparent bg-secondary hover:bg-secondary/80'
+              )}
+            >
+              <div
+                className={cn(
+                  'w-10 h-10 rounded-lg flex items-center justify-center',
+                  theme === option.value ? 'bg-primary text-primary-foreground' : 'bg-muted'
+                )}
+              >
+                <option.icon className="w-5 h-5" />
+              </div>
+              <span className="font-medium text-sm">{option.label}</span>
+            </button>
+          ))}
+        </div>
+        <p className="text-sm text-muted-foreground mt-4">
+          {themeOptions.find((o) => o.value === theme)?.description}
+        </p>
+      </Card>
     </div>
   );
 }

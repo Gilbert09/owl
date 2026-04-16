@@ -1,6 +1,37 @@
 import { create } from 'zustand';
 import type { Workspace, Environment, Agent, Task, InboxItem } from '@fastowl/shared';
 
+export type Theme = 'light' | 'dark' | 'system';
+
+// Get initial theme from localStorage or default to 'light'
+function getInitialTheme(): Theme {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('fastowl-theme');
+    if (stored === 'light' || stored === 'dark' || stored === 'system') {
+      return stored;
+    }
+  }
+  return 'light';
+}
+
+// Apply theme to document
+function applyTheme(theme: Theme) {
+  if (typeof document === 'undefined') return;
+
+  const root = document.documentElement;
+  let effectiveTheme = theme;
+
+  if (theme === 'system') {
+    effectiveTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  if (effectiveTheme === 'dark') {
+    root.classList.add('dark');
+  } else {
+    root.classList.remove('dark');
+  }
+}
+
 interface WorkspaceState {
   // Current workspace
   currentWorkspaceId: string | null;
@@ -23,6 +54,7 @@ interface WorkspaceState {
   sidebarCollapsed: boolean;
   activePanel: 'inbox' | 'queue' | 'github' | 'settings';
   selectedTaskId: string | null;
+  theme: Theme;
 
   // Actions
   setCurrentWorkspace: (id: string | null) => void;
@@ -49,6 +81,7 @@ interface WorkspaceState {
   toggleSidebar: () => void;
   setActivePanel: (panel: 'inbox' | 'queue' | 'github' | 'settings') => void;
   selectTask: (id: string | null) => void;
+  setTheme: (theme: Theme) => void;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set) => ({
@@ -63,6 +96,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   sidebarCollapsed: false,
   activePanel: 'queue',
   selectedTaskId: null,
+  theme: getInitialTheme(),
 
   // Actions
   setCurrentWorkspace: (id) => set({ currentWorkspaceId: id }),
@@ -143,4 +177,24 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setActivePanel: (panel) => set({ activePanel: panel }),
 
   selectTask: (id) => set({ selectedTaskId: id }),
+
+  setTheme: (theme) => {
+    localStorage.setItem('fastowl-theme', theme);
+    applyTheme(theme);
+    set({ theme });
+  },
 }));
+
+// Apply initial theme on load
+if (typeof window !== 'undefined') {
+  const initialTheme = getInitialTheme();
+  applyTheme(initialTheme);
+
+  // Listen for system theme changes when in 'system' mode
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    const state = useWorkspaceStore.getState();
+    if (state.theme === 'system') {
+      applyTheme('system');
+    }
+  });
+}
