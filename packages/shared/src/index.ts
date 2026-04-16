@@ -162,6 +162,10 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  // Agent-related fields (when task is running)
+  agentStatus?: AgentStatus;
+  agentAttention?: AgentAttention;
+  terminalOutput?: string;
 }
 
 export interface TaskResult {
@@ -228,6 +232,8 @@ export type WSEventType =
   | 'agent:output'
   | 'agent:attention'
   | 'task:status'
+  | 'task:output'
+  | 'task:agent_status'
   | 'inbox:new'
   | 'inbox:update'
   | 'environment:status'
@@ -255,6 +261,18 @@ export interface TaskStatusEvent {
   taskId: string;
   status: TaskStatus;
   result?: TaskResult;
+}
+
+export interface TaskOutputEvent {
+  taskId: string;
+  output: string;
+  append: boolean;
+}
+
+export interface TaskAgentStatusEvent {
+  taskId: string;
+  status: AgentStatus;
+  attention: AgentAttention;
 }
 
 export interface InboxNewEvent {

@@ -24,6 +24,9 @@ class TaskQueueService extends EventEmitter {
   init(db: DB): void {
     this.db = db;
 
+    // Recover any stuck tasks from previous runs
+    this.recoverStuckTasks();
+
     // Listen for agent status changes
     agentService.on('status', (_agentId, status, _attention) => {
       if (status === 'idle' || status === 'completed') {
@@ -36,6 +39,41 @@ class TaskQueueService extends EventEmitter {
     this.processingInterval = setInterval(() => {
       this.processQueue();
     }, 5000); // Every 5 seconds
+  }
+
+  /**
+   * Recover tasks that are stuck in 'in_progress' without an active agent
+   */
+  private recoverStuckTasks(): void {
+    if (!this.db) return;
+
+    // Find tasks that are in_progress but their assigned agent doesn't exist,
+    // isn't active (completed/error), or has no agent assigned
+    const stuckTasks = this.db.prepare(`
+      SELECT t.* FROM tasks t
+      LEFT JOIN agents a ON t.assigned_agent_id = a.id
+      WHERE t.status = 'in_progress'
+      AND (
+        t.assigned_agent_id IS NULL
+        OR a.id IS NULL
+        OR a.status IN ('completed', 'error', 'idle')
+      )
+    `).all();
+
+    if (stuckTasks.length > 0) {
+      console.log(`Found ${stuckTasks.length} stuck task(s), resetting to queued...`);
+
+      const now = new Date().toISOString();
+      const stmt = this.db.prepare(`
+        UPDATE tasks SET status = 'queued', assigned_agent_id = NULL, updated_at = ? WHERE id = ?
+      `);
+
+      for (const task of stuckTasks as any[]) {
+        stmt.run(now, task.id);
+        console.log(`  Reset task: ${task.title}`);
+        emitTaskStatus(task.workspace_id, task.id, 'queued');
+      }
+    }
   }
 
   /**
@@ -129,17 +167,26 @@ class TaskQueueService extends EventEmitter {
       const queuedTasks = this.getQueuedTasks();
       if (queuedTasks.length === 0) return;
 
+      console.log(`[TaskQueue] Processing ${queuedTasks.length} queued task(s)`);
+
       // Get idle agents
       const idleAgents = agentService.getIdleAgents();
+      console.log(`[TaskQueue] Found ${idleAgents.length} idle agent(s)`);
 
       // Also check for connected environments without agents
       const connectedEnvironments = environmentService.getAllEnvironments()
         .filter(env => env.status === 'connected');
+      console.log(`[TaskQueue] Found ${connectedEnvironments.length} connected environment(s)`);
 
       // For each high-priority task, try to assign it
       for (const task of queuedTasks) {
         // Only auto-process automated tasks
-        if (task.type !== 'automated') continue;
+        if (task.type !== 'automated') {
+          console.log(`[TaskQueue] Skipping task "${task.title}" - type is ${task.type}, not automated`);
+          continue;
+        }
+
+        console.log(`[TaskQueue] Processing task: "${task.title}"`);
 
         // Check if there's a preferred environment
         const targetEnvironmentId = task.assignedEnvironmentId;
@@ -152,6 +199,7 @@ class TaskQueueService extends EventEmitter {
           if (agent.workspaceId === task.workspaceId) {
             if (!targetEnvironmentId || agent.environmentId === targetEnvironmentId) {
               agentToUse = agent;
+              console.log(`[TaskQueue] Found idle agent: ${agent.id}`);
               break;
             }
           }
@@ -159,49 +207,61 @@ class TaskQueueService extends EventEmitter {
 
         // If no idle agent, check if we can start a new one
         if (!agentToUse) {
+          console.log(`[TaskQueue] No idle agent found, checking for available environments...`);
           // Find a connected environment without an active agent
           const workspace = this.getWorkspace(task.workspaceId);
           const maxAgents = workspace?.settings?.maxConcurrentAgents || 3;
 
           const activeAgentCount = this.getActiveAgentCount(task.workspaceId);
+          console.log(`[TaskQueue] Active agents: ${activeAgentCount}/${maxAgents}`);
 
           if (activeAgentCount < maxAgents) {
             // Find a suitable environment
             for (const env of connectedEnvironments) {
-              // Check if there's already an agent on this environment for this workspace
-              const envHasAgent = idleAgents.some(
-                a => a.environmentId === env.id && a.workspaceId === task.workspaceId
-              );
+              console.log(`[TaskQueue] Checking environment: ${env.name} (${env.type}, status: ${env.status})`);
 
-              if (!envHasAgent) {
-                if (!targetEnvironmentId || env.id === targetEnvironmentId) {
-                  // Start a new agent on this environment
-                  try {
-                    const newAgent = await agentService.startAgent({
-                      environmentId: env.id,
-                      workspaceId: task.workspaceId,
-                      taskId: task.id,
-                      prompt: task.prompt || task.description,
-                    });
+              // Check if there's already an active agent on this environment
+              const envHasActiveAgent = agentService.getAgentsByWorkspace(task.workspaceId)
+                .some(a => a.environmentId === env.id && agentService.isAgentActive(a.id));
 
-                    // Update task
-                    this.db!.prepare(`
-                      UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, updated_at = ? WHERE id = ?
-                    `).run(newAgent.id, new Date().toISOString(), task.id);
+              if (envHasActiveAgent) {
+                console.log(`[TaskQueue] Environment ${env.name} already has an active agent, skipping`);
+                continue;
+              }
 
-                    emitTaskStatus(task.workspaceId, task.id, 'in_progress');
+              if (!targetEnvironmentId || env.id === targetEnvironmentId) {
+                // Start a new agent on this environment
+                console.log(`[TaskQueue] Starting new agent on ${env.name}...`);
+                try {
+                  const newAgent = await agentService.startAgent({
+                    environmentId: env.id,
+                    workspaceId: task.workspaceId,
+                    taskId: task.id,
+                    prompt: task.prompt || task.description,
+                  });
 
-                    break; // Move to next task
-                  } catch (err) {
-                    console.error(`Failed to start agent on ${env.name}:`, err);
-                  }
+                  console.log(`[TaskQueue] Agent started: ${newAgent.id}`);
+
+                  // Update task
+                  this.db!.prepare(`
+                    UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, updated_at = ? WHERE id = ?
+                  `).run(newAgent.id, new Date().toISOString(), task.id);
+
+                  emitTaskStatus(task.workspaceId, task.id, 'in_progress');
+
+                  break; // Move to next task
+                } catch (err) {
+                  console.error(`[TaskQueue] Failed to start agent on ${env.name}:`, err);
                 }
               }
             }
+          } else {
+            console.log(`[TaskQueue] Max concurrent agents reached (${activeAgentCount}/${maxAgents})`);
           }
         } else {
           // Use the idle agent
           // Send the task to the agent
+          console.log(`[TaskQueue] Sending task to idle agent ${agentToUse.id}...`);
           try {
             const prompt = task.prompt || task.description;
             agentService.sendInput(agentToUse.id, prompt);
@@ -213,7 +273,7 @@ class TaskQueueService extends EventEmitter {
 
             // Update agent
             this.db.prepare(`
-              UPDATE agents SET current_task_id = ?, status = 'working', updated_at = ? WHERE id = ?
+              UPDATE agents SET current_task_id = ?, status = 'working', last_activity = ? WHERE id = ?
             `).run(task.id, new Date().toISOString(), agentToUse.id);
 
             emitTaskStatus(task.workspaceId, task.id, 'in_progress');

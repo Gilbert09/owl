@@ -9,7 +9,7 @@ interface WorkspaceState {
   // Environments
   environments: Environment[];
 
-  // Agents
+  // Agents (kept for internal use but not exposed in UI)
   agents: Agent[];
 
   // Tasks
@@ -21,8 +21,7 @@ interface WorkspaceState {
 
   // UI State
   sidebarCollapsed: boolean;
-  activePanel: 'inbox' | 'terminals' | 'queue' | 'github' | 'settings';
-  selectedAgentId: string | null;
+  activePanel: 'inbox' | 'queue' | 'github' | 'settings';
   selectedTaskId: string | null;
 
   // Actions
@@ -48,8 +47,7 @@ interface WorkspaceState {
   markInboxActioned: (id: string) => void;
 
   toggleSidebar: () => void;
-  setActivePanel: (panel: 'inbox' | 'terminals' | 'queue' | 'settings') => void;
-  selectAgent: (id: string | null) => void;
+  setActivePanel: (panel: 'inbox' | 'queue' | 'github' | 'settings') => void;
   selectTask: (id: string | null) => void;
 }
 
@@ -63,8 +61,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   inboxItems: [],
   unreadCount: 0,
   sidebarCollapsed: false,
-  activePanel: 'terminals',
-  selectedAgentId: null,
+  activePanel: 'queue',
   selectedTaskId: null,
 
   // Actions
@@ -99,7 +96,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   removeAgent: (id) =>
     set((state) => ({
       agents: state.agents.filter((a) => a.id !== id),
-      selectedAgentId: state.selectedAgentId === id ? null : state.selectedAgentId,
     })),
 
   setTasks: (tasks) => set({ tasks }),
@@ -145,8 +141,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
   setActivePanel: (panel) => set({ activePanel: panel }),
-
-  selectAgent: (id) => set({ selectedAgentId: id }),
 
   selectTask: (id) => set({ selectedTaskId: id }),
 }));

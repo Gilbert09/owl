@@ -36,18 +36,21 @@ An "environment" is a machine where work can be executed. Types include:
 - **Coder Devbox**: Coder.com managed workspaces (see `/Users/tomowers/dev/posthog/posthog/common/hogli/devbox/` for reference)
 - **Future**: Dev containers, cloud VMs, etc.
 
-### Agents
-Claude instances running on an environment, executing tasks. Each agent:
-- Has a status (idle, working, awaiting input, completed, errored)
-- Has a visual "terminal" representation
-- Can be color-coded based on attention needed (green = good, yellow = needs review, red = needs immediate attention)
-
 ### Tasks
 Items of work that can be:
 - **Manual**: Requires human action (e.g., "merge this PR", "reply to Slack message")
-- **Automated**: Can be handled by an agent (e.g., "implement PR feedback", "check CI status")
-- **Queued**: Waiting for an available agent
-- **In Progress**: Being worked on by an agent
+- **Automated**: Can be handled by Claude (e.g., "implement PR feedback", "check CI status")
+- **Pending**: Created but not yet queued
+- **Queued**: Waiting for an available environment
+- **In Progress**: Being worked on - task owns its own Claude agent/terminal
+
+When an automated task is running, it has:
+- A live terminal view showing Claude's output
+- Agent status (working, awaiting input, tool use, etc.)
+- Attention indicators (color-coded based on whether user input is needed)
+- Input controls for responding to Claude's questions
+
+**Key design**: Tasks own their agents. Users create/manage tasks, not agents directly. Agents are an internal implementation detail.
 
 ### Inbox
 A prioritized list of items requiring human attention, including:
@@ -63,10 +66,11 @@ A prioritized list of items requiring human attention, including:
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Electron App (Frontend)                      │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐    │
-│  │  Inbox   │ │ Terminals│ │  Queue   │ │    Workspace     │    │
-│  │  Panel   │ │  Panel   │ │  Panel   │ │    Settings      │    │
+│  │  Inbox   │ │  Tasks   │ │  GitHub  │ │    Settings      │    │
+│  │  Panel   │ │  Panel   │ │  Panel   │ │                  │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘    │
 │                              │                                   │
+│   Tasks Panel shows: task list + terminal view for running tasks │
 │                     IPC (electron)                               │
 └─────────────────────────────────────────────────────────────────┘
                                │
@@ -76,8 +80,8 @@ A prioritized list of items requiring human attention, including:
 │                        Backend Server                            │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐    │
 │  │  Agent   │ │ Environ- │ │   Task   │ │   Integration    │    │
-│  │ Manager  │ │   ment   │ │  Queue   │ │     Manager      │    │
-│  │          │ │ Manager  │ │          │ │ (GH,Slack,etc)   │    │
+│  │ Service  │ │   ment   │ │  Queue   │ │     Manager      │    │
+│  │(internal)│ │ Manager  │ │          │ │ (GH,Slack,etc)   │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
                                │
@@ -139,6 +143,16 @@ A prioritized list of items requiring human attention, including:
 - CLI handles authentication, context, etc.
 - Provides the "terminal view" naturally
 - Can capture output and detect when input is needed
+
+### Decision 5: Tasks Own Agents (not user-facing agents)
+**Date**: 2024-04-XX
+**Rationale**:
+- Cleaner conceptual model: users think in terms of tasks, not agents
+- Each task has its own Claude agent spawned when it starts
+- Terminal output is part of the task, not a separate view
+- Simpler UI: removed separate Terminals panel
+- Tasks Panel shows both queue and live terminal for running tasks
+- Per-environment concurrency is maintained (one running task per environment)
 
 ## Resolved Questions
 
@@ -248,13 +262,12 @@ A prioritized list of items requiring human attention, including:
   - [x] Terminal multiplexing (multiple sessions per environment)
   - [ ] Terminal state persistence
 
-- [x] **3.2 Terminal Panel UI** (COMPLETED)
-  - [x] Agent list (terminal tabs)
-  - [x] Terminal status indicators (color-coded)
-  - [x] New agent button + modal
-  - [x] Stop agent button (wired)
-  - [ ] Close terminal button (needs wiring)
-  - [ ] Terminal focus/maximize
+- [x] **3.2 Terminal Panel UI** (REFACTORED - merged into Tasks Panel)
+  - [x] ~~Agent list (terminal tabs)~~ - Removed, tasks list replaces this
+  - [x] Terminal status indicators (color-coded) - Now on task cards
+  - [x] ~~New agent button + modal~~ - Removed, tasks spawn their own agents
+  - [x] Stop button - Now on running tasks
+  - [x] Terminal view - Now embedded in TaskDetail when task is running
 
 - [x] **3.3 Claude Agent Service** (COMPLETED)
   - [x] Spawn `claude` CLI process on environment
@@ -270,12 +283,12 @@ A prioritized list of items requiring human attention, including:
   - [x] "Needs attention" detection (questions, errors)
   - [x] Status change events via WebSocket
 
-- [x] **3.5 Agent Panel UI** (COMPLETED)
-  - [x] Agent cards showing current status
-  - [x] Color-coded by attention needed
-  - [x] Quick input for agent questions (wired to API)
-  - [x] View full terminal button
-  - [x] Start Agent modal with environment selection
+- [x] **3.5 Agent Panel UI** (REFACTORED - agents are internal, UI moved to Tasks)
+  - [x] ~~Agent cards~~ - Task cards now show agent status when running
+  - [x] Color-coded by attention needed - On task cards
+  - [x] Quick input for questions - In TaskTerminal component
+  - [x] ~~Start Agent modal~~ - Removed, "Start Task" button starts agents
+  - [x] TaskTerminal component - Shows terminal when task is in_progress
 
 ### Phase 4: Task Queue System
 
@@ -286,12 +299,14 @@ A prioritized list of items requiring human attention, including:
   - [ ] Task status transitions
   - [ ] Task history
 
-- [x] **4.2 Queue Panel UI** (COMPLETED - basic)
+- [x] **4.2 Queue Panel UI** (COMPLETED - now primary view)
   - [x] Task list grouped by status (queued, in progress, completed)
   - [x] Create task form (CreateTaskModal)
-  - [x] Task details view
+  - [x] Task details view with terminal when running
   - [ ] Drag-and-drop reordering
-  - [x] Task actions (queue, unqueue, cancel) - wired to API
+  - [x] Task actions: queue, unqueue, cancel, start, stop, send input
+  - [x] TaskTerminal component for running tasks
+  - [x] Agent status indicators on task cards
 
 - [x] **4.3 Automated Task Runner** (COMPLETED)
   - [x] Watch for queued tasks
@@ -545,9 +560,10 @@ fastowl/
 │       │       ├── App.css       # Tailwind + CSS variables
 │       │       ├── components/
 │       │       │   ├── layout/   # Sidebar, MainLayout
-│       │       │   ├── modals/   # StartAgentModal, AddEnvironmentModal
-│       │       │   ├── panels/   # InboxPanel, TerminalsPanel, QueuePanel
+│       │       │   ├── modals/   # AddEnvironmentModal, CreateTaskModal, PRDetailModal
+│       │       │   ├── panels/   # InboxPanel, QueuePanel, TaskTerminal, GitHubPanel, SettingsPanel
 │       │       │   ├── terminal/ # XTerm component
+│       │       │   ├── widgets/  # PRListWidget
 │       │       │   └── ui/       # shadcn/ui components (Button, Card, Badge, Dialog, Input, Select, Textarea, ScrollArea)
 │       │       ├── hooks/
 │       │       ├── lib/          # Utils (cn, etc.)

@@ -98,7 +98,15 @@ export const tasks = {
   create: (data: CreateTaskRequest) => request<Task>('POST', '/tasks', data),
   update: (id: string, data: Partial<Task>) =>
     request<Task>('PATCH', `/tasks/${id}`, data),
+  retry: (id: string) => request<Task>('POST', `/tasks/${id}/retry`),
   delete: (id: string) => request<void>('DELETE', `/tasks/${id}`),
+  // Task execution control
+  start: (id: string) => request<Task>('POST', `/tasks/${id}/start`),
+  sendInput: (id: string, input: string) =>
+    request<void>('POST', `/tasks/${id}/input`, { input }),
+  stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
+  getTerminal: (id: string) =>
+    request<{ terminalOutput: string }>('GET', `/tasks/${id}/terminal`),
 };
 
 // Inbox

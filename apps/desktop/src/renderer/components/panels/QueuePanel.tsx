@@ -8,6 +8,10 @@ import {
   CheckCircle,
   AlertCircle,
   Loader2,
+  RotateCw,
+  Square,
+  MessageSquare,
+  Terminal,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -17,7 +21,8 @@ import { ScrollArea } from '../ui/scroll-area';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
-import type { Task, TaskStatus, TaskPriority } from '@fastowl/shared';
+import { TaskTerminal } from './TaskTerminal';
+import type { Task, TaskStatus, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
 
 const statusConfig: Record<
   TaskStatus,
@@ -175,6 +180,30 @@ export function QueuePanel() {
   );
 }
 
+// Agent status config for running tasks
+const agentStatusConfig: Record<
+  AgentStatus,
+  { icon: React.ElementType; label: string; color: string }
+> = {
+  idle: { icon: Terminal, label: 'Idle', color: 'text-slate-400' },
+  working: { icon: Loader2, label: 'Working', color: 'text-blue-400' },
+  awaiting_input: {
+    icon: MessageSquare,
+    label: 'Input Needed',
+    color: 'text-yellow-400',
+  },
+  tool_use: { icon: Play, label: 'Tool', color: 'text-purple-400' },
+  completed: { icon: CheckCircle, label: 'Done', color: 'text-green-400' },
+  error: { icon: AlertCircle, label: 'Error', color: 'text-red-400' },
+};
+
+const attentionColors: Record<AgentAttention, string> = {
+  none: 'border-transparent',
+  low: 'border-l-yellow-400/50',
+  medium: 'border-l-orange-400',
+  high: 'border-l-red-400',
+};
+
 interface TaskListItemProps {
   task: Task;
   isSelected: boolean;
@@ -182,13 +211,25 @@ interface TaskListItemProps {
 }
 
 function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
-  const StatusIcon = statusConfig[task.status].icon;
+  // Show agent status indicator for running tasks
+  const isRunning = task.status === 'in_progress';
+  const agentStatus = task.agentStatus || 'working';
+  const agentAttention = task.agentAttention || 'none';
+
+  // Determine which icon to show
+  const StatusIcon = isRunning
+    ? agentStatusConfig[agentStatus].icon
+    : statusConfig[task.status].icon;
+  const statusColor = isRunning
+    ? agentStatusConfig[agentStatus].color
+    : statusConfig[task.status].color;
 
   return (
     <Card
       className={cn(
-        'p-3 cursor-pointer transition-colors',
-        isSelected ? 'bg-accent' : 'hover:bg-accent/50'
+        'p-3 cursor-pointer transition-colors border-l-4',
+        isSelected ? 'bg-accent' : 'hover:bg-accent/50',
+        isRunning ? attentionColors[agentAttention] : 'border-l-transparent'
       )}
       onClick={onSelect}
     >
@@ -196,19 +237,29 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
         <div
           className={cn(
             'w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0 bg-secondary',
-            statusConfig[task.status].color
+            statusColor
           )}
         >
           <StatusIcon
             className={cn(
               'w-4 h-4',
-              task.status === 'in_progress' && 'animate-spin'
+              isRunning && agentStatus === 'working' && 'animate-spin'
             )}
           />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium truncate">{task.title}</span>
+            {isRunning && agentAttention !== 'none' && (
+              <div
+                className={cn(
+                  'w-2 h-2 rounded-full flex-shrink-0',
+                  agentAttention === 'high' && 'bg-red-400',
+                  agentAttention === 'medium' && 'bg-orange-400',
+                  agentAttention === 'low' && 'bg-yellow-400'
+                )}
+              />
+            )}
           </div>
           <div className="flex items-center gap-2 mt-1">
             <Badge
@@ -223,9 +274,16 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
             >
               {priorityConfig[task.priority].label}
             </Badge>
-            <span className="text-xs text-muted-foreground">
-              {task.type === 'automated' ? 'Auto' : 'Manual'}
-            </span>
+            {isRunning && (
+              <Badge variant="secondary" className="text-xs">
+                {agentStatusConfig[agentStatus].label}
+              </Badge>
+            )}
+            {!isRunning && (
+              <span className="text-xs text-muted-foreground">
+                {task.type === 'automated' ? 'Auto' : 'Manual'}
+              </span>
+            )}
           </div>
         </div>
       </div>
@@ -238,8 +296,8 @@ interface TaskDetailProps {
 }
 
 function TaskDetail({ taskId }: TaskDetailProps) {
-  const { tasks } = useWorkspaceStore();
-  const { updateTaskStatus, cancelTask } = useTaskActions();
+  const { tasks, environments } = useWorkspaceStore();
+  const { updateTaskStatus, cancelTask, retryTask, startTask, stopTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
   const task = tasks.find((t) => t.id === taskId);
 
@@ -250,6 +308,20 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       </div>
     );
   }
+
+  const isRunning = task.status === 'in_progress';
+  const isAutomated = task.type === 'automated';
+  const canStart = isAutomated && ['pending', 'queued'].includes(task.status);
+  const agentStatus = task.agentStatus || 'working';
+
+  const handleStartTask = async () => {
+    setIsLoading(true);
+    try {
+      await startTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleQueueTask = async () => {
     setIsLoading(true);
@@ -278,8 +350,92 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     }
   };
 
-  const StatusIcon = statusConfig[task.status].icon;
+  const handleStopTask = async () => {
+    setIsLoading(true);
+    try {
+      await stopTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
+  const handleRetryTask = async () => {
+    setIsLoading(true);
+    try {
+      await retryTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const StatusIcon = isRunning
+    ? agentStatusConfig[agentStatus].icon
+    : statusConfig[task.status].icon;
+
+  // If task is running, show terminal
+  if (isRunning) {
+    const env = environments.find((e) => e.id === task.assignedEnvironmentId);
+
+    return (
+      <>
+        {/* Header */}
+        <div className="p-4 border-b">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div
+                className={cn(
+                  'w-10 h-10 rounded-lg flex items-center justify-center bg-secondary',
+                  agentStatusConfig[agentStatus].color
+                )}
+              >
+                <StatusIcon
+                  className={cn(
+                    'w-5 h-5',
+                    agentStatus === 'working' && 'animate-spin'
+                  )}
+                />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold">{task.title}</h2>
+                <div className="flex items-center gap-2 mt-1">
+                  <Badge variant="secondary">
+                    {agentStatusConfig[agentStatus].label}
+                  </Badge>
+                  {env && (
+                    <Badge variant="outline" className="text-xs">
+                      {env.name}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                onClick={handleStopTask}
+                disabled={isLoading}
+              >
+                {isLoading ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <Square className="w-4 h-4 mr-1" />
+                )}
+                Stop
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {/* Terminal */}
+        <div className="flex-1 overflow-hidden">
+          <TaskTerminal task={task} />
+        </div>
+      </>
+    );
+  }
+
+  // Non-running task view
   return (
     <>
       {/* Header */}
@@ -292,12 +448,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 statusConfig[task.status].color
               )}
             >
-              <StatusIcon
-                className={cn(
-                  'w-5 h-5',
-                  task.status === 'in_progress' && 'animate-spin'
-                )}
-              />
+              <StatusIcon className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-lg font-semibold">{task.title}</h2>
@@ -318,9 +469,19 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {canStart && (
+              <Button size="sm" onClick={handleStartTask} disabled={isLoading}>
+                {isLoading ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <Play className="w-4 h-4 mr-1" />
+                )}
+                Start Now
+              </Button>
+            )}
             {task.status === 'pending' && (
-              <Button size="sm" onClick={handleQueueTask} disabled={isLoading}>
-                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
+              <Button size="sm" variant="outline" onClick={handleQueueTask} disabled={isLoading}>
+                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <ListTodo className="w-4 h-4 mr-1" />}
                 Queue
               </Button>
             )}
@@ -330,10 +491,10 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 Unqueue
               </Button>
             )}
-            {task.status === 'in_progress' && (
-              <Button size="sm" variant="outline" disabled>
-                <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                Running
+            {task.status === 'failed' && (
+              <Button size="sm" onClick={handleRetryTask} disabled={isLoading}>
+                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1" />}
+                Retry
               </Button>
             )}
             {['pending', 'queued'].includes(task.status) && (
@@ -384,6 +545,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 {task.result.summary && (
                   <p className="text-sm text-muted-foreground">
                     {task.result.summary}
+                  </p>
+                )}
+                {task.result.error && (
+                  <p className="text-sm text-red-400 mt-1">
+                    {task.result.error}
                   </p>
                 )}
               </Card>

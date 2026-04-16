@@ -123,6 +123,22 @@ export function emitTaskStatus(workspaceId: string, taskId: string, status: stri
   });
 }
 
+export function emitTaskOutput(workspaceId: string, taskId: string, output: string, append: boolean): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:output',
+    payload: { taskId, output, append },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitTaskAgentStatus(workspaceId: string, taskId: string, status: string, attention: string): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:agent_status',
+    payload: { taskId, status, attention },
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function emitInboxNew(workspaceId: string, item: any): void {
   broadcastToWorkspace(workspaceId, {
     type: 'inbox:new',

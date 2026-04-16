@@ -33,6 +33,9 @@ class EnvironmentService extends EventEmitter {
   init(db: DB): void {
     this.db = db;
 
+    // Ensure all local environments are marked as connected
+    this.fixLocalEnvironmentStatus();
+
     // Start health check loop
     this.healthCheckInterval = setInterval(() => {
       this.checkAllEnvironments();
@@ -42,6 +45,21 @@ class EnvironmentService extends EventEmitter {
     sshService.on('status', (environmentId, status, error) => {
       this.updateEnvironmentStatus(environmentId, status, error);
     });
+  }
+
+  /**
+   * Fix local environments that might have incorrect status
+   */
+  private fixLocalEnvironmentStatus(): void {
+    if (!this.db) return;
+
+    const result = this.db.prepare(`
+      UPDATE environments SET status = 'connected' WHERE type = 'local' AND status != 'connected'
+    `).run();
+
+    if (result.changes > 0) {
+      console.log(`Fixed ${result.changes} local environment(s) status to connected`);
+    }
   }
 
   /**
@@ -342,22 +360,48 @@ class EnvironmentService extends EventEmitter {
     command: string,
     options: { cwd?: string; rows?: number; cols?: number }
   ): Promise<void> {
-    // Use node-pty for proper terminal emulation
-    // Spawn shell interactively, then send the command
-    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash';
+    // Check if this is a non-interactive command (claude --print)
+    // If so, run it directly instead of through a shell
+    const isNonInteractive = command.startsWith('claude --print') || command.startsWith('claude -p');
 
-    console.log(`Spawning local PTY: ${shell} (will run: ${command})`);
+    let ptyProcess: pty.IPty;
 
-    const ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-256color',
-      cols: options.cols || 120,
-      rows: options.rows || 40,
-      cwd: options.cwd || process.cwd(),
-      env: {
-        ...process.env,
-        TERM: 'xterm-256color',
-      } as { [key: string]: string },
-    });
+    if (isNonInteractive) {
+      // Run the command directly using bash -c so it exits when done
+      console.log(`Spawning local PTY (non-interactive): bash -c "${command}"`);
+
+      ptyProcess = pty.spawn('/bin/bash', ['-c', command], {
+        name: 'xterm-256color',
+        cols: options.cols || 120,
+        rows: options.rows || 40,
+        cwd: options.cwd || process.cwd(),
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color',
+        } as { [key: string]: string },
+      });
+    } else {
+      // Interactive mode - spawn shell and send command
+      const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash';
+
+      console.log(`Spawning local PTY (interactive): ${shell} (will run: ${command})`);
+
+      ptyProcess = pty.spawn(shell, [], {
+        name: 'xterm-256color',
+        cols: options.cols || 120,
+        rows: options.rows || 40,
+        cwd: options.cwd || process.cwd(),
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color',
+        } as { [key: string]: string },
+      });
+
+      // Send the command to the shell after a brief delay to let it initialize
+      setTimeout(() => {
+        ptyProcess.write(command + '\n');
+      }, 100);
+    }
 
     this.localPTYs.set(sessionId, {
       id: sessionId,
@@ -373,11 +417,6 @@ class EnvironmentService extends EventEmitter {
       this.localPTYs.delete(sessionId);
       this.emit('session:close', sessionId, exitCode);
     });
-
-    // Send the command to the shell after a brief delay to let it initialize
-    setTimeout(() => {
-      ptyProcess.write(command + '\n');
-    }, 100);
   }
 
   /**

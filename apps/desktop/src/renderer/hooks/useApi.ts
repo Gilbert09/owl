@@ -5,6 +5,8 @@ import type {
   AgentStatusEvent,
   AgentOutputEvent,
   TaskStatusEvent,
+  TaskOutputEvent,
+  TaskAgentStatusEvent,
   InboxNewEvent,
   EnvironmentStatusEvent,
 } from '@fastowl/shared';
@@ -74,6 +76,30 @@ export function useApiConnection() {
         updateTask(payload.taskId, {
           status: payload.status,
           result: payload.result,
+        });
+      })
+    );
+
+    // Task output updates
+    unsubscribers.push(
+      wsClient.on<TaskOutputEvent>('task:output', (payload) => {
+        const store = useWorkspaceStore.getState();
+        const task = store.tasks.find((t) => t.id === payload.taskId);
+        if (task) {
+          const newOutput = payload.append
+            ? (task.terminalOutput || '') + payload.output
+            : payload.output;
+          updateTask(payload.taskId, { terminalOutput: newOutput });
+        }
+      })
+    );
+
+    // Task agent status updates
+    unsubscribers.push(
+      wsClient.on<TaskAgentStatusEvent>('task:agent_status', (payload) => {
+        updateTask(payload.taskId, {
+          agentStatus: payload.status,
+          agentAttention: payload.attention,
         });
       })
     );
@@ -262,7 +288,47 @@ export function useTaskActions() {
     [updateTask]
   );
 
-  return { createTask, updateTaskStatus, cancelTask };
+  const retryTask = useCallback(
+    async (taskId: string) => {
+      const task = await api.tasks.retry(taskId);
+      updateTask(taskId, task);
+      return task;
+    },
+    [updateTask]
+  );
+
+  // Task execution control
+  const startTask = useCallback(
+    async (taskId: string) => {
+      const task = await api.tasks.start(taskId);
+      updateTask(taskId, task);
+      return task;
+    },
+    [updateTask]
+  );
+
+  const sendTaskInput = useCallback(async (taskId: string, input: string) => {
+    await api.tasks.sendInput(taskId, input);
+  }, []);
+
+  const stopTask = useCallback(
+    async (taskId: string) => {
+      const task = await api.tasks.stop(taskId);
+      updateTask(taskId, task);
+      return task;
+    },
+    [updateTask]
+  );
+
+  return {
+    createTask,
+    updateTaskStatus,
+    cancelTask,
+    retryTask,
+    startTask,
+    sendTaskInput,
+    stopTask,
+  };
 }
 
 /**

@@ -9,7 +9,7 @@ import type {
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { sshService } from './ssh.js';
-import { emitAgentStatus, emitAgentOutput, emitInboxNew } from './websocket.js';
+import { emitAgentStatus, emitAgentOutput, emitInboxNew, emitTaskOutput, emitTaskAgentStatus } from './websocket.js';
 import { DB } from '../db/index.js';
 
 // Patterns to detect Claude CLI status
@@ -68,7 +68,7 @@ const STATUS_PATTERNS = {
   ],
 };
 
-interface ActiveAgent {
+export interface ActiveAgent {
   id: string;
   environmentId: string;
   workspaceId: string;
@@ -325,6 +325,26 @@ class AgentService extends EventEmitter {
   }
 
   /**
+   * Get the active agent for a task (if any)
+   */
+  getAgentByTaskId(taskId: string): ActiveAgent | null {
+    for (const [_id, agent] of this.activeAgents) {
+      if (agent.currentTaskId === taskId) {
+        return agent;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Get terminal output for an agent
+   */
+  getTerminalOutput(agentId: string): string {
+    const agent = this.activeAgents.get(agentId);
+    return agent?.outputBuffer || '';
+  }
+
+  /**
    * Handle output from agent session
    */
   private handleSessionData(sessionId: string, data: Buffer): void {
@@ -353,6 +373,11 @@ class AgentService extends EventEmitter {
 
     // Emit output via WebSocket
     emitAgentOutput(agent.workspaceId, agent.id, output, true);
+
+    // Also emit task output if this agent has a task
+    if (agent.currentTaskId) {
+      emitTaskOutput(agent.workspaceId, agent.currentTaskId, output, true);
+    }
 
     // Analyze output for status
     this.analyzeOutput(agent);
@@ -490,6 +515,11 @@ class AgentService extends EventEmitter {
     // Emit via WebSocket
     if (agent) {
       emitAgentStatus(agent.workspaceId, agentId, status, attention);
+
+      // Also emit task agent status if this agent has a task
+      if (agent.currentTaskId) {
+        emitTaskAgentStatus(agent.workspaceId, agent.currentTaskId, status, attention);
+      }
     }
 
     this.emit('status', agentId, status, attention);
@@ -538,6 +568,12 @@ class AgentService extends EventEmitter {
     const inboxId = uuid();
     const now = new Date().toISOString();
 
+    // Use taskId in source/actions if available, otherwise fall back to agentId
+    const sourceId = agent.currentTaskId || agent.id;
+    const sourceType = agent.currentTaskId ? 'task' : 'agent';
+    const actionLabel = agent.currentTaskId ? 'View Task' : 'View Agent';
+    const actionType = agent.currentTaskId ? 'view_task' : 'view_agent';
+
     this.db.prepare(`
       INSERT INTO inbox_items (id, workspace_id, type, status, priority, title, summary, source, actions, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -549,9 +585,9 @@ class AgentService extends EventEmitter {
       priority,
       title,
       summary,
-      JSON.stringify({ type: 'agent', id: agent.id, name: `Agent on ${envName}` }),
+      JSON.stringify({ type: sourceType, id: sourceId, name: `Task on ${envName}` }),
       JSON.stringify([
-        { id: '1', label: 'View Agent', type: 'primary', action: 'view_agent' },
+        { id: '1', label: actionLabel, type: 'primary', action: actionType },
       ]),
       now
     );
@@ -564,8 +600,8 @@ class AgentService extends EventEmitter {
       priority,
       title,
       summary,
-      source: { type: 'agent', id: agent.id, name: `Agent on ${envName}` },
-      actions: [{ id: '1', label: 'View Agent', type: 'primary', action: 'view_agent' }],
+      source: { type: sourceType as 'agent' | 'github' | 'slack' | 'posthog' | 'system', id: sourceId, name: `Task on ${envName}` },
+      actions: [{ id: '1', label: actionLabel, type: 'primary', action: actionType }],
       createdAt: now,
     };
 

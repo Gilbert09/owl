@@ -32,10 +32,13 @@ export function environmentRoutes(db: DB): Router {
     const id = uuid();
     const now = new Date().toISOString();
 
+    // Local environments are always connected
+    const initialStatus = body.type === 'local' ? 'connected' : 'disconnected';
+
     db.prepare(`
-      INSERT INTO environments (id, name, type, config, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(id, body.name, body.type, JSON.stringify(body.config), now, now);
+      INSERT INTO environments (id, name, type, status, config, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, body.name, body.type, initialStatus, JSON.stringify(body.config), now, now);
 
     const row = db.prepare('SELECT * FROM environments WHERE id = ?').get(id);
     res.status(201).json({ success: true, data: rowToEnvironment(row) } as ApiResponse<Environment>);

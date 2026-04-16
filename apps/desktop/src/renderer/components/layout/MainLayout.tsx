@@ -1,7 +1,6 @@
 import React from 'react';
 import { Sidebar } from './Sidebar';
 import { InboxPanel } from '../panels/InboxPanel';
-import { TerminalsPanel } from '../panels/TerminalsPanel';
 import { QueuePanel } from '../panels/QueuePanel';
 import { GitHubPanel } from '../panels/GitHubPanel';
 import { SettingsPanel } from '../panels/SettingsPanel';
@@ -24,7 +23,6 @@ export function MainLayout() {
         {/* Main content */}
         <div className="flex-1 overflow-hidden">
           {activePanel === 'inbox' && <InboxPanel />}
-          {activePanel === 'terminals' && <TerminalsPanel />}
           {activePanel === 'queue' && <QueuePanel />}
           {activePanel === 'github' && <GitHubPanel />}
           {activePanel === 'settings' && <SettingsPanel />}

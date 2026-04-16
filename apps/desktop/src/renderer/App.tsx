@@ -72,14 +72,23 @@ function useDemoData() {
       },
     ];
 
-    const agents = [
+    // Tasks now include terminal output and agent status when running
+    const tasks = [
       {
         id: '1',
-        environmentId: '1',
         workspaceId: '1',
-        status: 'working' as const,
-        attention: 'none' as const,
-        currentTaskId: '1',
+        type: 'automated' as const,
+        status: 'in_progress' as const,
+        priority: 'high' as const,
+        title: 'Fix authentication bug',
+        description: 'Users are being logged out unexpectedly after token refresh',
+        prompt: 'Fix the authentication bug in the login flow where users are logged out unexpectedly',
+        assignedEnvironmentId: '1',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        // Agent-related fields when running
+        agentStatus: 'working' as const,
+        agentAttention: 'none' as const,
         terminalOutput: `$ claude "Fix the authentication bug in login flow"
 
 I'll help you fix the authentication bug. Let me first explore the codebase to understand the login flow.
@@ -96,15 +105,22 @@ I found the issue. The session token is not being properly validated after refre
 Let me implement these changes...
 
 > Editing src/auth/login.ts...`,
-        lastActivity: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
       },
       {
         id: '2',
-        environmentId: '2',
         workspaceId: '1',
-        status: 'awaiting_input' as const,
-        attention: 'high' as const,
+        type: 'automated' as const,
+        status: 'in_progress' as const,
+        priority: 'medium' as const,
+        title: 'Add API rate limiting',
+        description: 'Implement rate limiting to prevent abuse',
+        prompt: 'Add rate limiting to the API endpoints',
+        assignedEnvironmentId: '2',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        // This task is awaiting input
+        agentStatus: 'awaiting_input' as const,
+        agentAttention: 'high' as const,
         terminalOutput: `$ claude "Add rate limiting to API"
 
 I've analyzed the API structure and have a question:
@@ -115,40 +131,21 @@ Should I implement rate limiting at:
 3. Both levels
 
 Which approach would you prefer?`,
-        lastActivity: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-      },
-    ];
-
-    const tasks = [
-      {
-        id: '1',
-        workspaceId: '1',
-        type: 'automated' as const,
-        status: 'in_progress' as const,
-        priority: 'high' as const,
-        title: 'Fix authentication bug',
-        description: 'Users are being logged out unexpectedly after token refresh',
-        prompt: 'Fix the authentication bug in the login flow where users are logged out unexpectedly',
-        assignedAgentId: '1',
-        assignedEnvironmentId: '1',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
       },
       {
-        id: '2',
+        id: '3',
         workspaceId: '1',
         type: 'automated' as const,
         status: 'queued' as const,
         priority: 'medium' as const,
-        title: 'Add API rate limiting',
-        description: 'Implement rate limiting to prevent abuse',
-        prompt: 'Add rate limiting to the API endpoints',
+        title: 'Refactor database queries',
+        description: 'Optimize slow database queries in the analytics module',
+        prompt: 'Refactor the slow database queries in the analytics module',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       },
       {
-        id: '3',
+        id: '4',
         workspaceId: '1',
         type: 'manual' as const,
         status: 'pending' as const,
@@ -167,11 +164,11 @@ Which approach would you prefer?`,
         type: 'agent_question' as const,
         status: 'unread' as const,
         priority: 'high' as const,
-        title: 'Agent needs input: Rate limiting approach',
+        title: 'Task needs input: Rate limiting approach',
         summary: 'Claude is asking whether to implement rate limiting at gateway or application level',
-        source: { type: 'agent' as const, id: '2', name: 'Agent on vm1' },
+        source: { type: 'agent' as const, id: '2', name: 'Task on vm1' },
         actions: [
-          { id: '1', label: 'View & Respond', type: 'primary' as const, action: 'view_agent' },
+          { id: '1', label: 'View Task', type: 'primary' as const, action: 'view_task' },
         ],
         createdAt: new Date(Date.now() - 5 * 60000).toISOString(),
       },
@@ -186,7 +183,7 @@ Which approach would you prefer?`,
         source: { type: 'github' as const, name: 'posthog/posthog', url: 'https://github.com/posthog/posthog/pull/1234' },
         actions: [
           { id: '1', label: 'Review', type: 'primary' as const, action: 'open_pr' },
-          { id: '2', label: 'Assign Claude', type: 'secondary' as const, action: 'assign_agent' },
+          { id: '2', label: 'Create Task', type: 'secondary' as const, action: 'create_task' },
         ],
         createdAt: new Date(Date.now() - 30 * 60000).toISOString(),
       },
@@ -209,7 +206,7 @@ Which approach would you prefer?`,
     setWorkspaces([workspace]);
     setCurrentWorkspace('1');
     setEnvironments(environments);
-    setAgents(agents);
+    setAgents([]); // No longer user-facing
     setTasks(tasks);
     setInboxItems(inboxItems);
   }, []);

@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import {
   Inbox,
-  Terminal,
   ListTodo,
   Settings,
   ChevronLeft,
@@ -31,13 +30,21 @@ export function Sidebar({ className }: SidebarProps) {
     unreadCount,
     workspaces,
     currentWorkspaceId,
-    agents,
+    tasks,
     environments,
   } = useWorkspaceStore();
 
   const [showAddEnvModal, setShowAddEnvModal] = useState(false);
 
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
+
+  // Count tasks that need attention (running with high/medium attention)
+  const tasksNeedingAttention = tasks.filter(
+    (t) => t.status === 'in_progress' && t.agentAttention && t.agentAttention !== 'none'
+  ).length;
+
+  // Count running tasks
+  const runningTasksCount = tasks.filter((t) => t.status === 'in_progress').length;
 
   const navItems = [
     {
@@ -47,15 +54,11 @@ export function Sidebar({ className }: SidebarProps) {
       badge: unreadCount > 0 ? unreadCount : undefined,
     },
     {
-      id: 'terminals' as const,
-      icon: Terminal,
-      label: 'Agents',
-      badge: agents.filter((a) => a.attention !== 'none').length || undefined,
-    },
-    {
       id: 'queue' as const,
       icon: ListTodo,
-      label: 'Queue',
+      label: 'Tasks',
+      badge: tasksNeedingAttention > 0 ? tasksNeedingAttention : runningTasksCount > 0 ? runningTasksCount : undefined,
+      badgeVariant: tasksNeedingAttention > 0 ? 'warning' : 'secondary',
     },
     {
       id: 'github' as const,
@@ -111,7 +114,7 @@ export function Sidebar({ className }: SidebarProps) {
                 <span className="flex-1 text-left">{item.label}</span>
                 {item.badge && (
                   <Badge
-                    variant={item.id === 'inbox' ? 'default' : 'warning'}
+                    variant={item.id === 'inbox' ? 'default' : (item.badgeVariant as 'warning' | 'secondary') || 'warning'}
                     className="ml-auto"
                   >
                     {item.badge}
