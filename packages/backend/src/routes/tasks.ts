@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { DB } from '../db/index.js';
 import { agentService, type ActiveAgent } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
+import { gitService } from '../services/git.js';
 import { emitTaskStatus } from '../services/websocket.js';
 import { generateTaskMetadata, isConfigured as isAIConfigured } from '../services/ai.js';
 import type {
@@ -233,10 +234,41 @@ export function taskRoutes(db: DB): Router {
 
     // Get repository path if task has a repository
     let workingDirectory: string | undefined;
+    let taskBranch: string | undefined;
+
     if (task.repositoryId) {
       const repoRow = db.prepare('SELECT local_path FROM repositories WHERE id = ?').get(task.repositoryId) as { local_path: string | null } | undefined;
       if (repoRow?.local_path) {
         workingDirectory = repoRow.local_path;
+
+        // Create or checkout task branch if task has a repo
+        // Use existing branch if task already has one, otherwise create new
+        if (task.branch) {
+          try {
+            await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
+            taskBranch = task.branch;
+          } catch (err) {
+            console.warn('Failed to checkout existing branch, creating new:', err);
+            taskBranch = await gitService.createTaskBranch(
+              environmentId,
+              task.id,
+              task.title,
+              workingDirectory
+            );
+          }
+        } else {
+          try {
+            taskBranch = await gitService.createTaskBranch(
+              environmentId,
+              task.id,
+              task.title,
+              workingDirectory
+            );
+          } catch (err) {
+            console.warn('Failed to create task branch (continuing without):', err);
+            // Continue without branch - not critical
+          }
+        }
       }
     }
 
@@ -250,11 +282,17 @@ export function taskRoutes(db: DB): Router {
         workingDirectory,
       });
 
-      // Update task status
+      // Update task status and branch
       const now = new Date().toISOString();
-      db.prepare(`
-        UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, assigned_environment_id = ?, updated_at = ? WHERE id = ?
-      `).run(agent.id, environmentId, now, task.id);
+      if (taskBranch) {
+        db.prepare(`
+          UPDATE tasks SET status = 'in_progress', branch = ?, assigned_agent_id = ?, assigned_environment_id = ?, updated_at = ? WHERE id = ?
+        `).run(taskBranch, agent.id, environmentId, now, task.id);
+      } else {
+        db.prepare(`
+          UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, assigned_environment_id = ?, updated_at = ? WHERE id = ?
+        `).run(agent.id, environmentId, now, task.id);
+      }
 
       emitTaskStatus(task.workspaceId, task.id, 'in_progress');
 
@@ -390,6 +428,7 @@ function rowToTask(row: any): Task {
     description: row.description,
     prompt: row.prompt || undefined,
     repositoryId: row.repository_id || undefined,
+    branch: row.branch || undefined,
     assignedAgentId: row.assigned_agent_id || undefined,
     assignedEnvironmentId: row.assigned_environment_id || undefined,
     result: row.result ? JSON.parse(row.result) : undefined,

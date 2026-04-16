@@ -414,6 +414,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                       {repo.fullName}
                     </Badge>
                   )}
+                  {task.branch && (
+                    <Badge variant="secondary" className="text-xs font-mono">
+                      {task.branch}
+                    </Badge>
+                  )}
                 </div>
               </div>
             </div>
@@ -577,6 +582,14 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                   <span className="ml-2 flex items-center gap-1">
                     <GitBranch className="w-3 h-3" />
                     {repo.fullName}
+                  </span>
+                </div>
+              )}
+              {task.branch && (
+                <div>
+                  <span className="text-muted-foreground">Branch:</span>
+                  <span className="ml-2 font-mono text-xs bg-secondary px-2 py-0.5 rounded">
+                    {task.branch}
                   </span>
                 </div>
               )}

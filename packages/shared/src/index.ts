@@ -156,6 +156,7 @@ export interface Task {
   description: string;
   prompt?: string; // Prompt for Claude agent
   repositoryId?: string; // Repository to run the task in
+  branch?: string; // Git branch for this task (auto-created for code tasks)
   assignedAgentId?: string;
   assignedEnvironmentId?: string;
   result?: TaskResult;

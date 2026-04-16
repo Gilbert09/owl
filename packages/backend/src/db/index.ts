@@ -176,6 +176,12 @@ function getMigrations(): Migration[] {
         CREATE INDEX idx_tasks_repository ON tasks(repository_id);
       `,
     },
+    {
+      name: '003_add_task_branch',
+      sql: `
+        ALTER TABLE tasks ADD COLUMN branch TEXT;
+      `,
+    },
   ];
 }
 
