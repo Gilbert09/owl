@@ -107,6 +107,7 @@ export function useApiConnection() {
 export function useInitialDataLoad() {
   const {
     currentWorkspaceId,
+    setCurrentWorkspace,
     setWorkspaces,
     setEnvironments,
     setAgents,
@@ -117,20 +118,49 @@ export function useInitialDataLoad() {
   const loadData = useCallback(async () => {
     try {
       // Load workspaces and environments (global)
-      const [workspaces, environments] = await Promise.all([
+      let [workspaces, environments] = await Promise.all([
         api.workspaces.list(),
         api.environments.list(),
       ]);
 
+      // If no workspaces exist, create a default one
+      if (workspaces.length === 0) {
+        console.log('No workspaces found, creating default workspace...');
+        const defaultWorkspace = await api.workspaces.create({
+          name: 'Default Workspace',
+          description: 'Your first FastOwl workspace',
+        });
+        workspaces = [defaultWorkspace];
+      }
+
+      // If no environments exist, create a local environment
+      if (environments.length === 0) {
+        console.log('No environments found, creating local environment...');
+        const localEnv = await api.environments.create({
+          name: 'Local Machine',
+          type: 'local',
+          config: { type: 'local' },
+        });
+        environments = [localEnv];
+      }
+
       setWorkspaces(workspaces);
       setEnvironments(environments);
 
-      // If there's a current workspace, load workspace-specific data
-      if (currentWorkspaceId) {
+      // Auto-select first workspace if none selected
+      let activeWorkspaceId = currentWorkspaceId;
+      if (!activeWorkspaceId && workspaces.length > 0) {
+        activeWorkspaceId = workspaces[0].id;
+        setCurrentWorkspace(activeWorkspaceId);
+        console.log('Auto-selected workspace:', workspaces[0].name);
+      }
+
+      // Load workspace-specific data
+      if (activeWorkspaceId) {
         const [agents, tasks, inboxItems] = await Promise.all([
-          api.agents.list({ workspaceId: currentWorkspaceId }),
-          api.tasks.list({ workspaceId: currentWorkspaceId }),
-          api.inbox.list({ workspaceId: currentWorkspaceId }),
+          api.agents.list({ workspaceId: activeWorkspaceId }),
+          api.tasks.list({ workspaceId: activeWorkspaceId }),
+          api.inbox.list({ workspaceId: activeWorkspaceId }),
         ]);
 
         setAgents(agents);
@@ -142,6 +172,7 @@ export function useInitialDataLoad() {
     }
   }, [
     currentWorkspaceId,
+    setCurrentWorkspace,
     setWorkspaces,
     setEnvironments,
     setAgents,

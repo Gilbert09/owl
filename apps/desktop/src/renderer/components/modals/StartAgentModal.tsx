@@ -31,18 +31,28 @@ export function StartAgentModal({ open, onOpenChange }: StartAgentModalProps) {
   const connectedEnvironments = environments.filter((e) => e.status === 'connected');
 
   const handleSubmit = useCallback(async () => {
-    if (!environmentId || !currentWorkspaceId) return;
+    if (!environmentId) {
+      setError('Please select an environment');
+      return;
+    }
+    if (!currentWorkspaceId) {
+      setError('No workspace selected. Please select a workspace first.');
+      return;
+    }
 
     setIsLoading(true);
     setError(null);
 
     try {
+      console.log('Starting agent...', { environmentId, currentWorkspaceId, prompt });
       await startAgent(environmentId, currentWorkspaceId, prompt || undefined);
+      console.log('Agent started successfully');
       onOpenChange(false);
       // Reset form
       setEnvironmentId('');
       setPrompt('');
     } catch (err: any) {
+      console.error('Failed to start agent:', err);
       setError(err.message || 'Failed to start agent');
     } finally {
       setIsLoading(false);
@@ -84,7 +94,14 @@ export function StartAgentModal({ open, onOpenChange }: StartAgentModalProps) {
             ))}
           </Select>
 
-          {connectedEnvironments.length === 0 && (
+          {!currentWorkspaceId && (
+            <div className="flex items-center gap-2 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-sm">
+              <Server className="w-4 h-4 flex-shrink-0" />
+              <span>No workspace selected. Create or select a workspace first.</span>
+            </div>
+          )}
+
+          {currentWorkspaceId && connectedEnvironments.length === 0 && (
             <div className="flex items-center gap-2 p-3 rounded-md bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-sm">
               <Server className="w-4 h-4 flex-shrink-0" />
               <span>No connected environments. Add one in Settings.</span>
@@ -113,7 +130,7 @@ export function StartAgentModal({ open, onOpenChange }: StartAgentModalProps) {
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!environmentId || isLoading}
+            disabled={!environmentId || !currentWorkspaceId || isLoading}
           >
             {isLoading ? (
               <>
