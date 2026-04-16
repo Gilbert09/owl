@@ -576,8 +576,8 @@ class PRMonitorService extends EventEmitter {
     };
 
     broadcastToWorkspace(workspaceId, {
-      type: 'inbox:created',
-      payload: inboxItem,
+      type: 'inbox:new',
+      payload: { item: inboxItem },
       timestamp: new Date().toISOString(),
     });
 
