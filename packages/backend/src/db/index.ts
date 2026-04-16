@@ -169,6 +169,13 @@ function getMigrations(): Migration[] {
         CREATE INDEX idx_inbox_status ON inbox_items(status);
       `,
     },
+    {
+      name: '002_add_task_repository',
+      sql: `
+        ALTER TABLE tasks ADD COLUMN repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL;
+        CREATE INDEX idx_tasks_repository ON tasks(repository_id);
+      `,
+    },
   ];
 }
 

@@ -12,6 +12,7 @@
     "test": "jest --passWithNoTests"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
     "@fastowl/shared": "*",
     "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",

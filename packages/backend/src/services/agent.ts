@@ -153,7 +153,7 @@ class AgentService extends EventEmitter {
    * Start a new agent on an environment
    */
   async startAgent(request: StartAgentRequest): Promise<Agent> {
-    const { environmentId, workspaceId, taskId, prompt } = request;
+    const { environmentId, workspaceId, taskId, prompt, workingDirectory } = request;
 
     // Ensure environment is connected
     const status = environmentService.getStatus(environmentId);
@@ -174,11 +174,11 @@ class AgentService extends EventEmitter {
       claudeCommand = `claude --print '${escapedPrompt}'`;
     }
 
-    // Spawn the interactive session
+    // Determine working directory: use task's repo path, then fall back to environment's default
     const env = environmentService.getEnvironment(environmentId);
-    const cwd = env?.config.type === 'ssh'
+    const cwd = workingDirectory || (env?.config.type === 'ssh'
       ? (env.config as any).workingDirectory
-      : undefined;
+      : (env?.config as any)?.workingDirectory);
 
     await environmentService.spawnInteractive(environmentId, sessionId, claudeCommand, {
       cwd,

@@ -4,14 +4,54 @@ import { DB } from '../db/index.js';
 import { agentService, type ActiveAgent } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { emitTaskStatus } from '../services/websocket.js';
+import { generateTaskMetadata, isConfigured as isAIConfigured } from '../services/ai.js';
 import type {
   Task,
   CreateTaskRequest,
   ApiResponse,
+  GenerateTaskMetadataRequest,
+  GenerateTaskMetadataResponse,
 } from '@fastowl/shared';
 
 export function taskRoutes(db: DB): Router {
   const router = Router();
+
+  // Generate task metadata from a prompt using AI
+  router.post('/generate-metadata', async (req, res) => {
+    const body = req.body as GenerateTaskMetadataRequest;
+
+    if (!body.prompt) {
+      return res.status(400).json({ success: false, error: 'Prompt is required' });
+    }
+
+    if (!isAIConfigured()) {
+      // Fallback when AI is not configured
+      return res.json({
+        success: true,
+        data: {
+          title: body.prompt.slice(0, 60).trim() || 'New Task',
+          description: body.prompt.slice(0, 200).trim(),
+          suggestedPriority: 'medium',
+        },
+      } as ApiResponse<GenerateTaskMetadataResponse>);
+    }
+
+    try {
+      const metadata = await generateTaskMetadata(body.prompt);
+      res.json({ success: true, data: metadata } as ApiResponse<GenerateTaskMetadataResponse>);
+    } catch (err: any) {
+      console.error('Failed to generate task metadata:', err);
+      // Return fallback on error
+      res.json({
+        success: true,
+        data: {
+          title: body.prompt.slice(0, 60).trim() || 'New Task',
+          description: body.prompt.slice(0, 200).trim(),
+          suggestedPriority: 'medium',
+        },
+      } as ApiResponse<GenerateTaskMetadataResponse>);
+    }
+  });
 
   // List tasks (with optional filters)
   router.get('/', (req, res) => {
@@ -69,8 +109,8 @@ export function taskRoutes(db: DB): Router {
     const now = new Date().toISOString();
 
     db.prepare(`
-      INSERT INTO tasks (id, workspace_id, type, title, description, prompt, priority, assigned_environment_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO tasks (id, workspace_id, type, title, description, prompt, priority, repository_id, assigned_environment_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       body.workspaceId,
@@ -79,6 +119,7 @@ export function taskRoutes(db: DB): Router {
       body.description,
       body.prompt || null,
       body.priority || 'medium',
+      body.repositoryId || null,
       body.assignedEnvironmentId || null,
       now,
       now
@@ -190,6 +231,15 @@ export function taskRoutes(db: DB): Router {
       return res.status(400).json({ success: false, error: 'Task already has an active agent' });
     }
 
+    // Get repository path if task has a repository
+    let workingDirectory: string | undefined;
+    if (task.repositoryId) {
+      const repoRow = db.prepare('SELECT local_path FROM repositories WHERE id = ?').get(task.repositoryId) as { local_path: string | null } | undefined;
+      if (repoRow?.local_path) {
+        workingDirectory = repoRow.local_path;
+      }
+    }
+
     // Start the agent for this task
     try {
       const agent = await agentService.startAgent({
@@ -197,6 +247,7 @@ export function taskRoutes(db: DB): Router {
         workspaceId: task.workspaceId,
         taskId: task.id,
         prompt: task.prompt || task.description,
+        workingDirectory,
       });
 
       // Update task status
@@ -338,6 +389,7 @@ function rowToTask(row: any): Task {
     title: row.title,
     description: row.description,
     prompt: row.prompt || undefined,
+    repositoryId: row.repository_id || undefined,
     assignedAgentId: row.assigned_agent_id || undefined,
     assignedEnvironmentId: row.assigned_environment_id || undefined,
     result: row.result ? JSON.parse(row.result) : undefined,

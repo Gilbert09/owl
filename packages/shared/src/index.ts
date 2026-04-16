@@ -155,6 +155,7 @@ export interface Task {
   title: string;
   description: string;
   prompt?: string; // Prompt for Claude agent
+  repositoryId?: string; // Repository to run the task in
   assignedAgentId?: string;
   assignedEnvironmentId?: string;
   result?: TaskResult;
@@ -333,7 +334,18 @@ export interface CreateTaskRequest {
   description: string;
   prompt?: string;
   priority?: TaskPriority;
+  repositoryId?: string;
   assignedEnvironmentId?: string;
+}
+
+export interface GenerateTaskMetadataRequest {
+  prompt: string;
+}
+
+export interface GenerateTaskMetadataResponse {
+  title: string;
+  description: string;
+  suggestedPriority: TaskPriority;
 }
 
 // Agent API
@@ -342,6 +354,7 @@ export interface StartAgentRequest {
   workspaceId: string;
   taskId?: string;
   prompt?: string;
+  workingDirectory?: string; // Directory to run Claude in (e.g., repository path)
 }
 
 export interface SendAgentInputRequest {

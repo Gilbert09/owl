@@ -84,6 +84,13 @@ export const agents = {
   delete: (id: string) => request<void>('DELETE', `/agents/${id}`),
 };
 
+// Task metadata generation response
+export interface TaskMetadata {
+  title: string;
+  description: string;
+  suggestedPriority: 'low' | 'medium' | 'high' | 'urgent';
+}
+
 // Tasks
 export const tasks = {
   list: (params?: { workspaceId?: string; status?: string; type?: string }) => {
@@ -107,6 +114,9 @@ export const tasks = {
   stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
   getTerminal: (id: string) =>
     request<{ terminalOutput: string }>('GET', `/tasks/${id}/terminal`),
+  // Generate task metadata from prompt using AI
+  generateMetadata: (prompt: string) =>
+    request<TaskMetadata>('POST', '/tasks/generate-metadata', { prompt }),
 };
 
 // Inbox
