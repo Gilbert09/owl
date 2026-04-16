@@ -47,3 +47,6 @@ npm-debug.log.*
 
 # Backend data
 .fastowl/
+
+# Claude Code local settings
+.claude/
