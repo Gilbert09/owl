@@ -166,11 +166,12 @@ class AgentService extends EventEmitter {
     const now = new Date().toISOString();
 
     // Construct the claude command
+    // Use --print for non-interactive mode when given a prompt (exits after response)
     let claudeCommand = 'claude';
     if (prompt) {
       // Escape the prompt for shell
       const escapedPrompt = prompt.replace(/'/g, "'\\''");
-      claudeCommand = `claude '${escapedPrompt}'`;
+      claudeCommand = `claude --print '${escapedPrompt}'`;
     }
 
     // Spawn the interactive session
