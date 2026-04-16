@@ -138,6 +138,7 @@ export function useInitialDataLoad() {
     setEnvironments,
     setAgents,
     setTasks,
+    setRepositories,
     setInboxItems,
   } = useWorkspaceStore();
 
@@ -183,15 +184,17 @@ export function useInitialDataLoad() {
 
       // Load workspace-specific data
       if (activeWorkspaceId) {
-        const [agents, tasks, inboxItems] = await Promise.all([
+        const [agents, tasks, inboxItems, repositories] = await Promise.all([
           api.agents.list({ workspaceId: activeWorkspaceId }),
           api.tasks.list({ workspaceId: activeWorkspaceId }),
           api.inbox.list({ workspaceId: activeWorkspaceId }),
+          api.repositories.list(activeWorkspaceId).catch(() => []), // May not exist
         ]);
 
         setAgents(agents);
         setTasks(tasks);
         setInboxItems(inboxItems);
+        setRepositories(repositories);
       }
     } catch (err) {
       console.error('Failed to load initial data:', err);
@@ -203,6 +206,7 @@ export function useInitialDataLoad() {
     setEnvironments,
     setAgents,
     setTasks,
+    setRepositories,
     setInboxItems,
   ]);
 

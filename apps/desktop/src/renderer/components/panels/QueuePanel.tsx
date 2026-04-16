@@ -12,6 +12,7 @@ import {
   Square,
   MessageSquare,
   Terminal,
+  GitBranch,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -296,10 +297,11 @@ interface TaskDetailProps {
 }
 
 function TaskDetail({ taskId }: TaskDetailProps) {
-  const { tasks, environments } = useWorkspaceStore();
+  const { tasks, environments, repositories } = useWorkspaceStore();
   const { updateTaskStatus, cancelTask, retryTask, startTask, stopTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
   const task = tasks.find((t) => t.id === taskId);
+  const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
 
   if (!task) {
     return (
@@ -404,6 +406,12 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                   {env && (
                     <Badge variant="outline" className="text-xs">
                       {env.name}
+                    </Badge>
+                  )}
+                  {repo && (
+                    <Badge variant="outline" className="text-xs">
+                      <GitBranch className="w-3 h-3 mr-1" />
+                      {repo.fullName}
                     </Badge>
                   )}
                 </div>
@@ -557,12 +565,21 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           )}
 
           <div>
-            <h3 className="text-sm font-medium mb-2">Metadata</h3>
+            <h3 className="text-sm font-medium mb-2">Details</h3>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
                 <span className="text-muted-foreground">Type:</span>
                 <span className="ml-2 capitalize">{task.type}</span>
               </div>
+              {repo && (
+                <div>
+                  <span className="text-muted-foreground">Repository:</span>
+                  <span className="ml-2 flex items-center gap-1">
+                    <GitBranch className="w-3 h-3" />
+                    {repo.fullName}
+                  </span>
+                </div>
+              )}
               <div>
                 <span className="text-muted-foreground">Created:</span>
                 <span className="ml-2">

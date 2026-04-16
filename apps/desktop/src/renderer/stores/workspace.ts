@@ -1,6 +1,15 @@
 import { create } from 'zustand';
 import type { Workspace, Environment, Agent, Task, InboxItem } from '@fastowl/shared';
 
+// Simplified repository type for store (matches API response)
+export interface WatchedRepo {
+  id: string;
+  workspaceId: string;
+  owner: string;
+  repo: string;
+  fullName: string;
+}
+
 export type Theme = 'light' | 'dark' | 'system';
 
 // Get initial theme from localStorage or default to 'light'
@@ -46,6 +55,9 @@ interface WorkspaceState {
   // Tasks
   tasks: Task[];
 
+  // Repositories (watched repos)
+  repositories: WatchedRepo[];
+
   // Inbox
   inboxItems: InboxItem[];
   unreadCount: number;
@@ -73,6 +85,8 @@ interface WorkspaceState {
   updateTask: (id: string, updates: Partial<Task>) => void;
   addTask: (task: Task) => void;
 
+  setRepositories: (repos: WatchedRepo[]) => void;
+
   setInboxItems: (items: InboxItem[]) => void;
   addInboxItem: (item: InboxItem) => void;
   markInboxRead: (id: string) => void;
@@ -91,6 +105,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   environments: [],
   agents: [],
   tasks: [],
+  repositories: [],
   inboxItems: [],
   unreadCount: 0,
   sidebarCollapsed: false,
@@ -143,6 +158,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
   addTask: (task) =>
     set((state) => ({ tasks: [...state.tasks, task] })),
+
+  setRepositories: (repos) => set({ repositories: repos }),
 
   setInboxItems: (items) =>
     set({
