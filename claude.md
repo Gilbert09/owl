@@ -550,25 +550,28 @@ A prioritized list of items requiring human attention:
 ### Priority Queue (Next Up)
 > These are the immediate priorities based on user feedback:
 
-1. **Phase 13.3 - Smart Task Creation** (Quick win)
-   - Remove required name/description, auto-generate with Haiku
+1. ~~**Phase 13.3 - Smart Task Creation** (Quick win)~~ DONE
+   - ~~Remove required name/description, auto-generate with Haiku~~
 
-2. **Phase 13.4 - Repository Context** (Essential)
-   - Spawn Claude in correct repo directory
+2. ~~**Phase 13.4 - Repository Context** (Essential)~~ DONE
+   - ~~Spawn Claude in correct repo directory~~
 
-3. **Phase 14.1-14.2 - Git Branch Management** (Core feature)
+3. **Phase 14.1-14.2 - Git Branch Management** (Core feature) **NEXT**
    - Task branches, work state preservation
 
-4. **Phase 12.8 - Light Mode** (Quick win)
-   - Theme toggle, system detection
+4. ~~**Phase 12.8 - Light Mode** (Quick win)~~ DONE
+   - ~~Theme toggle, system detection~~
 
 5. **Phase 15.1-15.3 - Task History** (Important UX)
    - Persist and display conversation history
 
-6. **Phase 13.1-13.2 - Interactive Terminal** (Core feature)
-   - Full interactivity, native UI overlays
+6. ~~**Phase 13.1 - Interactive Terminal** (Core feature)~~ DONE
+   - ~~Full interactivity, bidirectional communication~~
 
-7. **Phase 16 - Approval Workflows** (Core feature)
+7. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
+   - Clickable options, approval buttons
+
+8. **Phase 16 - Approval Workflows** (Core feature)
    - Approval gates, task types
 
 ### Phase 11: Settings & Configuration
@@ -627,20 +630,21 @@ A prioritized list of items requiring human attention:
   - [ ] API rate limiting
   - [ ] Deployment configuration
 
-- [ ] **12.8 Appearance**
-  - [ ] Light mode theme
-  - [ ] Theme toggle in settings
-  - [ ] System theme detection (auto)
-  - [ ] Persist theme preference
+- [x] **12.8 Appearance** (COMPLETED)
+  - [x] Light mode theme
+  - [x] Theme toggle in settings (Appearance section)
+  - [x] System theme detection (auto)
+  - [x] Persist theme preference (localStorage)
 
 ### Phase 13: Enhanced Terminal Interaction
 > Reference: https://github.com/PostHog/code for patterns
 
-- [ ] **13.1 Interactive Claude Terminal**
-  - [ ] Full interactive mode (not just --print)
-  - [ ] Bidirectional communication with Claude CLI
-  - [ ] Continue conversation after task starts
-  - [ ] Terminal stays active for follow-up questions
+- [x] **13.1 Interactive Claude Terminal** (COMPLETED)
+  - [x] Full interactive mode (not just --print)
+  - [x] Bidirectional communication with Claude CLI
+  - [x] Continue conversation after task starts
+  - [x] Terminal stays active for follow-up questions
+  - [x] Always-visible input field for sending messages
 
 - [ ] **13.2 Native UI Overlays**
   - [ ] Detect when Claude presents options (numbered choices)
@@ -649,17 +653,17 @@ A prioritized list of items requiring human attention:
   - [ ] Permission request UI (accept/reject tool use)
   - [ ] Feedback input with quick templates
 
-- [ ] **13.3 Smart Task Creation**
-  - [ ] Remove required name/description fields
-  - [ ] Auto-generate task name from prompt (Haiku LLM call)
-  - [ ] Show generating indicator while creating
-  - [ ] Allow editing generated name
+- [x] **13.3 Smart Task Creation** (COMPLETED)
+  - [x] Remove required name/description fields (prompt-first for automated tasks)
+  - [x] Auto-generate task name from prompt (Haiku LLM call via AI service)
+  - [x] Show generating indicator while creating
+  - [x] Allow editing generated name (in collapsed section)
 
-- [ ] **13.4 Repository Context**
-  - [ ] Configure repo paths per environment in workspace settings
-  - [ ] Spawn Claude in correct repo directory for task
-  - [ ] Support multiple repos per workspace
-  - [ ] Auto-clone repos on environment setup (optional)
+- [x] **13.4 Repository Context** (COMPLETED)
+  - [x] Repository selector in CreateTaskModal
+  - [x] Spawn Claude in correct repo directory for task (via workingDirectory)
+  - [x] Support multiple repos per workspace
+  - [ ] Auto-clone repos on environment setup (optional) - deferred
 
 ### Phase 14: Git-Centric Workflow
 
