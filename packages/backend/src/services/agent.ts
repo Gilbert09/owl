@@ -91,6 +91,10 @@ class AgentService extends EventEmitter {
   init(db: DB): void {
     this.db = db;
 
+    // Clean up any stale agent records from previous runs
+    // (agents that aren't in activeAgents are not actually running)
+    this.cleanupStaleAgents();
+
     // Listen for session data from environment service
     environmentService.on('session:data', (sessionId, data) => {
       this.handleSessionData(sessionId, data);
@@ -113,6 +117,22 @@ class AgentService extends EventEmitter {
     this.statusCheckInterval = setInterval(() => {
       this.checkStuckAgents();
     }, 60000); // Every minute
+  }
+
+  /**
+   * Clean up stale agent records from database
+   * (agents from previous server runs that are no longer active)
+   */
+  private cleanupStaleAgents(): void {
+    if (!this.db) return;
+
+    const result = this.db.prepare(`
+      DELETE FROM agents WHERE status IN ('idle', 'working', 'tool_use', 'awaiting_input')
+    `).run();
+
+    if (result.changes > 0) {
+      console.log(`Cleaned up ${result.changes} stale agent records`);
+    }
   }
 
   /**
@@ -276,31 +296,31 @@ class AgentService extends EventEmitter {
   }
 
   /**
-   * Get idle agents for a workspace
+   * Get idle agents for a workspace (only returns agents that are actually running)
    */
   getIdleAgents(workspaceId?: string): Agent[] {
-    if (!this.db) return [];
+    // Only return agents that are actually running (in activeAgents map)
+    const idleAgents: Agent[] = [];
 
-    let query = 'SELECT * FROM agents WHERE status = ?';
-    const params: any[] = ['idle'];
-
-    if (workspaceId) {
-      query += ' AND workspace_id = ?';
-      params.push(workspaceId);
+    for (const [id, activeAgent] of this.activeAgents) {
+      if (activeAgent.status === 'idle') {
+        if (!workspaceId || activeAgent.workspaceId === workspaceId) {
+          const agent = this.getAgent(id);
+          if (agent) {
+            idleAgents.push(agent);
+          }
+        }
+      }
     }
 
-    const rows = this.db.prepare(query).all(...params);
-    return rows.map((row: any) => ({
-      id: row.id,
-      environmentId: row.environment_id,
-      workspaceId: row.workspace_id,
-      status: row.status,
-      attention: row.attention,
-      currentTaskId: row.current_task_id || undefined,
-      terminalOutput: row.terminal_output,
-      lastActivity: row.last_activity,
-      createdAt: row.created_at,
-    }));
+    return idleAgents;
+  }
+
+  /**
+   * Check if an agent is currently active (has a running session)
+   */
+  isAgentActive(agentId: string): boolean {
+    return this.activeAgents.has(agentId);
   }
 
   /**
@@ -369,6 +389,11 @@ class AgentService extends EventEmitter {
       this.db.prepare(`
         UPDATE tasks SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?
       `).run(taskStatus, new Date().toISOString(), new Date().toISOString(), agent.currentTaskId);
+    }
+
+    // Remove agent record from database (it's no longer active)
+    if (this.db) {
+      this.db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
     }
   }
 
