@@ -27,34 +27,65 @@ A "workspace" groups related repositories and configuration together. For exampl
 - `posthog/posthog.com` (website)
 - `posthog/charts` (Helm charts)
 
-Each workspace has its own integrations configured (GitHub org, Slack channels, PostHog project, etc.).
+Each workspace has:
+- Configured integrations (GitHub org, Slack channels, PostHog project, etc.)
+- Repository paths on each environment (for spawning Claude in the right directory)
+- Auto-clone settings (FastOwl can clone repos on environments when setting up workspace)
 
 ### Environments
 An "environment" is a machine where work can be executed. Types include:
 - **Local**: The user's own machine
 - **SSH**: Remote machines accessible via SSH (e.g., `ssh vm1`)
-- **Coder Devbox**: Coder.com managed workspaces (see `/Users/tomowers/dev/posthog/posthog/common/hogli/devbox/` for reference)
+- **Coder Devbox**: Coder.com managed workspaces
 - **Future**: Dev containers, cloud VMs, etc.
 
+**Git user**: FastOwl uses the machine's configured git user (your personal GitHub account on local, same on VM, etc.). No special configuration needed.
+
 ### Tasks
-Items of work that can be:
-- **Manual**: Requires human action (e.g., "merge this PR", "reply to Slack message")
-- **Automated**: Can be handled by Claude (e.g., "implement PR feedback", "check CI status")
-- **Pending**: Created but not yet queued
-- **Queued**: Waiting for an available environment
-- **In Progress**: Being worked on - task owns its own Claude agent/terminal
+Tasks are the primary unit of work in FastOwl. They represent anything that needs to be done:
 
-When an automated task is running, it has:
-- A live terminal view showing Claude's output
-- Agent status (working, awaiting input, tool use, etc.)
-- Attention indicators (color-coded based on whether user input is needed)
-- Input controls for responding to Claude's questions
+**Task Types**:
+- **Code Writing**: Build a feature, fix a bug, refactor code (creates git branch)
+- **PR Response**: Automated - review comments on your PR, implement changes, wait for approval before pushing
+- **PR Review**: Suggest review comments on someone else's PR
+- **Manual**: Requires human action (merge PR, reply to Slack)
 
-**Key design**: Tasks own their agents. Users create/manage tasks, not agents directly. Agents are an internal implementation detail.
+**Task Lifecycle**:
+- **Pending**: Created but not yet started
+- **Queued**: Waiting for an available environment slot
+- **In Progress**: Claude is actively working (or paused awaiting input)
+- **Awaiting Approval**: Work is done, waiting for user to approve before pushing
+- **Completed**: Work is done and pushed/merged
+
+**Key Design Principles**:
+1. **Tasks own agents** - Users create/manage tasks, not agents. Agents are internal.
+2. **Approval gates** - Automated tasks do work, then wait for approval before pushing changes to the world
+3. **One active task per repo per environment** - Git branch isolation
+4. **Session persistence** - Task history and conversation persists, sessions can be paused/resumed
+
+### Git Branch Management (Code-Writing Tasks)
+Each code-writing task:
+- Gets assigned a dedicated git branch (e.g., `fastowl/task-123-fix-auth-bug`)
+- All work happens on that branch
+- Before another task runs on the same repo, current work is committed/stashed
+- Resuming a task auto-checks out the correct branch
+- User approves before merging/pushing to main
+
+### Interactive Terminal
+The task terminal provides a full Claude CLI-like experience:
+- Real-time streaming output
+- Interactive conversation with Claude
+- **Native UI overlays** for common actions:
+  - Selecting options from choices Claude presents
+  - Giving feedback on proposed changes
+  - Accepting/rejecting permission requests
+  - One-click approval/rejection buttons
+- Full history persistence and replay
 
 ### Inbox
-A prioritized list of items requiring human attention, including:
-- Agent requests for input/decisions
+A prioritized list of items requiring human attention:
+- Tasks awaiting approval (work done, ready to push)
+- Tasks awaiting input (Claude asked a question)
 - PR reviews received
 - CI failures
 - Slack mentions
@@ -153,6 +184,36 @@ A prioritized list of items requiring human attention, including:
 - Simpler UI: removed separate Terminals panel
 - Tasks Panel shows both queue and live terminal for running tasks
 - Per-environment concurrency is maintained (one running task per environment)
+
+### Decision 6: Git-Centric Task Workflow
+**Date**: 2024-04-XX
+**Rationale**:
+- Code-writing tasks each get a dedicated git branch
+- Provides isolation and easy rollback
+- Enables pausing/resuming tasks (stash/checkout)
+- One active task per repo per environment prevents conflicts
+- User approves before pushing - no surprise changes in the world
+
+### Decision 7: Approval-Based Automation
+**Date**: 2024-04-XX
+**Rationale**:
+- Automated tasks should do work, then wait for user approval before pushing
+- This gives users control while still automating the grunt work
+- Different task types have different approval requirements:
+  - PR Response: do work → show diff → wait for approval → push
+  - Feature Build: work in progress → await input as needed → user marks complete
+  - PR Review: suggest comments → wait for approval → post comments
+
+### Decision 8: Reference Architecture - PostHog Code
+**Date**: 2024-04-XX
+**Reference**: https://github.com/PostHog/code
+**Key patterns to adopt**:
+- Session persistence via conversation log replay (`resumeFromLog()`)
+- TreeTracker for git working tree snapshots
+- Permission modes (default, acceptEdits, plan, bypassPermissions)
+- tRPC over Electron IPC for type-safe communication
+- Zustand stores for UI state, services for business logic
+- Saga pattern for atomic operations with rollback
 
 ## Resolved Questions
 
@@ -486,6 +547,30 @@ A prioritized list of items requiring human attention, including:
 - [x] **Change default ports** - Changed from 3001 to 4747 to avoid conflicts with common dev servers.
 - [x] **Fix ESLint configuration** - Removed broken 'erb' extends, simplified config, fixed all lint errors.
 
+### Priority Queue (Next Up)
+> These are the immediate priorities based on user feedback:
+
+1. **Phase 13.3 - Smart Task Creation** (Quick win)
+   - Remove required name/description, auto-generate with Haiku
+
+2. **Phase 13.4 - Repository Context** (Essential)
+   - Spawn Claude in correct repo directory
+
+3. **Phase 14.1-14.2 - Git Branch Management** (Core feature)
+   - Task branches, work state preservation
+
+4. **Phase 12.8 - Light Mode** (Quick win)
+   - Theme toggle, system detection
+
+5. **Phase 15.1-15.3 - Task History** (Important UX)
+   - Persist and display conversation history
+
+6. **Phase 13.1-13.2 - Interactive Terminal** (Core feature)
+   - Full interactivity, native UI overlays
+
+7. **Phase 16 - Approval Workflows** (Core feature)
+   - Approval gates, task types
+
 ### Phase 11: Settings & Configuration
 
 - [ ] **11.1 Settings Service**
@@ -541,6 +626,145 @@ A prioritized list of items requiring human attention, including:
   - [ ] Data isolation
   - [ ] API rate limiting
   - [ ] Deployment configuration
+
+- [ ] **12.8 Appearance**
+  - [ ] Light mode theme
+  - [ ] Theme toggle in settings
+  - [ ] System theme detection (auto)
+  - [ ] Persist theme preference
+
+### Phase 13: Enhanced Terminal Interaction
+> Reference: https://github.com/PostHog/code for patterns
+
+- [ ] **13.1 Interactive Claude Terminal**
+  - [ ] Full interactive mode (not just --print)
+  - [ ] Bidirectional communication with Claude CLI
+  - [ ] Continue conversation after task starts
+  - [ ] Terminal stays active for follow-up questions
+
+- [ ] **13.2 Native UI Overlays**
+  - [ ] Detect when Claude presents options (numbered choices)
+  - [ ] Render clickable buttons for options
+  - [ ] One-click approval/rejection for proposed changes
+  - [ ] Permission request UI (accept/reject tool use)
+  - [ ] Feedback input with quick templates
+
+- [ ] **13.3 Smart Task Creation**
+  - [ ] Remove required name/description fields
+  - [ ] Auto-generate task name from prompt (Haiku LLM call)
+  - [ ] Show generating indicator while creating
+  - [ ] Allow editing generated name
+
+- [ ] **13.4 Repository Context**
+  - [ ] Configure repo paths per environment in workspace settings
+  - [ ] Spawn Claude in correct repo directory for task
+  - [ ] Support multiple repos per workspace
+  - [ ] Auto-clone repos on environment setup (optional)
+
+### Phase 14: Git-Centric Workflow
+
+- [ ] **14.1 Task Branch Management**
+  - [ ] Auto-create branch when code-writing task starts (e.g., `fastowl/task-{id}-{slug}`)
+  - [ ] Track branch per task in database
+  - [ ] Auto-checkout branch when resuming task
+  - [ ] One active task per repo per environment
+
+- [ ] **14.2 Work State Preservation**
+  - [ ] Before starting new task: commit/stash current work
+  - [ ] Detect uncommitted changes
+  - [ ] Prompt user or auto-stash with task reference
+  - [ ] Restore stash when resuming task
+
+- [ ] **14.3 Branch Lifecycle**
+  - [ ] Delete branch after task merged/completed
+  - [ ] Option to keep branches for reference
+  - [ ] List task branches in UI
+  - [ ] Push branch to remote for backup
+
+- [ ] **14.4 PR Creation from Task**
+  - [ ] "Create PR" button on completed tasks
+  - [ ] Pre-fill PR title/description from task
+  - [ ] Select target branch (main/master)
+  - [ ] Link PR to task in UI
+
+### Phase 15: Session Persistence & History
+
+- [ ] **15.1 Conversation Logging**
+  - [ ] Persist all terminal output to task record
+  - [ ] Store structured conversation (user messages, agent responses, tool calls)
+  - [ ] Persist agent state snapshots
+  - [ ] ndJson format for efficient append
+
+- [ ] **15.2 Session Resume**
+  - [ ] Reconstruct conversation state from logs
+  - [ ] Resume Claude session with context (if Claude CLI supports)
+  - [ ] Fallback: start new session with conversation summary
+  - [ ] "Continue where I left off" functionality
+
+- [ ] **15.3 Task History UI**
+  - [ ] View full conversation history for any task
+  - [ ] Scroll through past terminal output
+  - [ ] Collapsible tool use sections
+  - [ ] Search within task history
+
+- [ ] **15.4 Agent Reuse (Investigate)**
+  - [ ] Research: Can Claude CLI sessions be paused/frozen?
+  - [ ] Research: MCP session persistence capabilities
+  - [ ] If possible: implement session serialization
+  - [ ] If not: implement context summarization for new sessions
+
+### Phase 16: Task Types & Approval Workflows
+
+- [ ] **16.1 Task Type System**
+  - [ ] Define task types: code_writing, pr_response, pr_review, manual
+  - [ ] Type-specific behaviors and UI
+  - [ ] Type-specific default prompts/templates
+  - [ ] Type icons and colors
+
+- [ ] **16.2 Approval Gates**
+  - [ ] "Awaiting Approval" status
+  - [ ] Show diff of changes before push
+  - [ ] Approve/Reject buttons
+  - [ ] Comments on approval
+  - [ ] Push only after approval
+
+- [ ] **16.3 PR Response Task Type**
+  - [ ] Triggered by PR comment notifications
+  - [ ] Auto-checkout PR branch
+  - [ ] Review comments and implement changes
+  - [ ] Wait for approval before pushing
+  - [ ] Auto-create if configured in automation rules
+
+- [ ] **16.4 PR Review Task Type**
+  - [ ] Review someone else's PR
+  - [ ] Suggest review comments (not post immediately)
+  - [ ] Show suggested comments in UI
+  - [ ] User approves which comments to post
+  - [ ] Batch post approved comments
+
+- [ ] **16.5 Task Completion Model**
+  - [ ] Automated tasks: complete when work done + approved
+  - [ ] Code-writing tasks: user marks complete or continues
+  - [ ] Remove explicit "complete" button for most tasks
+  - [ ] Status: in_progress → awaiting_approval → completed
+
+### Phase 17: Automation & Triggers
+
+- [ ] **17.1 Automation Rules (Enhanced)**
+  - [ ] PR comment on my PR → create PR Response task
+  - [ ] CI failure → create fix task
+  - [ ] New PR for review → create PR Review task (optional)
+  - [ ] Configure per workspace
+
+- [ ] **17.2 Auto-Start Behavior**
+  - [ ] Option to auto-start triggered tasks
+  - [ ] Option to just create inbox item for manual start
+  - [ ] Rate limiting (max concurrent auto-tasks)
+
+- [ ] **17.3 Notification Preferences**
+  - [ ] Per-task-type notification settings
+  - [ ] Desktop notifications for approval requests
+  - [ ] Digest mode (batch notifications)
 
 ---
 
@@ -757,6 +981,20 @@ fastowl/
 
 ## References
 
+### Primary Reference: PostHog Code
+**URL**: https://github.com/PostHog/code
+**Why**: Best-in-class patterns for agentic development environment
+
+Key patterns to study:
+- `packages/agent/` - Agent framework wrapping Claude Agent SDK
+- `packages/core/` - Git operations, task execution
+- `packages/electron-trpc/` - tRPC over Electron IPC
+- Session persistence via `resumeFromLog()` (ndJson conversation logs)
+- TreeTracker for git working tree snapshots
+- Permission modes: default, acceptEdits, plan, bypassPermissions
+- Saga pattern for atomic operations with rollback
+
+### Other References
 - PostHog Devbox Code: `/Users/tomowers/dev/posthog/posthog/common/hogli/devbox/`
 - Electron React Boilerplate: https://github.com/electron-react-boilerplate/electron-react-boilerplate
 - User's current VM setup: SSH accessible via `ssh vm1`
