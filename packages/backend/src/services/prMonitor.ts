@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { v4 as uuid } from 'uuid';
 import { DB } from '../db/index.js';
 import { githubService } from './github.js';
-import { broadcast } from './websocket.js';
+import { broadcastToWorkspace } from './websocket.js';
 
 interface WatchedRepo {
   id: string;
@@ -575,9 +575,10 @@ class PRMonitorService extends EventEmitter {
       createdAt: now,
     };
 
-    broadcast(workspaceId, {
+    broadcastToWorkspace(workspaceId, {
       type: 'inbox:created',
       payload: inboxItem,
+      timestamp: new Date().toISOString(),
     });
 
     this.emit('inbox_item_created', inboxItem);
