@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { DB } from '../db/index.js';
 import { prMonitorService } from '../services/prMonitor.js';
 
-export function repositoryRoutes(db: DB): Router {
+export function repositoryRoutes(_db: DB): Router {
   const router = Router();
 
   // List watched repositories for a workspace
