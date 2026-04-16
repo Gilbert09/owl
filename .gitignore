@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+
+# Runtime data
+pids
+*.pid
+*.seed
+
+# Coverage directory used by tools like istanbul
+coverage
+.eslintcache
+
+# Dependency directory
+node_modules
+
+# Build outputs
+dist
+*.tsbuildinfo
+
+# OSX
+.DS_Store
+
+# Desktop app
+apps/desktop/release/app/dist
+apps/desktop/release/build
+apps/desktop/.erb/dll
+
+# IDE
+.idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Debug logs
+npm-debug.log.*
+
+# Generated type definitions
+*.css.d.ts
+*.sass.d.ts
+*.scss.d.ts
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Backend data
+.fastowl/

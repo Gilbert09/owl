@@ -1,0 +1,28 @@
+{
+  "name": "fastowl",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mission control for AI-assisted software engineering",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:desktop\"",
+    "dev:desktop": "npm run start -w @fastowl/desktop",
+    "dev:backend": "npm run dev -w @fastowl/backend",
+    "build": "npm run build -w @fastowl/shared && npm run build -w @fastowl/backend && npm run build -w @fastowl/desktop",
+    "build:desktop": "npm run build -w @fastowl/desktop",
+    "build:backend": "npm run build -w @fastowl/backend",
+    "package": "npm run package -w @fastowl/desktop",
+    "lint": "npm run lint --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}

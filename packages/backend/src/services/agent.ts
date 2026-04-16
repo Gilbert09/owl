@@ -1,0 +1,565 @@
+import { EventEmitter } from 'events';
+import { v4 as uuid } from 'uuid';
+import type {
+  Agent,
+  AgentStatus,
+  AgentAttention,
+  InboxItem,
+  StartAgentRequest,
+} from '@fastowl/shared';
+import { environmentService } from './environment.js';
+import { sshService } from './ssh.js';
+import { emitAgentStatus, emitAgentOutput, emitInboxNew } from './websocket.js';
+import { DB } from '../db/index.js';
+
+// Patterns to detect Claude CLI status
+const STATUS_PATTERNS = {
+  // Claude is thinking/working
+  working: [
+    /^>/,  // Tool use indicator
+    /^\s*\d+\s*│/,  // Code block line numbers
+    /Thinking\.\.\./i,
+    /Working on/i,
+    /Let me/i,
+    /I'll/i,
+    /I will/i,
+  ],
+  // Claude is waiting for user input
+  awaitingInput: [
+    /\?\s*$/,  // Ends with question mark
+    /What would you/i,
+    /Would you like/i,
+    /Should I/i,
+    /Do you want/i,
+    /Please (provide|specify|confirm|choose)/i,
+    /Which (one|option)/i,
+    /Enter your/i,
+    /Type your/i,
+    /\(y\/n\)/i,
+    /\[Y\/n\]/i,
+  ],
+  // Claude completed a task
+  completed: [
+    /Done\.?\s*$/i,
+    /Complete\.?\s*$/i,
+    /Finished\.?\s*$/i,
+    /Successfully/i,
+    /I've (completed|finished|done)/i,
+    /The (task|work) (is|has been) (complete|done|finished)/i,
+  ],
+  // Claude encountered an error
+  error: [
+    /Error:/i,
+    /Failed:/i,
+    /Exception:/i,
+    /Cannot/i,
+    /Unable to/i,
+    /Permission denied/i,
+    /command not found/i,
+  ],
+  // Claude is using a tool
+  toolUse: [
+    /^> Running/i,
+    /^> Reading/i,
+    /^> Writing/i,
+    /^> Editing/i,
+    /^> Executing/i,
+    /^> Searching/i,
+  ],
+};
+
+interface ActiveAgent {
+  id: string;
+  environmentId: string;
+  workspaceId: string;
+  sessionId: string;
+  status: AgentStatus;
+  attention: AgentAttention;
+  outputBuffer: string;
+  lastActivityTime: Date;
+  currentTaskId?: string;
+}
+
+class AgentService extends EventEmitter {
+  private db: DB | null = null;
+  private activeAgents: Map<string, ActiveAgent> = new Map();
+  private statusCheckInterval: NodeJS.Timeout | null = null;
+
+  /**
+   * Initialize with database
+   */
+  init(db: DB): void {
+    this.db = db;
+
+    // Listen for session data from environment service
+    environmentService.on('session:data', (sessionId, data) => {
+      this.handleSessionData(sessionId, data);
+    });
+
+    environmentService.on('session:close', (sessionId, code) => {
+      this.handleSessionClose(sessionId, code);
+    });
+
+    // Listen for SSH PTY data
+    sshService.on('pty:data', (sessionId, data) => {
+      this.handleSessionData(sessionId, data);
+    });
+
+    sshService.on('pty:close', (sessionId) => {
+      this.handleSessionClose(sessionId, 0);
+    });
+
+    // Periodic status check for stuck agents
+    this.statusCheckInterval = setInterval(() => {
+      this.checkStuckAgents();
+    }, 60000); // Every minute
+  }
+
+  /**
+   * Shutdown service
+   */
+  shutdown(): void {
+    if (this.statusCheckInterval) {
+      clearInterval(this.statusCheckInterval);
+    }
+
+    // Stop all agents
+    for (const [id, _agent] of this.activeAgents) {
+      this.stopAgent(id);
+    }
+  }
+
+  /**
+   * Start a new agent on an environment
+   */
+  async startAgent(request: StartAgentRequest): Promise<Agent> {
+    const { environmentId, workspaceId, taskId, prompt } = request;
+
+    // Ensure environment is connected
+    const status = environmentService.getStatus(environmentId);
+    if (status !== 'connected') {
+      await environmentService.connect(environmentId);
+    }
+
+    const agentId = uuid();
+    const sessionId = `agent:${agentId}`;
+    const now = new Date().toISOString();
+
+    // Construct the claude command
+    let claudeCommand = 'claude';
+    if (prompt) {
+      // Escape the prompt for shell
+      const escapedPrompt = prompt.replace(/'/g, "'\\''");
+      claudeCommand = `claude '${escapedPrompt}'`;
+    }
+
+    // Spawn the interactive session
+    const env = environmentService.getEnvironment(environmentId);
+    const cwd = env?.config.type === 'ssh'
+      ? (env.config as any).workingDirectory
+      : undefined;
+
+    await environmentService.spawnInteractive(environmentId, sessionId, claudeCommand, {
+      cwd,
+      rows: 40,
+      cols: 120,
+    });
+
+    // Create active agent tracking
+    const activeAgent: ActiveAgent = {
+      id: agentId,
+      environmentId,
+      workspaceId,
+      sessionId,
+      status: 'idle',
+      attention: 'none',
+      outputBuffer: '',
+      lastActivityTime: new Date(),
+      currentTaskId: taskId,
+    };
+
+    this.activeAgents.set(agentId, activeAgent);
+
+    // Create database record
+    if (this.db) {
+      this.db.prepare(`
+        INSERT INTO agents (id, environment_id, workspace_id, status, attention, current_task_id, terminal_output, last_activity, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(agentId, environmentId, workspaceId, 'idle', 'none', taskId || null, '', now, now);
+    }
+
+    // If there's a task, update it
+    if (taskId && this.db) {
+      this.db.prepare(`
+        UPDATE tasks SET assigned_agent_id = ?, status = 'in_progress', updated_at = ? WHERE id = ?
+      `).run(agentId, now, taskId);
+    }
+
+    return this.getAgent(agentId)!;
+  }
+
+  /**
+   * Send input to an agent
+   */
+  sendInput(agentId: string, input: string): void {
+    const agent = this.activeAgents.get(agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    environmentService.writeToSession(agent.sessionId, input + '\n');
+
+    // Update status to working
+    this.updateAgentStatus(agentId, 'working', 'none');
+  }
+
+  /**
+   * Stop an agent
+   */
+  stopAgent(agentId: string): void {
+    const agent = this.activeAgents.get(agentId);
+    if (!agent) return;
+
+    environmentService.killSession(agent.sessionId);
+    this.activeAgents.delete(agentId);
+
+    // Update database
+    if (this.db) {
+      this.db.prepare(`
+        UPDATE agents SET status = 'idle', attention = 'none', last_activity = ? WHERE id = ?
+      `).run(new Date().toISOString(), agentId);
+    }
+
+    emitAgentStatus(agent.workspaceId, agentId, 'idle', 'none');
+  }
+
+  /**
+   * Get agent from database
+   */
+  getAgent(agentId: string): Agent | null {
+    if (!this.db) return null;
+
+    const row = this.db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId);
+    if (!row) return null;
+
+    return {
+      id: (row as any).id,
+      environmentId: (row as any).environment_id,
+      workspaceId: (row as any).workspace_id,
+      status: (row as any).status,
+      attention: (row as any).attention,
+      currentTaskId: (row as any).current_task_id || undefined,
+      terminalOutput: (row as any).terminal_output,
+      lastActivity: (row as any).last_activity,
+      createdAt: (row as any).created_at,
+    };
+  }
+
+  /**
+   * Get all agents for a workspace
+   */
+  getAgentsByWorkspace(workspaceId: string): Agent[] {
+    if (!this.db) return [];
+
+    const rows = this.db.prepare('SELECT * FROM agents WHERE workspace_id = ?').all(workspaceId);
+    return rows.map((row: any) => ({
+      id: row.id,
+      environmentId: row.environment_id,
+      workspaceId: row.workspace_id,
+      status: row.status,
+      attention: row.attention,
+      currentTaskId: row.current_task_id || undefined,
+      terminalOutput: row.terminal_output,
+      lastActivity: row.last_activity,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Get idle agents for a workspace
+   */
+  getIdleAgents(workspaceId?: string): Agent[] {
+    if (!this.db) return [];
+
+    let query = 'SELECT * FROM agents WHERE status = ?';
+    const params: any[] = ['idle'];
+
+    if (workspaceId) {
+      query += ' AND workspace_id = ?';
+      params.push(workspaceId);
+    }
+
+    const rows = this.db.prepare(query).all(...params);
+    return rows.map((row: any) => ({
+      id: row.id,
+      environmentId: row.environment_id,
+      workspaceId: row.workspace_id,
+      status: row.status,
+      attention: row.attention,
+      currentTaskId: row.current_task_id || undefined,
+      terminalOutput: row.terminal_output,
+      lastActivity: row.last_activity,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /**
+   * Handle output from agent session
+   */
+  private handleSessionData(sessionId: string, data: Buffer): void {
+    // Find the agent for this session
+    let agent: ActiveAgent | undefined;
+    for (const [_id, a] of this.activeAgents) {
+      if (a.sessionId === sessionId) {
+        agent = a;
+        break;
+      }
+    }
+
+    if (!agent) return;
+
+    const output = data.toString();
+    agent.outputBuffer += output;
+    agent.lastActivityTime = new Date();
+
+    // Update terminal output in database (limit to last 10000 chars)
+    if (this.db) {
+      const truncatedOutput = agent.outputBuffer.slice(-10000);
+      this.db.prepare(`
+        UPDATE agents SET terminal_output = ?, last_activity = ? WHERE id = ?
+      `).run(truncatedOutput, agent.lastActivityTime.toISOString(), agent.id);
+    }
+
+    // Emit output via WebSocket
+    emitAgentOutput(agent.workspaceId, agent.id, output, true);
+
+    // Analyze output for status
+    this.analyzeOutput(agent);
+  }
+
+  /**
+   * Handle session close
+   */
+  private handleSessionClose(sessionId: string, code: number | null): void {
+    // Find the agent for this session
+    let agentId: string | undefined;
+    for (const [id, agent] of this.activeAgents) {
+      if (agent.sessionId === sessionId) {
+        agentId = id;
+        break;
+      }
+    }
+
+    if (!agentId) return;
+
+    const agent = this.activeAgents.get(agentId)!;
+
+    // Determine final status
+    const finalStatus: AgentStatus = code === 0 ? 'completed' : 'error';
+
+    this.updateAgentStatus(agentId, finalStatus, 'none');
+    this.activeAgents.delete(agentId);
+
+    // Create inbox item for completion
+    this.createInboxItemForAgent(agent, finalStatus);
+
+    // Update task if there was one
+    if (agent.currentTaskId && this.db) {
+      const taskStatus = code === 0 ? 'completed' : 'failed';
+      this.db.prepare(`
+        UPDATE tasks SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?
+      `).run(taskStatus, new Date().toISOString(), new Date().toISOString(), agent.currentTaskId);
+    }
+  }
+
+  /**
+   * Analyze output to detect status
+   */
+  private analyzeOutput(agent: ActiveAgent): void {
+    // Get last few lines for analysis
+    const lines = agent.outputBuffer.split('\n').slice(-10);
+    const recentOutput = lines.join('\n');
+
+    let newStatus: AgentStatus = agent.status;
+    let newAttention: AgentAttention = agent.attention;
+
+    // Check for tool use first (takes priority)
+    for (const pattern of STATUS_PATTERNS.toolUse) {
+      if (pattern.test(recentOutput)) {
+        newStatus = 'tool_use';
+        newAttention = 'none';
+        break;
+      }
+    }
+
+    // Check for errors
+    for (const pattern of STATUS_PATTERNS.error) {
+      if (pattern.test(recentOutput)) {
+        newStatus = 'error';
+        newAttention = 'high';
+        break;
+      }
+    }
+
+    // Check for awaiting input
+    if (newStatus !== 'error') {
+      for (const pattern of STATUS_PATTERNS.awaitingInput) {
+        if (pattern.test(recentOutput)) {
+          newStatus = 'awaiting_input';
+          newAttention = 'high';
+          break;
+        }
+      }
+    }
+
+    // Check for completion
+    if (newStatus !== 'error' && newStatus !== 'awaiting_input') {
+      for (const pattern of STATUS_PATTERNS.completed) {
+        if (pattern.test(recentOutput)) {
+          newStatus = 'completed';
+          newAttention = 'low';
+          break;
+        }
+      }
+    }
+
+    // Check for working
+    if (newStatus !== 'error' && newStatus !== 'awaiting_input' && newStatus !== 'completed') {
+      for (const pattern of STATUS_PATTERNS.working) {
+        if (pattern.test(recentOutput)) {
+          newStatus = 'working';
+          newAttention = 'none';
+          break;
+        }
+      }
+    }
+
+    // Update if changed
+    if (newStatus !== agent.status || newAttention !== agent.attention) {
+      this.updateAgentStatus(agent.id, newStatus, newAttention);
+
+      // Create inbox item if attention needed
+      if (newAttention === 'high' && agent.attention !== 'high') {
+        this.createInboxItemForAgent(agent, newStatus);
+      }
+    }
+  }
+
+  /**
+   * Update agent status
+   */
+  private updateAgentStatus(agentId: string, status: AgentStatus, attention: AgentAttention): void {
+    const agent = this.activeAgents.get(agentId);
+    if (agent) {
+      agent.status = status;
+      agent.attention = attention;
+    }
+
+    if (this.db) {
+      this.db.prepare(`
+        UPDATE agents SET status = ?, attention = ?, last_activity = ? WHERE id = ?
+      `).run(status, attention, new Date().toISOString(), agentId);
+    }
+
+    // Emit via WebSocket
+    if (agent) {
+      emitAgentStatus(agent.workspaceId, agentId, status, attention);
+    }
+
+    this.emit('status', agentId, status, attention);
+  }
+
+  /**
+   * Create inbox item for agent status
+   */
+  private createInboxItemForAgent(agent: ActiveAgent, status: AgentStatus): void {
+    if (!this.db) return;
+
+    let type: 'agent_question' | 'agent_completed' | 'agent_error';
+    let title: string;
+    let summary: string;
+    let priority: 'low' | 'medium' | 'high' | 'urgent';
+
+    const env = environmentService.getEnvironment(agent.environmentId);
+    const envName = env?.name || 'Unknown';
+
+    switch (status) {
+      case 'awaiting_input':
+        type = 'agent_question';
+        title = `Agent needs input`;
+        summary = `Claude on ${envName} is asking a question`;
+        priority = 'high';
+        break;
+
+      case 'completed':
+        type = 'agent_completed';
+        title = `Agent completed task`;
+        summary = `Claude on ${envName} finished working`;
+        priority = 'low';
+        break;
+
+      case 'error':
+        type = 'agent_error';
+        title = `Agent encountered error`;
+        summary = `Claude on ${envName} ran into a problem`;
+        priority = 'urgent';
+        break;
+
+      default:
+        return; // Don't create inbox item for other statuses
+    }
+
+    const inboxId = uuid();
+    const now = new Date().toISOString();
+
+    this.db.prepare(`
+      INSERT INTO inbox_items (id, workspace_id, type, status, priority, title, summary, source, actions, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      inboxId,
+      agent.workspaceId,
+      type,
+      'unread',
+      priority,
+      title,
+      summary,
+      JSON.stringify({ type: 'agent', id: agent.id, name: `Agent on ${envName}` }),
+      JSON.stringify([
+        { id: '1', label: 'View Agent', type: 'primary', action: 'view_agent' },
+      ]),
+      now
+    );
+
+    const inboxItem: InboxItem = {
+      id: inboxId,
+      workspaceId: agent.workspaceId,
+      type,
+      status: 'unread',
+      priority,
+      title,
+      summary,
+      source: { type: 'agent', id: agent.id, name: `Agent on ${envName}` },
+      actions: [{ id: '1', label: 'View Agent', type: 'primary', action: 'view_agent' }],
+      createdAt: now,
+    };
+
+    emitInboxNew(agent.workspaceId, inboxItem);
+  }
+
+  /**
+   * Check for stuck agents (no activity for 5 minutes)
+   */
+  private checkStuckAgents(): void {
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+
+    for (const [id, agent] of this.activeAgents) {
+      if (agent.status === 'working' && agent.lastActivityTime < fiveMinutesAgo) {
+        // Agent might be stuck
+        this.updateAgentStatus(id, 'awaiting_input', 'medium');
+      }
+    }
+  }
+}
+
+// Singleton instance
+export const agentService = new AgentService();
