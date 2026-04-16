@@ -9,6 +9,7 @@ import { environmentService } from './services/environment.js';
 import { agentService } from './services/agent.js';
 import { taskQueueService } from './services/taskQueue.js';
 import { githubService } from './services/github.js';
+import { prMonitorService } from './services/prMonitor.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -25,6 +26,7 @@ async function main() {
   agentService.init(db);
   taskQueueService.init(db);
   githubService.init(db);
+  prMonitorService.init(db);
 
   // Create Express app
   const app = express();
@@ -41,6 +43,7 @@ async function main() {
         environments: 'ready',
         agents: 'ready',
         taskQueue: 'ready',
+        prMonitor: 'ready',
       },
     });
   });
@@ -70,6 +73,7 @@ async function main() {
     console.log('Shutting down...');
 
     // Shutdown services
+    prMonitorService.shutdown();
     taskQueueService.shutdown();
     agentService.shutdown();
     environmentService.shutdown();

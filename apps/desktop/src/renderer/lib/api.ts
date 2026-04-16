@@ -176,6 +176,26 @@ export const github = {
     request<GitHubPullRequest[]>('GET', `/github/repos/${owner}/${repo}/pulls?workspaceId=${workspaceId}`),
 };
 
+// Watched Repositories
+export interface WatchedRepo {
+  id: string;
+  workspaceId: string;
+  owner: string;
+  repo: string;
+  fullName: string;
+}
+
+export const repositories = {
+  list: (workspaceId: string) =>
+    request<WatchedRepo[]>('GET', `/repositories?workspaceId=${workspaceId}`),
+  add: (workspaceId: string, owner: string, repo: string) =>
+    request<WatchedRepo>('POST', '/repositories', { workspaceId, owner, repo }),
+  remove: (id: string) =>
+    request<void>('DELETE', `/repositories/${id}`),
+  forcePoll: () =>
+    request<{ message: string }>('POST', '/repositories/poll'),
+};
+
 // ============================================================================
 // WebSocket Client
 // ============================================================================
@@ -313,5 +333,6 @@ export const api = {
   tasks,
   inbox,
   github,
+  repositories,
   ws: wsClient,
 };

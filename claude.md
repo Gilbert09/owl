@@ -343,11 +343,11 @@ A prioritized list of items requiring human attention, including:
   - [ ] GraphQL client (deferred - REST sufficient for now)
   - [ ] Webhook handling (deferred)
 
-- [ ] **6.3 PR Monitoring**
-  - [ ] Watch configured repos for PR activity
-  - [ ] New review comments → inbox
-  - [ ] CI status changes → inbox (on failure)
-  - [ ] PR merge ready → inbox
+- [x] **6.3 PR Monitoring** (COMPLETED)
+  - [x] Watch configured repos for PR activity (polling every 60s)
+  - [x] New review comments → inbox
+  - [x] CI status changes → inbox (on failure)
+  - [x] PR merge ready → inbox
 
 - [ ] **6.4 PR Actions**
   - [ ] View PR details
@@ -359,7 +359,7 @@ A prioritized list of items requiring human attention, including:
   - [x] Connect GitHub button (in Settings > Integrations)
   - [x] Connection status display (shows connected user)
   - [x] Disconnect button
-  - [ ] Repository selector
+  - [x] Repository selector (in Settings > Workspace > Watched Repositories)
   - [ ] PR list widget
   - [ ] CI status indicators
 
@@ -703,9 +703,38 @@ fastowl/
 
 **Next Steps**:
 - Create GitHub OAuth App and test the flow
-- PR monitoring (watch repos, create inbox items)
-- Repository selector UI in Settings
+- PR Actions (view PR details, create PR)
 - Slack integration
+
+### Session 6 (PR Monitoring + Repository Selector)
+- Created PR Monitor service (`packages/backend/src/services/prMonitor.ts`):
+  - Polls watched repos every 60 seconds for changes
+  - Tracks PR state (reviews, comments, CI status, mergeability)
+  - Creates inbox items for:
+    - New reviews (approved, changes requested)
+    - New review comments
+    - New general comments
+    - CI failures
+    - PR becoming mergeable
+  - Filters out user's own comments to avoid self-notifications
+  - Initializes state on first poll without creating notifications
+- Extended GitHub service (`packages/backend/src/services/github.ts`):
+  - Added getPRReviews, getPRReviewComments, getPRComments methods
+  - Added GitHubReview, GitHubReviewComment, GitHubIssueComment interfaces
+  - Added getConnectedWorkspaces method
+- Created repository routes (`packages/backend/src/routes/repositories.ts`):
+  - GET / - list watched repos for workspace
+  - POST / - add watched repo
+  - DELETE /:id - remove watched repo
+  - POST /poll - force poll refresh
+- Added frontend API client for repositories (`apps/desktop/src/renderer/lib/api.ts`):
+  - WatchedRepo type
+  - list, add, remove, forcePoll methods
+- Updated WorkspaceSettings in SettingsPanel:
+  - Real watched repositories list from backend
+  - Repository selector with GitHub repo search
+  - Add/remove repository functionality
+  - Manual poll refresh button
 
 ---
 

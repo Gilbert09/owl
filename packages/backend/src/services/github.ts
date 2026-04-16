@@ -68,6 +68,51 @@ interface GitHubCheckRun {
   html_url: string;
 }
 
+interface GitHubReview {
+  id: number;
+  user: {
+    login: string;
+    avatar_url: string;
+  };
+  body: string;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
+  submitted_at: string;
+  html_url: string;
+}
+
+interface GitHubReviewComment {
+  id: number;
+  user: {
+    login: string;
+    avatar_url: string;
+  };
+  body: string;
+  path: string;
+  created_at: string;
+  updated_at: string;
+  html_url: string;
+  pull_request_review_id: number;
+}
+
+interface GitHubIssueComment {
+  id: number;
+  user: {
+    login: string;
+    avatar_url: string;
+  };
+  body: string;
+  created_at: string;
+  updated_at: string;
+  html_url: string;
+}
+
+export interface GitHubNotification {
+  type: 'review' | 'review_comment' | 'comment' | 'ci_failure' | 'mergeable';
+  pr: GitHubPullRequest;
+  repo: { owner: string; name: string };
+  data: GitHubReview | GitHubReviewComment | GitHubIssueComment | GitHubCheckRun | { mergeable: boolean };
+}
+
 interface StoredToken {
   workspaceId: string;
   accessToken: string;
@@ -396,6 +441,68 @@ class GitHubService extends EventEmitter {
         body: JSON.stringify({ body }),
       }
     );
+  }
+
+  /**
+   * Get reviews for a pull request
+   */
+  async getPRReviews(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number
+  ): Promise<GitHubReview[]> {
+    return this.apiRequest<GitHubReview[]>(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls/${number}/reviews`
+    );
+  }
+
+  /**
+   * Get review comments for a pull request
+   */
+  async getPRReviewComments(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    options: { since?: string } = {}
+  ): Promise<GitHubReviewComment[]> {
+    const params = new URLSearchParams();
+    if (options.since) params.set('since', options.since);
+    const query = params.toString();
+
+    return this.apiRequest<GitHubReviewComment[]>(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls/${number}/comments${query ? `?${query}` : ''}`
+    );
+  }
+
+  /**
+   * Get issue comments for a pull request (general comments, not review comments)
+   */
+  async getPRComments(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    options: { since?: string } = {}
+  ): Promise<GitHubIssueComment[]> {
+    const params = new URLSearchParams();
+    if (options.since) params.set('since', options.since);
+    const query = params.toString();
+
+    return this.apiRequest<GitHubIssueComment[]>(
+      workspaceId,
+      `/repos/${owner}/${repo}/issues/${number}/comments${query ? `?${query}` : ''}`
+    );
+  }
+
+  /**
+   * Get all connected workspace IDs
+   */
+  getConnectedWorkspaces(): string[] {
+    return Array.from(this.tokens.keys());
   }
 }
 

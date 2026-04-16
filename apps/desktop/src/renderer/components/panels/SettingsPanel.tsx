@@ -13,8 +13,9 @@ import {
   AlertCircle,
   Loader2,
   Unlink,
+  RefreshCw,
 } from 'lucide-react';
-import { api, GitHubStatus, GitHubUser } from '../../lib/api';
+import { api, GitHubStatus, GitHubUser, GitHubRepo, WatchedRepo } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -82,6 +83,42 @@ function WorkspaceSettings() {
   const [isUpdating, setIsUpdating] = useState(false);
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
 
+  // Repository state
+  const [watchedRepos, setWatchedRepos] = useState<WatchedRepo[]>([]);
+  const [availableRepos, setAvailableRepos] = useState<GitHubRepo[]>([]);
+  const [githubConnected, setGithubConnected] = useState(false);
+  const [loadingRepos, setLoadingRepos] = useState(false);
+  const [showRepoSelector, setShowRepoSelector] = useState(false);
+  const [repoSearch, setRepoSearch] = useState('');
+
+  // Load watched repos and GitHub status
+  const loadRepos = useCallback(async () => {
+    if (!currentWorkspaceId) return;
+
+    try {
+      const watched = await api.repositories.list(currentWorkspaceId);
+      setWatchedRepos(watched);
+    } catch (_e) {
+      // Ignore errors
+    }
+
+    try {
+      const status = await api.github.getStatus(currentWorkspaceId);
+      setGithubConnected(status.connected);
+
+      if (status.connected) {
+        const repos = await api.github.listRepos(currentWorkspaceId);
+        setAvailableRepos(repos);
+      }
+    } catch (_e) {
+      setGithubConnected(false);
+    }
+  }, [currentWorkspaceId]);
+
+  useEffect(() => {
+    loadRepos();
+  }, [loadRepos]);
+
   const handleToggleAutoAssign = async () => {
     if (!currentWorkspace) return;
     setIsUpdating(true);
@@ -106,6 +143,52 @@ function WorkspaceSettings() {
       setIsUpdating(false);
     }
   };
+
+  const handleAddRepo = async (repo: GitHubRepo) => {
+    if (!currentWorkspaceId) return;
+    setLoadingRepos(true);
+    try {
+      const watched = await api.repositories.add(
+        currentWorkspaceId,
+        repo.owner.login,
+        repo.name
+      );
+      setWatchedRepos((prev) => [...prev, watched]);
+      setShowRepoSelector(false);
+      setRepoSearch('');
+    } finally {
+      setLoadingRepos(false);
+    }
+  };
+
+  const handleRemoveRepo = async (repoId: string) => {
+    setLoadingRepos(true);
+    try {
+      await api.repositories.remove(repoId);
+      setWatchedRepos((prev) => prev.filter((r) => r.id !== repoId));
+    } finally {
+      setLoadingRepos(false);
+    }
+  };
+
+  const handleForcePoll = async () => {
+    setLoadingRepos(true);
+    try {
+      await api.repositories.forcePoll();
+    } finally {
+      setLoadingRepos(false);
+    }
+  };
+
+  // Filter available repos that aren't already watched
+  const filteredRepos = availableRepos
+    .filter((repo) => !watchedRepos.some((w) => w.fullName === repo.full_name))
+    .filter((repo) =>
+      repoSearch
+        ? repo.full_name.toLowerCase().includes(repoSearch.toLowerCase())
+        : true
+    )
+    .slice(0, 10);
 
   return (
     <div className="space-y-6">
@@ -183,28 +266,107 @@ function WorkspaceSettings() {
           </Card>
 
           <Card className="p-4">
-            <h4 className="font-medium mb-3">Repositories</h4>
-            {currentWorkspace.repos.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No repositories configured. Add repos to track PRs and issues.
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-medium">Watched Repositories</h4>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={handleForcePoll}
+                disabled={loadingRepos || watchedRepos.length === 0}
+                title="Check for updates now"
+              >
+                <RefreshCw className={cn('w-4 h-4', loadingRepos && 'animate-spin')} />
+              </Button>
+            </div>
+            <p className="text-sm text-muted-foreground mb-3">
+              Track PRs, reviews, and CI status for these repositories
+            </p>
+
+            {watchedRepos.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-2">
+                No repositories being watched.
               </p>
             ) : (
-              <div className="space-y-2">
-                {currentWorkspace.repos.map((repo) => (
+              <div className="space-y-2 mb-3">
+                {watchedRepos.map((repo) => (
                   <div
                     key={repo.id}
                     className="flex items-center justify-between p-2 rounded bg-secondary"
                   >
-                    <span className="text-sm">{repo.name}</span>
-                    <Badge variant="outline">{repo.defaultBranch}</Badge>
+                    <div className="flex items-center gap-2">
+                      <Github className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-sm">{repo.fullName}</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                      onClick={() => handleRemoveRepo(repo.id)}
+                      disabled={loadingRepos}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </Button>
                   </div>
                 ))}
               </div>
             )}
-            <Button variant="outline" size="sm" className="mt-3" disabled>
-              <Plus className="w-4 h-4 mr-1" />
-              Add Repository
-            </Button>
+
+            {showRepoSelector ? (
+              <div className="space-y-2">
+                <Input
+                  placeholder="Search repositories..."
+                  value={repoSearch}
+                  onChange={(e) => setRepoSearch(e.target.value)}
+                  autoFocus
+                />
+                {filteredRepos.length > 0 ? (
+                  <div className="border rounded-md max-h-48 overflow-y-auto">
+                    {filteredRepos.map((repo) => (
+                      <button
+                        key={repo.id}
+                        className="w-full flex items-center gap-2 p-2 hover:bg-secondary text-left text-sm"
+                        onClick={() => handleAddRepo(repo)}
+                        disabled={loadingRepos}
+                      >
+                        <Github className="w-4 h-4 text-muted-foreground" />
+                        <span>{repo.full_name}</span>
+                        {repo.private && (
+                          <Badge variant="outline" className="ml-auto text-xs">Private</Badge>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ) : repoSearch ? (
+                  <p className="text-sm text-muted-foreground p-2">No matching repositories</p>
+                ) : null}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowRepoSelector(false);
+                    setRepoSearch('');
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowRepoSelector(true)}
+                disabled={!githubConnected}
+              >
+                <Plus className="w-4 h-4 mr-1" />
+                Add Repository
+              </Button>
+            )}
+
+            {!githubConnected && (
+              <p className="text-xs text-muted-foreground mt-2">
+                Connect GitHub in Integrations to add repositories
+              </p>
+            )}
           </Card>
         </>
       ) : (
