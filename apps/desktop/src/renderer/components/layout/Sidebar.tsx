@@ -10,6 +10,7 @@ import {
   Plus,
   Server,
   WifiOff,
+  Github,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -55,6 +56,11 @@ export function Sidebar({ className }: SidebarProps) {
       id: 'queue' as const,
       icon: ListTodo,
       label: 'Queue',
+    },
+    {
+      id: 'github' as const,
+      icon: Github,
+      label: 'GitHub',
     },
   ];
 

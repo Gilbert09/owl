@@ -21,7 +21,7 @@ interface WorkspaceState {
 
   // UI State
   sidebarCollapsed: boolean;
-  activePanel: 'inbox' | 'terminals' | 'queue' | 'settings';
+  activePanel: 'inbox' | 'terminals' | 'queue' | 'github' | 'settings';
   selectedAgentId: string | null;
   selectedTaskId: string | null;
 

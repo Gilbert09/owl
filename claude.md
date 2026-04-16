@@ -355,13 +355,14 @@ A prioritized list of items requiring human attention, including:
   - [x] Merge PR (with merge/squash/rebase options)
   - [x] Approve/Request changes (review submission)
 
-- [x] **6.5 GitHub UI** (COMPLETED - basic)
+- [x] **6.5 GitHub UI** (COMPLETED)
   - [x] Connect GitHub button (in Settings > Integrations)
   - [x] Connection status display (shows connected user)
   - [x] Disconnect button
   - [x] Repository selector (in Settings > Workspace > Watched Repositories)
-  - [ ] PR list widget
-  - [ ] CI status indicators
+  - [x] PR list widget (PRListWidget with checks status)
+  - [x] CI status indicators (check status icons in PR list)
+  - [x] Dedicated GitHub panel in sidebar
 
 ### Phase 7: Slack Integration
 
