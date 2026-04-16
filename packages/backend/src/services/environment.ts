@@ -343,12 +343,12 @@ class EnvironmentService extends EventEmitter {
     options: { cwd?: string; rows?: number; cols?: number }
   ): Promise<void> {
     // Use node-pty for proper terminal emulation
-    const shell = process.platform === 'win32' ? 'powershell.exe' : 'bash';
-    const args = process.platform === 'win32' ? [] : ['-c', command];
+    // Spawn shell interactively, then send the command
+    const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash';
 
-    console.log(`Spawning local PTY: ${shell} ${args.join(' ')}`);
+    console.log(`Spawning local PTY: ${shell} (will run: ${command})`);
 
-    const ptyProcess = pty.spawn(shell, args, {
+    const ptyProcess = pty.spawn(shell, [], {
       name: 'xterm-256color',
       cols: options.cols || 120,
       rows: options.rows || 40,
@@ -373,6 +373,11 @@ class EnvironmentService extends EventEmitter {
       this.localPTYs.delete(sessionId);
       this.emit('session:close', sessionId, exitCode);
     });
+
+    // Send the command to the shell after a brief delay to let it initialize
+    setTimeout(() => {
+      ptyProcess.write(command + '\n');
+    }, 100);
   }
 
   /**
