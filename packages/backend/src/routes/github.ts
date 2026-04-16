@@ -270,5 +270,236 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
+  /**
+   * Get a specific pull request
+   */
+  router.get('/repos/:owner/:repo/pulls/:number', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId } = req.query;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId is required',
+      });
+    }
+
+    try {
+      const pr = await githubService.getPullRequest(
+        workspaceId as string,
+        owner,
+        repo,
+        parseInt(number, 10)
+      );
+      res.json({ success: true, data: pr });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Get files changed in a pull request
+   */
+  router.get('/repos/:owner/:repo/pulls/:number/files', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId } = req.query;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId is required',
+      });
+    }
+
+    try {
+      const files = await githubService.getPRFiles(
+        workspaceId as string,
+        owner,
+        repo,
+        parseInt(number, 10)
+      );
+      res.json({ success: true, data: files });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Create a pull request
+   */
+  router.post('/repos/:owner/:repo/pulls', async (req, res) => {
+    const { owner, repo } = req.params;
+    const { workspaceId, title, head, base, body, draft } = req.body;
+
+    if (!workspaceId || !title || !head || !base) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId, title, head, and base are required',
+      });
+    }
+
+    try {
+      const pr = await githubService.createPullRequest(
+        workspaceId,
+        owner,
+        repo,
+        { title, head, base, body, draft }
+      );
+      res.json({ success: true, data: pr });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Update a pull request
+   */
+  router.patch('/repos/:owner/:repo/pulls/:number', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId, title, body, state, base } = req.body;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId is required',
+      });
+    }
+
+    try {
+      const pr = await githubService.updatePullRequest(
+        workspaceId,
+        owner,
+        repo,
+        parseInt(number, 10),
+        { title, body, state, base }
+      );
+      res.json({ success: true, data: pr });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Merge a pull request
+   */
+  router.put('/repos/:owner/:repo/pulls/:number/merge', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId, commit_title, commit_message, merge_method } = req.body;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId is required',
+      });
+    }
+
+    try {
+      const result = await githubService.mergePullRequest(
+        workspaceId,
+        owner,
+        repo,
+        parseInt(number, 10),
+        { commit_title, commit_message, merge_method }
+      );
+      res.json({ success: true, data: result });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Create a review on a pull request
+   */
+  router.post('/repos/:owner/:repo/pulls/:number/reviews', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId, body, event, comments } = req.body;
+
+    if (!workspaceId || !event) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId and event are required',
+      });
+    }
+
+    try {
+      const review = await githubService.createPRReview(
+        workspaceId,
+        owner,
+        repo,
+        parseInt(number, 10),
+        { body, event, comments }
+      );
+      res.json({ success: true, data: review });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * Create a comment on a pull request
+   */
+  router.post('/repos/:owner/:repo/pulls/:number/comments', async (req, res) => {
+    const { owner, repo, number } = req.params;
+    const { workspaceId, body } = req.body;
+
+    if (!workspaceId || !body) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId and body are required',
+      });
+    }
+
+    try {
+      const comment = await githubService.createPRComment(
+        workspaceId,
+        owner,
+        repo,
+        parseInt(number, 10),
+        body
+      );
+      res.json({ success: true, data: comment });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
+  /**
+   * List branches for a repository
+   */
+  router.get('/repos/:owner/:repo/branches', async (req, res) => {
+    const { owner, repo } = req.params;
+    const { workspaceId, per_page, page } = req.query;
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        success: false,
+        error: 'workspaceId is required',
+      });
+    }
+
+    try {
+      const branches = await githubService.listBranches(
+        workspaceId as string,
+        owner,
+        repo,
+        {
+          per_page: per_page ? parseInt(per_page as string, 10) : undefined,
+          page: page ? parseInt(page as string, 10) : undefined,
+        }
+      );
+      res.json({ success: true, data: branches });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      res.status(400).json({ success: false, error: message });
+    }
+  });
+
   return router;
 }

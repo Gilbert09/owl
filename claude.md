@@ -349,11 +349,11 @@ A prioritized list of items requiring human attention, including:
   - [x] CI status changes → inbox (on failure)
   - [x] PR merge ready → inbox
 
-- [ ] **6.4 PR Actions**
-  - [ ] View PR details
-  - [ ] Create PR from agent work
-  - [ ] Merge PR
-  - [ ] Request changes
+- [x] **6.4 PR Actions** (COMPLETED)
+  - [x] View PR details (PRDetailModal with files, checks, branches)
+  - [x] Create PR from agent work (API endpoint ready)
+  - [x] Merge PR (with merge/squash/rebase options)
+  - [x] Approve/Request changes (review submission)
 
 - [x] **6.5 GitHub UI** (COMPLETED - basic)
   - [x] Connect GitHub button (in Settings > Integrations)

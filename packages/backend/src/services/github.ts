@@ -504,6 +504,153 @@ class GitHubService extends EventEmitter {
   getConnectedWorkspaces(): string[] {
     return Array.from(this.tokens.keys());
   }
+
+  /**
+   * Merge a pull request
+   */
+  async mergePullRequest(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    options: {
+      commit_title?: string;
+      commit_message?: string;
+      merge_method?: 'merge' | 'squash' | 'rebase';
+    } = {}
+  ): Promise<{ sha: string; merged: boolean; message: string }> {
+    return this.apiRequest(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls/${number}/merge`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          commit_title: options.commit_title,
+          commit_message: options.commit_message,
+          merge_method: options.merge_method || 'merge',
+        }),
+      }
+    );
+  }
+
+  /**
+   * Create a pull request
+   */
+  async createPullRequest(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    options: {
+      title: string;
+      head: string;
+      base: string;
+      body?: string;
+      draft?: boolean;
+    }
+  ): Promise<GitHubPullRequest> {
+    return this.apiRequest<GitHubPullRequest>(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
+      }
+    );
+  }
+
+  /**
+   * Create a review on a pull request
+   */
+  async createPRReview(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    options: {
+      body?: string;
+      event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+      comments?: Array<{
+        path: string;
+        position?: number;
+        body: string;
+      }>;
+    }
+  ): Promise<GitHubReview> {
+    return this.apiRequest<GitHubReview>(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls/${number}/reviews`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
+      }
+    );
+  }
+
+  /**
+   * Update a pull request
+   */
+  async updatePullRequest(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    options: {
+      title?: string;
+      body?: string;
+      state?: 'open' | 'closed';
+      base?: string;
+    }
+  ): Promise<GitHubPullRequest> {
+    return this.apiRequest<GitHubPullRequest>(
+      workspaceId,
+      `/repos/${owner}/${repo}/pulls/${number}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(options),
+      }
+    );
+  }
+
+  /**
+   * List branches for a repository
+   */
+  async listBranches(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    options: { per_page?: number; page?: number } = {}
+  ): Promise<Array<{ name: string; protected: boolean }>> {
+    const params = new URLSearchParams({
+      per_page: String(options.per_page || 100),
+      page: String(options.page || 1),
+    });
+
+    return this.apiRequest(workspaceId, `/repos/${owner}/${repo}/branches?${params}`);
+  }
+
+  /**
+   * Get PR diff/files changed
+   */
+  async getPRFiles(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number
+  ): Promise<Array<{
+    sha: string;
+    filename: string;
+    status: 'added' | 'removed' | 'modified' | 'renamed' | 'copied' | 'changed' | 'unchanged';
+    additions: number;
+    deletions: number;
+    changes: number;
+    patch?: string;
+  }>> {
+    return this.apiRequest(workspaceId, `/repos/${owner}/${repo}/pulls/${number}/files`);
+  }
 }
 
 // Singleton instance

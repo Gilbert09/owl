@@ -161,6 +161,47 @@ export interface GitHubPullRequest {
   created_at: string;
   updated_at: string;
   draft: boolean;
+  mergeable: boolean | null;
+  mergeable_state: string;
+  head: {
+    ref: string;
+    sha: string;
+  };
+  base: {
+    ref: string;
+  };
+}
+
+export interface GitHubPRFile {
+  sha: string;
+  filename: string;
+  status: 'added' | 'removed' | 'modified' | 'renamed' | 'copied' | 'changed' | 'unchanged';
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
+}
+
+export interface GitHubReview {
+  id: number;
+  user: { login: string; avatar_url: string };
+  body: string;
+  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
+  submitted_at: string;
+  html_url: string;
+}
+
+export interface GitHubBranch {
+  name: string;
+  protected: boolean;
+}
+
+export interface GitHubCheckRun {
+  id: number;
+  name: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: 'success' | 'failure' | 'neutral' | 'cancelled' | 'skipped' | 'timed_out' | 'action_required' | null;
+  html_url: string;
 }
 
 export const github = {
@@ -176,8 +217,43 @@ export const github = {
     request<GitHubUser>('GET', `/github/user?workspaceId=${workspaceId}`),
   listRepos: (workspaceId: string) =>
     request<GitHubRepo[]>('GET', `/github/repos?workspaceId=${workspaceId}`),
+  listBranches: (workspaceId: string, owner: string, repo: string) =>
+    request<GitHubBranch[]>('GET', `/github/repos/${owner}/${repo}/branches?workspaceId=${workspaceId}`),
   listPullRequests: (workspaceId: string, owner: string, repo: string) =>
     request<GitHubPullRequest[]>('GET', `/github/repos/${owner}/${repo}/pulls?workspaceId=${workspaceId}`),
+  getPullRequest: (workspaceId: string, owner: string, repo: string, number: number) =>
+    request<GitHubPullRequest>('GET', `/github/repos/${owner}/${repo}/pulls/${number}?workspaceId=${workspaceId}`),
+  getPRFiles: (workspaceId: string, owner: string, repo: string, number: number) =>
+    request<GitHubPRFile[]>('GET', `/github/repos/${owner}/${repo}/pulls/${number}/files?workspaceId=${workspaceId}`),
+  getPRChecks: (workspaceId: string, owner: string, repo: string, number: number) =>
+    request<{ total_count: number; check_runs: GitHubCheckRun[] }>('GET', `/github/repos/${owner}/${repo}/pulls/${number}/checks?workspaceId=${workspaceId}`),
+  createPullRequest: (workspaceId: string, owner: string, repo: string, data: {
+    title: string;
+    head: string;
+    base: string;
+    body?: string;
+    draft?: boolean;
+  }) =>
+    request<GitHubPullRequest>('POST', `/github/repos/${owner}/${repo}/pulls`, { workspaceId, ...data }),
+  updatePullRequest: (workspaceId: string, owner: string, repo: string, number: number, data: {
+    title?: string;
+    body?: string;
+    state?: 'open' | 'closed';
+  }) =>
+    request<GitHubPullRequest>('PATCH', `/github/repos/${owner}/${repo}/pulls/${number}`, { workspaceId, ...data }),
+  mergePullRequest: (workspaceId: string, owner: string, repo: string, number: number, data?: {
+    commit_title?: string;
+    commit_message?: string;
+    merge_method?: 'merge' | 'squash' | 'rebase';
+  }) =>
+    request<{ sha: string; merged: boolean; message: string }>('PUT', `/github/repos/${owner}/${repo}/pulls/${number}/merge`, { workspaceId, ...data }),
+  createPRReview: (workspaceId: string, owner: string, repo: string, number: number, data: {
+    body?: string;
+    event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+  }) =>
+    request<GitHubReview>('POST', `/github/repos/${owner}/${repo}/pulls/${number}/reviews`, { workspaceId, ...data }),
+  createPRComment: (workspaceId: string, owner: string, repo: string, number: number, body: string) =>
+    request<{ id: number; html_url: string }>('POST', `/github/repos/${owner}/${repo}/pulls/${number}/comments`, { workspaceId, body }),
 };
 
 // Watched Repositories
