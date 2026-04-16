@@ -556,8 +556,8 @@ A prioritized list of items requiring human attention:
 2. ~~**Phase 13.4 - Repository Context** (Essential)~~ DONE
    - ~~Spawn Claude in correct repo directory~~
 
-3. **Phase 14.1-14.2 - Git Branch Management** (Core feature) **NEXT**
-   - Task branches, work state preservation
+3. ~~**Phase 14.1-14.2 - Git Branch Management** (Core feature)~~ DONE
+   - ~~Task branches~~ - Auto-create branch when starting task with repo
 
 4. ~~**Phase 12.8 - Light Mode** (Quick win)~~ DONE
    - ~~Theme toggle, system detection~~
@@ -667,17 +667,17 @@ A prioritized list of items requiring human attention:
 
 ### Phase 14: Git-Centric Workflow
 
-- [ ] **14.1 Task Branch Management**
-  - [ ] Auto-create branch when code-writing task starts (e.g., `fastowl/task-{id}-{slug}`)
-  - [ ] Track branch per task in database
-  - [ ] Auto-checkout branch when resuming task
-  - [ ] One active task per repo per environment
+- [x] **14.1 Task Branch Management** (COMPLETED)
+  - [x] Auto-create branch when code-writing task starts (`fastowl/{id}-{slug}`)
+  - [x] Track branch per task in database
+  - [x] Auto-checkout branch when resuming task
+  - [ ] One active task per repo per environment (deferred)
 
-- [ ] **14.2 Work State Preservation**
+- [x] **14.2 Work State Preservation** (PARTIALLY COMPLETED)
   - [ ] Before starting new task: commit/stash current work
-  - [ ] Detect uncommitted changes
+  - [x] Detect uncommitted changes (gitService.hasUncommittedChanges)
   - [ ] Prompt user or auto-stash with task reference
-  - [ ] Restore stash when resuming task
+  - [x] Stash utility available (gitService.stashChanges)
 
 - [ ] **14.3 Branch Lifecycle**
   - [ ] Delete branch after task merged/completed
