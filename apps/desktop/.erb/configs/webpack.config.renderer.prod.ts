@@ -2,6 +2,10 @@
  * Build config for electron renderer process
  */
 
+// Load apps/desktop/.env into process.env so EnvironmentPlugin below can
+// see FASTOWL_SUPABASE_URL etc. without the operator needing to `export`
+// them in every shell.
+import 'dotenv/config';
 import path from 'path';
 import webpack from 'webpack';
 import HtmlWebpackPlugin from 'html-webpack-plugin';
