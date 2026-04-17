@@ -2,6 +2,31 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 13 (Phase 18.2 — end-to-end auth)
+Wired Supabase GitHub OAuth through backend, desktop, CLI, and MCP in five focused commits. Every REST endpoint and the WebSocket upgrade now require a valid Supabase JWT; data is scoped by `owner_id` at the app layer with RLS as defense in depth.
+
+- **Schema + routes** (`b267d0f`): added `users` table mirroring `auth.users`, added `owner_id` (NOT NULL, FK) on `workspaces` + `environments` — everything else inherits access through its workspace FK. `requireAuth` middleware verifies Supabase JWTs via `auth.getUser(token)`, upserts the user row on first sight, and enforces `FASTOWL_ALLOWED_EMAILS` if set. Every route got ownership gates (helper: `requireWorkspaceAccess`, `requireTaskAccess`, etc.). `/api/v1/github/callback` stays public — state-token lookup guards it. WebSocket accepts `?token=` on upgrade, verifies, then scopes subscribe requests to the connected user's workspaces.
+- **Desktop login** (`3790764`): `AuthProvider` wraps the app. Sign-in opens GitHub OAuth in the system browser via `shell.openExternal`, Supabase redirects to `fastowl://auth-callback#access_token=...`, the main process catches the deep link and forwards over IPC. `api.ts` attaches `Authorization: Bearer` to every REST call and the WS upgrade query. Added `fastowl://` to the `protocols` field in `package.json` for packaged builds.
+- **CLI + MCP** (`4591c7a`): CLI reads token from `~/.fastowl/token` (mode 0600) or `FASTOWL_AUTH_TOKEN`; new `fastowl token set|show|clear|whoami` commands. MCP is env-only (parent agent sets `FASTOWL_AUTH_TOKEN` on spawn). Desktop Settings gains an Account tab with sign-out and a one-click "Copy CLI token" button — tokens expire hourly so users re-copy as needed. Proper PKCE `fastowl login` deferred.
+- **RLS** (`4a9cdd6`): migration enables RLS on all user-scoped tables + policies on `auth.uid()`. Test helper stubs `auth.uid()` so pglite can apply the migration; pglite's superuser connection bypasses RLS the same way the service role does in prod.
+- **Docs**: this session note + SETUP.md (Supabase redirect URL, allow-list env var, desktop/CLI env conventions).
+
+- **Key decisions** (ratified with Tom):
+  - Ownership lives only on top-level tables (`workspaces`, `environments`) + `users`. Child tables (tasks, agents, inbox, repos, integrations, backlog_sources, backlog_items) cascade access through the workspace FK. Simpler schema, simpler RLS, matches existing mental model.
+  - Backend uses the service-role key + app-level owner filtering. Keeps Drizzle usage unchanged; no per-request Supabase client.
+  - Electron OAuth = system browser + `fastowl://` deep link. Rejected embedded BrowserWindow (less secure, non-standard).
+  - Allow-list env var for single-user mode; invite flow explicitly deferred (documented as TODO in ROADMAP 12.7).
+
+- **Still on the list**:
+  - Proper `fastowl login` with PKCE code flow + local callback server (replaces copy-paste token UX).
+  - Refresh-token rotation in CLI (right now CLI tokens expire in an hour, user re-copies).
+  - Cross-user integration test at the HTTP layer (today's coverage is: migration applies RLS, app-level helpers are structured around owner checks, but we don't spin up two users and assert user A's routes 404 on user B's resources).
+  - Invite flow + `workspaces_users` join table once FastOwl needs real multi-tenancy.
+
+- **Files touched**: schema + 2 new migrations; new `middleware/auth.ts` + `services/supabase.ts`; all 8 route files gated; new `renderer/components/auth/{AuthProvider,LoginScreen}.tsx` + `renderer/lib/supabase.ts`; `main/main.ts` + `preload.ts` for deep-link plumbing; CLI `commands/token.ts` + `config.ts`; MCP `client.ts`; Settings panel Account section.
+
+- **Next action**: continue Phase 18.3 (daemon split + auto-install over SSH) or 17.3 (notifications). Auth is done enough to build on top of.
+
 ## Session 12 (Hosted backend — Phase A + B landed, Phase C ready to resume)
 Started the hosted-backend work from `docs/CONTINUOUS_BUILD_ROADMAP.md`. Phases A + B complete end-to-end on hosted infra. Phase C started then paused to avoid a half-broken main; picks up next session from a known-green state.
 

@@ -410,10 +410,11 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] API documentation
 
 - [ ] **12.7 Multi-Tenant Backend (Future)**
-  - [ ] User authentication
-  - [ ] Data isolation
+  - [x] User authentication (Phase 18.2 — Supabase GitHub OAuth, JWT middleware, owner_id on top-level tables, RLS, desktop login + CLI/MCP bearer token)
+  - [x] Data isolation (owner_id scoping via workspaces/environments, RLS as defense in depth)
   - [ ] API rate limiting
   - [ ] Deployment configuration
+  - [ ] **Invite flow (TODO)** — today anyone with a GitHub account can sign up to a fresh instance; self-hosters use `FASTOWL_ALLOWED_EMAILS` to lock down. Need a proper `workspaces_users` join table, invitation tokens, and UI for inviting teammates before this is truly multi-tenant.
 
 - [x] **12.8 Appearance** (COMPLETED)
   - [x] Light mode theme

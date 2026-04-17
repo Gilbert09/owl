@@ -69,7 +69,22 @@ For Postgres + auth when Phase 18.1/18.2 lands.
    - `SUPABASE_ANON_KEY` (same page → anon public)
    - `SUPABASE_SERVICE_ROLE_KEY` (same page → service_role) — **never expose to the desktop app**, backend only
    - `DATABASE_URL` (Project settings → Database → Connection string → URI, with pooling for runtime)
-4. Enable GitHub OAuth in Supabase Auth (Authentication → Providers → GitHub) — uses the same OAuth app as #3 plus a callback added to Supabase
+4. Enable GitHub OAuth in Supabase Auth (Authentication → Providers → GitHub). You'll need to create a **separate** GitHub OAuth app for Supabase auth (the one from #3 is for workspace-level GitHub integration):
+   - https://github.com/settings/developers → **New OAuth App**
+   - Homepage URL: your Supabase project URL
+   - Authorization callback URL: `https://<project-ref>.supabase.co/auth/v1/callback`
+   - Paste the client ID/secret into Supabase Authentication → Providers → GitHub
+5. Add `fastowl://auth-callback` to **Redirect URLs** in Supabase (Authentication → URL Configuration → Redirect URLs). Without this, the desktop deep-link flow fails silently with an "invalid redirect URL" error.
+
+### Single-user allow-list (optional, recommended while FastOwl is pre-invites)
+
+FastOwl doesn't ship an invite flow yet — anyone with a GitHub account can sign in to an instance. To lock a self-hosted instance to just you, set on the backend:
+
+```
+FASTOWL_ALLOWED_EMAILS=you@example.com
+```
+
+Multiple emails are comma-separated. Unauthorised callers get a 403 on first request. Once invite flows land (TODO in ROADMAP Phase 19) this can go away.
 
 ### 5. Railway account
 
@@ -182,12 +197,31 @@ Backend reads env vars on startup. To avoid exporting them every terminal, creat
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
+
+# Workspace-level GitHub integration (for PR monitoring)
 GITHUB_CLIENT_ID=Iv1.xxx
 GITHUB_CLIENT_SECRET=xxx
 GITHUB_REDIRECT_URI=http://localhost:4747/api/v1/github/callback
+
+# Database + auth (Phase 18)
+DATABASE_URL=postgres://...supabase.co:6543/postgres?pgbouncer=true
+SUPABASE_URL=https://<ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJ...    # service role, bypasses RLS
+# FASTOWL_ALLOWED_EMAILS=you@example.com   # optional single-user lock
+
 POSTHOG_PROJECT_API_KEY=phc_xxx     # optional, for when 18.8 lands
 POSTHOG_HOST=https://us.i.posthog.com
 ```
+
+Desktop app env (set in the shell before `npm run build` or `npm start`):
+
+```
+FASTOWL_SUPABASE_URL=https://<ref>.supabase.co
+FASTOWL_SUPABASE_ANON_KEY=eyJ...    # anon key, safe to bundle
+FASTOWL_API_URL=http://localhost:4747   # default if unset
+```
+
+CLI uses `~/.fastowl/token` (populated via `fastowl token set` — copy the current token from desktop → Settings → Account → Copy CLI token). MCP server expects `FASTOWL_AUTH_TOKEN` in its spawn env.
 
 And ensure `.gitignore` has `packages/backend/.env`. (If the backend doesn't yet load `.env` automatically, we'll add a `dotenv` import in Phase 18 cleanup — not critical yet.)
 
