@@ -18,7 +18,15 @@ import {
   Sun,
   Moon,
   Monitor,
+  Bot,
+  FileText,
+  Circle,
+  CheckCircle2,
+  Ban,
+  Play,
+  Pause,
 } from 'lucide-react';
+import type { BacklogSource, BacklogItem, MarkdownFileBacklogConfig } from '@fastowl/shared';
 import { api, GitHubStatus, GitHubUser, GitHubRepo, WatchedRepo } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -31,13 +39,19 @@ import { useEnvironmentActions, useWorkspaceActions } from '../../hooks/useApi';
 import { AddEnvironmentModal } from '../modals/AddEnvironmentModal';
 import { Select } from '../ui/select';
 
-type SettingsSection = 'workspace' | 'integrations' | 'environments' | 'appearance';
+type SettingsSection =
+  | 'workspace'
+  | 'continuous_build'
+  | 'integrations'
+  | 'environments'
+  | 'appearance';
 
 export function SettingsPanel() {
   const [activeSection, setActiveSection] = useState<SettingsSection>('workspace');
 
   const sections = [
     { id: 'workspace' as const, icon: FolderKanban, label: 'Workspace' },
+    { id: 'continuous_build' as const, icon: Bot, label: 'Continuous Build' },
     { id: 'integrations' as const, icon: Settings, label: 'Integrations' },
     { id: 'environments' as const, icon: Server, label: 'Environments' },
     { id: 'appearance' as const, icon: Palette, label: 'Appearance' },
@@ -73,6 +87,7 @@ export function SettingsPanel() {
         <ScrollArea className="h-full">
           <div className="p-6 max-w-2xl">
             {activeSection === 'workspace' && <WorkspaceSettings />}
+            {activeSection === 'continuous_build' && <ContinuousBuildSettings />}
             {activeSection === 'integrations' && <IntegrationsSettings />}
             {activeSection === 'environments' && <EnvironmentsSettings />}
             {activeSection === 'appearance' && <AppearanceSettings />}
@@ -745,6 +760,448 @@ function EnvironmentsSettings() {
             </Card>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function ContinuousBuildSettings() {
+  const { workspaces, currentWorkspaceId, environments } = useWorkspaceStore();
+  const { updateCurrentWorkspaceSettings } = useWorkspaceActions();
+  const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
+  const continuousBuild = currentWorkspace?.settings.continuousBuild;
+
+  const [sources, setSources] = useState<BacklogSource[]>([]);
+  const [items, setItems] = useState<BacklogItem[]>([]);
+  const [isUpdating, setIsUpdating] = useState(false);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Add-source form state
+  const [showAddSource, setShowAddSource] = useState(false);
+  const [newPath, setNewPath] = useState('');
+  const [newSection, setNewSection] = useState('');
+  const [newEnvId, setNewEnvId] = useState('');
+
+  const loadSources = useCallback(async () => {
+    if (!currentWorkspaceId) return;
+    try {
+      const [srcs, its] = await Promise.all([
+        api.backlog.listSources(currentWorkspaceId),
+        api.backlog.listItemsForWorkspace(currentWorkspaceId),
+      ]);
+      setSources(srcs);
+      setItems(its);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load backlog');
+    }
+  }, [currentWorkspaceId]);
+
+  useEffect(() => {
+    loadSources();
+  }, [loadSources]);
+
+  const handleToggleEnabled = async () => {
+    if (!continuousBuild) {
+      // First time — write a default config
+      setIsUpdating(true);
+      try {
+        await updateCurrentWorkspaceSettings({
+          continuousBuild: { enabled: true, maxConcurrent: 1, requireApproval: true },
+        });
+      } finally {
+        setIsUpdating(false);
+      }
+      return;
+    }
+    setIsUpdating(true);
+    try {
+      await updateCurrentWorkspaceSettings({
+        continuousBuild: { ...continuousBuild, enabled: !continuousBuild.enabled },
+      });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleMaxConcurrent = async (value: string) => {
+    const n = parseInt(value, 10);
+    if (isNaN(n) || n < 1) return;
+    setIsUpdating(true);
+    try {
+      await updateCurrentWorkspaceSettings({
+        continuousBuild: {
+          enabled: continuousBuild?.enabled ?? false,
+          maxConcurrent: n,
+          requireApproval: continuousBuild?.requireApproval ?? true,
+        },
+      });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleRequireApproval = async () => {
+    setIsUpdating(true);
+    try {
+      await updateCurrentWorkspaceSettings({
+        continuousBuild: {
+          enabled: continuousBuild?.enabled ?? false,
+          maxConcurrent: continuousBuild?.maxConcurrent ?? 1,
+          requireApproval: !(continuousBuild?.requireApproval ?? true),
+        },
+      });
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAddSource = async () => {
+    if (!currentWorkspaceId || !newPath.trim()) return;
+    setError(null);
+    try {
+      await api.backlog.createSource({
+        workspaceId: currentWorkspaceId,
+        type: 'markdown_file',
+        environmentId: newEnvId || undefined,
+        config: {
+          type: 'markdown_file',
+          path: newPath.trim(),
+          section: newSection.trim() || undefined,
+        },
+      });
+      setShowAddSource(false);
+      setNewPath('');
+      setNewSection('');
+      setNewEnvId('');
+      await loadSources();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to add source');
+    }
+  };
+
+  const handleSync = async (id: string) => {
+    setSyncingId(id);
+    setError(null);
+    try {
+      await api.backlog.syncSource(id);
+      await loadSources();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Sync failed');
+    } finally {
+      setSyncingId(null);
+    }
+  };
+
+  const handleDeleteSource = async (id: string) => {
+    if (!confirm('Remove this backlog source? Tasks already spawned will stay.')) return;
+    try {
+      await api.backlog.deleteSource(id);
+      await loadSources();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to remove source');
+    }
+  };
+
+  const handleKickSchedule = async () => {
+    if (!currentWorkspaceId) return;
+    try {
+      await api.backlog.schedule(currentWorkspaceId);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Scheduler failed');
+    }
+  };
+
+  if (!currentWorkspace) {
+    return (
+      <Card className="p-6 text-center">
+        <Bot className="w-10 h-10 mx-auto text-muted-foreground/50 mb-3" />
+        <h4 className="font-medium mb-1">No Workspace Selected</h4>
+        <p className="text-sm text-muted-foreground">
+          Select a workspace to configure Continuous Build
+        </p>
+      </Card>
+    );
+  }
+
+  const enabled = continuousBuild?.enabled ?? false;
+  const maxConcurrent = continuousBuild?.maxConcurrent ?? 1;
+  const requireApproval = continuousBuild?.requireApproval ?? true;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-medium mb-1 flex items-center gap-2">
+          <Bot className="w-5 h-5" />
+          Continuous Build
+        </h3>
+        <p className="text-sm text-muted-foreground">
+          Point FastOwl at a TODO document and it will work through the list,
+          spawning a task per item and waiting for your approval between each.
+        </p>
+      </div>
+
+      {error && (
+        <div className="p-3 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-sm flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" />
+          {error}
+        </div>
+      )}
+
+      <Card className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <p className="text-sm font-medium flex items-center gap-2">
+              {enabled ? (
+                <Play className="w-4 h-4 text-green-500" />
+              ) : (
+                <Pause className="w-4 h-4 text-muted-foreground" />
+              )}
+              Continuous Build {enabled ? 'enabled' : 'disabled'}
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">
+              When enabled, new tasks are spawned automatically from your backlog sources.
+            </p>
+          </div>
+          <Button
+            variant={enabled ? 'default' : 'outline'}
+            size="sm"
+            onClick={handleToggleEnabled}
+            disabled={isUpdating}
+          >
+            {enabled ? 'Enabled' : 'Disabled'}
+          </Button>
+        </div>
+
+        <div className="space-y-3 pt-3 border-t">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Max concurrent tasks</p>
+              <p className="text-xs text-muted-foreground">
+                Cap on in-flight code_writing tasks from this workspace's backlog.
+              </p>
+            </div>
+            <Select
+              value={String(maxConcurrent)}
+              onChange={(e) => handleMaxConcurrent(e.target.value)}
+              disabled={isUpdating}
+              className="w-20"
+            >
+              {[1, 2, 3, 4, 5].map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </Select>
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Require approval between items</p>
+              <p className="text-xs text-muted-foreground">
+                Hold scheduling until you've approved (or rejected) pending reviews.
+              </p>
+            </div>
+            <Button
+              variant={requireApproval ? 'default' : 'outline'}
+              size="sm"
+              onClick={handleRequireApproval}
+              disabled={isUpdating}
+            >
+              {requireApproval ? 'On' : 'Off'}
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Card className="p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h4 className="font-medium">Backlog Sources</h4>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleKickSchedule}
+              disabled={!enabled || sources.length === 0}
+              title="Evaluate the scheduler now"
+            >
+              <RefreshCw className="w-4 h-4 mr-1" />
+              Run scheduler
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowAddSource(true)}
+            >
+              <Plus className="w-4 h-4 mr-1" />
+              Add source
+            </Button>
+          </div>
+        </div>
+
+        {sources.length === 0 && !showAddSource && (
+          <p className="text-sm text-muted-foreground py-2">
+            No sources configured. Add a markdown file on any of your environments.
+          </p>
+        )}
+
+        {sources.map((src) => {
+          const cfg = src.config as MarkdownFileBacklogConfig;
+          const srcItems = items.filter((i) => i.sourceId === src.id);
+          const pending = srcItems.filter((i) => !i.completed && !i.blocked).length;
+          const completed = srcItems.filter((i) => i.completed).length;
+          const blocked = srcItems.filter((i) => i.blocked).length;
+          const env = environments.find((e) => e.id === src.environmentId);
+
+          return (
+            <div key={src.id} className="py-3 border-t first:border-t-0 first:pt-0">
+              <div className="flex items-start gap-3">
+                <FileText className="w-4 h-4 mt-0.5 text-muted-foreground flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{cfg.path}</p>
+                  <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                    {cfg.section && (
+                      <Badge variant="outline" className="text-xs">
+                        {cfg.section}
+                      </Badge>
+                    )}
+                    {env && <span>on {env.name}</span>}
+                    {src.lastSyncedAt && (
+                      <span>· synced {new Date(src.lastSyncedAt).toLocaleTimeString()}</span>
+                    )}
+                  </div>
+                  {srcItems.length > 0 && (
+                    <div className="flex items-center gap-3 mt-2 text-xs">
+                      <span className="flex items-center gap-1">
+                        <Circle className="w-3 h-3 text-blue-500" />
+                        {pending} pending
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3 text-green-500" />
+                        {completed} done
+                      </span>
+                      {blocked > 0 && (
+                        <span className="flex items-center gap-1">
+                          <Ban className="w-3 h-3 text-amber-500" />
+                          {blocked} blocked
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleSync(src.id)}
+                    disabled={syncingId === src.id}
+                  >
+                    <RefreshCw className={cn('w-4 h-4', syncingId === src.id && 'animate-spin')} />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-500/10"
+                    onClick={() => handleDeleteSource(src.id)}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {showAddSource && (
+          <div className="space-y-3 pt-3 border-t mt-3">
+            <div>
+              <label className="text-sm font-medium">File path</label>
+              <Input
+                value={newPath}
+                onChange={(e) => setNewPath(e.target.value)}
+                placeholder="/absolute/path/to/TODO.md"
+                className="mt-1"
+                autoFocus
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Path on the target environment. FastOwl reads it with `cat`.
+              </p>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Section (optional)</label>
+              <Input
+                value={newSection}
+                onChange={(e) => setNewSection(e.target.value)}
+                placeholder="Priority Queue"
+                className="mt-1"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                If set, only checkboxes under this heading are considered.
+              </p>
+            </div>
+            <div>
+              <label className="text-sm font-medium">Environment</label>
+              <Select
+                value={newEnvId}
+                onChange={(e) => setNewEnvId(e.target.value)}
+                className="mt-1"
+              >
+                <option value="">Default (first local)</option>
+                {environments.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name} ({env.type})
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div className="flex gap-2">
+              <Button size="sm" onClick={handleAddSource} disabled={!newPath.trim()}>
+                Add source
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setShowAddSource(false);
+                  setNewPath('');
+                  setNewSection('');
+                  setNewEnvId('');
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {items.length > 0 && (
+        <Card className="p-4">
+          <h4 className="font-medium mb-3">Backlog Items ({items.length})</h4>
+          <div className="space-y-1 max-h-96 overflow-y-auto">
+            {items.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-start gap-2 py-1 text-sm"
+              >
+                {item.completed ? (
+                  <CheckCircle2 className="w-4 h-4 mt-0.5 text-green-500 flex-shrink-0" />
+                ) : item.blocked ? (
+                  <Ban className="w-4 h-4 mt-0.5 text-amber-500 flex-shrink-0" />
+                ) : item.claimedTaskId ? (
+                  <Loader2 className="w-4 h-4 mt-0.5 text-blue-500 animate-spin flex-shrink-0" />
+                ) : (
+                  <Circle className="w-4 h-4 mt-0.5 text-muted-foreground flex-shrink-0" />
+                )}
+                <span
+                  className={cn(
+                    'flex-1',
+                    item.completed && 'line-through text-muted-foreground'
+                  )}
+                >
+                  {item.text}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
     </div>
   );

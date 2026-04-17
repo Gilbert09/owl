@@ -4,6 +4,10 @@ import type {
   Agent,
   Task,
   InboxItem,
+  BacklogSource,
+  BacklogItem,
+  CreateBacklogSourceRequest,
+  UpdateBacklogSourceRequest,
   CreateWorkspaceRequest,
   CreateEnvironmentRequest,
   CreateTaskRequest,
@@ -300,6 +304,29 @@ export const repositories = {
     request<{ message: string }>('POST', '/repositories/poll'),
 };
 
+// Backlog (Continuous Build)
+export const backlog = {
+  listSources: (workspaceId: string) =>
+    request<BacklogSource[]>('GET', `/backlog/sources?workspaceId=${workspaceId}`),
+  getSource: (id: string) => request<BacklogSource>('GET', `/backlog/sources/${id}`),
+  createSource: (data: CreateBacklogSourceRequest) =>
+    request<BacklogSource>('POST', '/backlog/sources', data),
+  updateSource: (id: string, data: UpdateBacklogSourceRequest) =>
+    request<BacklogSource>('PATCH', `/backlog/sources/${id}`, data),
+  deleteSource: (id: string) => request<void>('DELETE', `/backlog/sources/${id}`),
+  syncSource: (id: string) =>
+    request<{ added: number; updated: number; retired: number }>(
+      'POST',
+      `/backlog/sources/${id}/sync`
+    ),
+  listItems: (sourceId: string) =>
+    request<BacklogItem[]>('GET', `/backlog/sources/${sourceId}/items`),
+  listItemsForWorkspace: (workspaceId: string) =>
+    request<BacklogItem[]>('GET', `/backlog/items?workspaceId=${workspaceId}`),
+  schedule: (workspaceId: string) =>
+    request<void>('POST', '/backlog/schedule', { workspaceId }),
+};
+
 // ============================================================================
 // WebSocket Client
 // ============================================================================
@@ -438,5 +465,6 @@ export const api = {
   inbox,
   github,
   repositories,
+  backlog,
   ws: wsClient,
 };

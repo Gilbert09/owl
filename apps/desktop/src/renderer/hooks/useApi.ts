@@ -9,6 +9,7 @@ import type {
   TaskAgentStatusEvent,
   InboxNewEvent,
   EnvironmentStatusEvent,
+  WorkspaceSettings,
 } from '@fastowl/shared';
 
 /**
@@ -462,11 +463,11 @@ export function useWorkspaceActions() {
   );
 
   const updateCurrentWorkspaceSettings = useCallback(
-    async (settings: { autoAssignTasks?: boolean; maxConcurrentAgents?: number }) => {
+    async (settings: Partial<WorkspaceSettings>) => {
       if (!currentWorkspaceId) return null;
       // Cast is safe because backend merges partial settings with existing values
       const workspace = await api.workspaces.update(currentWorkspaceId, {
-        settings: settings as { autoAssignTasks: boolean; maxConcurrentAgents: number }
+        settings: settings as WorkspaceSettings,
       });
       const workspaces = await api.workspaces.list();
       setWorkspaces(workspaces);
