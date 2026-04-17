@@ -53,6 +53,15 @@ export interface PostHogIntegration {
 export interface WorkspaceSettings {
   autoAssignTasks: boolean;
   maxConcurrentAgents: number;
+  continuousBuild?: ContinuousBuildSettings;
+}
+
+export interface ContinuousBuildSettings {
+  enabled: boolean;
+  /** How many code_writing tasks can be in-flight at once. */
+  maxConcurrent: number;
+  /** If true, wait for user to approve a task before spawning the next. */
+  requireApproval: boolean;
 }
 
 // ============================================================================
@@ -191,6 +200,75 @@ export interface TaskResult {
   summary?: string;
   output?: string;
   error?: string;
+}
+
+// ============================================================================
+// Backlog (Continuous Build)
+// ============================================================================
+
+/** Where backlog items are sourced from. Start with markdown; others later. */
+export type BacklogSourceType = 'markdown_file';
+
+export interface BacklogSource {
+  id: string;
+  workspaceId: string;
+  type: BacklogSourceType;
+  enabled: boolean;
+  /** Environment to read the source from. Defaults to the first local env. */
+  environmentId?: string;
+  config: BacklogSourceConfig;
+  lastSyncedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type BacklogSourceConfig = MarkdownFileBacklogConfig;
+
+export interface MarkdownFileBacklogConfig {
+  type: 'markdown_file';
+  /** Absolute path on the environment. */
+  path: string;
+  /** Optional heading title; only items under this section are parsed. */
+  section?: string;
+}
+
+export type BacklogItemState =
+  | 'pending'
+  | 'in_progress'
+  | 'awaiting_review'
+  | 'completed'
+  | 'blocked';
+
+export interface BacklogItem {
+  id: string;
+  sourceId: string;
+  workspaceId: string;
+  /** Stable ID within the source — hash of text + parent. Survives reorderings. */
+  externalId: string;
+  text: string;
+  parentExternalId?: string;
+  completed: boolean;
+  blocked: boolean;
+  /** Task currently working on this item, if any. */
+  claimedTaskId?: string;
+  orderIndex: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Request: create a new backlog source on a workspace. */
+export interface CreateBacklogSourceRequest {
+  workspaceId: string;
+  type: BacklogSourceType;
+  config: BacklogSourceConfig;
+  environmentId?: string;
+  enabled?: boolean;
+}
+
+export interface UpdateBacklogSourceRequest {
+  enabled?: boolean;
+  environmentId?: string;
+  config?: BacklogSourceConfig;
 }
 
 // ============================================================================

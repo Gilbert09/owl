@@ -43,8 +43,31 @@ export function installFakeEnvironment(
   const commands: RecordedCommand[] = [];
   const { outputs = {}, exitCode = 0 } = opts;
 
+  function resolveOutput(command: string): string {
+    for (const [pattern, fixture] of Object.entries(outputs)) {
+      if (command.includes(pattern)) return fixture;
+    }
+    return '';
+  }
+
   const originalSpawn = environmentService.spawnInteractive.bind(environmentService);
   const originalKill = environmentService.killSession.bind(environmentService);
+  const originalExec = environmentService.exec.bind(environmentService);
+
+  const execSpy = vi.fn(
+    async (
+      environmentId: string,
+      command: string,
+      options: { cwd?: string } = {}
+    ) => {
+      commands.push({ environmentId, sessionId: '(exec)', command, cwd: options.cwd });
+      return {
+        stdout: resolveOutput(command),
+        stderr: '',
+        code: exitCode ?? 0,
+      };
+    }
+  );
 
   const spawnSpy = vi.fn(
     async (
@@ -63,15 +86,7 @@ export function installFakeEnvironment(
       // Fire output + close events asynchronously so the subject can
       // register listeners before they arrive (mirrors real PTY timing).
       queueMicrotask(() => {
-        // Find a fixture that matches the command
-        let output = '';
-        for (const [pattern, fixture] of Object.entries(outputs)) {
-          if (command.includes(pattern)) {
-            output = fixture;
-            break;
-          }
-        }
-
+        const output = resolveOutput(command);
         if (output) {
           environmentService.emit('session:data', sessionId, Buffer.from(output));
         }
@@ -86,12 +101,14 @@ export function installFakeEnvironment(
 
   (environmentService as any).spawnInteractive = spawnSpy;
   (environmentService as any).killSession = killSpy;
+  (environmentService as any).exec = execSpy;
 
   return {
     commands,
     restore: () => {
       (environmentService as any).spawnInteractive = originalSpawn;
       (environmentService as any).killSession = originalKill;
+      (environmentService as any).exec = originalExec;
       environmentService.removeAllListeners('session:data');
       environmentService.removeAllListeners('session:close');
     },

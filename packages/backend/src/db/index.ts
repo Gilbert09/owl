@@ -194,6 +194,43 @@ export function getMigrations(): Migration[] {
         UPDATE tasks SET type = 'code_writing' WHERE type = 'automated';
       `,
     },
+    {
+      name: '006_add_backlog_tables',
+      sql: `
+        CREATE TABLE backlog_sources (
+          id TEXT PRIMARY KEY,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          type TEXT NOT NULL,
+          enabled INTEGER NOT NULL DEFAULT 1,
+          environment_id TEXT REFERENCES environments(id) ON DELETE SET NULL,
+          config TEXT NOT NULL DEFAULT '{}',
+          last_synced_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE backlog_items (
+          id TEXT PRIMARY KEY,
+          source_id TEXT NOT NULL REFERENCES backlog_sources(id) ON DELETE CASCADE,
+          workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+          external_id TEXT NOT NULL,
+          text TEXT NOT NULL,
+          parent_external_id TEXT,
+          completed INTEGER NOT NULL DEFAULT 0,
+          blocked INTEGER NOT NULL DEFAULT 0,
+          claimed_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          order_index INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(source_id, external_id)
+        );
+
+        CREATE INDEX idx_backlog_sources_workspace ON backlog_sources(workspace_id);
+        CREATE INDEX idx_backlog_items_source ON backlog_items(source_id);
+        CREATE INDEX idx_backlog_items_workspace ON backlog_items(workspace_id);
+        CREATE INDEX idx_backlog_items_claimed ON backlog_items(claimed_task_id);
+      `,
+    },
   ];
 }
 

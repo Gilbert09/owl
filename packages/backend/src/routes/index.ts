@@ -7,6 +7,7 @@ import { agentRoutes } from './agents.js';
 import { inboxRoutes } from './inbox.js';
 import { githubRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
+import { backlogRoutes } from './backlog.js';
 
 export function setupRoutes(app: Express, db: DB): void {
   // API version prefix
@@ -20,6 +21,7 @@ export function setupRoutes(app: Express, db: DB): void {
   app.use(`${api}/inbox`, inboxRoutes(db));
   app.use(`${api}/github`, githubRoutes(db));
   app.use(`${api}/repositories`, repositoryRoutes(db));
+  app.use(`${api}/backlog`, backlogRoutes(db));
 
   // 404 handler
   app.use((req, res) => {

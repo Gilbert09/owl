@@ -10,6 +10,7 @@ import { agentService } from './services/agent.js';
 import { taskQueueService } from './services/taskQueue.js';
 import { githubService } from './services/github.js';
 import { prMonitorService } from './services/prMonitor.js';
+import { backlogService } from './services/backlog/service.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -27,6 +28,7 @@ async function main() {
   taskQueueService.init(db);
   githubService.init(db);
   prMonitorService.init(db);
+  backlogService.init(db);
 
   // Create Express app
   const app = express();
