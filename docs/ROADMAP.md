@@ -9,8 +9,8 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 > The top three are the active work for "Continuous Build, production ready."
 > See `docs/CONTINUOUS_BUILD_ROADMAP.md` for the full plan.
 
-1. **Phase 18.1 + 18.4 — Hosted backend on Fly + Supabase Postgres** (ACTIVE)
-   - Drizzle ORM migration, `DatabaseClient` interface, Supabase Postgres, Fly.io deploy, auth middleware
+1. **Phase 18.1 + 18.4 — Hosted backend on Railway + Supabase Postgres** (ACTIVE)
+   - Drizzle ORM migration, `DatabaseClient` interface, Supabase Postgres, Railway deploy, auth middleware
    - Eliminates the reverse-tunnel / `.bashrc` dance that's currently the #1 setup friction
    - Desktop switches from hardcoded `localhost:4747` to configurable server URL + JWT
 
@@ -598,15 +598,15 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
     - [ ] Uninstall flow: symmetric — remove env in UI optionally tears down daemon on VM
 
 - [ ] **18.4 Deployment**
-  - [ ] Dockerfile for `packages/server` (Node 22, slim base)
-  - [ ] **Hosting: Fly.io** (recommended — persistent volumes, WS-friendly, cheap; alternatives: Railway, Render)
-  - [ ] `fly.toml` config + secrets (DATABASE_URL, SUPABASE_*, ANTHROPIC_API_KEY, GITHUB_CLIENT_SECRET)
-  - [ ] Health check endpoint for Fly's load balancer
+  - [ ] Dockerfile for `packages/server` (Node 22, slim base) — or rely on Railway's Nixpacks detection, TBD
+  - [ ] **Hosting: Railway** (WS-friendly, GitHub-integrated, MCP server available for agent-driven deploys)
+  - [ ] `railway.json` (or dashboard-only) config + service variables (DATABASE_URL, SUPABASE_*, ANTHROPIC_API_KEY, GITHUB_CLIENT_SECRET)
+  - [ ] Health check endpoint for Railway's health-check probe
   - [ ] Rate limiting on public API (per-user)
 
 - [ ] **18.5 CI for hosted backend**
-  - [ ] `.github/workflows/deploy-backend.yml` — on push to `main`, run migrations + `flyctl deploy`
-  - [ ] Separate staging vs production environments
+  - [ ] `.github/workflows/deploy-backend.yml` — on push to `main`, run migrations + `railway up --service <name>` (auth via `RAILWAY_TOKEN`)
+  - [ ] Separate staging vs production environments (Railway environments feature)
   - [ ] Automated Supabase branch creation for PR previews (optional)
   - [ ] Rollback procedure documented
 
@@ -626,7 +626,7 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] Error tracking via PostHog error tracking (server + daemon + Electron renderer + main process)
   - [ ] Product analytics events: task created, task approved/rejected, env added, integration connected, time-to-first-agent
   - [ ] PostHog session replay for desktop UX debugging (opt-in only)
-  - [ ] Fly.io platform metrics → PostHog (CPU/mem/request counts) via webhook or periodic push
+  - [ ] Railway platform metrics → PostHog (CPU/mem/request counts) via webhook or periodic push
   - [ ] Dashboards: cohort retention, error rate by route, approval latency histogram
   - [ ] Self-host PostHog or PostHog Cloud — defer decision; cloud is faster to start
 

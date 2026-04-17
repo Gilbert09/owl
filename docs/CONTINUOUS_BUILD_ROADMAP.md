@@ -39,7 +39,7 @@ to it over the public internet (HTTPS + auth).
 - Port migrations 001-007 from hand-rolled SQL to Drizzle
 - `DatabaseClient` interface so services don't depend on `better-sqlite3` directly
 - Supabase project for Postgres + Auth (GitHub OAuth for sign-in)
-- Deploy the backend on **Fly.io** (WS-friendly, persistent volumes, cheap)
+- Deploy the backend on **Railway** (WS-friendly, GitHub-integrated, cheap; MCP server available for agent-driven deploys)
 - Add `user_id` scoping to every row + RLS policies
 - Desktop: replace hardcoded `http://localhost:4747` with a configurable
   URL + JWT in the Electron safeStorage

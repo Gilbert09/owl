@@ -71,15 +71,20 @@ For Postgres + auth when Phase 18.1/18.2 lands.
    - `DATABASE_URL` (Project settings → Database → Connection string → URI, with pooling for runtime)
 4. Enable GitHub OAuth in Supabase Auth (Authentication → Providers → GitHub) — uses the same OAuth app as #3 plus a callback added to Supabase
 
-### 5. Fly.io account
+### 5. Railway account
 
-For hosting the control-plane backend.
+For hosting the control-plane backend. Railway has an agent-ready MCP
+server and GitHub-integrated deploys out of the box.
 
-1. Sign up at https://fly.io
-2. Install `flyctl` locally (`brew install flyctl`) and run `flyctl auth login`
-3. For CI: `flyctl tokens create deploy` → save as `FLY_API_TOKEN` GitHub secret on the repo
+1. Sign up at https://railway.com
+2. Install the CLI locally (`brew install railway` or `npm i -g @railway/cli`)
+   and run `railway login`
+3. For CI: Project Settings → Tokens → create a deploy token → save as
+   `RAILWAY_TOKEN` GitHub secret on the repo
 
-No app needs to exist yet — creating it is part of the 18.4 deploy work.
+No project needs to exist yet — creating it is part of the 18.4 deploy work.
+For interactive use, the Railway MCP server (see below) can create + deploy
+projects directly from a Claude Code session.
 
 ### 6. PostHog project
 
@@ -115,9 +120,12 @@ Follow https://github.com/supabase-community/supabase-mcp for the install comman
 
 Not yet officially released but community versions exist — search `posthog mcp` on GitHub. Will use `POSTHOG_PERSONAL_API_KEY` + `POSTHOG_HOST`.
 
-### Fly.io MCP (once #5 is set up)
+### Railway MCP (once #5 is set up)
 
-Community MCP server exists at https://github.com/superfly/fly-mcp. Uses the same `FLY_API_TOKEN`.
+Official Railway MCP server — see https://docs.railway.com for the current
+install command. Uses a Railway account token (same one you minted in #5).
+Lets Claude Code create projects, deploy services, read logs, and manage
+variables without leaving the editor.
 
 ### FastOwl MCP (local)
 
@@ -159,7 +167,7 @@ Once the accounts above exist, add these to **Repo Settings → Secrets and vari
 | ------------------------------- | ----------------------------------------- |
 | `ANTHROPIC_API_KEY`             | Future: CI-run tests that hit the API    |
 | `GITHUB_TOKEN`                  | Already provided by Actions               |
-| `FLY_API_TOKEN`                 | Deploy the backend on merges to main      |
+| `RAILWAY_TOKEN`                 | Deploy the backend on merges to main      |
 | `DATABASE_URL`                  | drizzle-kit migrate step                  |
 | `SUPABASE_SERVICE_ROLE_KEY`     | Server-side admin operations in migrations|
 | `POSTHOG_PROJECT_API_KEY`       | Ship error events + build metrics         |
@@ -188,7 +196,7 @@ And ensure `.gitignore` has `packages/backend/.env`. (If the backend doesn't yet
 ## What Claude Code cannot do for you
 
 Everything in this doc that requires an account, a browser approval, or a credential you own. Specifically:
-- Create Anthropic / GitHub / Supabase / Fly.io / PostHog accounts
+- Create Anthropic / GitHub / Supabase / Railway / PostHog accounts
 - Approve OAuth apps
 - Generate API keys
 - Add GitHub repo secrets

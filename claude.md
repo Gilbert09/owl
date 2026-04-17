@@ -40,8 +40,8 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 > Full list in [`docs/ROADMAP.md`](./docs/ROADMAP.md). Definition of done for "production ready" is in [`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md).
 
-1. **Phase 18.1 + 18.4 — Hosted backend on Fly + Supabase Postgres** (ACTIVE)
-   Drizzle ORM migration, Supabase Postgres, Fly.io deploy, auth middleware. Eliminates the reverse-tunnel / `.bashrc` dance. Session 12 left Phase A + B done; Phase C (services rewrite to Drizzle) is the next atomic commit — resume from the plan in `docs/SESSIONS.md#session-12`.
+1. **Phase 18.1 + 18.4 — Hosted backend on Railway + Supabase Postgres** (ACTIVE)
+   Drizzle ORM migration, Supabase Postgres, Railway deploy, auth middleware. Eliminates the reverse-tunnel / `.bashrc` dance. Session 12 left Phase A + B done; Phase C (services rewrite to Drizzle) is the next atomic commit — resume from the plan in `docs/SESSIONS.md#session-12`.
 
 2. **Phase 18.3 — Daemon split + auto-install over SSH** (NEXT)
    Extract env/agent/git services into `packages/daemon`. Single-file binary. "Add SSH env → install daemon" checkbox in desktop. Interim: `scripts/bootstrap-vm.sh`.
