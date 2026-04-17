@@ -2,6 +2,27 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 14 (Phase 18.4 — backend on Railway)
+Backend now live at `https://fastowl-backend-production.up.railway.app`. Health check passes, migrations ran on startup, RLS confirmed on every user-scoped table. Desktop `.env` flipped to point at Railway.
+
+- **Dockerfile** (multi-stage): builder installs the whole workspace + compiles with tsc + prunes to prod deps; runtime copies `node_modules` + `dist/` + migrations. Copying node_modules instead of reinstalling keeps `node-pty` / `ssh2` native bindings intact without needing build tools in the runtime image. `.dockerignore` keeps the build context tight (no desktop release, no .env, no docs).
+- **Migrations fix**: `tsc` doesn't copy `.sql` files, so the migrate-on-startup would have crashed in prod. Added `build:copy-migrations` postbuild script (`fs.cpSync` — ESM-safe, no shell) that mirrors `src/db/migrations` → `dist/db/migrations`.
+- **railway.toml**: DOCKERFILE builder, healthcheck at `/health` (30s window), restart on failure max 5 retries.
+- **CI**: `.github/workflows/deploy-backend.yml` deploys on pushes to main that touch backend/shared/Dockerfile, using `RAILWAY_TOKEN` secret. Path-filtered so desktop-only changes don't redeploy.
+- **Two gotchas that bit**:
+  1. Railway doesn't route IPv6; Supabase's direct `db.<ref>.supabase.co` resolves IPv6. Fix: use the transaction pooler (`aws-1-eu-west-2.pooler.supabase.com:6543`). Session 12 had the wrong region prefix (`aws-0-` vs `aws-1-` — it's project-specific, copy from the dashboard).
+  2. `--ignore-scripts` on `npm ci` in the runtime stage strips node-pty's native binary. Moved the install to the builder stage and copied the resulting `node_modules` across — works without shipping python/build-essential to the runtime image.
+- **Env vars on Railway** (service `fastowl-backend`): `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `FASTOWL_ALLOWED_EMAILS=owerstom@googlemail.com`, `NODE_ENV=production`. `PORT` auto-provided by Railway.
+- **Desktop**: `apps/desktop/.env` gains `FASTOWL_API_URL=https://fastowl-backend-production.up.railway.app`. Commented fallback to `http://localhost:4747` for running against a local backend.
+- **Verified**: `GET /health` returns the full service payload; `GET /api/v1/workspaces` without auth returns 401 (middleware enforcing); Supabase query confirms RLS is on for all 10 user-scoped tables, off for `settings`.
+
+- **Still outstanding**:
+  - Add `RAILWAY_TOKEN` to GitHub repo secrets (manual; required before the deploy workflow actually runs).
+  - Update workspace-integration GitHub OAuth app callback URL if/when we exercise it against the hosted backend.
+  - Extra Railway "FastOwl" service auto-created alongside `fastowl-backend` can be deleted via the dashboard — harmless but cluttered.
+
+- **Next action**: **Phase 18.3 — daemon split + SSH auto-install.** With the backend hosted, a VM now has a target to dial out to. Extract env/agent/git services into `packages/daemon`, flip the connection direction, add the "Install FastOwl daemon" checkbox in the Add-SSH-env dialog.
+
 ## Session 13 (Phase 18.2 — end-to-end auth)
 Wired Supabase GitHub OAuth through backend, desktop, CLI, and MCP in five focused commits. Every REST endpoint and the WebSocket upgrade now require a valid Supabase JWT; data is scoped by `owner_id` at the app layer with RLS as defense in depth.
 

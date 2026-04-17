@@ -1,0 +1,32 @@
+node_modules
+**/node_modules
+.git
+.gitignore
+.github
+
+# Desktop app isn't built here
+apps/desktop/release
+apps/desktop/dist
+apps/desktop/.erb/dll
+
+# Local env + secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Already-built artifacts we rebuild inside the image
+**/dist
+**/*.tsbuildinfo
+
+# Dev-only
+.vscode
+.idea
+.DS_Store
+**/coverage
+**/.eslintcache
+**/npm-debug.log*
+
+# Docs don't need to live in the image
+docs
+*.md
+!CLAUDE.md

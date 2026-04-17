@@ -1,0 +1,15 @@
+# Railway service config for @fastowl/backend.
+# Docs: https://docs.railway.com/reference/config-as-code
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# /health is unauthenticated and returns 200 when all services init'd.
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
+# Restart on crash; don't loop forever on config errors.
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

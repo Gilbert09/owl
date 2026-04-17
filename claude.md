@@ -48,7 +48,9 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 3. **Phase 18.2 polish** — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
 
-**Recently landed** (Session 13): end-to-end auth — Supabase GitHub OAuth, JWT middleware, `owner_id` scoping, RLS defense in depth, desktop login + CLI/MCP bearer tokens.
+**Recently landed**:
+- Session 14 (Phase 18.4): backend deployed to Railway at `https://fastowl-backend-production.up.railway.app`. Dockerfile + railway.toml + CI workflow. Desktop `.env` now points at hosted backend.
+- Session 13 (Phase 18.2): end-to-end auth — Supabase GitHub OAuth, JWT middleware, `owner_id` scoping, RLS defense in depth, desktop login + CLI/MCP bearer tokens.
 
 ## File Structure
 

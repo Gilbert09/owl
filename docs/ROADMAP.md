@@ -598,24 +598,26 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
     - [ ] Health check: confirm daemon connects back to hosted server before marking env ready
     - [ ] Uninstall flow: symmetric — remove env in UI optionally tears down daemon on VM
 
-- [ ] **18.4 Deployment**
-  - [ ] Dockerfile for `packages/server` (Node 22, slim base) — or rely on Railway's Nixpacks detection, TBD
-  - [ ] **Hosting: Railway** (WS-friendly, GitHub-integrated, MCP server available for agent-driven deploys)
-  - [ ] `railway.json` (or dashboard-only) config + service variables (DATABASE_URL, SUPABASE_*, ANTHROPIC_API_KEY, GITHUB_CLIENT_SECRET)
-  - [ ] Health check endpoint for Railway's health-check probe
-  - [ ] Rate limiting on public API (per-user)
+- [x] **18.4 Deployment** (Session 14)
+  - [x] Multi-stage Dockerfile at repo root — Node 22 slim, copies pre-built node_modules from builder to avoid re-running install-scripts (keeps node-pty/ssh2 native bindings without runtime build tools)
+  - [x] `railway.toml` — DOCKERFILE builder, `/health` healthcheck, on-failure restart
+  - [x] Hosted at `https://fastowl-backend-production.up.railway.app`, project `FastOwl`, service `fastowl-backend`
+  - [x] Service variables: `DATABASE_URL` (transaction pooler, not direct — Railway has no IPv6), `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `FASTOWL_ALLOWED_EMAILS`, `NODE_ENV`
+  - [x] Migrations run on startup via drizzle-orm migrator; `build:copy-migrations` postbuild script puts `.sql` files into `dist/`
+  - [ ] Rate limiting on public API (per-user) — future
 
-- [ ] **18.5 CI for hosted backend**
-  - [ ] `.github/workflows/deploy-backend.yml` — on push to `main`, run migrations + `railway up --service <name>` (auth via `RAILWAY_TOKEN`)
-  - [ ] Separate staging vs production environments (Railway environments feature)
-  - [ ] Automated Supabase branch creation for PR previews (optional)
-  - [ ] Rollback procedure documented
+- [x] **18.5 CI for hosted backend** (Session 14, partial)
+  - [x] `.github/workflows/deploy-backend.yml` — path-filtered to backend/shared/Dockerfile, uses `RAILWAY_TOKEN` secret
+  - [ ] Separate staging vs production environments (Railway environments feature) — future
+  - [ ] Automated Supabase branch creation for PR previews — future
+  - [ ] Rollback procedure documented — future
 
-- [ ] **18.6 Desktop app integration**
-  - [ ] Replace hardcoded `http://localhost:4747` with configurable server URL
-  - [ ] First-run flow: choose "Cloud (hosted)" vs "Self-hosted/local" mode
-  - [ ] Graceful degradation when daemon is offline (show state but disable execution)
-  - [ ] Encrypt stored JWT at rest via OS keychain (Electron safeStorage API)
+- [x] **18.6 Desktop app integration** (mostly Session 13 + 14)
+  - [x] Replace hardcoded `http://localhost:4747` with configurable server URL (`FASTOWL_API_URL` env, webpack EnvironmentPlugin, loaded via dotenv)
+  - [x] Desktop points at Railway by default; local fallback via `.env` override
+  - [x] Graceful degradation when backend unreachable (App.tsx renders "Backend is unreachable" screen)
+  - [ ] First-run flow: choose "Cloud (hosted)" vs "Self-hosted/local" mode — future, not required for production
+  - [ ] Encrypt stored JWT at rest via OS keychain (Electron safeStorage API) — future, localStorage persists fine for MVP
 
 - [ ] **18.7 Data migration for existing users**
   - [ ] One-click "Sync to cloud" flow reads local SQLite and pushes to hosted Postgres

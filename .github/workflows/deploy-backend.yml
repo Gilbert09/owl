@@ -1,0 +1,33 @@
+name: Deploy backend
+
+# Deploy the hosted backend to Railway on every push to main that touches
+# something the backend actually cares about. The desktop app ships
+# separately via publish.yml and can't trigger a backend deploy.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/backend/**'
+      - 'packages/shared/**'
+      - 'Dockerfile'
+      - 'railway.toml'
+      - '.dockerignore'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Guard so forks / PRs from forks can't burn Railway credits.
+    if: github.repository == 'Gilbert09/owl'
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: curl -fsSL https://railway.com/install.sh | sh
+
+      - name: Deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway up --ci --service fastowl-backend

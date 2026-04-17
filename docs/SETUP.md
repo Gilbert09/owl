@@ -86,20 +86,31 @@ FASTOWL_ALLOWED_EMAILS=you@example.com
 
 Multiple emails are comma-separated. Unauthorised callers get a 403 on first request. Once invite flows land (TODO in ROADMAP Phase 19) this can go away.
 
-### 5. Railway account
+### 5. Railway account (deployed)
 
-For hosting the control-plane backend. Railway has an agent-ready MCP
-server and GitHub-integrated deploys out of the box.
+Hosted backend lives at **https://fastowl-backend-production.up.railway.app**
+(project `FastOwl`, service `fastowl-backend`, env `production`).
+Auto-deploy on push to main via `.github/workflows/deploy-backend.yml` —
+needs a `RAILWAY_TOKEN` GitHub secret:
 
-1. Sign up at https://railway.com
-2. Install the CLI locally (`brew install railway` or `npm i -g @railway/cli`)
-   and run `railway login`
-3. For CI: Project Settings → Tokens → create a deploy token → save as
-   `RAILWAY_TOKEN` GitHub secret on the repo
+1. Railway dashboard → **Project Settings → Tokens** → create a project
+   token (account-scoped works too) → copy.
+2. GitHub repo → **Settings → Secrets and variables → Actions** → **New
+   repository secret** → name `RAILWAY_TOKEN`, paste value.
 
-No project needs to exist yet — creating it is part of the 18.4 deploy work.
-For interactive use, the Railway MCP server (see below) can create + deploy
-projects directly from a Claude Code session.
+**Supabase connection**: Railway can't route IPv6, so the backend uses
+the **transaction pooler** (`aws-1-eu-west-2.pooler.supabase.com:6543`)
+not the direct connection. If you rotate the DB password, update
+`DATABASE_URL` on Railway too (`railway variables --set 'DATABASE_URL=...'`).
+
+**GitHub OAuth callback**: the workspace-integration GitHub OAuth app
+(the one from section #3 above, used for PR monitoring) has its
+authorization callback URL pointing at localhost. Once you actually
+start using GitHub integration against the hosted backend, update the
+OAuth app's callback to
+`https://fastowl-backend-production.up.railway.app/api/v1/github/callback`.
+The Supabase-auth GitHub OAuth app (for user sign-in) is separate and
+already points at Supabase's domain, not ours.
 
 ### 6. PostHog project
 
