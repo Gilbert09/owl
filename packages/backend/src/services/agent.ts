@@ -232,8 +232,12 @@ class AgentService extends EventEmitter {
     const now = new Date().toISOString();
 
     // Launch claude interactively - the user can interact with it like Claude Code CLI
-    // If a prompt is provided, we'll send it as the initial input
-    const claudeCommand = 'claude';
+    // If a prompt is provided, we'll send it as the initial input.
+    //
+    // Inline env vars expose FastOwl context to the child process so that
+    // `fastowl` CLI invocations (for task-spawns-task) have context without
+    // needing to be configured per-run.
+    const claudeCommand = `${buildFastOwlEnvPrefix(workspaceId, taskId)}claude`;
 
     // Determine working directory: use task's repo path, then fall back to environment's default
     const env = environmentService.getEnvironment(environmentId);
@@ -659,3 +663,23 @@ class AgentService extends EventEmitter {
 
 // Singleton instance
 export const agentService = new AgentService();
+
+/**
+ * Build an inline `KEY=val ` prefix for a shell command so child Claudes
+ * can find their parent FastOwl via the CLI. Values are single-quoted and
+ * safely escaped for bash.
+ */
+export function buildFastOwlEnvPrefix(workspaceId: string, taskId?: string): string {
+  const port = process.env.PORT || '4747';
+  const apiUrl = process.env.FASTOWL_API_URL || `http://localhost:${port}`;
+  const parts = [
+    `FASTOWL_API_URL=${shellQuote(apiUrl)}`,
+    `FASTOWL_WORKSPACE_ID=${shellQuote(workspaceId)}`,
+  ];
+  if (taskId) parts.push(`FASTOWL_TASK_ID=${shellQuote(taskId)}`);
+  return parts.join(' ') + ' ';
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}

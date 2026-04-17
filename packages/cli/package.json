@@ -1,0 +1,27 @@
+{
+  "name": "@fastowl/cli",
+  "version": "0.1.0",
+  "description": "Command-line client for FastOwl — create tasks, inspect backlog, etc.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "fastowl": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fastowl/shared": "*",
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.7.1",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
+  }
+}
