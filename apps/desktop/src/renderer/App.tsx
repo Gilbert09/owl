@@ -77,7 +77,7 @@ function useDemoData() {
       {
         id: '1',
         workspaceId: '1',
-        type: 'automated' as const,
+        type: 'code_writing' as const,
         status: 'in_progress' as const,
         priority: 'high' as const,
         title: 'Fix authentication bug',
@@ -109,7 +109,7 @@ Let me implement these changes...
       {
         id: '2',
         workspaceId: '1',
-        type: 'automated' as const,
+        type: 'code_writing' as const,
         status: 'in_progress' as const,
         priority: 'medium' as const,
         title: 'Add API rate limiting',
@@ -135,7 +135,7 @@ Which approach would you prefer?`,
       {
         id: '3',
         workspaceId: '1',
-        type: 'automated' as const,
+        type: 'code_writing' as const,
         status: 'queued' as const,
         priority: 'medium' as const,
         title: 'Refactor database queries',

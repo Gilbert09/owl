@@ -182,6 +182,18 @@ function getMigrations(): Migration[] {
         ALTER TABLE tasks ADD COLUMN branch TEXT;
       `,
     },
+    {
+      name: '004_add_task_terminal_output',
+      sql: `
+        ALTER TABLE tasks ADD COLUMN terminal_output TEXT NOT NULL DEFAULT '';
+      `,
+    },
+    {
+      name: '005_rename_task_type_automated_to_code_writing',
+      sql: `
+        UPDATE tasks SET type = 'code_writing' WHERE type = 'automated';
+      `,
+    },
   ];
 }
 

@@ -8,6 +8,7 @@ import {
   AlertCircle,
   Play,
   Terminal,
+  FileCheck,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -44,9 +45,10 @@ const attentionColors: Record<AgentAttention, string> = {
 };
 
 export function TaskTerminal({ task }: TaskTerminalProps) {
-  const { sendTaskInput, stopTask } = useTaskActions();
+  const { sendTaskInput, stopTask, readyForReview } = useTaskActions();
   const [inputValue, setInputValue] = useState('');
   const [isStopping, setIsStopping] = useState(false);
+  const [isMarkingReady, setIsMarkingReady] = useState(false);
 
   const agentStatus = task.agentStatus || 'working';
   const agentAttention = task.agentAttention || 'none';
@@ -74,6 +76,17 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
       setIsStopping(false);
     }
   }, [task.id, stopTask]);
+
+  const handleReadyForReview = useCallback(async () => {
+    setIsMarkingReady(true);
+    try {
+      await readyForReview(task.id);
+    } catch (err) {
+      console.error('Failed to mark ready for review:', err);
+    } finally {
+      setIsMarkingReady(false);
+    }
+  }, [task.id, readyForReview]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -119,12 +132,27 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
         </div>
         <div className="flex items-center gap-1">
           <Button
+            variant="default"
+            size="sm"
+            className="h-8"
+            title="Mark work as ready for your review"
+            onClick={handleReadyForReview}
+            disabled={isMarkingReady || isStopping}
+          >
+            {isMarkingReady ? (
+              <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+            ) : (
+              <FileCheck className="w-4 h-4 mr-1" />
+            )}
+            Ready for Review
+          </Button>
+          <Button
             variant="ghost"
             size="sm"
             className="h-8"
-            title="Stop Task"
+            title="Stop Task (discard work)"
             onClick={handleStopTask}
-            disabled={isStopping}
+            disabled={isStopping || isMarkingReady}
           >
             {isStopping ? (
               <Loader2 className="w-4 h-4 mr-1 animate-spin" />

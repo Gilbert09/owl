@@ -133,7 +133,23 @@ export interface Agent {
 // Task
 // ============================================================================
 
-export type TaskType = 'manual' | 'automated';
+export type TaskType =
+  | 'code_writing'
+  | 'pr_response'
+  | 'pr_review'
+  | 'manual';
+
+/** Types for which FastOwl spawns a Claude agent. */
+export const AGENT_TASK_TYPES: readonly TaskType[] = [
+  'code_writing',
+  'pr_response',
+  'pr_review',
+];
+
+/** True if FastOwl should spawn/drive a Claude agent for this task. */
+export function isAgentTask(type: TaskType): boolean {
+  return type !== 'manual';
+}
 
 export type TaskStatus =
   | 'pending'

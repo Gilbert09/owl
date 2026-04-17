@@ -132,6 +132,35 @@ class GitService {
   }
 
   /**
+   * Get diff for the given branch vs a base branch (default: main).
+   * Includes both committed changes and uncommitted working tree changes.
+   */
+  async getDiff(
+    environmentId: string,
+    branch: string,
+    base: string = 'main',
+    workingDirectory?: string
+  ): Promise<string> {
+    const sessionId = `git:diff:${Date.now()}`;
+    // git diff <base>...<branch> shows changes from base merge-base to branch tip
+    // Append working tree changes (uncommitted) with git diff HEAD
+    const committed = await this.executeGitCommand(
+      environmentId,
+      `${sessionId}:committed`,
+      `git diff ${base}...${branch} 2>/dev/null || git diff ${branch}`,
+      workingDirectory
+    );
+    const uncommitted = await this.executeGitCommand(
+      environmentId,
+      `${sessionId}:uncommitted`,
+      'git diff HEAD 2>/dev/null',
+      workingDirectory
+    );
+    if (uncommitted.trim().length === 0) return committed;
+    return committed + '\n\n--- Uncommitted changes ---\n' + uncommitted;
+  }
+
+  /**
    * Delete a branch
    */
   async deleteBranch(
@@ -166,7 +195,7 @@ class GitService {
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       let output = '';
-      let errorOutput = '';
+      const errorOutput = '';
 
       // Listen for data
       const dataHandler = (sid: string, data: Buffer) => {

@@ -112,8 +112,14 @@ export const tasks = {
   sendInput: (id: string, input: string) =>
     request<void>('POST', `/tasks/${id}/input`, { input }),
   stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
+  readyForReview: (id: string) =>
+    request<Task>('POST', `/tasks/${id}/ready-for-review`),
+  approve: (id: string) => request<Task>('POST', `/tasks/${id}/approve`),
+  reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
   getTerminal: (id: string) =>
     request<{ terminalOutput: string }>('GET', `/tasks/${id}/terminal`),
+  getDiff: (id: string) =>
+    request<{ diff: string }>('GET', `/tasks/${id}/diff`),
   // Generate task metadata from prompt using AI
   generateMetadata: (prompt: string) =>
     request<TaskMetadata>('POST', '/tasks/generate-metadata', { prompt }),

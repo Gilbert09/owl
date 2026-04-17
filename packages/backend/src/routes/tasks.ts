@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import { DB } from '../db/index.js';
-import { agentService, type ActiveAgent } from '../services/agent.js';
+import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { emitTaskStatus } from '../services/websocket.js';
@@ -13,6 +13,7 @@ import type {
   GenerateTaskMetadataRequest,
   GenerateTaskMetadataResponse,
 } from '@fastowl/shared';
+import { isAgentTask } from '@fastowl/shared';
 
 export function taskRoutes(db: DB): Router {
   const router = Router();
@@ -77,7 +78,7 @@ export function taskRoutes(db: DB): Router {
     query += ` ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`;
 
     const rows = db.prepare(query).all(...params);
-    const tasks = rows.map(rowToTask);
+    const tasks = rows.map((row) => rowToTask(row));
     res.json({ success: true, data: tasks } as ApiResponse<Task[]>);
   });
 
@@ -88,9 +89,9 @@ export function taskRoutes(db: DB): Router {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
+    const task = rowToTask(row, { includeTerminalOutput: true });
 
-    // If task is in_progress, get agent status
+    // If task is in_progress, prefer live in-memory output + agent status
     if (task.status === 'in_progress') {
       const activeAgent = agentService.getAgentByTaskId(task.id);
       if (activeAgent) {
@@ -199,9 +200,9 @@ export function taskRoutes(db: DB): Router {
       return res.status(400).json({ success: false, error: 'Task is already running' });
     }
 
-    // Only automated tasks can be started
-    if (task.type !== 'automated') {
-      return res.status(400).json({ success: false, error: 'Only automated tasks can be started' });
+    // Only agent-driven tasks (non-manual) can be started
+    if (!isAgentTask(task.type)) {
+      return res.status(400).json({ success: false, error: 'Only agent tasks can be started' });
     }
 
     // Find environment to use
@@ -221,7 +222,7 @@ export function taskRoutes(db: DB): Router {
     if (envStatus !== 'connected') {
       try {
         await environmentService.connect(environmentId);
-      } catch (err) {
+      } catch (_err) {
         return res.status(400).json({ success: false, error: 'Failed to connect to environment' });
       }
     }
@@ -341,6 +342,77 @@ export function taskRoutes(db: DB): Router {
     }
   });
 
+  // Mark a running task as ready for review. Stops the agent but keeps
+  // the task alive in 'awaiting_review' so the user can approve/reject.
+  router.post('/:id/ready-for-review', (req, res) => {
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    const task = rowToTask(row);
+
+    if (task.status !== 'in_progress') {
+      return res.status(400).json({ success: false, error: 'Task is not running' });
+    }
+
+    if (!isAgentTask(task.type)) {
+      return res.status(400).json({ success: false, error: 'Only agent tasks can be marked ready for review' });
+    }
+
+    // Stop the agent (if still running)
+    const activeAgent = agentService.getAgentByTaskId(task.id);
+    if (activeAgent) {
+      agentService.stopAgent(activeAgent.id);
+    }
+
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE tasks SET status = 'awaiting_review', updated_at = ? WHERE id = ?
+    `).run(now, task.id);
+
+    emitTaskStatus(task.workspaceId, task.id, 'awaiting_review');
+
+    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
+    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+  });
+
+  // Approve an awaiting_review task → completed
+  router.post('/:id/approve', (req, res) => {
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; workspace_id: string } | undefined;
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    if (row.status !== 'awaiting_review') {
+      return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
+    }
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
+    `).run(now, now, req.params.id);
+    emitTaskStatus(row.workspace_id, req.params.id, 'completed');
+    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
+    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+  });
+
+  // Reject an awaiting_review task → back to queued for more work
+  router.post('/:id/reject', (req, res) => {
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; workspace_id: string } | undefined;
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    if (row.status !== 'awaiting_review') {
+      return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
+    }
+    const now = new Date().toISOString();
+    db.prepare(`
+      UPDATE tasks SET status = 'queued', assigned_agent_id = NULL, updated_at = ? WHERE id = ?
+    `).run(now, req.params.id);
+    emitTaskStatus(row.workspace_id, req.params.id, 'queued');
+    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
+    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+  });
+
   // Stop a running task
   router.post('/:id/stop', (req, res) => {
     const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
@@ -372,19 +444,61 @@ export function taskRoutes(db: DB): Router {
     res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
   });
 
-  // Get terminal output for a task
-  router.get('/:id/terminal', (req, res) => {
+  // Get the diff of a task's work against the base branch.
+  // Requires task.branch + repository with local_path + an environment.
+  router.get('/:id/diff', async (req, res) => {
     const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
     if (!row) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
     const task = rowToTask(row);
+    if (!task.branch || !task.repositoryId) {
+      return res.status(400).json({ success: false, error: 'Task has no branch or repository' });
+    }
 
-    // Get terminal output from active agent if running
-    let terminalOutput = '';
-    if (task.status === 'in_progress') {
-      const activeAgent = agentService.getAgentByTaskId(task.id);
+    const repoRow = db.prepare('SELECT local_path, default_branch FROM repositories WHERE id = ?').get(task.repositoryId) as { local_path: string | null; default_branch: string } | undefined;
+    if (!repoRow?.local_path) {
+      return res.status(400).json({ success: false, error: 'Repository has no local path on this machine' });
+    }
+
+    // Prefer the environment the task ran on; fall back to any connected one
+    let environmentId = task.assignedEnvironmentId;
+    if (!environmentId) {
+      const connected = environmentService.getAllEnvironments().find(e => e.status === 'connected');
+      if (!connected) {
+        return res.status(400).json({ success: false, error: 'No connected environment to compute diff' });
+      }
+      environmentId = connected.id;
+    }
+
+    try {
+      const diff = await gitService.getDiff(
+        environmentId,
+        task.branch,
+        repoRow.default_branch || 'main',
+        repoRow.local_path
+      );
+      res.json({ success: true, data: { diff } } as ApiResponse<{ diff: string }>);
+    } catch (err: any) {
+      console.error('Failed to get diff:', err);
+      res.status(500).json({ success: false, error: err.message || 'Failed to get diff' });
+    }
+  });
+
+  // Get terminal output for a task
+  // For running tasks, prefer the live in-memory buffer (most recent).
+  // For completed/failed/cancelled tasks, fall back to the persisted column.
+  router.get('/:id/terminal', (req, res) => {
+    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; terminal_output: string | null } | undefined;
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    let terminalOutput = row.terminal_output || '';
+
+    if (row.status === 'in_progress') {
+      const activeAgent = agentService.getAgentByTaskId(req.params.id);
       if (activeAgent) {
         terminalOutput = activeAgent.outputBuffer;
       }
@@ -417,7 +531,7 @@ export function taskRoutes(db: DB): Router {
   return router;
 }
 
-function rowToTask(row: any): Task {
+function rowToTask(row: any, opts: { includeTerminalOutput?: boolean } = {}): Task {
   return {
     id: row.id,
     workspaceId: row.workspace_id,
@@ -436,5 +550,6 @@ function rowToTask(row: any): Task {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at || undefined,
+    terminalOutput: opts.includeTerminalOutput ? (row.terminal_output || undefined) : undefined,
   };
 }

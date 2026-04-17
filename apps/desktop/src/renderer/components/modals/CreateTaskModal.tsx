@@ -1,5 +1,14 @@
 import React, { useState, useCallback, useEffect } from 'react';
-import { ListTodo, Loader2, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
+import {
+  ListTodo,
+  Loader2,
+  Sparkles,
+  ChevronDown,
+  ChevronUp,
+  MessageSquare,
+  Eye,
+  Hand,
+} from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -15,12 +24,52 @@ import { Textarea } from '../ui/textarea';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
 import { api, type WatchedRepo } from '../../lib/api';
-import type { TaskType, TaskPriority } from '@fastowl/shared';
+import { isAgentTask, type TaskType, type TaskPriority } from '@fastowl/shared';
 
 interface CreateTaskModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
+
+const typeOptions: {
+  value: TaskType;
+  label: string;
+  icon: React.ElementType;
+  description: string;
+  promptPlaceholder: string;
+}[] = [
+  {
+    value: 'code_writing',
+    label: 'Code',
+    icon: Sparkles,
+    description: 'Claude writes code: features, bug fixes, refactors.',
+    promptPlaceholder:
+      'e.g., Fix the authentication bug where users are logged out after refreshing the page...',
+  },
+  {
+    value: 'pr_response',
+    label: 'PR Response',
+    icon: MessageSquare,
+    description: 'Respond to review comments on one of your PRs.',
+    promptPlaceholder:
+      'e.g., Address the review comments on PR #234 — rename variables as suggested and add tests...',
+  },
+  {
+    value: 'pr_review',
+    label: 'PR Review',
+    icon: Eye,
+    description: "Draft review comments for someone else's PR.",
+    promptPlaceholder:
+      "e.g., Review PR #567 — focus on error handling and the new migration...",
+  },
+  {
+    value: 'manual',
+    label: 'Manual',
+    icon: Hand,
+    description: 'A task you handle yourself (no agent).',
+    promptPlaceholder: '',
+  },
+];
 
 export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
   const { environments, currentWorkspaceId } = useWorkspaceStore();
@@ -28,7 +77,7 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [type, setType] = useState<TaskType>('automated');
+  const [type, setType] = useState<TaskType>('code_writing');
   const [priority, setPriority] = useState<TaskPriority>('medium');
   const [prompt, setPrompt] = useState('');
   const [repositoryId, setRepositoryId] = useState('');
@@ -40,6 +89,8 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
   const [repositories, setRepositories] = useState<WatchedRepo[]>([]);
 
   const connectedEnvironments = environments.filter((e) => e.status === 'connected');
+  const typeConfig = typeOptions.find((t) => t.value === type)!;
+  const isAgent = isAgentTask(type);
 
   // Load repositories when modal opens
   useEffect(() => {
@@ -50,19 +101,17 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
 
   // Auto-generate metadata when prompt changes (debounced)
   useEffect(() => {
-    if (!prompt || prompt.length < 10 || type !== 'automated') return;
+    if (!prompt || prompt.length < 10 || !isAgent) return;
     if (title && description) return; // Don't override if user has already entered values
 
     const timer = setTimeout(async () => {
       setIsGenerating(true);
       try {
         const metadata = await api.tasks.generateMetadata(prompt);
-        // Only set if user hasn't entered values
         if (!title) setTitle(metadata.title);
         if (!description) setDescription(metadata.description);
         setPriority(metadata.suggestedPriority);
       } catch (err) {
-        // Silently fail - not critical
         console.error('Failed to generate metadata:', err);
       } finally {
         setIsGenerating(false);
@@ -70,10 +119,9 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [prompt, type, title, description]);
+  }, [prompt, isAgent, title, description]);
 
   const handleSubmit = useCallback(async () => {
-    // For automated tasks, prompt is required; title/description can be auto-generated
     const effectiveTitle = title || (prompt ? prompt.slice(0, 60) : '');
     const effectiveDescription = description || prompt || '';
 
@@ -89,15 +137,14 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
         description: effectiveDescription,
         type,
         priority,
-        prompt: type === 'automated' ? prompt || undefined : undefined,
-        repositoryId: type === 'automated' && repositoryId ? repositoryId : undefined,
-        assignedEnvironmentId: type === 'automated' && environmentId ? environmentId : undefined,
+        prompt: isAgent ? prompt || undefined : undefined,
+        repositoryId: isAgent && repositoryId ? repositoryId : undefined,
+        assignedEnvironmentId: isAgent && environmentId ? environmentId : undefined,
       });
       onOpenChange(false);
-      // Reset form
       setTitle('');
       setDescription('');
-      setType('automated');
+      setType('code_writing');
       setPriority('medium');
       setPrompt('');
       setRepositoryId('');
@@ -108,7 +155,7 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [title, description, type, priority, prompt, repositoryId, environmentId, currentWorkspaceId, createTask, onOpenChange]);
+  }, [title, description, type, priority, prompt, repositoryId, environmentId, currentWorkspaceId, createTask, onOpenChange, isAgent]);
 
   const handleClose = useCallback(() => {
     if (!isLoading) {
@@ -118,10 +165,9 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     }
   }, [isLoading, onOpenChange]);
 
-  // Check if form is valid
-  const isValid = type === 'automated'
-    ? prompt.length > 0 // For automated tasks, just need a prompt
-    : title && description; // For manual tasks, need title and description
+  const isValid = isAgent
+    ? prompt.length > 0
+    : title && description;
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -131,50 +177,43 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
             <ListTodo className="w-5 h-5" />
             Create New Task
           </DialogTitle>
-          <DialogDescription>
-            {type === 'automated'
-              ? 'Enter a prompt and Claude will handle the task. Title and description will be auto-generated.'
-              : 'Add a manual task that requires human action.'}
-          </DialogDescription>
+          <DialogDescription>{typeConfig.description}</DialogDescription>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
-          {/* Task Type Toggle */}
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant={type === 'automated' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setType('automated')}
-              disabled={isLoading}
-            >
-              <Sparkles className="w-4 h-4 mr-1" />
-              Automated (Agent)
-            </Button>
-            <Button
-              type="button"
-              variant={type === 'manual' ? 'default' : 'outline'}
-              size="sm"
-              onClick={() => setType('manual')}
-              disabled={isLoading}
-            >
-              Manual (Human)
-            </Button>
+          {/* Task Type Picker */}
+          <div className="grid grid-cols-2 gap-2">
+            {typeOptions.map((opt) => {
+              const Icon = opt.icon;
+              const selected = type === opt.value;
+              return (
+                <Button
+                  key={opt.value}
+                  type="button"
+                  variant={selected ? 'default' : 'outline'}
+                  size="sm"
+                  onClick={() => setType(opt.value)}
+                  disabled={isLoading}
+                  className="justify-start"
+                >
+                  <Icon className="w-4 h-4 mr-2" />
+                  {opt.label}
+                </Button>
+              );
+            })}
           </div>
 
-          {type === 'automated' ? (
+          {isAgent ? (
             <>
-              {/* Prompt is primary for automated tasks */}
               <Textarea
                 label="What do you want Claude to do?"
-                placeholder="e.g., Fix the authentication bug where users are logged out after refreshing the page..."
+                placeholder={typeConfig.promptPlaceholder}
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 disabled={isLoading}
                 rows={4}
               />
 
-              {/* Repository selector */}
               {repositories.length > 0 && (
                 <Select
                   label="Repository"
@@ -191,7 +230,6 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
                 </Select>
               )}
 
-              {/* Auto-generated metadata display */}
               {(title || description || isGenerating) && (
                 <div className="p-3 rounded-md bg-secondary/50 space-y-2">
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -229,7 +267,6 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
                 </div>
               )}
 
-              {/* Advanced options toggle */}
               <Button
                 type="button"
                 variant="ghost"
@@ -275,7 +312,6 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
             </>
           ) : (
             <>
-              {/* Manual task: traditional title/description form */}
               <Input
                 label="Title"
                 placeholder="e.g., Review PR #123"

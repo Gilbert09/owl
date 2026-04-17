@@ -13,6 +13,9 @@ import {
   MessageSquare,
   Terminal,
   GitBranch,
+  Sparkles,
+  Eye,
+  Hand,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -23,7 +26,17 @@ import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
 import { TaskTerminal } from './TaskTerminal';
-import type { Task, TaskStatus, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
+import { TerminalHistory } from './TerminalHistory';
+import { TaskDiff } from './TaskDiff';
+import { isAgentTask } from '@fastowl/shared';
+import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
+
+const taskTypeConfig: Record<TaskType, { label: string; icon: React.ElementType }> = {
+  code_writing: { label: 'Code', icon: Sparkles },
+  pr_response: { label: 'PR Response', icon: MessageSquare },
+  pr_review: { label: 'PR Review', icon: Eye },
+  manual: { label: 'Manual', icon: Hand },
+};
 
 const statusConfig: Record<
   TaskStatus,
@@ -281,8 +294,12 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
               </Badge>
             )}
             {!isRunning && (
-              <span className="text-xs text-muted-foreground">
-                {task.type === 'automated' ? 'Auto' : 'Manual'}
+              <span className="text-xs text-muted-foreground flex items-center gap-1">
+                {(() => {
+                  const TypeIcon = taskTypeConfig[task.type]?.icon ?? Hand;
+                  return <TypeIcon className="w-3 h-3" />;
+                })()}
+                {taskTypeConfig[task.type]?.label ?? task.type}
               </span>
             )}
           </div>
@@ -298,7 +315,7 @@ interface TaskDetailProps {
 
 function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
-  const { updateTaskStatus, cancelTask, retryTask, startTask, stopTask } = useTaskActions();
+  const { updateTaskStatus, cancelTask, retryTask, startTask, stopTask, approveTask, rejectTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
   const task = tasks.find((t) => t.id === taskId);
   const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
@@ -312,8 +329,8 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   }
 
   const isRunning = task.status === 'in_progress';
-  const isAutomated = task.type === 'automated';
-  const canStart = isAutomated && ['pending', 'queued'].includes(task.status);
+  const isAgent = isAgentTask(task.type);
+  const canStart = isAgent && ['pending', 'queued'].includes(task.status);
   const agentStatus = task.agentStatus || 'working';
 
   const handleStartTask = async () => {
@@ -365,6 +382,24 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     setIsLoading(true);
     try {
       await retryTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleApproveTask = async () => {
+    setIsLoading(true);
+    try {
+      await approveTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleRejectTask = async () => {
+    setIsLoading(true);
+    try {
+      await rejectTask(taskId);
     } finally {
       setIsLoading(false);
     }
@@ -482,6 +517,22 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {task.status === 'awaiting_review' && (
+              <>
+                <Button size="sm" onClick={handleApproveTask} disabled={isLoading}>
+                  {isLoading ? (
+                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4 mr-1" />
+                  )}
+                  Approve
+                </Button>
+                <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={isLoading}>
+                  <RotateCw className="w-4 h-4 mr-1" />
+                  Reject & Requeue
+                </Button>
+              </>
+            )}
             {canStart && (
               <Button size="sm" onClick={handleStartTask} disabled={isLoading}>
                 {isLoading ? (
@@ -574,7 +625,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div>
                 <span className="text-muted-foreground">Type:</span>
-                <span className="ml-2 capitalize">{task.type}</span>
+                <span className="ml-2">{taskTypeConfig[task.type]?.label ?? task.type}</span>
               </div>
               {repo && (
                 <div>
@@ -609,6 +660,14 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               )}
             </div>
           </div>
+
+          {task.status === 'awaiting_review' && task.branch && task.repositoryId && (
+            <TaskDiff taskId={task.id} />
+          )}
+
+          {['awaiting_review', 'completed', 'failed', 'cancelled'].includes(task.status) && (
+            <TerminalHistory taskId={task.id} />
+          )}
         </div>
       </ScrollArea>
     </>

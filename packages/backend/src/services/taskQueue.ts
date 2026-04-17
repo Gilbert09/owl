@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import type { Task, TaskPriority, Agent } from '@fastowl/shared';
+import { isAgentTask } from '@fastowl/shared';
 import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
 import { emitTaskStatus } from './websocket.js';
@@ -180,9 +181,9 @@ class TaskQueueService extends EventEmitter {
 
       // For each high-priority task, try to assign it
       for (const task of queuedTasks) {
-        // Only auto-process automated tasks
-        if (task.type !== 'automated') {
-          console.log(`[TaskQueue] Skipping task "${task.title}" - type is ${task.type}, not automated`);
+        // Only auto-process agent-driven tasks (anything that isn't manual)
+        if (!isAgentTask(task.type)) {
+          console.log(`[TaskQueue] Skipping task "${task.title}" - type is ${task.type}, not an agent task`);
           continue;
         }
 

@@ -9,7 +9,7 @@ import type {
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { sshService } from './ssh.js';
-import { emitAgentStatus, emitAgentOutput, emitInboxNew, emitTaskOutput, emitTaskAgentStatus } from './websocket.js';
+import { emitAgentStatus, emitAgentOutput, emitInboxNew, emitTaskOutput, emitTaskAgentStatus, emitTaskStatus } from './websocket.js';
 import { DB } from '../db/index.js';
 
 // Patterns to detect Claude CLI status
@@ -372,6 +372,15 @@ class AgentService extends EventEmitter {
       this.db.prepare(`
         UPDATE agents SET terminal_output = ?, last_activity = ? WHERE id = ?
       `).run(truncatedOutput, agent.lastActivityTime.toISOString(), agent.id);
+
+      // Append to task's persistent terminal output so history survives
+      // the agent session. Append-only keeps write cost proportional to
+      // each chunk, not the full buffer.
+      if (agent.currentTaskId) {
+        this.db.prepare(`
+          UPDATE tasks SET terminal_output = terminal_output || ?, updated_at = ? WHERE id = ?
+        `).run(output, agent.lastActivityTime.toISOString(), agent.currentTaskId);
+      }
     }
 
     // Emit output via WebSocket
@@ -412,12 +421,22 @@ class AgentService extends EventEmitter {
     // Create inbox item for completion
     this.createInboxItemForAgent(agent, finalStatus);
 
-    // Update task if there was one
+    // Update task if there was one. Clean agent exits go through the
+    // approval gate (awaiting_review) so the user can accept/reject the
+    // work before it's considered completed.
     if (agent.currentTaskId && this.db) {
-      const taskStatus = code === 0 ? 'completed' : 'failed';
-      this.db.prepare(`
-        UPDATE tasks SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?
-      `).run(taskStatus, new Date().toISOString(), new Date().toISOString(), agent.currentTaskId);
+      const now = new Date().toISOString();
+      if (code === 0) {
+        this.db.prepare(`
+          UPDATE tasks SET status = 'awaiting_review', updated_at = ? WHERE id = ?
+        `).run(now, agent.currentTaskId);
+        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
+      } else {
+        this.db.prepare(`
+          UPDATE tasks SET status = 'failed', completed_at = ?, updated_at = ? WHERE id = ?
+        `).run(now, now, agent.currentTaskId);
+        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed');
+      }
     }
 
     // Remove agent record from database (it's no longer active)
