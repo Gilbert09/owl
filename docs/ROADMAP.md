@@ -584,14 +584,16 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 
 - [ ] **18.3 Split backend into server + daemon**
   - [~] New `packages/server` — hosted control plane. 18.3.A landed the daemon-on-the-other-side of the split; dropping ssh2/node-pty from the backend waits until legacy `local`/`ssh` env types are deprecated.
-  - [x] New `packages/daemon` — `@fastowl/daemon` workspace with `executor.ts`, `git.ts`, `wsClient.ts`, `config.ts`. Session 15.
-  - [x] Wire protocol in `@fastowl/shared/daemonProtocol.ts`: hello / request-response / events. Session 15.
+  - [x] New `packages/daemon` — `@fastowl/daemon` workspace with `executor.ts`, `git.ts`, `wsClient.ts`, `config.ts`, `proxyServer.ts`. Session 15–16.
+  - [x] Wire protocol in `@fastowl/shared/daemonProtocol.ts`: hello / request-response / events + proxy_http_request. Session 15–16.
   - [x] Daemon auth: one-shot pairing token → long-lived device token (SHA-256 hash stored). Session 15.
-  - [ ] **Bundled daemon**: child process of the Electron app for the user's own machine
+  - [x] **Option-1 HTTP relay for CLI/MCP inside tasks**: daemon runs a localhost HTTP proxy; child processes' REST calls tunnel over the daemon's authenticated WS. Backend accepts internal-auth headers (randomBytes(48) secret, timingSafeEqual) alongside JWT. No user JWT ever lives on the VM. Session 16.
+  - [x] **Scheduler/backlog recognise daemon envs**: `daemonRegistry` updates `environments.status` on connect/disconnect; backlog + continuousBuildScheduler treat connected daemon envs as eligible fallbacks. Session 16.
+  - [ ] **Bundled daemon**: child process of the Electron app for the user's own machine (replaces `type: 'local'`).
   - [ ] **Deployable daemon**: `fastowl-daemon` as a standalone binary/CLI distributable to VMs
     - [ ] Single-file binary (pkg, bun --compile, or Docker image)
     - [ ] Systemd unit / launchd plist for auto-start
-    - [ ] Self-register with hosted server on first run using a one-time pairing token from the desktop app
+    - [x] Self-register with hosted server on first run using a one-time pairing token from the desktop app — pairing flow works; UI to mint the token still ahead.
   - [ ] **Remote install flow**: given SSH creds for a VM, FastOwl installs the daemon automatically
     - [ ] Desktop UI: "Add SSH environment" → inline option "Install daemon on this host"
     - [ ] Backend provisioning: SSH in, detect arch/OS, `curl | sh` the daemon binary, write config with pairing token, start under systemd/launchd

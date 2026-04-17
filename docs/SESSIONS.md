@@ -25,6 +25,10 @@ Option-1 relay shipped. Child processes spawned by a daemon (`claude` running a 
   4. Daemon logs `listening on http://127.0.0.1:<port>`.
   5. From the shell where the daemon is running: `FASTOWL_API_URL=http://127.0.0.1:<port> FASTOWL_AUTH_TOKEN= fastowl workspace list` — request hits the local proxy, tunnels over WS, backend answers as the daemon's owner.
 
+- **Follow-up commits landed same session**:
+  - `a0000ea` Daemon envs are first-class in scheduling: daemonRegistry updates `environments.status` on register/unregister; `backlogService` and `continuousBuildScheduler` fall back to any connected daemon when no env is pinned; `connectSavedEnvironments` on startup marks daemon envs disconnected until they dial back.
+  - `9e82bc7` CI hygiene: `@fastowl/daemon` gets `--passWithNoTests` so an empty suite doesn't fail CI; `taskQueueService` gains a `shuttingDown` flag + `runProcessQueue` wrapper that swallows the "DATABASE_URL is not set" noise triggered by floating promises after a test's DB reset; AuthProvider no longer `console.error`s when Supabase env vars are missing (LoginScreen already surfaces a visible warning).
+
 ## Session 15 (Phase 18.3.A — daemon package + WS transport)
 Foundation for the SSH auto-install flow. Daemon package exists and can dial the hosted backend; backend has a `/daemon-ws` endpoint, a registry that tracks live daemons, and a `daemon` env type that proxies commands through. No UX change yet — Phase 18.3.B bolts the "Install daemon" checkbox onto the Add-SSH-env dialog.
 
