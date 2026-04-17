@@ -3,6 +3,8 @@ import postgres from 'postgres';
 import * as schema from './schema.js';
 
 export type DrizzleClient = ReturnType<typeof createDrizzleClient>;
+/** Shortcut for routes/services — just the Drizzle query builder. */
+export type Database = DrizzleClient['db'];
 
 /**
  * Create a Drizzle-wrapped Postgres client from a DATABASE_URL.
