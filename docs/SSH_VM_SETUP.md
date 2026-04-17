@@ -6,6 +6,21 @@ server) over SSH and running Continuous Build tasks there.
 The desktop app + backend still run on your **laptop** — only the Claude
 agents (and the code they touch) run on the **VM**.
 
+> **TL;DR (fast path)** — with SSH access to the VM, from the FastOwl repo on
+> your laptop:
+>
+> ```bash
+> ssh <vm-host> bash -s -- --api-url http://localhost:4747 \
+>   < scripts/bootstrap-vm.sh
+> ```
+>
+> That installs Node, Claude CLI, the `fastowl` CLI, and writes the env vars
+> to `~/.bashrc`. Then `ssh <vm-host> 'claude'` once to do the interactive
+> Claude auth, add the SSH env in the desktop app, and you're set.
+>
+> The rest of this doc is the detail + the networking options (default is
+> SSH reverse tunnel, which matches the `--api-url` example above).
+
 ```
 ┌──────── laptop ─────────┐           ┌────── remote VM ──────┐
 │  FastOwl desktop app    │           │                       │
@@ -36,30 +51,57 @@ npm run dev:desktop
 
 ## 2. On the VM
 
-You need three things on the VM: **git + node**, **Claude CLI**, and the
+You need three things on the VM: **git + node ≥ 18**, **Claude CLI**, and
 **`fastowl` CLI**.
 
+### Option 1 (recommended): use the bootstrap script
+
+From the FastOwl repo on your laptop:
+
 ```bash
-# Node 18+ is required; verify:
+ssh <vm-host> bash -s -- --api-url http://localhost:4747 \
+  < scripts/bootstrap-vm.sh
+```
+
+This is idempotent (safe to re-run). It installs Node via nvm if needed,
+installs the Claude CLI globally, clones FastOwl to `~/fastowl`, builds
+the CLI + MCP server, links `fastowl` onto `PATH`, and writes the env var
+block to `~/.bashrc`. Run with `--help` to see options (`--branch`, custom
+install dir, `--dry-run`).
+
+After it completes, log into the VM once interactively to authenticate Claude:
+
+```bash
+ssh <vm-host>
+claude     # first run opens a browser auth flow; follow it
+exit
+```
+
+### Option 2: do it manually
+
+If you want to install things differently or the script breaks on your
+distro, the manual equivalent is:
+
+```bash
+# Node 18+ required
 node --version
 
-# Install Claude CLI (see https://docs.anthropic.com/claude/docs/claude-cli
-# for the latest instructions). Quick install:
-curl -fsSL https://claude.ai/install.sh | sh
+# Claude CLI
+npm install -g @anthropic-ai/claude-code
 claude --version
-claude auth login      # follow the browser flow
 
-# Install the fastowl CLI. Easiest: clone the repo and link.
+# FastOwl CLI
 git clone git@github.com:Gilbert09/owl.git ~/fastowl
 cd ~/fastowl
 npm install
-npm run build -w @fastowl/shared
-npm run build -w @fastowl/cli
-sudo npm link -w @fastowl/cli
+npm run build -w @fastowl/shared -w @fastowl/cli -w @fastowl/mcp-server
+(cd packages/cli && npm link)
 fastowl --version
 ```
 
-Clone whatever project repos you want FastOwl to work on:
+### Clone your project repos
+
+Separate from FastOwl's CLI: clone the repos you want tasks to run against.
 
 ```bash
 mkdir -p ~/projects && cd ~/projects

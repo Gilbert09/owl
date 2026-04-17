@@ -184,9 +184,11 @@ class SSHService extends EventEmitter {
 
           this.ptySessions.set(sessionId, session);
 
-          stream.on('close', () => {
+          stream.on('close', (code: number | null, _signal: string | null) => {
             this.ptySessions.delete(sessionId);
-            this.emit('pty:close', sessionId);
+            // ssh2 reports code=null when the remote closed without an explicit
+            // exit code — treat as 0 (normal close) unless we have a signal.
+            this.emit('pty:close', sessionId, code ?? 0);
           });
 
           stream.on('data', (data: Buffer) => {

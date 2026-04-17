@@ -8,6 +8,7 @@ import type {
 } from '@fastowl/shared';
 import { DB } from '../db/index.js';
 import { backlogService } from './backlog/service.js';
+import { environmentService } from './environment.js';
 import { domainEvents, type DomainTaskStatusEvent } from './events.js';
 import { emitTaskStatus } from './websocket.js';
 
@@ -79,6 +80,16 @@ class ContinuousBuildScheduler {
 
     const sources = backlogService.listSources(workspaceId).filter((s) => s.enabled);
     for (const source of sources) {
+      // Skip sources whose target environment is disconnected — spawning a
+      // task there would just fail at agent start time and put the item
+      // back in the queue.
+      if (!this.isSourceEnvironmentReady(source)) {
+        console.log(
+          `[ContinuousBuild] Skipping source ${source.id}: environment not connected`
+        );
+        continue;
+      }
+
       const item = backlogService.nextActionableItem(source.id);
       if (!item) continue;
 
@@ -90,6 +101,21 @@ class ContinuousBuildScheduler {
       }
       return;
     }
+  }
+
+  private isSourceEnvironmentReady(source: BacklogSource): boolean {
+    const envId = source.environmentId;
+    if (!envId) {
+      // Default-to-local sources: find the first local env and check.
+      const local = environmentService
+        .getAllEnvironments()
+        .find((e) => e.type === 'local');
+      return Boolean(local);
+    }
+    const env = environmentService.getEnvironment(envId);
+    if (!env) return false;
+    if (env.type === 'local') return true;
+    return env.status === 'connected';
   }
 
   private async onTaskStatus(evt: DomainTaskStatusEvent): Promise<void> {
@@ -219,17 +245,26 @@ function deriveTitle(text: string): string {
 }
 
 function buildPrompt(sourcePath: string, itemText: string): string {
+  // Autonomous Continuous Build tasks run via `claude --print --permission-mode
+  // acceptEdits`. Completion = process exit. The prompt tells Claude what to do
+  // and the acceptance bar; it does NOT need to call FastOwl endpoints —
+  // exiting cleanly after committing the work is the done signal.
   return [
+    `You are working autonomously on a FastOwl Continuous Build task.`,
     `Implement the following TODO item from \`${sourcePath}\`:`,
     '',
     itemText,
     '',
-    'Read surrounding context in the project before starting. Follow existing conventions.',
-    'Make the minimum change required to satisfy the item — do not add unrelated refactors.',
-    'Before finishing, run the project checks locally:',
-    '  - `npm run typecheck`',
-    '  - `npm run lint`',
-    '  - `npm test`',
-    'All three must pass. When everything looks good, hit "Ready for Review" in FastOwl so a human can approve.',
+    'Guidance:',
+    '- Read surrounding project context before starting (CLAUDE.md, nearby files).',
+    '- Follow existing conventions. Make the minimum change required — do not add unrelated refactors.',
+    '- Commit your work to the current branch with a descriptive message when complete.',
+    '- Before finishing, run the project checks locally and make sure they pass:',
+    '    * `npm run typecheck`',
+    '    * `npm run lint`',
+    '    * `npm test`',
+    '- If any check fails, fix the issue before finishing.',
+    '- When done, stop responding. Your process exiting is how FastOwl knows the task is complete — a human will review the branch in `awaiting_review` state.',
+    '- If you get stuck or need human input, stop responding — the task will land in `awaiting_review` with whatever progress you made, and the reviewer can resume.',
   ].join('\n');
 }

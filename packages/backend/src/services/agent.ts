@@ -175,8 +175,8 @@ class AgentService extends EventEmitter {
       this.handleSessionData(sessionId, data);
     });
 
-    sshService.on('pty:close', (sessionId) => {
-      this.handleSessionClose(sessionId, 0);
+    sshService.on('pty:close', (sessionId, code?: number) => {
+      this.handleSessionClose(sessionId, code ?? 0);
     });
 
     // Periodic status check for stuck agents
@@ -231,9 +231,6 @@ class AgentService extends EventEmitter {
     const sessionId = `agent:${agentId}`;
     const now = new Date().toISOString();
 
-    // Launch claude interactively - the user can interact with it like Claude Code CLI
-    // If a prompt is provided, we'll send it as the initial input.
-    //
     // Inline env vars expose FastOwl context to the child process so that
     // `fastowl` CLI invocations (for task-spawns-task) have context without
     // needing to be configured per-run.
@@ -243,7 +240,24 @@ class AgentService extends EventEmitter {
     // .bashrc / the install doc (docs/SSH_VM_SETUP.md).
     const env = environmentService.getEnvironment(environmentId);
     const includeApiUrl = env?.type === 'local';
-    const claudeCommand = `${buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl })}claude`;
+    const envPrefix = buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl });
+
+    // Autonomous tasks (spawned by Continuous Build) run in non-interactive
+    // --print mode. Exit signals completion deterministically, `acceptEdits`
+    // lets the agent run file edits unattended, and we bake the prompt into
+    // argv so there's no race between shell startup and prompt delivery.
+    //
+    // Non-autonomous tasks (user clicked Start, pr_response, pr_review,
+    // manual follow-up) stay interactive so the human can step in mid-flight.
+    const autonomous = taskId ? this.isAutonomousTask(taskId) : false;
+
+    let claudeCommand: string;
+    if (autonomous && prompt) {
+      claudeCommand =
+        `${envPrefix}claude --print --permission-mode acceptEdits ${shellQuote(prompt)}`;
+    } else {
+      claudeCommand = `${envPrefix}claude`;
+    }
 
     // Determine working directory: use task's repo path, then fall back to environment's default
     const cwd = workingDirectory || (env?.config.type === 'ssh'
@@ -256,9 +270,10 @@ class AgentService extends EventEmitter {
       cols: 120,
     });
 
-    // If there's a prompt, send it as initial input after a short delay
-    // This allows Claude to start up before receiving input
-    if (prompt) {
+    // In interactive mode we send the prompt after a short delay so the
+    // Claude TUI has time to come up. In non-interactive mode the prompt is
+    // already in argv.
+    if (prompt && !autonomous) {
       setTimeout(() => {
         environmentService.writeToSession(sessionId, prompt + '\n');
       }, 500);
@@ -400,6 +415,25 @@ class AgentService extends EventEmitter {
    */
   isAgentActive(agentId: string): boolean {
     return this.activeAgents.has(agentId);
+  }
+
+  /**
+   * True if a task was spawned by the Continuous Build scheduler (has a
+   * backlog item in its metadata). Those tasks run `claude --print` and
+   * derive completion from process exit instead of a user button.
+   */
+  private isAutonomousTask(taskId: string): boolean {
+    if (!this.db) return false;
+    const row = this.db
+      .prepare('SELECT metadata FROM tasks WHERE id = ?')
+      .get(taskId) as { metadata: string | null } | undefined;
+    if (!row?.metadata) return false;
+    try {
+      const meta = JSON.parse(row.metadata) as { backlogItemId?: string };
+      return Boolean(meta.backlogItemId);
+    } catch {
+      return false;
+    }
   }
 
   /**

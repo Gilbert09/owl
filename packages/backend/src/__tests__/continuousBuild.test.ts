@@ -240,4 +240,55 @@ describe('continuousBuildScheduler', () => {
     await continuousBuildScheduler.scheduleNext('ws1');
     expect(countQueuedTasks(db, 'ws1')).toBe(0);
   });
+
+  it('skips sources whose SSH environment is not connected', async () => {
+    seedWorkspace(db, 'ws1', { enabled: true });
+    // Disconnected SSH env
+    db.prepare(
+      "INSERT INTO environments (id, name, type, status, config) VALUES (?, ?, ?, ?, ?)"
+    ).run(
+      'env-ssh',
+      'Remote',
+      'ssh',
+      'disconnected',
+      JSON.stringify({ type: 'ssh', host: 'vm1', port: 22, username: 'me', authMethod: 'agent' })
+    );
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] on the vm\n' } });
+
+    const src = backlogService.createSource({
+      workspaceId: 'ws1',
+      environmentId: 'env-ssh',
+      type: 'markdown_file',
+      config: { type: 'markdown_file', path: '/home/me/TODO.md' },
+    });
+    // Seed the source's items manually — we can't sync without an exec path
+    db.prepare(
+      `INSERT INTO backlog_items (id, source_id, workspace_id, external_id, text, completed, blocked, order_index)
+       VALUES ('bi1', ?, 'ws1', 'e1', 'on the vm', 0, 0, 0)`
+    ).run(src.id);
+
+    await continuousBuildScheduler.scheduleNext('ws1');
+    expect(countQueuedTasks(db, 'ws1')).toBe(0);
+
+    // Now flip it connected and retry
+    db.prepare("UPDATE environments SET status = 'connected' WHERE id = 'env-ssh'").run();
+    await continuousBuildScheduler.scheduleNext('ws1');
+    expect(countQueuedTasks(db, 'ws1')).toBe(1);
+  });
+
+  it('writes backlogItemId into spawned task metadata (powers autonomous mode)', async () => {
+    seedWorkspace(db, 'ws1', { enabled: true });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] do the thing\n' } });
+    const { sourceId } = await seedBacklog('');
+    await backlogService.syncSource(sourceId);
+
+    await continuousBuildScheduler.scheduleNext('ws1');
+
+    const task = db
+      .prepare("SELECT metadata FROM tasks WHERE workspace_id = 'ws1'")
+      .get() as { metadata: string };
+    const meta = JSON.parse(task.metadata);
+    expect(meta.backlogItemId).toBeTruthy();
+    expect(meta.backlogSourceId).toBe(sourceId);
+  });
 });

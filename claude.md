@@ -559,33 +559,48 @@ A prioritized list of items requiring human attention:
 - **Multi-step agent state recovery**: A task agent crashing mid-run loses its state (the task does persist, and recovery resets to `queued` via `recoverStuckTasks`, but no partial resume).
 
 ### Priority Queue (Next Up)
-> These are the immediate priorities based on user feedback:
+> The top three are the active work for "Continuous Build, production ready."
+> See `docs/CONTINUOUS_BUILD_ROADMAP.md` for the full plan.
 
-1. ~~**Phase 13.3 - Smart Task Creation** (Quick win)~~ DONE
-2. ~~**Phase 13.4 - Repository Context** (Essential)~~ DONE
-3. ~~**Phase 14.1-14.2 - Git Branch Management** (Core feature)~~ DONE
-4. ~~**Phase 12.8 - Light Mode** (Quick win)~~ DONE
-5. ~~**Phase 15.1-15.3 - Task History** (Important UX)~~ DONE
-6. ~~**Phase 13.1 - Interactive Terminal** (Core feature)~~ DONE
-7. ~~**Phase 16.1/16.2/16.5 - Approval Workflows** (Core feature)~~ DONE
-8. ~~**Phase 20.1-20.5 - Continuous Build** (Core feature, "FastOwl builds itself")~~ DONE — backlog model, scheduler, UI toggle, `fastowl` CLI for task-spawns-task, SSH VM setup doc. Remaining: user-side VM verification (20.5 end-to-end) and MCP server (20.6).
+1. **Phase 18.1 + 18.4 - Hosted backend on Fly + Supabase Postgres** (ACTIVE)
+   - Drizzle ORM migration, `DatabaseClient` interface, Supabase Postgres, Fly.io deploy, auth middleware
+   - Eliminates the reverse-tunnel / `.bashrc` dance that's currently the #1 setup friction
+   - Desktop switches from hardcoded `localhost:4747` to configurable server URL + JWT
 
-9. **Phase 20.5 - Run Continuous Build on the FastOwl VM** (User action)
-   - Follow `docs/SSH_VM_SETUP.md` to install the CLI on the VM and configure `FASTOWL_API_URL`.
-   - Turn on Continuous Build pointed at `claude.md` `Priority Queue (Next Up)` section.
+2. **Phase 18.3 - Daemon split + auto-install over SSH** (NEXT)
+   - Extract env/agent/git services into `packages/daemon`
+   - Single-file daemon binary (`bun --compile` or `pkg`) for linux/amd64, linux/arm64, darwin/arm64
+   - Desktop "Add SSH env" → checkbox "Install FastOwl daemon" that SSH-es in and runs a self-install
+   - Today's interim: `scripts/bootstrap-vm.sh` installs Claude CLI + fastowl CLI on a VM in one ssh invocation. That's the design target for the automated flow.
 
-10. ~~**Phase 20.6 - FastOwl MCP server**~~ DONE — `@fastowl/mcp-server` with 7 tools over stdio, registered via `docs/SETUP.md`.
+3. **Phase 17.3 - Notifications on `awaiting_review`** (QUICK WIN)
+   - Desktop + OS notification when a Continuous Build task lands for review
+   - Without this, the user has to poll the app to see if work is done
 
-11. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
+--- done above ---
+
+4. ~~**Phase 13.3 - Smart Task Creation**~~ DONE
+5. ~~**Phase 13.4 - Repository Context**~~ DONE
+6. ~~**Phase 14.1-14.2 - Git Branch Management**~~ DONE
+7. ~~**Phase 12.8 - Light Mode**~~ DONE
+8. ~~**Phase 15.1-15.3 - Task History**~~ DONE
+9. ~~**Phase 13.1 - Interactive Terminal**~~ DONE
+10. ~~**Phase 16.1/16.2/16.5 - Approval Workflows**~~ DONE
+11. ~~**Phase 20.1-20.6 - Continuous Build (backlog model, scheduler, UI, CLI, MCP, Option 3 deterministic completion)**~~ DONE
+12. ~~**Phase 20.5 prep - `scripts/bootstrap-vm.sh`**~~ DONE — one-command VM install pending the daemon work
+
+--- later ---
+
+13. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
     - Clickable options, approval buttons on Claude TUI
 
-12. **Phase 16.3 - Automated PR Response** (Core workflow)
+14. **Phase 16.3 - Automated PR Response** (Core workflow)
     - Hook PR monitor → auto-create `pr_response` tasks on new review comments
 
-13. **Phase 12.5 - Testing framework** (Reliability, ongoing)
-    - See `docs/TESTING.md`. 64 backend + 3 CLI + 1 desktop tests now landed.
+15. **Phase 12.5 - Testing framework** (Reliability, ongoing)
+    - See `docs/TESTING.md`. 66 backend + 7 MCP + 3 CLI + 1 desktop tests now landed.
 
-14. **Phase 18 - Hosted backend + local daemon** (Shipping / productionization)
+16. **Phase 18 (rest) - Deployment hardening** (after 18.1/18.3/18.4 land)
 
 ### Phase 11: Settings & Configuration
 
@@ -916,10 +931,19 @@ A prioritized list of items requiring human attention:
   - [x] Agent service injects `FASTOWL_API_URL` (local), `FASTOWL_WORKSPACE_ID`, `FASTOWL_TASK_ID` as inline env vars on spawn so child Claudes inherit context
   - [x] 3 CLI client tests + 4 backend env-prefix tests
 
-- [x] **20.5 SSH VM support** (COMPLETED — documentation and code path)
+- [x] **20.5 SSH VM support** (COMPLETED — documentation, code path, and one-command bootstrap)
   - [x] Env prefix skips `FASTOWL_API_URL` for SSH environments (remote `.bashrc` sets it instead)
   - [x] `docs/SSH_VM_SETUP.md` with three networking options (SSH reverse tunnel, LAN bind, backend-on-VM) and troubleshooting
+  - [x] `scripts/bootstrap-vm.sh` — idempotent one-command VM install (Node, Claude CLI, fastowl CLI, .bashrc env block). Runs over SSH, no manual steps beyond the interactive `claude` auth.
   - [ ] End-to-end user verification on the real VM (requires user action)
+
+- [x] **20.8 Option 3 — deterministic completion for autonomous tasks** (COMPLETED)
+  - [x] Autonomous tasks (those with `metadata.backlogItemId`) spawn `claude --print --permission-mode acceptEdits <prompt>` via the existing `bash -c` non-interactive path
+  - [x] Process exit = completion signal. No prompt-based signaling, no hook, no sentinel
+  - [x] Interactive tasks keep the existing PTY + prompt-delivery flow
+  - [x] Scheduler `buildPrompt` rewritten: tells Claude to stop responding when done (exit is the signal), removed the human-oriented "hit Ready for Review" instruction
+  - [x] Fix: SSH `pty:close` now carries the real exit code (previously hardcoded 0); agent close handler forwards it
+  - [x] Fix: scheduler skips sources whose target environment isn't connected (prevents spurious failed tasks)
 
 - [x] **20.6 FastOwl MCP server** (COMPLETED)
   - [x] New `packages/mcp-server` workspace using `@modelcontextprotocol/sdk` over stdio
@@ -1000,6 +1024,36 @@ fastowl/
 ---
 
 ## Session Notes
+
+### Session 11 (Option 3 + fixes + hosting roadmap)
+Shipped the "deterministic completion" path for Continuous Build tasks plus four targeted fixes, wrote the production roadmap, and stood up a one-command VM bootstrap script.
+
+- **Option 3 (non-interactive autonomous mode)** (`packages/backend/src/services/agent.ts`):
+  - New private `isAutonomousTask(taskId)` — looks up the task row, parses `metadata.backlogItemId`. True when the task was spawned by Continuous Build.
+  - `startAgent` branches on this: autonomous tasks spawn `claude --print --permission-mode acceptEdits <quoted-prompt>` via the existing `bash -c` path in `environment.ts` (which already detected `claude --print` and runs accordingly). Process exit now = task done; `handleSessionClose(code=0)` transitions to `awaiting_review`; `code !== 0` transitions to `failed`. No prompt trickery, no hook, no polling.
+  - Interactive (user-launched / pr_response / pr_review / manual) tasks unchanged — still PTY-based with prompt written via `writeToSession` after 500ms.
+  - Prompt in `continuousBuild.ts:buildPrompt` rewritten: tells Claude to stop responding when done (exit is the signal); removed the "hit Ready for Review" instruction that was meant for humans.
+
+- **Fix: SSH pty exit code** (`packages/backend/src/services/ssh.ts:189`, `agent.ts:178`):
+  - ssh2's `stream.on('close', (code, signal) => ...)` does surface an exit code; we were ignoring it and always emitting 0. Now `pty:close` carries the real exit code (or 0 if ssh2 reports null for a normal close). Agent listener forwards it to `handleSessionClose`.
+
+- **Fix: scheduler env-connectivity gate** (`continuousBuild.ts`):
+  - New `isSourceEnvironmentReady(source)` — for SSH envs, skips sources whose env isn't `connected`. For local, always ready. Scheduler iterates sources, skips unconnected, tries next. Test covers the disconnect → connect → fire sequence.
+
+- **`scripts/bootstrap-vm.sh`** (new):
+  - Idempotent shell script, runnable over SSH (`ssh <host> bash -s -- [opts] < scripts/bootstrap-vm.sh`). Installs Node via nvm if < 18, npm-installs `@anthropic-ai/claude-code`, clones the FastOwl repo, builds shared + cli + mcp-server, npm-links the `fastowl` binary, writes `FASTOWL_API_URL` into `~/.bashrc` (in a managed block that round-trips safely on re-run). Flags: `--api-url`, `--branch`, `--install-dir`, `--skip-node`, `--skip-claude`, `--dry-run`, `--help`. This is the design target for the automated "Add SSH env → install daemon" flow that lands with Phase 18.3; until then you run it manually.
+
+- **Docs**:
+  - `docs/CONTINUOUS_BUILD_ROADMAP.md` — the top-of-queue plan. Three ordered phases: hosted backend (18.1+18.4), daemon split + SSH auto-install (18.3), Agent SDK migration (optional, later). Definition of done for "production ready" is explicit.
+  - `docs/SSH_VM_SETUP.md` — fast path now front-loaded at the top pointing at the bootstrap script. Manual option kept below as fallback.
+
+- **Tests**: 64 backend → 66 backend (2 new scheduler tests: env-disconnected skip, metadata.backlogItemId written on spawn). 66 + 7 MCP + 3 CLI + 1 desktop = 77 total.
+
+- **claude.md updates**:
+  - Priority queue re-ordered: hosted backend now #1 (active), daemon/auto-install #2, notifications #3. Continuous Build bulk-work moved to "done above." Everything else pushed to "later."
+  - This session note.
+
+Deferred: Layer-5 idle-timeout safeguard (nice-to-have — Option 3 means most timeouts are moot for autonomous tasks, only matters for interactive). Agent SDK migration (Phase 18 follow-up).
 
 ### Session 10 (Continuous Build — Phase 20)
 Shipped the whole "point FastOwl at a TODO doc and it builds it" feature end-to-end, covering 20.1–20.5.
