@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { DB } from '../db/index.js';
 import { githubService } from '../services/github.js';
 import type { ApiResponse } from '@fastowl/shared';
 
@@ -11,21 +10,15 @@ const pendingOAuthStates = new Map<string, { workspaceId: string; expiresAt: num
 setInterval(() => {
   const now = Date.now();
   for (const [state, data] of pendingOAuthStates) {
-    if (data.expiresAt < now) {
-      pendingOAuthStates.delete(state);
-    }
+    if (data.expiresAt < now) pendingOAuthStates.delete(state);
   }
-}, 60000); // Every minute
+}, 60000);
 
-export function githubRoutes(_db: DB): Router {
+export function githubRoutes(): Router {
   const router = Router();
 
-  /**
-   * Check if GitHub OAuth is configured
-   */
   router.get('/status', (req, res) => {
     const { workspaceId } = req.query;
-
     const configured = githubService.isConfigured();
 
     if (!configured) {
@@ -43,95 +36,63 @@ export function githubRoutes(_db: DB): Router {
       const status = githubService.getConnectionStatus(workspaceId as string);
       return res.json({
         success: true,
-        data: {
-          configured: true,
-          ...status,
-        },
+        data: { configured: true, ...status },
       });
     }
 
-    res.json({
-      success: true,
-      data: { configured: true, connected: false },
-    });
+    res.json({ success: true, data: { configured: true, connected: false } });
   });
 
-  /**
-   * Start OAuth flow - returns authorization URL
-   */
   router.post('/connect', (req, res) => {
     const { workspaceId } = req.body;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     if (!githubService.isConfigured()) {
-      return res.status(400).json({
-        success: false,
-        error: 'GitHub OAuth not configured',
-      });
+      return res.status(400).json({ success: false, error: 'GitHub OAuth not configured' });
     }
 
-    // Generate state for CSRF protection
     const state = uuid();
     pendingOAuthStates.set(state, {
       workspaceId,
-      expiresAt: Date.now() + 10 * 60 * 1000, // 10 minutes
+      expiresAt: Date.now() + 10 * 60 * 1000,
     });
 
     const authUrl = githubService.getAuthorizationUrl(workspaceId, state);
-
-    res.json({
-      success: true,
-      data: { authUrl, state },
-    });
+    res.json({ success: true, data: { authUrl, state } });
   });
 
-  /**
-   * OAuth callback - exchanges code for token
-   */
   router.get('/callback', async (req, res) => {
     const { code, state, error, error_description } = req.query;
 
-    // Handle OAuth errors
     if (error) {
-      return res.redirect(`/?github_error=${encodeURIComponent(error_description as string || error as string)}`);
+      return res.redirect(
+        `/?github_error=${encodeURIComponent(error_description as string || (error as string))}`
+      );
     }
 
     if (!code || !state) {
       return res.redirect('/?github_error=missing_params');
     }
 
-    // Parse state to get workspaceId
     const stateStr = state as string;
     const [workspaceId, stateToken] = stateStr.split(':');
 
-    // Verify state
     const pendingState = pendingOAuthStates.get(stateToken);
     if (!pendingState || pendingState.workspaceId !== workspaceId) {
       return res.redirect('/?github_error=invalid_state');
     }
 
-    // Clean up state
     pendingOAuthStates.delete(stateToken);
 
     try {
-      // Exchange code for token
       const tokenData = await githubService.exchangeCodeForToken(code as string);
-
-      // Store the token
-      githubService.storeToken(
+      await githubService.storeToken(
         workspaceId,
         tokenData.access_token,
         tokenData.token_type,
         tokenData.scope
       );
-
-      // Redirect to settings with success
       res.redirect('/?github_connected=true');
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -139,37 +100,20 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Disconnect GitHub from a workspace
-   */
-  router.post('/disconnect', (req, res) => {
+  router.post('/disconnect', async (req, res) => {
     const { workspaceId } = req.body;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
-    githubService.removeToken(workspaceId);
-
+    await githubService.removeToken(workspaceId);
     res.json({ success: true } as ApiResponse<void>);
   });
 
-  /**
-   * Get authenticated user info
-   */
   router.get('/user', async (req, res) => {
     const { workspaceId } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const user = await githubService.getUser(workspaceId as string);
       res.json({ success: true, data: user });
@@ -179,19 +123,11 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * List repositories
-   */
   router.get('/repos', async (req, res) => {
     const { workspaceId, per_page, page } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const repos = await githubService.listRepositories(workspaceId as string, {
         per_page: per_page ? parseInt(per_page as string, 10) : undefined,
@@ -204,20 +140,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * List pull requests for a repository
-   */
   router.get('/repos/:owner/:repo/pulls', async (req, res) => {
     const { owner, repo } = req.params;
     const { workspaceId, state } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const pulls = await githubService.listPullRequests(
         workspaceId as string,
@@ -232,37 +160,25 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Get check runs for a PR
-   */
   router.get('/repos/:owner/:repo/pulls/:number/checks', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
-      // First get the PR to get the head SHA
       const pr = await githubService.getPullRequest(
         workspaceId as string,
         owner,
         repo,
         parseInt(number, 10)
       );
-
-      // Then get check runs for that SHA
       const checks = await githubService.getCheckRuns(
         workspaceId as string,
         owner,
         repo,
         pr.head.sha
       );
-
       res.json({ success: true, data: checks });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
@@ -270,20 +186,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Get a specific pull request
-   */
   router.get('/repos/:owner/:repo/pulls/:number', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const pr = await githubService.getPullRequest(
         workspaceId as string,
@@ -298,20 +206,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Get files changed in a pull request
-   */
   router.get('/repos/:owner/:repo/pulls/:number/files', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const files = await githubService.getPRFiles(
         workspaceId as string,
@@ -326,20 +226,15 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Create a pull request
-   */
   router.post('/repos/:owner/:repo/pulls', async (req, res) => {
     const { owner, repo } = req.params;
     const { workspaceId, title, head, base, body, draft } = req.body;
-
     if (!workspaceId || !title || !head || !base) {
       return res.status(400).json({
         success: false,
         error: 'workspaceId, title, head, and base are required',
       });
     }
-
     try {
       const pr = await githubService.createPullRequest(
         workspaceId,
@@ -354,20 +249,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Update a pull request
-   */
   router.patch('/repos/:owner/:repo/pulls/:number', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId, title, body, state, base } = req.body;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const pr = await githubService.updatePullRequest(
         workspaceId,
@@ -383,20 +270,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Merge a pull request
-   */
   router.put('/repos/:owner/:repo/pulls/:number/merge', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId, commit_title, commit_message, merge_method } = req.body;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
       const result = await githubService.mergePullRequest(
         workspaceId,
@@ -412,20 +291,15 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Create a review on a pull request
-   */
   router.post('/repos/:owner/:repo/pulls/:number/reviews', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId, body, event, comments } = req.body;
-
     if (!workspaceId || !event) {
       return res.status(400).json({
         success: false,
         error: 'workspaceId and event are required',
       });
     }
-
     try {
       const review = await githubService.createPRReview(
         workspaceId,
@@ -441,20 +315,12 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * Create a comment on a pull request
-   */
   router.post('/repos/:owner/:repo/pulls/:number/comments', async (req, res) => {
     const { owner, repo, number } = req.params;
     const { workspaceId, body } = req.body;
-
     if (!workspaceId || !body) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId and body are required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId and body are required' });
     }
-
     try {
       const comment = await githubService.createPRComment(
         workspaceId,
@@ -470,30 +336,17 @@ export function githubRoutes(_db: DB): Router {
     }
   });
 
-  /**
-   * List branches for a repository
-   */
   router.get('/repos/:owner/:repo/branches', async (req, res) => {
     const { owner, repo } = req.params;
     const { workspaceId, per_page, page } = req.query;
-
     if (!workspaceId) {
-      return res.status(400).json({
-        success: false,
-        error: 'workspaceId is required',
-      });
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
-
     try {
-      const branches = await githubService.listBranches(
-        workspaceId as string,
-        owner,
-        repo,
-        {
-          per_page: per_page ? parseInt(per_page as string, 10) : undefined,
-          page: page ? parseInt(page as string, 10) : undefined,
-        }
-      );
+      const branches = await githubService.listBranches(workspaceId as string, owner, repo, {
+        per_page: per_page ? parseInt(per_page as string, 10) : undefined,
+        page: page ? parseInt(page as string, 10) : undefined,
+      });
       res.json({ success: true, data: branches });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';

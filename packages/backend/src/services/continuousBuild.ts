@@ -1,4 +1,5 @@
 import { v4 as uuid } from 'uuid';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type {
   BacklogItem,
   BacklogSource,
@@ -6,18 +7,18 @@ import type {
   MarkdownFileBacklogConfig,
   TaskStatus,
 } from '@fastowl/shared';
-import { DB } from '../db/index.js';
+import { getDbClient, type Database } from '../db/client.js';
+import {
+  workspaces as workspacesTable,
+  tasks as tasksTable,
+  backlogItems as backlogItemsTable,
+} from '../db/schema.js';
 import { backlogService } from './backlog/service.js';
 import { environmentService } from './environment.js';
 import { domainEvents, type DomainTaskStatusEvent } from './events.js';
 import { emitTaskStatus } from './websocket.js';
 
 const TERMINAL_STATUSES: TaskStatus[] = ['completed', 'failed', 'cancelled'];
-
-interface WorkspaceRow {
-  id: string;
-  settings: string;
-}
 
 /**
  * Keeps the task queue warm from a workspace's backlog sources.
@@ -30,13 +31,15 @@ interface WorkspaceRow {
  * a source's file changed out from under us.
  */
 class ContinuousBuildScheduler {
-  private db: DB | null = null;
   private tickTimer: NodeJS.Timeout | null = null;
   private listener: ((evt: DomainTaskStatusEvent) => void) | null = null;
   private creating = new Set<string>();
 
-  init(db: DB): void {
-    this.db = db;
+  private get db(): Database {
+    return getDbClient();
+  }
+
+  async init(): Promise<void> {
     this.listener = (evt) => {
       this.onTaskStatus(evt).catch((err) =>
         console.error('ContinuousBuildScheduler onTaskStatus error:', err)
@@ -68,29 +71,29 @@ class ContinuousBuildScheduler {
    */
   async scheduleNext(workspaceId: string): Promise<void> {
     if (this.creating.has(workspaceId)) return;
-    const settings = this.getContinuousBuildSettings(workspaceId);
+    const settings = await this.getContinuousBuildSettings(workspaceId);
     if (!settings?.enabled) return;
 
-    const inFlight = this.countInFlight(workspaceId);
+    const inFlight = await this.countInFlight(workspaceId);
     if (inFlight >= Math.max(1, settings.maxConcurrent)) return;
 
-    if (settings.requireApproval && this.countAwaitingReview(workspaceId) > 0) {
+    if (settings.requireApproval && (await this.countAwaitingReview(workspaceId)) > 0) {
       return;
     }
 
-    const sources = backlogService.listSources(workspaceId).filter((s) => s.enabled);
+    const sources = (await backlogService.listSources(workspaceId)).filter((s) => s.enabled);
     for (const source of sources) {
       // Skip sources whose target environment is disconnected — spawning a
       // task there would just fail at agent start time and put the item
       // back in the queue.
-      if (!this.isSourceEnvironmentReady(source)) {
+      if (!(await this.isSourceEnvironmentReady(source))) {
         console.log(
           `[ContinuousBuild] Skipping source ${source.id}: environment not connected`
         );
         continue;
       }
 
-      const item = backlogService.nextActionableItem(source.id);
+      const item = await backlogService.nextActionableItem(source.id);
       if (!item) continue;
 
       this.creating.add(workspaceId);
@@ -103,28 +106,25 @@ class ContinuousBuildScheduler {
     }
   }
 
-  private isSourceEnvironmentReady(source: BacklogSource): boolean {
+  private async isSourceEnvironmentReady(source: BacklogSource): Promise<boolean> {
     const envId = source.environmentId;
     if (!envId) {
-      // Default-to-local sources: find the first local env and check.
-      const local = environmentService
-        .getAllEnvironments()
-        .find((e) => e.type === 'local');
-      return Boolean(local);
+      const envs = await environmentService.getAllEnvironments();
+      return Boolean(envs.find((e) => e.type === 'local'));
     }
-    const env = environmentService.getEnvironment(envId);
+    const env = await environmentService.getEnvironment(envId);
     if (!env) return false;
     if (env.type === 'local') return true;
     return env.status === 'connected';
   }
 
   private async onTaskStatus(evt: DomainTaskStatusEvent): Promise<void> {
-    const item = backlogService.findByClaimedTask(evt.taskId);
+    const item = await backlogService.findByClaimedTask(evt.taskId);
     if (item) {
       if (evt.status === 'completed') {
-        backlogService.completeItem(item.id);
+        await backlogService.completeItem(item.id);
       } else if (evt.status === 'failed' || evt.status === 'cancelled') {
-        backlogService.releaseItem(item.id);
+        await backlogService.releaseItem(item.id);
       }
     }
 
@@ -134,49 +134,46 @@ class ContinuousBuildScheduler {
   }
 
   private async tickAllWorkspaces(): Promise<void> {
-    const db = this.requireDb();
-    const rows = db.prepare('SELECT id, settings FROM workspaces').all() as WorkspaceRow[];
+    const rows = await this.db
+      .select({ id: workspacesTable.id, settings: workspacesTable.settings })
+      .from(workspacesTable);
     for (const row of rows) {
-      let settings: ContinuousBuildSettings | undefined;
-      try {
-        settings = JSON.parse(row.settings)?.continuousBuild;
-      } catch {
-        continue;
-      }
+      const settings = (row.settings as { continuousBuild?: ContinuousBuildSettings } | null)
+        ?.continuousBuild;
       if (!settings?.enabled) continue;
       await this.scheduleNext(row.id);
     }
   }
 
   private async spawnTaskForItem(source: BacklogSource, item: BacklogItem): Promise<void> {
-    const db = this.requireDb();
     const sourcePath = describeSourcePath(source);
     const title = deriveTitle(item.text);
     const prompt = buildPrompt(sourcePath, item.text);
-    const now = new Date().toISOString();
+    const now = new Date();
     const taskId = uuid();
 
-    const tx = db.transaction(() => {
-      db.prepare(
-        `INSERT INTO tasks
-           (id, workspace_id, type, status, priority, title, description, prompt,
-            repository_id, assigned_environment_id, metadata, created_at, updated_at)
-         VALUES (?, ?, 'code_writing', 'queued', 'medium', ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        taskId,
-        source.workspaceId,
+    await this.db.transaction(async (tx) => {
+      await tx.insert(tasksTable).values({
+        id: taskId,
+        workspaceId: source.workspaceId,
+        type: 'code_writing',
+        status: 'queued',
+        priority: 'medium',
         title,
-        item.text,
+        description: item.text,
         prompt,
-        source.repositoryId ?? null,
-        source.environmentId ?? null,
-        JSON.stringify({ backlogSourceId: source.id, backlogItemId: item.id }),
-        now,
-        now
-      );
-      backlogService.claimItem(item.id, taskId);
+        repositoryId: source.repositoryId ?? null,
+        assignedEnvironmentId: source.environmentId ?? null,
+        metadata: { backlogSourceId: source.id, backlogItemId: item.id },
+        createdAt: now,
+        updatedAt: now,
+      });
+      // Inline the claim so it's in the same transaction as the insert.
+      await tx
+        .update(backlogItemsTable)
+        .set({ claimedTaskId: taskId, updatedAt: now })
+        .where(eq(backlogItemsTable.id, item.id));
     });
-    tx();
 
     emitTaskStatus(source.workspaceId, taskId, 'queued');
     console.log(
@@ -184,46 +181,43 @@ class ContinuousBuildScheduler {
     );
   }
 
-  private getContinuousBuildSettings(workspaceId: string): ContinuousBuildSettings | undefined {
-    const db = this.requireDb();
-    const row = db
-      .prepare('SELECT settings FROM workspaces WHERE id = ?')
-      .get(workspaceId) as { settings: string } | undefined;
-    if (!row) return undefined;
-    try {
-      return JSON.parse(row.settings)?.continuousBuild;
-    } catch {
-      return undefined;
-    }
+  private async getContinuousBuildSettings(
+    workspaceId: string
+  ): Promise<ContinuousBuildSettings | undefined> {
+    const rows = await this.db
+      .select({ settings: workspacesTable.settings })
+      .from(workspacesTable)
+      .where(eq(workspacesTable.id, workspaceId))
+      .limit(1);
+    return (rows[0]?.settings as { continuousBuild?: ContinuousBuildSettings } | null)
+      ?.continuousBuild;
   }
 
-  private countInFlight(workspaceId: string): number {
-    const db = this.requireDb();
-    const row = db
-      .prepare(
-        `SELECT COUNT(*) AS c FROM tasks
-         WHERE workspace_id = ?
-           AND type = 'code_writing'
-           AND status IN ('queued', 'in_progress', 'awaiting_review')`
-      )
-      .get(workspaceId) as { c: number };
-    return row.c;
+  private async countInFlight(workspaceId: string): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(tasksTable)
+      .where(
+        and(
+          eq(tasksTable.workspaceId, workspaceId),
+          eq(tasksTable.type, 'code_writing'),
+          inArray(tasksTable.status, ['queued', 'in_progress', 'awaiting_review'])
+        )
+      );
+    return rows[0]?.count ?? 0;
   }
 
-  private countAwaitingReview(workspaceId: string): number {
-    const db = this.requireDb();
-    const row = db
-      .prepare(
-        `SELECT COUNT(*) AS c FROM tasks
-         WHERE workspace_id = ? AND status = 'awaiting_review'`
-      )
-      .get(workspaceId) as { c: number };
-    return row.c;
-  }
-
-  private requireDb(): DB {
-    if (!this.db) throw new Error('ContinuousBuildScheduler not initialized');
-    return this.db;
+  private async countAwaitingReview(workspaceId: string): Promise<number> {
+    const rows = await this.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(tasksTable)
+      .where(
+        and(
+          eq(tasksTable.workspaceId, workspaceId),
+          eq(tasksTable.status, 'awaiting_review')
+        )
+      );
+    return rows[0]?.count ?? 0;
   }
 }
 
@@ -246,9 +240,7 @@ function deriveTitle(text: string): string {
 
 function buildPrompt(sourcePath: string, itemText: string): string {
   // Autonomous Continuous Build tasks run via `claude --print --permission-mode
-  // acceptEdits`. Completion = process exit. The prompt tells Claude what to do
-  // and the acceptance bar; it does NOT need to call FastOwl endpoints —
-  // exiting cleanly after committing the work is the done signal.
+  // acceptEdits`. Completion = process exit.
   return [
     `You are working autonomously on a FastOwl Continuous Build task.`,
     `Implement the following TODO item from \`${sourcePath}\`:`,

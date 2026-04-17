@@ -1,6 +1,11 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { DB } from '../db/index.js';
+import { and, desc, eq, SQL, sql } from 'drizzle-orm';
+import { getDbClient } from '../db/client.js';
+import {
+  tasks as tasksTable,
+  repositories as repositoriesTable,
+} from '../db/schema.js';
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
@@ -8,6 +13,9 @@ import { emitTaskStatus } from '../services/websocket.js';
 import { generateTaskMetadata, isConfigured as isAIConfigured } from '../services/ai.js';
 import type {
   Task,
+  TaskPriority,
+  TaskStatus,
+  TaskType,
   CreateTaskRequest,
   ApiResponse,
   GenerateTaskMetadataRequest,
@@ -15,7 +23,7 @@ import type {
 } from '@fastowl/shared';
 import { isAgentTask } from '@fastowl/shared';
 
-export function taskRoutes(db: DB): Router {
+export function taskRoutes(): Router {
   const router = Router();
 
   // Generate task metadata from a prompt using AI
@@ -27,7 +35,6 @@ export function taskRoutes(db: DB): Router {
     }
 
     if (!isAIConfigured()) {
-      // Fallback when AI is not configured
       return res.json({
         success: true,
         data: {
@@ -41,9 +48,8 @@ export function taskRoutes(db: DB): Router {
     try {
       const metadata = await generateTaskMetadata(body.prompt);
       res.json({ success: true, data: metadata } as ApiResponse<GenerateTaskMetadataResponse>);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to generate task metadata:', err);
-      // Return fallback on error
       res.json({
         success: true,
         data: {
@@ -56,42 +62,48 @@ export function taskRoutes(db: DB): Router {
   });
 
   // List tasks (with optional filters)
-  router.get('/', (req, res) => {
+  router.get('/', async (req, res) => {
+    const db = getDbClient();
     const { workspaceId, status, type } = req.query;
 
-    let query = 'SELECT * FROM tasks WHERE 1=1';
-    const params: any[] = [];
+    const conditions: SQL[] = [];
+    if (workspaceId) conditions.push(eq(tasksTable.workspaceId, workspaceId as string));
+    if (status) conditions.push(eq(tasksTable.status, status as string));
+    if (type) conditions.push(eq(tasksTable.type, type as string));
 
-    if (workspaceId) {
-      query += ' AND workspace_id = ?';
-      params.push(workspaceId);
-    }
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-    if (type) {
-      query += ' AND type = ?';
-      params.push(type);
-    }
+    const priorityCase = sql<number>`CASE ${tasksTable.priority}
+      WHEN 'urgent' THEN 1
+      WHEN 'high' THEN 2
+      WHEN 'medium' THEN 3
+      ELSE 4
+    END`;
 
-    query += ` ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`;
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(priorityCase, desc(tasksTable.createdAt));
 
-    const rows = db.prepare(query).all(...params);
-    const tasks = rows.map((row) => rowToTask(row));
-    res.json({ success: true, data: tasks } as ApiResponse<Task[]>);
+    res.json({
+      success: true,
+      data: rows.map((row) => rowToTask(row)),
+    } as ApiResponse<Task[]>);
   });
 
   // Get single task (includes agent status if running)
-  router.get('/:id', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.get('/:id', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row, { includeTerminalOutput: true });
+    const task = rowToTask(rows[0], { includeTerminalOutput: true });
 
-    // If task is in_progress, prefer live in-memory output + agent status
     if (task.status === 'in_progress') {
       const activeAgent = agentService.getAgentByTaskId(task.id);
       if (activeAgent) {
@@ -105,145 +117,193 @@ export function taskRoutes(db: DB): Router {
   });
 
   // Create task
-  router.post('/', (req, res) => {
+  router.post('/', async (req, res) => {
+    const db = getDbClient();
     const body = req.body as CreateTaskRequest;
     const id = uuid();
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    db.prepare(`
-      INSERT INTO tasks (id, workspace_id, type, title, description, prompt, priority, repository_id, assigned_environment_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(tasksTable).values({
       id,
-      body.workspaceId,
-      body.type,
-      body.title,
-      body.description,
-      body.prompt || null,
-      body.priority || 'medium',
-      body.repositoryId || null,
-      body.assignedEnvironmentId || null,
-      now,
-      now
-    );
+      workspaceId: body.workspaceId,
+      type: body.type,
+      title: body.title,
+      description: body.description,
+      prompt: body.prompt ?? null,
+      priority: body.priority || 'medium',
+      repositoryId: body.repositoryId ?? null,
+      assignedEnvironmentId: body.assignedEnvironmentId ?? null,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id);
-    res.status(201).json({ success: true, data: rowToTask(row) } as ApiResponse<Task>);
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, id))
+      .limit(1);
+    res.status(201).json({ success: true, data: rowToTask(rows[0]) } as ApiResponse<Task>);
   });
 
   // Update task
-  router.patch('/:id', (req, res) => {
-    const body = req.body;
-    const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!existing) {
+  router.patch('/:id', async (req, res) => {
+    const db = getDbClient();
+    const body = req.body as {
+      status?: TaskStatus;
+      priority?: TaskPriority;
+      title?: string;
+      description?: string;
+      prompt?: string;
+      assignedAgentId?: string;
+      assignedEnvironmentId?: string;
+      result?: Record<string, unknown>;
+      metadata?: Record<string, unknown>;
+    };
+
+    const existing = await db
+      .select({ id: tasksTable.id })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!existing[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const updates: string[] = [];
-    const values: any[] = [];
+    const updates: Record<string, unknown> = {};
+    if (body.status !== undefined) updates.status = body.status;
+    if (body.priority !== undefined) updates.priority = body.priority;
+    if (body.title !== undefined) updates.title = body.title;
+    if (body.description !== undefined) updates.description = body.description;
+    if (body.prompt !== undefined) updates.prompt = body.prompt;
+    if (body.assignedAgentId !== undefined) updates.assignedAgentId = body.assignedAgentId;
+    if (body.assignedEnvironmentId !== undefined)
+      updates.assignedEnvironmentId = body.assignedEnvironmentId;
+    if (body.result !== undefined) updates.result = body.result;
+    if (body.metadata !== undefined) updates.metadata = body.metadata;
 
-    const allowedFields = ['status', 'priority', 'title', 'description', 'prompt', 'assignedAgentId', 'assignedEnvironmentId', 'result', 'metadata'];
-    for (const field of allowedFields) {
-      if (body[field] !== undefined) {
-        const dbField = field.replace(/([A-Z])/g, '_$1').toLowerCase();
-        updates.push(`${dbField} = ?`);
-        values.push(typeof body[field] === 'object' ? JSON.stringify(body[field]) : body[field]);
-      }
+    const now = new Date();
+    if (
+      body.status === 'completed' ||
+      body.status === 'failed' ||
+      body.status === 'cancelled'
+    ) {
+      updates.completedAt = now;
     }
 
-    if (body.status === 'completed' || body.status === 'failed' || body.status === 'cancelled') {
-      updates.push('completed_at = ?');
-      values.push(new Date().toISOString());
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = now;
+      await db
+        .update(tasksTable)
+        .set(updates)
+        .where(eq(tasksTable.id, req.params.id));
     }
 
-    if (updates.length > 0) {
-      updates.push('updated_at = ?');
-      values.push(new Date().toISOString());
-      values.push(req.params.id);
-
-      db.prepare(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    }
-
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToTask(row) } as ApiResponse<Task>);
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(rows[0]) } as ApiResponse<Task>);
   });
 
   // Retry/reset a task back to queued
-  router.post('/:id/retry', (req, res) => {
-    const existing = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!existing) {
+  router.post('/:id/retry', async (req, res) => {
+    const db = getDbClient();
+    const existing = await db
+      .select({ id: tasksTable.id })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!existing[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE tasks
-      SET status = 'queued', assigned_agent_id = NULL, result = NULL, completed_at = NULL, updated_at = ?
-      WHERE id = ?
-    `).run(now, req.params.id);
+    await db
+      .update(tasksTable)
+      .set({
+        status: 'queued',
+        assignedAgentId: null,
+        result: null,
+        completedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(tasksTable.id, req.params.id));
 
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToTask(row) } as ApiResponse<Task>);
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(rows[0]) } as ApiResponse<Task>);
   });
 
   // Start executing a task (spawns an agent)
   router.post('/:id/start', async (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
+    const task = rowToTask(rows[0]);
 
-    // Check if task is already running
     if (task.status === 'in_progress') {
       return res.status(400).json({ success: false, error: 'Task is already running' });
     }
-
-    // Only agent-driven tasks (non-manual) can be started
     if (!isAgentTask(task.type)) {
       return res.status(400).json({ success: false, error: 'Only agent tasks can be started' });
     }
 
-    // Find environment to use
     let environmentId = task.assignedEnvironmentId;
     if (!environmentId) {
-      // Find first connected environment
-      const environments = environmentService.getAllEnvironments();
-      const connected = environments.find(e => e.status === 'connected');
+      const environments = await environmentService.getAllEnvironments();
+      const connected = environments.find((e) => e.status === 'connected');
       if (!connected) {
-        return res.status(400).json({ success: false, error: 'No connected environments available' });
+        return res
+          .status(400)
+          .json({ success: false, error: 'No connected environments available' });
       }
       environmentId = connected.id;
     }
 
-    // Check if environment is connected
-    const envStatus = environmentService.getStatus(environmentId);
+    const envStatus = await environmentService.getStatus(environmentId);
     if (envStatus !== 'connected') {
       try {
         await environmentService.connect(environmentId);
-      } catch (_err) {
-        return res.status(400).json({ success: false, error: 'Failed to connect to environment' });
+      } catch {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Failed to connect to environment' });
       }
     }
 
-    // Check if environment already has an active task
     const existingAgent = agentService.getAgentByTaskId(task.id);
     if (existingAgent) {
-      return res.status(400).json({ success: false, error: 'Task already has an active agent' });
+      return res
+        .status(400)
+        .json({ success: false, error: 'Task already has an active agent' });
     }
 
-    // Get repository path if task has a repository
     let workingDirectory: string | undefined;
     let taskBranch: string | undefined;
 
     if (task.repositoryId) {
-      const repoRow = db.prepare('SELECT local_path FROM repositories WHERE id = ?').get(task.repositoryId) as { local_path: string | null } | undefined;
-      if (repoRow?.local_path) {
-        workingDirectory = repoRow.local_path;
+      const repoRows = await db
+        .select({
+          localPath: repositoriesTable.localPath,
+        })
+        .from(repositoriesTable)
+        .where(eq(repositoriesTable.id, task.repositoryId))
+        .limit(1);
+      const repoRow = repoRows[0];
 
-        // Create or checkout task branch if task has a repo
-        // Use existing branch if task already has one, otherwise create new
+      if (repoRow?.localPath) {
+        workingDirectory = repoRow.localPath;
+
         if (task.branch) {
           try {
             await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
@@ -267,13 +327,11 @@ export function taskRoutes(db: DB): Router {
             );
           } catch (err) {
             console.warn('Failed to create task branch (continuing without):', err);
-            // Continue without branch - not critical
           }
         }
       }
     }
 
-    // Start the agent for this task
     try {
       const agent = await agentService.startAgent({
         environmentId,
@@ -283,52 +341,62 @@ export function taskRoutes(db: DB): Router {
         workingDirectory,
       });
 
-      // Update task status and branch
-      const now = new Date().toISOString();
-      if (taskBranch) {
-        db.prepare(`
-          UPDATE tasks SET status = 'in_progress', branch = ?, assigned_agent_id = ?, assigned_environment_id = ?, updated_at = ? WHERE id = ?
-        `).run(taskBranch, agent.id, environmentId, now, task.id);
-      } else {
-        db.prepare(`
-          UPDATE tasks SET status = 'in_progress', assigned_agent_id = ?, assigned_environment_id = ?, updated_at = ? WHERE id = ?
-        `).run(agent.id, environmentId, now, task.id);
-      }
+      const now = new Date();
+      const updateValues: Record<string, unknown> = {
+        status: 'in_progress',
+        assignedAgentId: agent.id,
+        assignedEnvironmentId: environmentId,
+        updatedAt: now,
+      };
+      if (taskBranch) updateValues.branch = taskBranch;
+
+      await db
+        .update(tasksTable)
+        .set(updateValues)
+        .where(eq(tasksTable.id, task.id));
 
       emitTaskStatus(task.workspaceId, task.id, 'in_progress');
 
-      const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
-      const updatedTask = rowToTask(updatedRow);
+      const updatedRows = await db
+        .select()
+        .from(tasksTable)
+        .where(eq(tasksTable.id, task.id))
+        .limit(1);
+      const updatedTask = rowToTask(updatedRows[0]);
       updatedTask.agentStatus = 'working';
       updatedTask.agentAttention = 'none';
       updatedTask.terminalOutput = '';
 
       res.json({ success: true, data: updatedTask } as ApiResponse<Task>);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to start task';
       console.error('Failed to start task:', err);
-      res.status(500).json({ success: false, error: err.message || 'Failed to start task' });
+      res.status(500).json({ success: false, error: msg });
     }
   });
 
   // Send input to a running task
-  router.post('/:id/input', (req, res) => {
-    const { input } = req.body;
+  router.post('/:id/input', async (req, res) => {
+    const db = getDbClient();
+    const { input } = req.body as { input: string };
     if (!input) {
       return res.status(400).json({ success: false, error: 'Input is required' });
     }
 
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
-
+    const task = rowToTask(rows[0]);
     if (task.status !== 'in_progress') {
       return res.status(400).json({ success: false, error: 'Task is not running' });
     }
 
-    // Find the agent for this task
     const activeAgent = agentService.getAgentByTaskId(task.id);
     if (!activeAgent) {
       return res.status(400).json({ success: false, error: 'No active agent for this task' });
@@ -337,137 +405,200 @@ export function taskRoutes(db: DB): Router {
     try {
       agentService.sendInput(activeAgent.id, input);
       res.json({ success: true } as ApiResponse<void>);
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message || 'Failed to send input' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to send input';
+      res.status(500).json({ success: false, error: msg });
     }
   });
 
-  // Mark a running task as ready for review. Stops the agent but keeps
-  // the task alive in 'awaiting_review' so the user can approve/reject.
-  router.post('/:id/ready-for-review', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+  // Mark a running task as ready for review.
+  router.post('/:id/ready-for-review', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
-
+    const task = rowToTask(rows[0]);
     if (task.status !== 'in_progress') {
       return res.status(400).json({ success: false, error: 'Task is not running' });
     }
-
     if (!isAgentTask(task.type)) {
-      return res.status(400).json({ success: false, error: 'Only agent tasks can be marked ready for review' });
+      return res
+        .status(400)
+        .json({ success: false, error: 'Only agent tasks can be marked ready for review' });
     }
 
-    // Stop the agent (if still running)
     const activeAgent = agentService.getAgentByTaskId(task.id);
-    if (activeAgent) {
-      agentService.stopAgent(activeAgent.id);
-    }
+    if (activeAgent) agentService.stopAgent(activeAgent.id);
 
-    const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE tasks SET status = 'awaiting_review', updated_at = ? WHERE id = ?
-    `).run(now, task.id);
+    await db
+      .update(tasksTable)
+      .set({ status: 'awaiting_review', updatedAt: new Date() })
+      .where(eq(tasksTable.id, task.id));
 
     emitTaskStatus(task.workspaceId, task.id, 'awaiting_review');
 
-    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
-    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+    const updatedRows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, task.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
   // Approve an awaiting_review task → completed
-  router.post('/:id/approve', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; workspace_id: string } | undefined;
-    if (!row) {
+  router.post('/:id/approve', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
-    if (row.status !== 'awaiting_review') {
+    if (rows[0].status !== 'awaiting_review') {
       return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
     }
-    const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE tasks SET status = 'completed', completed_at = ?, updated_at = ? WHERE id = ?
-    `).run(now, now, req.params.id);
-    emitTaskStatus(row.workspace_id, req.params.id, 'completed');
-    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+
+    const now = new Date();
+    await db
+      .update(tasksTable)
+      .set({ status: 'completed', completedAt: now, updatedAt: now })
+      .where(eq(tasksTable.id, req.params.id));
+
+    emitTaskStatus(rows[0].workspaceId, req.params.id, 'completed');
+
+    const updatedRows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Reject an awaiting_review task → back to queued for more work
-  router.post('/:id/reject', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; workspace_id: string } | undefined;
-    if (!row) {
+  // Reject an awaiting_review task → back to queued
+  router.post('/:id/reject', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
-    if (row.status !== 'awaiting_review') {
+    if (rows[0].status !== 'awaiting_review') {
       return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
     }
-    const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE tasks SET status = 'queued', assigned_agent_id = NULL, updated_at = ? WHERE id = ?
-    `).run(now, req.params.id);
-    emitTaskStatus(row.workspace_id, req.params.id, 'queued');
-    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+
+    await db
+      .update(tasksTable)
+      .set({ status: 'queued', assignedAgentId: null, updatedAt: new Date() })
+      .where(eq(tasksTable.id, req.params.id));
+
+    emitTaskStatus(rows[0].workspaceId, req.params.id, 'queued');
+
+    const updatedRows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
   // Stop a running task
-  router.post('/:id/stop', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/stop', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
-
+    const task = rowToTask(rows[0]);
     if (task.status !== 'in_progress') {
       return res.status(400).json({ success: false, error: 'Task is not running' });
     }
 
-    // Find and stop the agent
     const activeAgent = agentService.getAgentByTaskId(task.id);
-    if (activeAgent) {
-      agentService.stopAgent(activeAgent.id);
-    }
+    if (activeAgent) agentService.stopAgent(activeAgent.id);
 
-    // Update task status to failed (stopped by user)
-    const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE tasks SET status = 'failed', result = ?, completed_at = ?, updated_at = ? WHERE id = ?
-    `).run(JSON.stringify({ success: false, error: 'Stopped by user' }), now, now, task.id);
+    const now = new Date();
+    await db
+      .update(tasksTable)
+      .set({
+        status: 'failed',
+        result: { success: false, error: 'Stopped by user' },
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(tasksTable.id, task.id));
 
-    emitTaskStatus(task.workspaceId, task.id, 'failed', { success: false, error: 'Stopped by user' });
+    emitTaskStatus(task.workspaceId, task.id, 'failed', {
+      success: false,
+      error: 'Stopped by user',
+    });
 
-    const updatedRow = db.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id);
-    res.json({ success: true, data: rowToTask(updatedRow) } as ApiResponse<Task>);
+    const updatedRows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, task.id))
+      .limit(1);
+    res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Get the diff of a task's work against the base branch.
-  // Requires task.branch + repository with local_path + an environment.
+  // Get the diff of a task's work against the base branch
   router.get('/:id/diff', async (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (!row) {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    const task = rowToTask(row);
+    const task = rowToTask(rows[0]);
     if (!task.branch || !task.repositoryId) {
-      return res.status(400).json({ success: false, error: 'Task has no branch or repository' });
+      return res
+        .status(400)
+        .json({ success: false, error: 'Task has no branch or repository' });
     }
 
-    const repoRow = db.prepare('SELECT local_path, default_branch FROM repositories WHERE id = ?').get(task.repositoryId) as { local_path: string | null; default_branch: string } | undefined;
-    if (!repoRow?.local_path) {
-      return res.status(400).json({ success: false, error: 'Repository has no local path on this machine' });
+    const repoRows = await db
+      .select({
+        localPath: repositoriesTable.localPath,
+        defaultBranch: repositoriesTable.defaultBranch,
+      })
+      .from(repositoriesTable)
+      .where(eq(repositoriesTable.id, task.repositoryId))
+      .limit(1);
+    const repoRow = repoRows[0];
+    if (!repoRow?.localPath) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Repository has no local path on this machine' });
     }
 
-    // Prefer the environment the task ran on; fall back to any connected one
     let environmentId = task.assignedEnvironmentId;
     if (!environmentId) {
-      const connected = environmentService.getAllEnvironments().find(e => e.status === 'connected');
+      const connected = (await environmentService.getAllEnvironments()).find(
+        (e) => e.status === 'connected'
+      );
       if (!connected) {
-        return res.status(400).json({ success: false, error: 'No connected environment to compute diff' });
+        return res
+          .status(400)
+          .json({ success: false, error: 'No connected environment to compute diff' });
       }
       environmentId = connected.id;
     }
@@ -476,53 +607,65 @@ export function taskRoutes(db: DB): Router {
       const diff = await gitService.getDiff(
         environmentId,
         task.branch,
-        repoRow.default_branch || 'main',
-        repoRow.local_path
+        repoRow.defaultBranch || 'main',
+        repoRow.localPath
       );
       res.json({ success: true, data: { diff } } as ApiResponse<{ diff: string }>);
-    } catch (err: any) {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to get diff';
       console.error('Failed to get diff:', err);
-      res.status(500).json({ success: false, error: err.message || 'Failed to get diff' });
+      res.status(500).json({ success: false, error: msg });
     }
   });
 
   // Get terminal output for a task
-  // For running tasks, prefer the live in-memory buffer (most recent).
-  // For completed/failed/cancelled tasks, fall back to the persisted column.
-  router.get('/:id/terminal', (req, res) => {
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id) as { status: string; terminal_output: string | null } | undefined;
-    if (!row) {
+  router.get('/:id/terminal', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({
+        status: tasksTable.status,
+        terminalOutput: tasksTable.terminalOutput,
+      })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    let terminalOutput = row.terminal_output || '';
-
-    if (row.status === 'in_progress') {
+    let terminalOutput = rows[0].terminalOutput || '';
+    if (rows[0].status === 'in_progress') {
       const activeAgent = agentService.getAgentByTaskId(req.params.id);
-      if (activeAgent) {
-        terminalOutput = activeAgent.outputBuffer;
-      }
+      if (activeAgent) terminalOutput = activeAgent.outputBuffer;
     }
 
-    res.json({ success: true, data: { terminalOutput } } as ApiResponse<{ terminalOutput: string }>);
+    res.json({
+      success: true,
+      data: { terminalOutput },
+    } as ApiResponse<{ terminalOutput: string }>);
   });
 
   // Delete task
-  router.delete('/:id', (req, res) => {
-    // First stop any running agent
-    const row = db.prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id);
-    if (row) {
-      const task = rowToTask(row);
+  router.delete('/:id', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (rows[0]) {
+      const task = rowToTask(rows[0]);
       if (task.status === 'in_progress') {
         const activeAgent = agentService.getAgentByTaskId(task.id);
-        if (activeAgent) {
-          agentService.stopAgent(activeAgent.id);
-        }
+        if (activeAgent) agentService.stopAgent(activeAgent.id);
       }
     }
 
-    const result = db.prepare('DELETE FROM tasks WHERE id = ?').run(req.params.id);
-    if (result.changes === 0) {
+    const result = await db
+      .delete(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .returning({ id: tasksTable.id });
+    if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
     res.json({ success: true } as ApiResponse<void>);
@@ -531,25 +674,28 @@ export function taskRoutes(db: DB): Router {
   return router;
 }
 
-function rowToTask(row: any, opts: { includeTerminalOutput?: boolean } = {}): Task {
+function rowToTask(
+  row: typeof tasksTable.$inferSelect,
+  opts: { includeTerminalOutput?: boolean } = {}
+): Task {
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
-    type: row.type,
-    status: row.status,
-    priority: row.priority,
+    workspaceId: row.workspaceId,
+    type: row.type as TaskType,
+    status: row.status as TaskStatus,
+    priority: row.priority as TaskPriority,
     title: row.title,
     description: row.description,
-    prompt: row.prompt || undefined,
-    repositoryId: row.repository_id || undefined,
-    branch: row.branch || undefined,
-    assignedAgentId: row.assigned_agent_id || undefined,
-    assignedEnvironmentId: row.assigned_environment_id || undefined,
-    result: row.result ? JSON.parse(row.result) : undefined,
-    metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    completedAt: row.completed_at || undefined,
-    terminalOutput: opts.includeTerminalOutput ? (row.terminal_output || undefined) : undefined,
+    prompt: row.prompt ?? undefined,
+    repositoryId: row.repositoryId ?? undefined,
+    branch: row.branch ?? undefined,
+    assignedAgentId: row.assignedAgentId ?? undefined,
+    assignedEnvironmentId: row.assignedEnvironmentId ?? undefined,
+    result: (row.result as Task['result']) ?? undefined,
+    metadata: (row.metadata as Task['metadata']) ?? undefined,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    completedAt: row.completedAt ? row.completedAt.toISOString() : undefined,
+    terminalOutput: opts.includeTerminalOutput ? row.terminalOutput || undefined : undefined,
   };
 }

@@ -1,116 +1,140 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { DB } from '../db/index.js';
+import { eq } from 'drizzle-orm';
+import { getDbClient } from '../db/client.js';
+import { environments as environmentsTable } from '../db/schema.js';
 import type {
   Environment,
+  EnvironmentConfig,
+  EnvironmentStatus,
   CreateEnvironmentRequest,
   ApiResponse,
 } from '@fastowl/shared';
 
-export function environmentRoutes(db: DB): Router {
+export function environmentRoutes(): Router {
   const router = Router();
 
-  // List all environments
-  router.get('/', (_req, res) => {
-    const rows = db.prepare('SELECT * FROM environments ORDER BY name').all();
-    const environments = rows.map(rowToEnvironment);
-    res.json({ success: true, data: environments } as ApiResponse<Environment[]>);
+  router.get('/', async (_req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(environmentsTable)
+      .orderBy(environmentsTable.name);
+    res.json({ success: true, data: rows.map(rowToEnvironment) } as ApiResponse<Environment[]>);
   });
 
-  // Get single environment
-  router.get('/:id', (req, res) => {
-    const row = db.prepare('SELECT * FROM environments WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.get('/:id', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
     }
-    res.json({ success: true, data: rowToEnvironment(row) } as ApiResponse<Environment>);
+    res.json({ success: true, data: rowToEnvironment(rows[0]) } as ApiResponse<Environment>);
   });
 
-  // Create environment
-  router.post('/', (req, res) => {
+  router.post('/', async (req, res) => {
+    const db = getDbClient();
     const body = req.body as CreateEnvironmentRequest;
     const id = uuid();
-    const now = new Date().toISOString();
-
-    // Local environments are always connected
+    const now = new Date();
     const initialStatus = body.type === 'local' ? 'connected' : 'disconnected';
 
-    db.prepare(`
-      INSERT INTO environments (id, name, type, status, config, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, body.name, body.type, initialStatus, JSON.stringify(body.config), now, now);
+    await db.insert(environmentsTable).values({
+      id,
+      name: body.name,
+      type: body.type,
+      status: initialStatus,
+      config: body.config,
+      createdAt: now,
+      updatedAt: now,
+    });
 
-    const row = db.prepare('SELECT * FROM environments WHERE id = ?').get(id);
-    res.status(201).json({ success: true, data: rowToEnvironment(row) } as ApiResponse<Environment>);
+    const rows = await db
+      .select()
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, id))
+      .limit(1);
+    res.status(201).json({ success: true, data: rowToEnvironment(rows[0]) } as ApiResponse<Environment>);
   });
 
-  // Update environment
-  router.patch('/:id', (req, res) => {
-    const body = req.body;
-    const existing = db.prepare('SELECT * FROM environments WHERE id = ?').get(req.params.id);
-    if (!existing) {
+  router.patch('/:id', async (req, res) => {
+    const db = getDbClient();
+    const body = req.body as {
+      name?: string;
+      config?: EnvironmentConfig;
+      status?: EnvironmentStatus;
+    };
+    const existing = await db
+      .select()
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, req.params.id))
+      .limit(1);
+    if (!existing[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
     }
 
-    const updates: string[] = [];
-    const values: any[] = [];
+    const updates: Record<string, unknown> = {};
+    if (body.name !== undefined) updates.name = body.name;
+    if (body.config !== undefined) updates.config = body.config;
+    if (body.status !== undefined) updates.status = body.status;
 
-    if (body.name !== undefined) {
-      updates.push('name = ?');
-      values.push(body.name);
-    }
-    if (body.config !== undefined) {
-      updates.push('config = ?');
-      values.push(JSON.stringify(body.config));
-    }
-    if (body.status !== undefined) {
-      updates.push('status = ?');
-      values.push(body.status);
+    if (Object.keys(updates).length > 0) {
+      updates.updatedAt = new Date();
+      await db
+        .update(environmentsTable)
+        .set(updates)
+        .where(eq(environmentsTable.id, req.params.id));
     }
 
-    if (updates.length > 0) {
-      updates.push('updated_at = ?');
-      values.push(new Date().toISOString());
-      values.push(req.params.id);
-
-      db.prepare(`UPDATE environments SET ${updates.join(', ')} WHERE id = ?`).run(...values);
-    }
-
-    const row = db.prepare('SELECT * FROM environments WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToEnvironment(row) } as ApiResponse<Environment>);
+    const rows = await db
+      .select()
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToEnvironment(rows[0]) } as ApiResponse<Environment>);
   });
 
-  // Delete environment
-  router.delete('/:id', (req, res) => {
-    const result = db.prepare('DELETE FROM environments WHERE id = ?').run(req.params.id);
-    if (result.changes === 0) {
+  router.delete('/:id', async (req, res) => {
+    const db = getDbClient();
+    const result = await db
+      .delete(environmentsTable)
+      .where(eq(environmentsTable.id, req.params.id))
+      .returning({ id: environmentsTable.id });
+    if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
     }
     res.json({ success: true } as ApiResponse<void>);
   });
 
-  // Test connection
+  // Test connection (placeholder)
   router.post('/:id/test', async (req, res) => {
-    const row = db.prepare('SELECT * FROM environments WHERE id = ?').get(req.params.id);
-    if (!row) {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: environmentsTable.id })
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
     }
-
-    // TODO: Implement actual connection testing
     res.json({ success: true, data: { connected: true } });
   });
 
   return router;
 }
 
-function rowToEnvironment(row: any): Environment {
+function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environment {
   return {
     id: row.id,
     name: row.name,
-    type: row.type,
-    status: row.status,
-    config: JSON.parse(row.config),
-    lastConnected: row.last_connected || undefined,
-    error: row.error || undefined,
+    type: row.type as Environment['type'],
+    status: row.status as EnvironmentStatus,
+    config: row.config as EnvironmentConfig,
+    lastConnected: row.lastConnected ? row.lastConnected.toISOString() : undefined,
+    error: row.error ?? undefined,
   };
 }

@@ -91,6 +91,11 @@ class SSHService extends EventEmitter {
     });
   }
 
+  /** IDs of every environment the service is currently tracking a connection for. */
+  getConnectedEnvironmentIds(): string[] {
+    return Array.from(this.connections.keys());
+  }
+
   /**
    * Disconnect from an environment
    */

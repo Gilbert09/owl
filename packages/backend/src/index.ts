@@ -1,10 +1,14 @@
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
+import { eq } from 'drizzle-orm';
 import { setupRoutes } from './routes/index.js';
 import { setupWebSocket } from './services/websocket.js';
 import { initDatabase } from './db/index.js';
+import { getDbClient, closeDbClient } from './db/client.js';
+import { environments as environmentsTable } from './db/schema.js';
 import { environmentService } from './services/environment.js';
 import { agentService } from './services/agent.js';
 import { taskQueueService } from './services/taskQueue.js';
@@ -18,26 +22,25 @@ const PORT = process.env.PORT || 4747;
 async function main() {
   console.log('Starting FastOwl backend...');
 
-  // Initialize database
+  // Initialize database + run migrations. Must complete before services
+  // read any state.
   console.log('Initializing database...');
-  const db = initDatabase();
+  await initDatabase();
 
-  // Initialize services
+  // Initialize services. Each init is idempotent and DB-aware.
   console.log('Initializing services...');
-  environmentService.init(db);
-  agentService.init(db);
-  taskQueueService.init(db);
-  githubService.init(db);
-  prMonitorService.init(db);
-  backlogService.init(db);
-  continuousBuildScheduler.init(db);
+  await environmentService.init();
+  await agentService.init();
+  await taskQueueService.init();
+  await githubService.init();
+  await prMonitorService.init();
+  await backlogService.init();
+  await continuousBuildScheduler.init();
 
-  // Create Express app
   const app = express();
   app.use(cors());
   app.use(express.json());
 
-  // Health check
   app.get('/health', (_req, res) => {
     res.json({
       status: 'ok',
@@ -52,76 +55,69 @@ async function main() {
     });
   });
 
-  // Setup API routes
-  setupRoutes(app, db);
+  setupRoutes(app);
 
-  // Create HTTP server
   const server = createServer(app);
-
-  // Setup WebSocket server
   const wss = new WebSocketServer({ server, path: '/ws' });
   setupWebSocket(wss);
 
-  // Start server
   server.listen(PORT, () => {
     console.log(`FastOwl backend running on http://localhost:${PORT}`);
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
     console.log(`Health check at http://localhost:${PORT}/health`);
   });
 
-  // Auto-connect to saved environments
-  connectSavedEnvironments(db);
+  connectSavedEnvironments().catch((err) =>
+    console.error('Failed to auto-connect environments:', err)
+  );
 
-  // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     console.log('Shutting down...');
-
-    // Shutdown services
     continuousBuildScheduler.shutdown();
     prMonitorService.shutdown();
     taskQueueService.shutdown();
     agentService.shutdown();
     environmentService.shutdown();
 
-    // Close server
-    server.close(() => {
-      db.close();
+    server.close(async () => {
+      await closeDbClient();
       console.log('Goodbye!');
       process.exit(0);
     });
 
-    // Force exit after 10 seconds
     setTimeout(() => {
       console.log('Forcing exit...');
       process.exit(1);
     }, 10000);
   };
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => { void shutdown(); });
+  process.on('SIGINT', () => { void shutdown(); });
 }
 
 /**
- * Connect to all saved environments that should auto-connect
+ * Connect to every saved environment on startup. Local envs always
+ * "connect" (it's a no-op). SSH envs try their stored credentials.
  */
-async function connectSavedEnvironments(db: ReturnType<typeof initDatabase>) {
-  const environments = db.prepare('SELECT * FROM environments').all();
-
-  for (const env of environments as any[]) {
+async function connectSavedEnvironments() {
+  const db = getDbClient();
+  const envs = await db.select().from(environmentsTable);
+  for (const env of envs) {
     if (env.type === 'local') {
-      // Local is always connected
-      db.prepare(`UPDATE environments SET status = 'connected' WHERE id = ?`).run(env.id);
+      await db
+        .update(environmentsTable)
+        .set({ status: 'connected' })
+        .where(eq(environmentsTable.id, env.id));
       continue;
     }
-
-    // Try to connect to SSH environments
     if (env.type === 'ssh') {
       console.log(`Attempting to connect to ${env.name}...`);
       try {
         await environmentService.connect(env.id);
         console.log(`Connected to ${env.name}`);
-      } catch (err: any) {
-        console.log(`Failed to connect to ${env.name}: ${err.message}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'unknown error';
+        console.log(`Failed to connect to ${env.name}: ${msg}`);
       }
     }
   }

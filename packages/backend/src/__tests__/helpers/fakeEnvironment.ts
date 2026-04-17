@@ -99,16 +99,22 @@ export function installFakeEnvironment(
     // no-op for fake
   });
 
-  (environmentService as any).spawnInteractive = spawnSpy;
-  (environmentService as any).killSession = killSpy;
-  (environmentService as any).exec = execSpy;
+  // Cast the service to a mutable shape so we can swap bound methods in tests.
+  const svc = environmentService as unknown as {
+    spawnInteractive: typeof environmentService.spawnInteractive;
+    killSession: typeof environmentService.killSession;
+    exec: typeof environmentService.exec;
+  };
+  svc.spawnInteractive = spawnSpy;
+  svc.killSession = killSpy;
+  svc.exec = execSpy;
 
   return {
     commands,
     restore: () => {
-      (environmentService as any).spawnInteractive = originalSpawn;
-      (environmentService as any).killSession = originalKill;
-      (environmentService as any).exec = originalExec;
+      svc.spawnInteractive = originalSpawn;
+      svc.killSession = originalKill;
+      svc.exec = originalExec;
       environmentService.removeAllListeners('session:data');
       environmentService.removeAllListeners('session:close');
     },

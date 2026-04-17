@@ -1,56 +1,81 @@
-import { drizzle } from 'drizzle-orm/postgres-js';
+import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import * as schema from './schema.js';
 
-export type DrizzleClient = ReturnType<typeof createDrizzleClient>;
-/** Shortcut for routes/services — just the Drizzle query builder. */
-export type Database = DrizzleClient['db'];
-
 /**
- * Create a Drizzle-wrapped Postgres client from a DATABASE_URL.
- *
- * Uses `postgres-js` under the hood. We expose both the wrapped `db`
- * (query builder) and the raw `sql` handle so services that need
- * transactions, raw SQL, or connection lifecycle can reach for it.
+ * The Drizzle query builder that every service/route consumes. Both the
+ * real postgres-js client and the in-process pglite client used by tests
+ * satisfy this shape.
  */
-export function createDrizzleClient(connectionString: string) {
-  const sql = postgres(connectionString, {
-    // Conservative defaults for a single-instance backend. Revisit when
-    // we scale horizontally.
-    max: 10,
-    idle_timeout: 20,
-    // Supabase Postgres wants SSL; postgres-js picks it up from sslmode=
-    // in the URL. If you pass an IP/hostname without sslmode, you'll
-    // need to opt into `ssl: 'require'` here.
-  });
-  const db = drizzle(sql, { schema, casing: 'snake_case' });
-  return { db, sql, schema } as const;
+export type Database = PostgresJsDatabase<typeof schema>;
+
+interface Handle {
+  db: Database;
+  /** Underlying connection. Only defined for real Postgres (postgres-js). */
+  close: () => Promise<void>;
 }
 
-let singleton: DrizzleClient | null = null;
+let singleton: Handle | null = null;
 
 /**
- * Get the process-wide Drizzle client. Initialized on first call from
- * `DATABASE_URL`. Throws if the env var is unset.
+ * Initialize a Drizzle client from a DATABASE_URL. Supabase's transaction-
+ * mode pooler (port 6543, `pooler.supabase.com`) disables prepared statements,
+ * so we detect that and pass `prepare: false` — otherwise every insert fails
+ * with "prepared statement does not exist".
  */
-export function getDbClient(): DrizzleClient {
-  if (singleton) return singleton;
+function createPostgresHandle(connectionString: string): Handle {
+  const url = new URL(connectionString);
+  const isPooler = url.hostname.includes('pooler.supabase.com');
+  const sql = postgres(connectionString, {
+    max: 10,
+    idle_timeout: 20,
+    prepare: !isPooler,
+  });
+  const db = drizzle(sql, { schema, casing: 'snake_case' }) as Database;
+  return {
+    db,
+    close: async () => {
+      await sql.end({ timeout: 5 });
+    },
+  };
+}
+
+/**
+ * Get the process-wide Drizzle client, initializing it on first use. Throws
+ * if `DATABASE_URL` isn't set — the backend cannot start without Postgres.
+ */
+export function getDbClient(): Database {
+  if (singleton) return singleton.db;
   const url = process.env.DATABASE_URL;
   if (!url) {
     throw new Error(
       'DATABASE_URL is not set. Point it at a Postgres (Supabase) instance.'
     );
   }
-  singleton = createDrizzleClient(url);
-  return singleton;
+  singleton = createPostgresHandle(url);
+  return singleton.db;
 }
 
-/** For tests that want to inject their own client. */
-export function setDbClient(client: DrizzleClient): void {
-  singleton = client;
+/**
+ * Close the underlying Postgres connection. No-op for test-injected clients
+ * (their lifecycle belongs to the test).
+ */
+export async function closeDbClient(): Promise<void> {
+  if (singleton) {
+    await singleton.close();
+    singleton = null;
+  }
 }
 
-/** For tests that need a clean slate. */
+/**
+ * Inject a Drizzle client for tests. The caller owns the connection — we
+ * don't close it. Typically paired with `@electric-sql/pglite`.
+ */
+export function setDbClient(db: Database): void {
+  singleton = { db, close: async () => {} };
+}
+
+/** Clear the process-wide client. Tests call this in afterEach/afterAll. */
 export function resetDbClient(): void {
   singleton = null;
 }

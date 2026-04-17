@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { v4 as uuid } from 'uuid';
+import { eq, inArray, sql } from 'drizzle-orm';
 import type {
   Agent,
   AgentStatus,
@@ -9,26 +10,33 @@ import type {
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { sshService } from './ssh.js';
-import { emitAgentStatus, emitAgentOutput, emitInboxNew, emitTaskOutput, emitTaskAgentStatus, emitTaskStatus } from './websocket.js';
-import { DB } from '../db/index.js';
+import {
+  emitAgentStatus,
+  emitAgentOutput,
+  emitInboxNew,
+  emitTaskOutput,
+  emitTaskAgentStatus,
+  emitTaskStatus,
+} from './websocket.js';
+import { getDbClient, type Database } from '../db/client.js';
+import {
+  agents as agentsTable,
+  tasks as tasksTable,
+  inboxItems as inboxItemsTable,
+} from '../db/schema.js';
 
 // Patterns to detect Claude CLI status
 export const STATUS_PATTERNS = {
-  // Claude is thinking/working. Note: tool-use indicators ("> Running ...")
-  // are intentionally NOT included here — they're matched by the more
-  // specific STATUS_PATTERNS.toolUse and including a catch-all `/^>/` here
-  // would override the tool_use classification in the cascade.
   working: [
-    /^\s*\d+\s*│/,  // Code block line numbers
+    /^\s*\d+\s*│/,
     /Thinking\.\.\./i,
     /Working on/i,
     /Let me/i,
     /I'll/i,
     /I will/i,
   ],
-  // Claude is waiting for user input
   awaitingInput: [
-    /\?\s*$/,  // Ends with question mark
+    /\?\s*$/,
     /What would you/i,
     /Would you like/i,
     /Should I/i,
@@ -40,7 +48,6 @@ export const STATUS_PATTERNS = {
     /\(y\/n\)/i,
     /\[Y\/n\]/i,
   ],
-  // Claude completed a task
   completed: [
     /Done\.?\s*$/i,
     /Complete\.?\s*$/i,
@@ -49,7 +56,6 @@ export const STATUS_PATTERNS = {
     /I've (completed|finished|done)/i,
     /The (task|work) (is|has been) (complete|done|finished)/i,
   ],
-  // Claude encountered an error
   error: [
     /Error:/i,
     /Failed:/i,
@@ -59,7 +65,6 @@ export const STATUS_PATTERNS = {
     /Permission denied/i,
     /command not found/i,
   ],
-  // Claude is using a tool
   toolUse: [
     /^> Running/i,
     /^> Reading/i,
@@ -73,10 +78,6 @@ export const STATUS_PATTERNS = {
 /**
  * Pure status detection from Claude CLI output. Extracted so it can be
  * unit-tested independently of the live agent service.
- *
- * Takes the recent output (typically the last ~10 lines) and the current
- * status, returns the derived status. Priority cascade preserves the
- * historical behavior: tool_use → error → awaiting_input → completed → working.
  */
 export function detectStatusFromOutput(
   recentOutput: string,
@@ -147,109 +148,84 @@ export interface ActiveAgent {
 }
 
 class AgentService extends EventEmitter {
-  private db: DB | null = null;
   private activeAgents: Map<string, ActiveAgent> = new Map();
   private statusCheckInterval: NodeJS.Timeout | null = null;
 
-  /**
-   * Initialize with database
-   */
-  init(db: DB): void {
-    this.db = db;
+  private get db(): Database {
+    return getDbClient();
+  }
 
-    // Clean up any stale agent records from previous runs
-    // (agents that aren't in activeAgents are not actually running)
-    this.cleanupStaleAgents();
+  async init(): Promise<void> {
+    // Clean up any stale agent records from previous runs. Statuses that
+    // imply a running process are fiction after a restart.
+    await this.cleanupStaleAgents();
 
-    // Listen for session data from environment service
     environmentService.on('session:data', (sessionId, data) => {
-      this.handleSessionData(sessionId, data);
+      this.handleSessionData(sessionId, data).catch((err) =>
+        console.error('handleSessionData error:', err)
+      );
     });
 
     environmentService.on('session:close', (sessionId, code) => {
-      this.handleSessionClose(sessionId, code);
+      this.handleSessionClose(sessionId, code).catch((err) =>
+        console.error('handleSessionClose error:', err)
+      );
     });
 
-    // Listen for SSH PTY data
     sshService.on('pty:data', (sessionId, data) => {
-      this.handleSessionData(sessionId, data);
+      this.handleSessionData(sessionId, data).catch((err) =>
+        console.error('handleSessionData error:', err)
+      );
     });
 
     sshService.on('pty:close', (sessionId, code?: number) => {
-      this.handleSessionClose(sessionId, code ?? 0);
+      this.handleSessionClose(sessionId, code ?? 0).catch((err) =>
+        console.error('handleSessionClose error:', err)
+      );
     });
 
-    // Periodic status check for stuck agents
     this.statusCheckInterval = setInterval(() => {
       this.checkStuckAgents();
-    }, 60000); // Every minute
+    }, 60000);
   }
 
-  /**
-   * Clean up stale agent records from database
-   * (agents from previous server runs that are no longer active)
-   */
-  private cleanupStaleAgents(): void {
-    if (!this.db) return;
-
-    const result = this.db.prepare(`
-      DELETE FROM agents WHERE status IN ('idle', 'working', 'tool_use', 'awaiting_input')
-    `).run();
-
-    if (result.changes > 0) {
-      console.log(`Cleaned up ${result.changes} stale agent records`);
+  private async cleanupStaleAgents(): Promise<void> {
+    const result = await this.db
+      .delete(agentsTable)
+      .where(inArray(agentsTable.status, ['idle', 'working', 'tool_use', 'awaiting_input']))
+      .returning({ id: agentsTable.id });
+    if (result.length > 0) {
+      console.log(`Cleaned up ${result.length} stale agent records`);
     }
   }
 
-  /**
-   * Shutdown service
-   */
   shutdown(): void {
     if (this.statusCheckInterval) {
       clearInterval(this.statusCheckInterval);
+      this.statusCheckInterval = null;
     }
-
-    // Stop all agents
-    for (const [id, _agent] of this.activeAgents) {
+    for (const [id] of this.activeAgents) {
       this.stopAgent(id);
     }
   }
 
-  /**
-   * Start a new agent on an environment
-   */
   async startAgent(request: StartAgentRequest): Promise<Agent> {
     const { environmentId, workspaceId, taskId, prompt, workingDirectory } = request;
 
-    // Ensure environment is connected
-    const status = environmentService.getStatus(environmentId);
+    const status = await environmentService.getStatus(environmentId);
     if (status !== 'connected') {
       await environmentService.connect(environmentId);
     }
 
     const agentId = uuid();
     const sessionId = `agent:${agentId}`;
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    // Inline env vars expose FastOwl context to the child process so that
-    // `fastowl` CLI invocations (for task-spawns-task) have context without
-    // needing to be configured per-run.
-    //
-    // For SSH environments, we skip FASTOWL_API_URL — "localhost" on the
-    // VM isn't this process. The remote shell is expected to set it via
-    // .bashrc / the install doc (docs/SSH_VM_SETUP.md).
-    const env = environmentService.getEnvironment(environmentId);
+    const env = await environmentService.getEnvironment(environmentId);
     const includeApiUrl = env?.type === 'local';
     const envPrefix = buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl });
 
-    // Autonomous tasks (spawned by Continuous Build) run in non-interactive
-    // --print mode. Exit signals completion deterministically, `acceptEdits`
-    // lets the agent run file edits unattended, and we bake the prompt into
-    // argv so there's no race between shell startup and prompt delivery.
-    //
-    // Non-autonomous tasks (user clicked Start, pr_response, pr_review,
-    // manual follow-up) stay interactive so the human can step in mid-flight.
-    const autonomous = taskId ? this.isAutonomousTask(taskId) : false;
+    const autonomous = taskId ? await this.isAutonomousTask(taskId) : false;
 
     let claudeCommand: string;
     if (autonomous && prompt) {
@@ -259,10 +235,9 @@ class AgentService extends EventEmitter {
       claudeCommand = `${envPrefix}claude`;
     }
 
-    // Determine working directory: use task's repo path, then fall back to environment's default
     const cwd = workingDirectory || (env?.config.type === 'ssh'
-      ? (env.config as any).workingDirectory
-      : (env?.config as any)?.workingDirectory);
+      ? (env.config as { workingDirectory?: string }).workingDirectory
+      : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
 
     await environmentService.spawnInteractive(environmentId, sessionId, claudeCommand, {
       cwd,
@@ -270,16 +245,12 @@ class AgentService extends EventEmitter {
       cols: 120,
     });
 
-    // In interactive mode we send the prompt after a short delay so the
-    // Claude TUI has time to come up. In non-interactive mode the prompt is
-    // already in argv.
     if (prompt && !autonomous) {
       setTimeout(() => {
         environmentService.writeToSession(sessionId, prompt + '\n');
       }, 500);
     }
 
-    // Create active agent tracking
     const activeAgent: ActiveAgent = {
       id: agentId,
       environmentId,
@@ -288,131 +259,95 @@ class AgentService extends EventEmitter {
       status: 'idle',
       attention: 'none',
       outputBuffer: '',
-      lastActivityTime: new Date(),
+      lastActivityTime: now,
       currentTaskId: taskId,
     };
-
     this.activeAgents.set(agentId, activeAgent);
 
-    // Create database record
-    if (this.db) {
-      this.db.prepare(`
-        INSERT INTO agents (id, environment_id, workspace_id, status, attention, current_task_id, terminal_output, last_activity, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(agentId, environmentId, workspaceId, 'idle', 'none', taskId || null, '', now, now);
+    await this.db.insert(agentsTable).values({
+      id: agentId,
+      environmentId,
+      workspaceId,
+      status: 'idle',
+      attention: 'none',
+      currentTaskId: taskId ?? null,
+      terminalOutput: '',
+      lastActivity: now,
+      createdAt: now,
+    });
+
+    if (taskId) {
+      await this.db
+        .update(tasksTable)
+        .set({ assignedAgentId: agentId, status: 'in_progress', updatedAt: now })
+        .where(eq(tasksTable.id, taskId));
     }
 
-    // If there's a task, update it
-    if (taskId && this.db) {
-      this.db.prepare(`
-        UPDATE tasks SET assigned_agent_id = ?, status = 'in_progress', updated_at = ? WHERE id = ?
-      `).run(agentId, now, taskId);
-    }
-
-    return this.getAgent(agentId)!;
+    const agent = await this.getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
+    return agent;
   }
 
-  /**
-   * Send input to an agent
-   */
   sendInput(agentId: string, input: string): void {
     const agent = this.activeAgents.get(agentId);
-    if (!agent) {
-      throw new Error(`Agent ${agentId} not found`);
-    }
-
+    if (!agent) throw new Error(`Agent ${agentId} not found`);
     environmentService.writeToSession(agent.sessionId, input + '\n');
-
-    // Update status to working
-    this.updateAgentStatus(agentId, 'working', 'none');
+    this.updateAgentStatus(agentId, 'working', 'none').catch((err) =>
+      console.error('updateAgentStatus error:', err)
+    );
   }
 
-  /**
-   * Stop an agent
-   */
   stopAgent(agentId: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) return;
-
     environmentService.killSession(agent.sessionId);
     this.activeAgents.delete(agentId);
 
-    // Update database
-    if (this.db) {
-      this.db.prepare(`
-        UPDATE agents SET status = 'idle', attention = 'none', last_activity = ? WHERE id = ?
-      `).run(new Date().toISOString(), agentId);
-    }
-
-    emitAgentStatus(agent.workspaceId, agentId, 'idle', 'none');
+    this.db
+      .update(agentsTable)
+      .set({ status: 'idle', attention: 'none', lastActivity: new Date() })
+      .where(eq(agentsTable.id, agentId))
+      .then(() => {
+        emitAgentStatus(agent.workspaceId, agentId, 'idle', 'none');
+      })
+      .catch((err) => console.error('stopAgent DB update failed:', err));
   }
 
-  /**
-   * Get agent from database
-   */
-  getAgent(agentId: string): Agent | null {
-    if (!this.db) return null;
-
-    const row = this.db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId);
+  async getAgent(agentId: string): Promise<Agent | null> {
+    const rows = await this.db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.id, agentId))
+      .limit(1);
+    const row = rows[0];
     if (!row) return null;
+    return rowToAgent(row);
+  }
 
-    return {
-      id: (row as any).id,
-      environmentId: (row as any).environment_id,
-      workspaceId: (row as any).workspace_id,
-      status: (row as any).status,
-      attention: (row as any).attention,
-      currentTaskId: (row as any).current_task_id || undefined,
-      terminalOutput: (row as any).terminal_output,
-      lastActivity: (row as any).last_activity,
-      createdAt: (row as any).created_at,
-    };
+  async getAgentsByWorkspace(workspaceId: string): Promise<Agent[]> {
+    const rows = await this.db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.workspaceId, workspaceId));
+    return rows.map(rowToAgent);
   }
 
   /**
-   * Get all agents for a workspace
+   * Idle agents for a workspace. Only returns agents that are actually
+   * running (present in activeAgents) — DB rows alone aren't enough because
+   * a process may have died between polls.
    */
-  getAgentsByWorkspace(workspaceId: string): Agent[] {
-    if (!this.db) return [];
-
-    const rows = this.db.prepare('SELECT * FROM agents WHERE workspace_id = ?').all(workspaceId);
-    return rows.map((row: any) => ({
-      id: row.id,
-      environmentId: row.environment_id,
-      workspaceId: row.workspace_id,
-      status: row.status,
-      attention: row.attention,
-      currentTaskId: row.current_task_id || undefined,
-      terminalOutput: row.terminal_output,
-      lastActivity: row.last_activity,
-      createdAt: row.created_at,
-    }));
-  }
-
-  /**
-   * Get idle agents for a workspace (only returns agents that are actually running)
-   */
-  getIdleAgents(workspaceId?: string): Agent[] {
-    // Only return agents that are actually running (in activeAgents map)
+  async getIdleAgents(workspaceId?: string): Promise<Agent[]> {
     const idleAgents: Agent[] = [];
-
     for (const [id, activeAgent] of this.activeAgents) {
-      if (activeAgent.status === 'idle') {
-        if (!workspaceId || activeAgent.workspaceId === workspaceId) {
-          const agent = this.getAgent(id);
-          if (agent) {
-            idleAgents.push(agent);
-          }
-        }
-      }
+      if (activeAgent.status !== 'idle') continue;
+      if (workspaceId && activeAgent.workspaceId !== workspaceId) continue;
+      const agent = await this.getAgent(id);
+      if (agent) idleAgents.push(agent);
     }
-
     return idleAgents;
   }
 
-  /**
-   * Check if an agent is currently active (has a running session)
-   */
   isAgentActive(agentId: string): boolean {
     return this.activeAgents.has(agentId);
   }
@@ -420,144 +355,110 @@ class AgentService extends EventEmitter {
   /**
    * True if a task was spawned by the Continuous Build scheduler (has a
    * backlog item in its metadata). Those tasks run `claude --print` and
-   * derive completion from process exit instead of a user button.
+   * derive completion from process exit.
    */
-  private isAutonomousTask(taskId: string): boolean {
-    if (!this.db) return false;
-    const row = this.db
-      .prepare('SELECT metadata FROM tasks WHERE id = ?')
-      .get(taskId) as { metadata: string | null } | undefined;
-    if (!row?.metadata) return false;
-    try {
-      const meta = JSON.parse(row.metadata) as { backlogItemId?: string };
-      return Boolean(meta.backlogItemId);
-    } catch {
-      return false;
-    }
+  private async isAutonomousTask(taskId: string): Promise<boolean> {
+    const rows = await this.db
+      .select({ metadata: tasksTable.metadata })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, taskId))
+      .limit(1);
+    const meta = rows[0]?.metadata as { backlogItemId?: string } | null | undefined;
+    return Boolean(meta?.backlogItemId);
   }
 
-  /**
-   * Get the active agent for a task (if any)
-   */
   getAgentByTaskId(taskId: string): ActiveAgent | null {
-    for (const [_id, agent] of this.activeAgents) {
-      if (agent.currentTaskId === taskId) {
-        return agent;
-      }
+    for (const [, agent] of this.activeAgents) {
+      if (agent.currentTaskId === taskId) return agent;
     }
     return null;
   }
 
-  /**
-   * Get terminal output for an agent
-   */
   getTerminalOutput(agentId: string): string {
-    const agent = this.activeAgents.get(agentId);
-    return agent?.outputBuffer || '';
+    return this.activeAgents.get(agentId)?.outputBuffer ?? '';
   }
 
-  /**
-   * Handle output from agent session
-   */
-  private handleSessionData(sessionId: string, data: Buffer): void {
-    // Find the agent for this session
+  private async handleSessionData(sessionId: string, data: Buffer): Promise<void> {
     let agent: ActiveAgent | undefined;
-    for (const [_id, a] of this.activeAgents) {
+    for (const [, a] of this.activeAgents) {
       if (a.sessionId === sessionId) {
         agent = a;
         break;
       }
     }
-
     if (!agent) return;
 
     const output = data.toString();
     agent.outputBuffer += output;
     agent.lastActivityTime = new Date();
 
-    // Update terminal output in database (limit to last 10000 chars)
-    if (this.db) {
-      const truncatedOutput = agent.outputBuffer.slice(-10000);
-      this.db.prepare(`
-        UPDATE agents SET terminal_output = ?, last_activity = ? WHERE id = ?
-      `).run(truncatedOutput, agent.lastActivityTime.toISOString(), agent.id);
+    const truncatedOutput = agent.outputBuffer.slice(-10000);
+    await this.db
+      .update(agentsTable)
+      .set({ terminalOutput: truncatedOutput, lastActivity: agent.lastActivityTime })
+      .where(eq(agentsTable.id, agent.id));
 
-      // Append to task's persistent terminal output so history survives
-      // the agent session. Append-only keeps write cost proportional to
-      // each chunk, not the full buffer.
-      if (agent.currentTaskId) {
-        this.db.prepare(`
-          UPDATE tasks SET terminal_output = terminal_output || ?, updated_at = ? WHERE id = ?
-        `).run(output, agent.lastActivityTime.toISOString(), agent.currentTaskId);
-      }
+    // Append to task's persistent terminal output so history survives the
+    // agent session. Raw `||` concat keeps write cost proportional to each
+    // chunk rather than the full buffer.
+    if (agent.currentTaskId) {
+      await this.db
+        .update(tasksTable)
+        .set({
+          terminalOutput: sql`${tasksTable.terminalOutput} || ${output}`,
+          updatedAt: agent.lastActivityTime,
+        })
+        .where(eq(tasksTable.id, agent.currentTaskId));
     }
 
-    // Emit output via WebSocket
     emitAgentOutput(agent.workspaceId, agent.id, output, true);
-
-    // Also emit task output if this agent has a task
     if (agent.currentTaskId) {
       emitTaskOutput(agent.workspaceId, agent.currentTaskId, output, true);
     }
 
-    // Analyze output for status
-    this.analyzeOutput(agent);
+    await this.analyzeOutput(agent);
   }
 
-  /**
-   * Handle session close
-   */
-  private handleSessionClose(sessionId: string, code: number | null): void {
-    // Find the agent for this session
+  private async handleSessionClose(sessionId: string, code: number | null): Promise<void> {
     let agentId: string | undefined;
-    for (const [id, agent] of this.activeAgents) {
-      if (agent.sessionId === sessionId) {
+    for (const [id, a] of this.activeAgents) {
+      if (a.sessionId === sessionId) {
         agentId = id;
         break;
       }
     }
-
     if (!agentId) return;
 
     const agent = this.activeAgents.get(agentId)!;
-
-    // Determine final status
     const finalStatus: AgentStatus = code === 0 ? 'completed' : 'error';
-
-    this.updateAgentStatus(agentId, finalStatus, 'none');
+    await this.updateAgentStatus(agentId, finalStatus, 'none');
     this.activeAgents.delete(agentId);
 
-    // Create inbox item for completion
-    this.createInboxItemForAgent(agent, finalStatus);
+    await this.createInboxItemForAgent(agent, finalStatus);
 
-    // Update task if there was one. Clean agent exits go through the
-    // approval gate (awaiting_review) so the user can accept/reject the
-    // work before it's considered completed.
-    if (agent.currentTaskId && this.db) {
-      const now = new Date().toISOString();
+    // Update task. Clean agent exits go through the approval gate
+    // (awaiting_review) so the user can accept/reject the work.
+    if (agent.currentTaskId) {
+      const now = new Date();
       if (code === 0) {
-        this.db.prepare(`
-          UPDATE tasks SET status = 'awaiting_review', updated_at = ? WHERE id = ?
-        `).run(now, agent.currentTaskId);
+        await this.db
+          .update(tasksTable)
+          .set({ status: 'awaiting_review', updatedAt: now })
+          .where(eq(tasksTable.id, agent.currentTaskId));
         emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
       } else {
-        this.db.prepare(`
-          UPDATE tasks SET status = 'failed', completed_at = ?, updated_at = ? WHERE id = ?
-        `).run(now, now, agent.currentTaskId);
+        await this.db
+          .update(tasksTable)
+          .set({ status: 'failed', completedAt: now, updatedAt: now })
+          .where(eq(tasksTable.id, agent.currentTaskId));
         emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed');
       }
     }
 
-    // Remove agent record from database (it's no longer active)
-    if (this.db) {
-      this.db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
-    }
+    await this.db.delete(agentsTable).where(eq(agentsTable.id, agentId));
   }
 
-  /**
-   * Analyze output to detect status
-   */
-  private analyzeOutput(agent: ActiveAgent): void {
+  private async analyzeOutput(agent: ActiveAgent): Promise<void> {
     const recentOutput = agent.outputBuffer.split('\n').slice(-10).join('\n');
     const { status: newStatus, attention: newAttention } = detectStatusFromOutput(
       recentOutput,
@@ -565,35 +466,32 @@ class AgentService extends EventEmitter {
     );
 
     if (newStatus !== agent.status || newAttention !== agent.attention) {
-      this.updateAgentStatus(agent.id, newStatus, newAttention);
-
-      if (newAttention === 'high' && agent.attention !== 'high') {
-        this.createInboxItemForAgent(agent, newStatus);
+      const prevAttention = agent.attention;
+      await this.updateAgentStatus(agent.id, newStatus, newAttention);
+      if (newAttention === 'high' && prevAttention !== 'high') {
+        await this.createInboxItemForAgent(agent, newStatus);
       }
     }
   }
 
-  /**
-   * Update agent status
-   */
-  private updateAgentStatus(agentId: string, status: AgentStatus, attention: AgentAttention): void {
+  private async updateAgentStatus(
+    agentId: string,
+    status: AgentStatus,
+    attention: AgentAttention
+  ): Promise<void> {
     const agent = this.activeAgents.get(agentId);
     if (agent) {
       agent.status = status;
       agent.attention = attention;
     }
 
-    if (this.db) {
-      this.db.prepare(`
-        UPDATE agents SET status = ?, attention = ?, last_activity = ? WHERE id = ?
-      `).run(status, attention, new Date().toISOString(), agentId);
-    }
+    await this.db
+      .update(agentsTable)
+      .set({ status, attention, lastActivity: new Date() })
+      .where(eq(agentsTable.id, agentId));
 
-    // Emit via WebSocket
     if (agent) {
       emitAgentStatus(agent.workspaceId, agentId, status, attention);
-
-      // Also emit task agent status if this agent has a task
       if (agent.currentTaskId) {
         emitTaskAgentStatus(agent.workspaceId, agent.currentTaskId, status, attention);
       }
@@ -602,72 +500,60 @@ class AgentService extends EventEmitter {
     this.emit('status', agentId, status, attention);
   }
 
-  /**
-   * Create inbox item for agent status
-   */
-  private createInboxItemForAgent(agent: ActiveAgent, status: AgentStatus): void {
-    if (!this.db) return;
-
+  private async createInboxItemForAgent(agent: ActiveAgent, status: AgentStatus): Promise<void> {
     let type: 'agent_question' | 'agent_completed' | 'agent_error';
     let title: string;
     let summary: string;
     let priority: 'low' | 'medium' | 'high' | 'urgent';
 
-    const env = environmentService.getEnvironment(agent.environmentId);
+    const env = await environmentService.getEnvironment(agent.environmentId);
     const envName = env?.name || 'Unknown';
 
     switch (status) {
       case 'awaiting_input':
         type = 'agent_question';
-        title = `Agent needs input`;
+        title = 'Agent needs input';
         summary = `Claude on ${envName} is asking a question`;
         priority = 'high';
         break;
-
       case 'completed':
         type = 'agent_completed';
-        title = `Agent completed task`;
+        title = 'Agent completed task';
         summary = `Claude on ${envName} finished working`;
         priority = 'low';
         break;
-
       case 'error':
         type = 'agent_error';
-        title = `Agent encountered error`;
+        title = 'Agent encountered error';
         summary = `Claude on ${envName} ran into a problem`;
         priority = 'urgent';
         break;
-
       default:
-        return; // Don't create inbox item for other statuses
+        return;
     }
 
     const inboxId = uuid();
-    const now = new Date().toISOString();
-
-    // Use taskId in source/actions if available, otherwise fall back to agentId
+    const now = new Date();
     const sourceId = agent.currentTaskId || agent.id;
     const sourceType = agent.currentTaskId ? 'task' : 'agent';
     const actionLabel = agent.currentTaskId ? 'View Task' : 'View Agent';
     const actionType = agent.currentTaskId ? 'view_task' : 'view_agent';
 
-    this.db.prepare(`
-      INSERT INTO inbox_items (id, workspace_id, type, status, priority, title, summary, source, actions, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      inboxId,
-      agent.workspaceId,
+    const source = { type: sourceType, id: sourceId, name: `Task on ${envName}` };
+    const actions = [{ id: '1', label: actionLabel, type: 'primary', action: actionType }];
+
+    await this.db.insert(inboxItemsTable).values({
+      id: inboxId,
+      workspaceId: agent.workspaceId,
       type,
-      'unread',
+      status: 'unread',
       priority,
       title,
       summary,
-      JSON.stringify({ type: sourceType, id: sourceId, name: `Task on ${envName}` }),
-      JSON.stringify([
-        { id: '1', label: actionLabel, type: 'primary', action: actionType },
-      ]),
-      now
-    );
+      source,
+      actions,
+      createdAt: now,
+    });
 
     const inboxItem: InboxItem = {
       id: inboxId,
@@ -679,28 +565,38 @@ class AgentService extends EventEmitter {
       summary,
       source: { type: sourceType as 'agent' | 'github' | 'slack' | 'posthog' | 'system', id: sourceId, name: `Task on ${envName}` },
       actions: [{ id: '1', label: actionLabel, type: 'primary', action: actionType }],
-      createdAt: now,
+      createdAt: now.toISOString(),
     };
 
     emitInboxNew(agent.workspaceId, inboxItem);
   }
 
-  /**
-   * Check for stuck agents (no activity for 5 minutes)
-   */
   private checkStuckAgents(): void {
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-
     for (const [id, agent] of this.activeAgents) {
       if (agent.status === 'working' && agent.lastActivityTime < fiveMinutesAgo) {
-        // Agent might be stuck
-        this.updateAgentStatus(id, 'awaiting_input', 'medium');
+        this.updateAgentStatus(id, 'awaiting_input', 'medium').catch((err) =>
+          console.error('checkStuckAgents updateAgentStatus failed:', err)
+        );
       }
     }
   }
 }
 
-// Singleton instance
+function rowToAgent(row: typeof agentsTable.$inferSelect): Agent {
+  return {
+    id: row.id,
+    environmentId: row.environmentId,
+    workspaceId: row.workspaceId,
+    status: row.status as AgentStatus,
+    attention: row.attention as AgentAttention,
+    currentTaskId: row.currentTaskId ?? undefined,
+    terminalOutput: row.terminalOutput,
+    lastActivity: row.lastActivity.toISOString(),
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
 export const agentService = new AgentService();
 
 /**
@@ -709,8 +605,8 @@ export const agentService = new AgentService();
  * safely escaped for bash.
  *
  * Pass `includeApiUrl: false` for SSH environments — "localhost" on the
- * VM isn't this process. The remote shell is expected to set FASTOWL_API_URL
- * via .bashrc or similar (see docs/SSH_VM_SETUP.md).
+ * VM isn't this process. The remote shell sets FASTOWL_API_URL via
+ * .bashrc (see docs/SSH_VM_SETUP.md).
  */
 export function buildFastOwlEnvPrefix(
   workspaceId: string,

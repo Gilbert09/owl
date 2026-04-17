@@ -1,16 +1,25 @@
-import Database from 'better-sqlite3';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { runMigrations } from '../db/index.js';
+import { eq } from 'drizzle-orm';
 import { taskQueueService } from '../services/taskQueue.js';
+import { createTestDb } from './helpers/testDb.js';
+import { type Database } from '../db/client.js';
+import {
+  workspaces as workspacesTable,
+  tasks as tasksTable,
+  environments as environmentsTable,
+  agents as agentsTable,
+} from '../db/schema.js';
 
-function seedWorkspace(db: Database.Database, id = 'ws1', name = 'Default') {
-  db.prepare(
-    "INSERT INTO workspaces (id, name, settings) VALUES (?, ?, ?)"
-  ).run(id, name, JSON.stringify({ autoAssignTasks: true, maxConcurrentAgents: 3 }));
+async function seedWorkspace(db: Database, id = 'ws1', name = 'Default') {
+  await db.insert(workspacesTable).values({
+    id,
+    name,
+    settings: { autoAssignTasks: true, maxConcurrentAgents: 3 },
+  });
 }
 
-function seedTask(
-  db: Database.Database,
+async function seedTask(
+  db: Database,
   overrides: Partial<{
     id: string;
     workspaceId: string;
@@ -19,167 +28,166 @@ function seedTask(
     priority: string;
     title: string;
     description: string;
-    assigned_agent_id: string | null;
-    created_at: string;
+    assignedAgentId: string | null;
+    createdAt: Date;
   }> = {}
 ) {
+  const createdAt = overrides.createdAt ?? new Date();
   const task = {
-    id: 't' + Math.random().toString(36).slice(2, 8),
-    workspaceId: 'ws1',
-    type: 'code_writing',
-    status: 'queued',
-    priority: 'medium',
-    title: 'A task',
-    description: 'desc',
-    assigned_agent_id: null,
-    created_at: new Date().toISOString(),
-    ...overrides,
+    id: overrides.id ?? 't' + Math.random().toString(36).slice(2, 8),
+    workspaceId: overrides.workspaceId ?? 'ws1',
+    type: overrides.type ?? 'code_writing',
+    status: overrides.status ?? 'queued',
+    priority: overrides.priority ?? 'medium',
+    title: overrides.title ?? 'A task',
+    description: overrides.description ?? 'desc',
+    assignedAgentId: overrides.assignedAgentId ?? null,
+    createdAt,
+    updatedAt: createdAt,
   };
-  db.prepare(
-    `INSERT INTO tasks (id, workspace_id, type, status, priority, title, description, assigned_agent_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    task.id,
-    task.workspaceId,
-    task.type,
-    task.status,
-    task.priority,
-    task.title,
-    task.description,
-    task.assigned_agent_id,
-    task.created_at,
-    task.created_at
-  );
+  await db.insert(tasksTable).values(task);
   return task;
 }
 
 describe('taskQueueService', () => {
-  let db: Database.Database;
+  let cleanup: (() => Promise<void>) | null = null;
+  let db: Database;
 
-  beforeEach(() => {
-    db = new Database(':memory:');
-    db.pragma('foreign_keys = ON');
-    runMigrations(db);
-    seedWorkspace(db);
+  beforeEach(async () => {
+    const testDb = await createTestDb();
+    db = testDb.db;
+    cleanup = testDb.cleanup;
+    await seedWorkspace(db);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     taskQueueService.shutdown();
-    // Clear the db reference on the singleton so the next test gets a clean slate
-    (taskQueueService as any).db = null;
-    db.close();
+    await cleanup?.();
+    cleanup = null;
   });
 
   describe('getQueuedTasks', () => {
-    it('orders by priority (urgent > high > medium > low), then created_at ascending', () => {
-      // taskQueueService.init starts a setInterval; we don't want that here.
-      // Inject the DB directly.
-      (taskQueueService as any).db = db;
+    it('orders by priority (urgent > high > medium > low), then created_at ascending', async () => {
+      await seedTask(db, { id: 'a', priority: 'low', createdAt: new Date('2026-01-01T00:00:00Z') });
+      await seedTask(db, { id: 'b', priority: 'urgent', createdAt: new Date('2026-01-02T00:00:00Z') });
+      await seedTask(db, { id: 'c', priority: 'medium', createdAt: new Date('2026-01-01T00:00:00Z') });
+      await seedTask(db, { id: 'd', priority: 'high', createdAt: new Date('2026-01-03T00:00:00Z') });
+      await seedTask(db, { id: 'e', priority: 'urgent', createdAt: new Date('2026-01-01T00:00:00Z') });
 
-      seedTask(db, { id: 'a', priority: 'low', created_at: '2026-01-01T00:00:00Z' });
-      seedTask(db, { id: 'b', priority: 'urgent', created_at: '2026-01-02T00:00:00Z' });
-      seedTask(db, { id: 'c', priority: 'medium', created_at: '2026-01-01T00:00:00Z' });
-      seedTask(db, { id: 'd', priority: 'high', created_at: '2026-01-03T00:00:00Z' });
-      seedTask(db, { id: 'e', priority: 'urgent', created_at: '2026-01-01T00:00:00Z' });
-
-      const tasks = taskQueueService.getQueuedTasks();
+      const tasks = await taskQueueService.getQueuedTasks();
       expect(tasks.map((t) => t.id)).toEqual(['e', 'b', 'd', 'c', 'a']);
     });
 
-    it('filters by workspaceId when provided', () => {
-      (taskQueueService as any).db = db;
-      db.prepare("INSERT INTO workspaces (id, name, settings) VALUES (?, ?, ?)").run(
-        'ws2',
-        'Other',
-        '{}'
-      );
-      seedTask(db, { id: 'a', workspaceId: 'ws1' });
-      seedTask(db, { id: 'b', workspaceId: 'ws2' });
+    it('filters by workspaceId when provided', async () => {
+      await db.insert(workspacesTable).values({
+        id: 'ws2',
+        name: 'Other',
+        settings: {},
+      });
+      await seedTask(db, { id: 'a', workspaceId: 'ws1' });
+      await seedTask(db, { id: 'b', workspaceId: 'ws2' });
 
-      expect(taskQueueService.getQueuedTasks('ws1').map((t) => t.id)).toEqual(['a']);
-      expect(taskQueueService.getQueuedTasks('ws2').map((t) => t.id)).toEqual(['b']);
+      expect((await taskQueueService.getQueuedTasks('ws1')).map((t) => t.id)).toEqual(['a']);
+      expect((await taskQueueService.getQueuedTasks('ws2')).map((t) => t.id)).toEqual(['b']);
     });
 
-    it('includes both "pending" and "queued" statuses', () => {
-      (taskQueueService as any).db = db;
-      seedTask(db, { id: 'a', status: 'pending' });
-      seedTask(db, { id: 'b', status: 'queued' });
-      seedTask(db, { id: 'c', status: 'in_progress' });
-      seedTask(db, { id: 'd', status: 'completed' });
+    it('includes both "pending" and "queued" statuses', async () => {
+      await seedTask(db, { id: 'a', status: 'pending' });
+      await seedTask(db, { id: 'b', status: 'queued' });
+      await seedTask(db, { id: 'c', status: 'in_progress' });
+      await seedTask(db, { id: 'd', status: 'completed' });
 
-      const ids = taskQueueService.getQueuedTasks().map((t) => t.id).sort();
+      const ids = (await taskQueueService.getQueuedTasks()).map((t) => t.id).sort();
       expect(ids).toEqual(['a', 'b']);
     });
   });
 
   describe('queueTask', () => {
-    it('transitions a pending task to queued', () => {
-      (taskQueueService as any).db = db;
-      const task = seedTask(db, { status: 'pending' });
-      taskQueueService.queueTask(task.id);
-      const row = db.prepare('SELECT status FROM tasks WHERE id = ?').get(task.id) as { status: string };
-      expect(row.status).toBe('queued');
+    it('transitions a pending task to queued', async () => {
+      const task = await seedTask(db, { status: 'pending' });
+      await taskQueueService.queueTask(task.id);
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, task.id))
+        .limit(1);
+      expect(rows[0].status).toBe('queued');
     });
   });
 
   describe('cancelTask', () => {
-    it('transitions a task to cancelled and stamps completed_at', () => {
-      (taskQueueService as any).db = db;
-      const task = seedTask(db, { status: 'queued' });
-      taskQueueService.cancelTask(task.id);
-      const row = db
-        .prepare('SELECT status, completed_at FROM tasks WHERE id = ?')
-        .get(task.id) as { status: string; completed_at: string | null };
-      expect(row.status).toBe('cancelled');
-      expect(row.completed_at).not.toBeNull();
+    it('transitions a task to cancelled and stamps completed_at', async () => {
+      const task = await seedTask(db, { status: 'queued' });
+      await taskQueueService.cancelTask(task.id);
+      const rows = await db
+        .select({ status: tasksTable.status, completedAt: tasksTable.completedAt })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, task.id))
+        .limit(1);
+      expect(rows[0].status).toBe('cancelled');
+      expect(rows[0].completedAt).not.toBeNull();
     });
   });
 
   describe('recoverStuckTasks', () => {
-    it('resets in_progress tasks with no assigned agent back to queued', () => {
-      (taskQueueService as any).db = db;
-      seedTask(db, { id: 't1', status: 'in_progress', assigned_agent_id: null });
+    async function callRecover() {
+      // recoverStuckTasks is private; invoke via the class method.
+      type WithPrivate = { recoverStuckTasks: () => Promise<void> };
+      await (taskQueueService as unknown as WithPrivate).recoverStuckTasks();
+    }
 
-      // Call the private method directly
-      (taskQueueService as any).recoverStuckTasks();
+    it('resets in_progress tasks with no assigned agent back to queued', async () => {
+      await seedTask(db, { id: 't1', status: 'in_progress', assignedAgentId: null });
 
-      const row = db.prepare('SELECT status, assigned_agent_id FROM tasks WHERE id = ?').get('t1') as {
-        status: string;
-        assigned_agent_id: string | null;
-      };
-      expect(row.status).toBe('queued');
-      expect(row.assigned_agent_id).toBeNull();
+      await callRecover();
+
+      const rows = await db
+        .select({ status: tasksTable.status, assignedAgentId: tasksTable.assignedAgentId })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, 't1'))
+        .limit(1);
+      expect(rows[0].status).toBe('queued');
+      expect(rows[0].assignedAgentId).toBeNull();
     });
 
-    it('resets in_progress tasks whose assigned agent no longer exists', () => {
-      (taskQueueService as any).db = db;
-      seedTask(db, { id: 't1', status: 'in_progress', assigned_agent_id: 'agent-gone' });
-      // Note: we never insert an agent row, so the LEFT JOIN returns NULL for the agent
+    it('resets in_progress tasks whose assigned agent no longer exists', async () => {
+      await seedTask(db, { id: 't1', status: 'in_progress', assignedAgentId: 'agent-gone' });
 
-      (taskQueueService as any).recoverStuckTasks();
+      await callRecover();
 
-      const row = db.prepare('SELECT status FROM tasks WHERE id = ?').get('t1') as { status: string };
-      expect(row.status).toBe('queued');
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, 't1'))
+        .limit(1);
+      expect(rows[0].status).toBe('queued');
     });
 
-    it('leaves in_progress tasks alone when the agent is actively working', () => {
-      (taskQueueService as any).db = db;
-      db.prepare("INSERT INTO environments (id, name, type, config) VALUES (?, ?, ?, ?)").run(
-        'env1',
-        'Local',
-        'local',
-        '{}'
-      );
-      db.prepare(
-        `INSERT INTO agents (id, environment_id, workspace_id, status, attention, last_activity)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run('agent-alive', 'env1', 'ws1', 'working', 'none', new Date().toISOString());
-      seedTask(db, { id: 't1', status: 'in_progress', assigned_agent_id: 'agent-alive' });
+    it('leaves in_progress tasks alone when the agent is actively working', async () => {
+      await db.insert(environmentsTable).values({
+        id: 'env1',
+        name: 'Local',
+        type: 'local',
+        config: { type: 'local' },
+      });
+      await db.insert(agentsTable).values({
+        id: 'agent-alive',
+        environmentId: 'env1',
+        workspaceId: 'ws1',
+        status: 'working',
+        attention: 'none',
+        lastActivity: new Date(),
+      });
+      await seedTask(db, { id: 't1', status: 'in_progress', assignedAgentId: 'agent-alive' });
 
-      (taskQueueService as any).recoverStuckTasks();
+      await callRecover();
 
-      const row = db.prepare('SELECT status FROM tasks WHERE id = ?').get('t1') as { status: string };
-      expect(row.status).toBe('in_progress');
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, 't1'))
+        .limit(1);
+      expect(rows[0].status).toBe('in_progress');
     });
   });
 });

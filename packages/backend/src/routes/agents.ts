@@ -1,121 +1,134 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { DB } from '../db/index.js';
+import { and, eq, SQL } from 'drizzle-orm';
+import { getDbClient } from '../db/client.js';
+import { agents as agentsTable } from '../db/schema.js';
 import { agentService } from '../services/agent.js';
 import type {
   Agent,
+  AgentStatus,
+  AgentAttention,
   StartAgentRequest,
   ApiResponse,
 } from '@fastowl/shared';
 
-export function agentRoutes(db: DB): Router {
+export function agentRoutes(): Router {
   const router = Router();
 
-  // List agents (with optional filters)
-  router.get('/', (req, res) => {
+  router.get('/', async (req, res) => {
+    const db = getDbClient();
     const { workspaceId, environmentId, status } = req.query;
 
-    let query = 'SELECT * FROM agents WHERE 1=1';
-    const params: any[] = [];
+    const conditions: SQL[] = [];
+    if (workspaceId) conditions.push(eq(agentsTable.workspaceId, workspaceId as string));
+    if (environmentId) conditions.push(eq(agentsTable.environmentId, environmentId as string));
+    if (status) conditions.push(eq(agentsTable.status, status as string));
 
-    if (workspaceId) {
-      query += ' AND workspace_id = ?';
-      params.push(workspaceId);
-    }
-    if (environmentId) {
-      query += ' AND environment_id = ?';
-      params.push(environmentId);
-    }
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+    const rows = await db
+      .select()
+      .from(agentsTable)
+      .where(whereClause)
+      .orderBy(agentsTable.createdAt);
 
-    query += ' ORDER BY created_at DESC';
-
-    const rows = db.prepare(query).all(...params);
-    const agents = rows.map(rowToAgent);
-    res.json({ success: true, data: agents } as ApiResponse<Agent[]>);
+    res.json({ success: true, data: rows.map(rowToAgent) } as ApiResponse<Agent[]>);
   });
 
-  // Get single agent
-  router.get('/:id', (req, res) => {
-    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.get('/:id', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Agent not found' });
     }
-    res.json({ success: true, data: rowToAgent(row) } as ApiResponse<Agent>);
+    res.json({ success: true, data: rowToAgent(rows[0]) } as ApiResponse<Agent>);
   });
 
-  // Start new agent
-  router.post('/start', (req, res) => {
+  router.post('/start', async (req, res) => {
+    const db = getDbClient();
     const body = req.body as StartAgentRequest;
     const id = uuid();
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    db.prepare(`
-      INSERT INTO agents (id, environment_id, workspace_id, status, attention, current_task_id, terminal_output, last_activity, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(agentsTable).values({
       id,
-      body.environmentId,
-      body.workspaceId,
-      'idle',
-      'none',
-      body.taskId || null,
-      '',
-      now,
-      now
-    );
+      environmentId: body.environmentId,
+      workspaceId: body.workspaceId,
+      status: 'idle',
+      attention: 'none',
+      currentTaskId: body.taskId ?? null,
+      terminalOutput: '',
+      lastActivity: now,
+      createdAt: now,
+    });
 
-    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+    const rows = await db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.id, id))
+      .limit(1);
 
-    // TODO: Actually spawn the Claude process on the environment
+    // TODO: Actually spawn the Claude process on the environment.
 
-    res.status(201).json({ success: true, data: rowToAgent(row) } as ApiResponse<Agent>);
+    res.status(201).json({ success: true, data: rowToAgent(rows[0]) } as ApiResponse<Agent>);
   });
 
-  // Send input to agent
-  router.post('/:id/input', (req, res) => {
-    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/input', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: agentsTable.id })
+      .from(agentsTable)
+      .where(eq(agentsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Agent not found' });
     }
 
     const { input } = req.body as { input: string };
-
-    // Send input to the Claude process via agent service
     agentService.sendInput(req.params.id, input);
 
-    // Update last activity
-    db.prepare('UPDATE agents SET last_activity = ? WHERE id = ?')
-      .run(new Date().toISOString(), req.params.id);
+    await db
+      .update(agentsTable)
+      .set({ lastActivity: new Date() })
+      .where(eq(agentsTable.id, req.params.id));
 
     res.json({ success: true } as ApiResponse<void>);
   });
 
-  // Stop agent
-  router.post('/:id/stop', (req, res) => {
-    const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/stop', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: agentsTable.id })
+      .from(agentsTable)
+      .where(eq(agentsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Agent not found' });
     }
 
-    // TODO: Actually stop the Claude process
+    await db
+      .update(agentsTable)
+      .set({ status: 'idle', lastActivity: new Date() })
+      .where(eq(agentsTable.id, req.params.id));
 
-    db.prepare('UPDATE agents SET status = ?, last_activity = ? WHERE id = ?')
-      .run('idle', new Date().toISOString(), req.params.id);
-
-    const updated = db.prepare('SELECT * FROM agents WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToAgent(updated) } as ApiResponse<Agent>);
+    const updated = await db
+      .select()
+      .from(agentsTable)
+      .where(eq(agentsTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToAgent(updated[0]) } as ApiResponse<Agent>);
   });
 
-  // Delete agent
-  router.delete('/:id', (req, res) => {
-    // TODO: Ensure process is stopped first
-
-    const result = db.prepare('DELETE FROM agents WHERE id = ?').run(req.params.id);
-    if (result.changes === 0) {
+  router.delete('/:id', async (req, res) => {
+    const db = getDbClient();
+    const result = await db
+      .delete(agentsTable)
+      .where(eq(agentsTable.id, req.params.id))
+      .returning({ id: agentsTable.id });
+    if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Agent not found' });
     }
     res.json({ success: true } as ApiResponse<void>);
@@ -124,16 +137,16 @@ export function agentRoutes(db: DB): Router {
   return router;
 }
 
-function rowToAgent(row: any): Agent {
+function rowToAgent(row: typeof agentsTable.$inferSelect): Agent {
   return {
     id: row.id,
-    environmentId: row.environment_id,
-    workspaceId: row.workspace_id,
-    status: row.status,
-    attention: row.attention,
-    currentTaskId: row.current_task_id || undefined,
-    terminalOutput: row.terminal_output,
-    lastActivity: row.last_activity,
-    createdAt: row.created_at,
+    environmentId: row.environmentId,
+    workspaceId: row.workspaceId,
+    status: row.status as AgentStatus,
+    attention: row.attention as AgentAttention,
+    currentTaskId: row.currentTaskId ?? undefined,
+    terminalOutput: row.terminalOutput,
+    lastActivity: row.lastActivity.toISOString(),
+    createdAt: row.createdAt.toISOString(),
   };
 }

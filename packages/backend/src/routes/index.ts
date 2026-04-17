@@ -1,5 +1,4 @@
 import { Express } from 'express';
-import { DB } from '../db/index.js';
 import { workspaceRoutes } from './workspaces.js';
 import { environmentRoutes } from './environments.js';
 import { taskRoutes } from './tasks.js';
@@ -9,27 +8,23 @@ import { githubRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
 import { backlogRoutes } from './backlog.js';
 
-export function setupRoutes(app: Express, db: DB): void {
-  // API version prefix
+export function setupRoutes(app: Express): void {
   const api = '/api/v1';
 
-  // Mount routes
-  app.use(`${api}/workspaces`, workspaceRoutes(db));
-  app.use(`${api}/environments`, environmentRoutes(db));
-  app.use(`${api}/tasks`, taskRoutes(db));
-  app.use(`${api}/agents`, agentRoutes(db));
-  app.use(`${api}/inbox`, inboxRoutes(db));
-  app.use(`${api}/github`, githubRoutes(db));
-  app.use(`${api}/repositories`, repositoryRoutes(db));
-  app.use(`${api}/backlog`, backlogRoutes(db));
+  app.use(`${api}/workspaces`, workspaceRoutes());
+  app.use(`${api}/environments`, environmentRoutes());
+  app.use(`${api}/tasks`, taskRoutes());
+  app.use(`${api}/agents`, agentRoutes());
+  app.use(`${api}/inbox`, inboxRoutes());
+  app.use(`${api}/github`, githubRoutes());
+  app.use(`${api}/repositories`, repositoryRoutes());
+  app.use(`${api}/backlog`, backlogRoutes());
 
-  // 404 handler
   app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Not found' });
   });
 
-  // Error handler
-  app.use((err: Error, _req: any, res: any, _next: any) => {
+  app.use((err: Error, _req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
     console.error('API Error:', err);
     res.status(500).json({ success: false, error: err.message });
   });

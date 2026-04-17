@@ -1,174 +1,214 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { DB } from '../db/index.js';
-import type {
-  InboxItem,
-  ApiResponse,
-} from '@fastowl/shared';
+import { and, desc, eq, isNull, lte, or, sql, SQL } from 'drizzle-orm';
+import { getDbClient } from '../db/client.js';
+import { inboxItems as inboxItemsTable } from '../db/schema.js';
+import type { InboxItem, ApiResponse } from '@fastowl/shared';
 
-export function inboxRoutes(db: DB): Router {
+export function inboxRoutes(): Router {
   const router = Router();
 
-  // List inbox items (with optional filters)
-  router.get('/', (req, res) => {
+  router.get('/', async (req, res) => {
+    const db = getDbClient();
     const { workspaceId, status, type } = req.query;
 
-    let query = 'SELECT * FROM inbox_items WHERE 1=1';
-    const params: any[] = [];
+    const conditions: SQL[] = [];
+    if (workspaceId) conditions.push(eq(inboxItemsTable.workspaceId, workspaceId as string));
+    if (status) conditions.push(eq(inboxItemsTable.status, status as string));
+    if (type) conditions.push(eq(inboxItemsTable.type, type as string));
 
-    if (workspaceId) {
-      query += ' AND workspace_id = ?';
-      params.push(workspaceId);
-    }
-    if (status) {
-      query += ' AND status = ?';
-      params.push(status);
-    }
-    if (type) {
-      query += ' AND type = ?';
-      params.push(type);
-    }
+    const notSnoozedOrDue = or(
+      isNull(inboxItemsTable.snoozedUntil),
+      lte(inboxItemsTable.snoozedUntil, new Date())
+    );
+    const snoozeCondition = notSnoozedOrDue as SQL;
+    conditions.push(snoozeCondition);
 
-    // Filter out snoozed items that aren't ready
-    query += ` AND (snoozed_until IS NULL OR snoozed_until <= datetime('now'))`;
+    const priorityCase = sql<number>`CASE ${inboxItemsTable.priority}
+      WHEN 'urgent' THEN 1
+      WHEN 'high' THEN 2
+      WHEN 'medium' THEN 3
+      ELSE 4
+    END`;
 
-    query += ` ORDER BY CASE priority WHEN 'urgent' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC`;
+    const rows = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(and(...conditions))
+      .orderBy(priorityCase, desc(inboxItemsTable.createdAt));
 
-    const rows = db.prepare(query).all(...params);
-    const items = rows.map(rowToInboxItem);
-    res.json({ success: true, data: items } as ApiResponse<InboxItem[]>);
+    res.json({ success: true, data: rows.map(rowToInboxItem) } as ApiResponse<InboxItem[]>);
   });
 
-  // Get single inbox item
-  router.get('/:id', (req, res) => {
-    const row = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.get('/:id', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
-    res.json({ success: true, data: rowToInboxItem(row) } as ApiResponse<InboxItem>);
+    res.json({ success: true, data: rowToInboxItem(rows[0]) } as ApiResponse<InboxItem>);
   });
 
-  // Create inbox item (usually done internally, but exposed for testing)
-  router.post('/', (req, res) => {
+  router.post('/', async (req, res) => {
+    const db = getDbClient();
     const body = req.body;
     const id = uuid();
-    const now = new Date().toISOString();
+    const now = new Date();
 
-    db.prepare(`
-      INSERT INTO inbox_items (id, workspace_id, type, priority, title, summary, source, actions, data, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+    await db.insert(inboxItemsTable).values({
       id,
-      body.workspaceId,
-      body.type,
-      body.priority || 'medium',
-      body.title,
-      body.summary,
-      JSON.stringify(body.source),
-      JSON.stringify(body.actions || []),
-      body.data ? JSON.stringify(body.data) : null,
-      now
-    );
+      workspaceId: body.workspaceId,
+      type: body.type,
+      priority: body.priority || 'medium',
+      title: body.title,
+      summary: body.summary,
+      source: body.source,
+      actions: body.actions || [],
+      data: body.data ?? null,
+      createdAt: now,
+    });
 
-    const row = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(id);
-    res.status(201).json({ success: true, data: rowToInboxItem(row) } as ApiResponse<InboxItem>);
+    const rows = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, id))
+      .limit(1);
+    res.status(201).json({ success: true, data: rowToInboxItem(rows[0]) } as ApiResponse<InboxItem>);
   });
 
-  // Mark as read
-  router.post('/:id/read', (req, res) => {
-    const row = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/read', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: inboxItemsTable.id })
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
 
-    db.prepare('UPDATE inbox_items SET status = ?, read_at = ? WHERE id = ?')
-      .run('read', new Date().toISOString(), req.params.id);
+    await db
+      .update(inboxItemsTable)
+      .set({ status: 'read', readAt: new Date() })
+      .where(eq(inboxItemsTable.id, req.params.id));
 
-    const updated = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToInboxItem(updated) } as ApiResponse<InboxItem>);
+    const updated = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToInboxItem(updated[0]) } as ApiResponse<InboxItem>);
   });
 
-  // Mark as actioned
-  router.post('/:id/action', (req, res) => {
-    const row = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/action', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: inboxItemsTable.id })
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
 
-    db.prepare('UPDATE inbox_items SET status = ?, actioned_at = ? WHERE id = ?')
-      .run('actioned', new Date().toISOString(), req.params.id);
+    await db
+      .update(inboxItemsTable)
+      .set({ status: 'actioned', actionedAt: new Date() })
+      .where(eq(inboxItemsTable.id, req.params.id));
 
-    const updated = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToInboxItem(updated) } as ApiResponse<InboxItem>);
+    const updated = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToInboxItem(updated[0]) } as ApiResponse<InboxItem>);
   });
 
-  // Snooze item
-  router.post('/:id/snooze', (req, res) => {
-    const row = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    if (!row) {
+  router.post('/:id/snooze', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select({ id: inboxItemsTable.id })
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
 
-    const { until } = req.body; // ISO string
-    db.prepare('UPDATE inbox_items SET status = ?, snoozed_until = ? WHERE id = ?')
-      .run('snoozed', until, req.params.id);
+    const { until } = req.body as { until: string };
+    await db
+      .update(inboxItemsTable)
+      .set({ status: 'snoozed', snoozedUntil: new Date(until) })
+      .where(eq(inboxItemsTable.id, req.params.id));
 
-    const updated = db.prepare('SELECT * FROM inbox_items WHERE id = ?').get(req.params.id);
-    res.json({ success: true, data: rowToInboxItem(updated) } as ApiResponse<InboxItem>);
+    const updated = await db
+      .select()
+      .from(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .limit(1);
+    res.json({ success: true, data: rowToInboxItem(updated[0]) } as ApiResponse<InboxItem>);
   });
 
-  // Delete inbox item
-  router.delete('/:id', (req, res) => {
-    const result = db.prepare('DELETE FROM inbox_items WHERE id = ?').run(req.params.id);
-    if (result.changes === 0) {
+  router.delete('/:id', async (req, res) => {
+    const db = getDbClient();
+    const result = await db
+      .delete(inboxItemsTable)
+      .where(eq(inboxItemsTable.id, req.params.id))
+      .returning({ id: inboxItemsTable.id });
+    if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
     res.json({ success: true } as ApiResponse<void>);
   });
 
-  // Bulk actions
-  router.post('/bulk/read', (req, res) => {
+  router.post('/bulk/read', async (req, res) => {
+    const db = getDbClient();
     const { ids } = req.body as { ids: string[] };
-    const now = new Date().toISOString();
-
-    const stmt = db.prepare('UPDATE inbox_items SET status = ?, read_at = ? WHERE id = ?');
+    const now = new Date();
     for (const id of ids) {
-      stmt.run('read', now, id);
+      await db
+        .update(inboxItemsTable)
+        .set({ status: 'read', readAt: now })
+        .where(eq(inboxItemsTable.id, id));
     }
-
     res.json({ success: true, data: { updated: ids.length } });
   });
 
-  router.post('/bulk/action', (req, res) => {
+  router.post('/bulk/action', async (req, res) => {
+    const db = getDbClient();
     const { ids } = req.body as { ids: string[] };
-    const now = new Date().toISOString();
-
-    const stmt = db.prepare('UPDATE inbox_items SET status = ?, actioned_at = ? WHERE id = ?');
+    const now = new Date();
     for (const id of ids) {
-      stmt.run('actioned', now, id);
+      await db
+        .update(inboxItemsTable)
+        .set({ status: 'actioned', actionedAt: now })
+        .where(eq(inboxItemsTable.id, id));
     }
-
     res.json({ success: true, data: { updated: ids.length } });
   });
 
   return router;
 }
 
-function rowToInboxItem(row: any): InboxItem {
+function rowToInboxItem(row: typeof inboxItemsTable.$inferSelect): InboxItem {
   return {
     id: row.id,
-    workspaceId: row.workspace_id,
-    type: row.type,
-    status: row.status,
-    priority: row.priority,
+    workspaceId: row.workspaceId,
+    type: row.type as InboxItem['type'],
+    status: row.status as InboxItem['status'],
+    priority: row.priority as InboxItem['priority'],
     title: row.title,
     summary: row.summary,
-    source: JSON.parse(row.source),
-    actions: JSON.parse(row.actions),
-    data: row.data ? JSON.parse(row.data) : undefined,
-    snoozedUntil: row.snoozed_until || undefined,
-    createdAt: row.created_at,
-    readAt: row.read_at || undefined,
-    actionedAt: row.actioned_at || undefined,
+    source: row.source as InboxItem['source'],
+    actions: (row.actions as InboxItem['actions']) ?? [],
+    data: (row.data as InboxItem['data']) ?? undefined,
+    snoozedUntil: row.snoozedUntil ? row.snoozedUntil.toISOString() : undefined,
+    createdAt: row.createdAt.toISOString(),
+    readAt: row.readAt ? row.readAt.toISOString() : undefined,
+    actionedAt: row.actionedAt ? row.actionedAt.toISOString() : undefined,
   };
 }
