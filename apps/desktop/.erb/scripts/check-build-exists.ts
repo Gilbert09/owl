@@ -1,34 +1,26 @@
-// Check if the renderer and main bundles are built
-import path from 'path';
-import chalk from 'chalk';
-import fs from 'fs';
+// Jest setup file. Polyfills TextEncoder/TextDecoder for JSDOM so React
+// Testing Library can run without a pre-built bundle.
 import { TextEncoder, TextDecoder } from 'node:util';
-import webpackPaths from '../configs/webpack.paths';
 
-const mainPath = path.join(webpackPaths.distMainPath, 'main.js');
-const rendererPath = path.join(webpackPaths.distRendererPath, 'renderer.js');
-
-if (!fs.existsSync(mainPath)) {
-  throw new Error(
-    chalk.whiteBright.bgRed.bold(
-      'The main process is not built yet. Build it by running "npm run build:main"',
-    ),
-  );
-}
-
-if (!fs.existsSync(rendererPath)) {
-  throw new Error(
-    chalk.whiteBright.bgRed.bold(
-      'The renderer process is not built yet. Build it by running "npm run build:renderer"',
-    ),
-  );
-}
-
-// JSDOM does not implement TextEncoder and TextDecoder
 if (!global.TextEncoder) {
   global.TextEncoder = TextEncoder;
 }
 if (!global.TextDecoder) {
-  // @ts-ignore
+  // @ts-ignore - jsdom types mismatch with Node's TextDecoder
   global.TextDecoder = TextDecoder;
+}
+
+// JSDOM does not implement matchMedia; components that query it (theme
+// detection, responsive hooks) crash on import without this stub.
+if (typeof window !== 'undefined' && !window.matchMedia) {
+  window.matchMedia = (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  }) as MediaQueryList;
 }
