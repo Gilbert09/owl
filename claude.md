@@ -562,35 +562,31 @@ A prioritized list of items requiring human attention:
 > These are the immediate priorities based on user feedback:
 
 1. ~~**Phase 13.3 - Smart Task Creation** (Quick win)~~ DONE
-   - ~~Remove required name/description, auto-generate with Haiku~~
-
 2. ~~**Phase 13.4 - Repository Context** (Essential)~~ DONE
-   - ~~Spawn Claude in correct repo directory~~
-
 3. ~~**Phase 14.1-14.2 - Git Branch Management** (Core feature)~~ DONE
-   - ~~Task branches~~ - Auto-create branch when starting task with repo
-
 4. ~~**Phase 12.8 - Light Mode** (Quick win)~~ DONE
-   - ~~Theme toggle, system detection~~
-
-5. ~~**Phase 15.1-15.3 - Task History** (Important UX)~~ DONE (raw terminal output persisted + shown for completed tasks; structured log deferred)
-
+5. ~~**Phase 15.1-15.3 - Task History** (Important UX)~~ DONE
 6. ~~**Phase 13.1 - Interactive Terminal** (Core feature)~~ DONE
-   - ~~Full interactivity, bidirectional communication~~
+7. ~~**Phase 16.1/16.2/16.5 - Approval Workflows** (Core feature)~~ DONE
+8. ~~**Phase 20.1-20.5 - Continuous Build** (Core feature, "FastOwl builds itself")~~ DONE — backlog model, scheduler, UI toggle, `fastowl` CLI for task-spawns-task, SSH VM setup doc. Remaining: user-side VM verification (20.5 end-to-end) and MCP server (20.6).
 
-7. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
-   - Clickable options, approval buttons on Claude TUI
+9. **Phase 20.5 - Run Continuous Build on the FastOwl VM** (User action)
+   - Follow `docs/SSH_VM_SETUP.md` to install the CLI on the VM and configure `FASTOWL_API_URL`.
+   - Turn on Continuous Build pointed at `claude.md` `Priority Queue (Next Up)` section.
 
-9. **Phase 16.3 - Automated PR Response** (Core workflow)
-   - Hook PR monitor → auto-create `pr_response` tasks on new review comments
+10. **Phase 20.6 - FastOwl MCP server** (Enhanced UX for child Claudes)
+    - Wrap CLI commands as first-class Claude tools.
 
-10. **Phase 12.5 - Testing framework** (Reliability)
-    - See `docs/TESTING.md` for the full plan. Start with backend service tests + a handful of E2E smoke flows.
+11. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
+    - Clickable options, approval buttons on Claude TUI
 
-11. **Phase 18 - Hosted backend + local daemon** (Shipping / productionization)
-    - Split backend into hosted server + local daemon; migrate from SQLite to Supabase Postgres; see Phase 18 below.
+12. **Phase 16.3 - Automated PR Response** (Core workflow)
+    - Hook PR monitor → auto-create `pr_response` tasks on new review comments
 
-8. ~~**Phase 16.1/16.2/16.5 - Approval Workflows** (Core feature)~~ DONE (task types, awaiting_review gate, approve/reject). Remaining: 16.3 PR Response auto-trigger, 16.4 PR Review batch-post, diff preview.
+13. **Phase 12.5 - Testing framework** (Reliability, ongoing)
+    - See `docs/TESTING.md`. 64 backend + 3 CLI + 1 desktop tests now landed.
+
+14. **Phase 18 - Hosted backend + local daemon** (Shipping / productionization)
 
 ### Phase 11: Settings & Configuration
 
@@ -889,6 +885,54 @@ A prioritized list of items requiring human attention:
 - [ ] **19.3 Local `claude` CLI smoke harness**
   - [ ] Fixture transcripts + a test harness that replays them into `agent.analyzeOutput()` to catch regressions in status detection when the Claude CLI output format changes
 
+### Phase 20: Continuous Build
+
+> Point FastOwl at a TODO document and it works through the list — one task per item, each with its own git branch, each gated by human approval. See [`docs/CONTINUOUS_BUILD.md`](./docs/CONTINUOUS_BUILD.md) for the full feature doc.
+
+- [x] **20.1 Backlog data model + markdown parser** (COMPLETED)
+  - [x] `backlog_sources` + `backlog_items` tables (migrations 006, 007)
+  - [x] Markdown checklist parser with heading-scoped sections, nesting, `(blocked)` detection
+  - [x] Stable external IDs (hash of text + parent) so reordering doesn't churn state
+  - [x] Source sync: read file via `environmentService.exec`, upsert items, retire missing ones
+  - [x] REST at `/api/v1/backlog` for sources CRUD + sync + item list
+  - [x] 18 unit/service tests (parser + service)
+
+- [x] **20.2 Continuous Build scheduler** (COMPLETED)
+  - [x] Domain EventEmitter (`services/events.ts`) so backend services can react to `task:status` transitions without going through websocket
+  - [x] Scheduler subscribes to `task:status`, updates backlog item claim/completion, and spawns the next unblocked item when slots are available
+  - [x] Workspace-level `continuousBuild.{ enabled, maxConcurrent, requireApproval }` settings
+  - [x] Manual-kick endpoint `POST /api/v1/backlog/schedule`
+  - [x] Periodic tick (60s) as a safety net for missed events
+  - [x] 8 scheduler tests (on/off, cap, approval gate, claim/release, disabled-source skip)
+
+- [x] **20.3 Desktop UI** (COMPLETED)
+  - [x] New **Continuous Build** section in Settings: toggle + concurrent cap + approval gate
+  - [x] Source management: add/delete markdown_file sources with per-source environment
+  - [x] Backlog items view with live status chips (pending/in-flight/done/blocked)
+  - [x] "Run scheduler" button
+
+- [x] **20.4 FastOwl CLI (task-spawns-task)** (COMPLETED)
+  - [x] New `packages/cli` workspace publishing the `fastowl` binary
+  - [x] Commands: `task create/list/ready`, `backlog sources/sync/items/schedule`, `ping`
+  - [x] Agent service injects `FASTOWL_API_URL` (local), `FASTOWL_WORKSPACE_ID`, `FASTOWL_TASK_ID` as inline env vars on spawn so child Claudes inherit context
+  - [x] 3 CLI client tests + 4 backend env-prefix tests
+
+- [x] **20.5 SSH VM support** (COMPLETED — documentation and code path)
+  - [x] Env prefix skips `FASTOWL_API_URL` for SSH environments (remote `.bashrc` sets it instead)
+  - [x] `docs/SSH_VM_SETUP.md` with three networking options (SSH reverse tunnel, LAN bind, backend-on-VM) and troubleshooting
+  - [ ] End-to-end user verification on the real VM (requires user action)
+
+- [ ] **20.6 FastOwl MCP server (follow-up)**
+  - [ ] New `packages/mcp-server` wrapping the CLI commands as Claude tools
+  - [ ] Document in `docs/SETUP.md` how to register it in `~/.claude/mcp_servers.json`
+
+- [ ] **20.7 Nice-to-haves (deferred)**
+  - [ ] GitHub issues as a backlog source type
+  - [ ] Linear projects as a backlog source type
+  - [ ] Priority inference from source context (currently every item is `medium`)
+  - [ ] Cross-source scheduling priority (currently iterates in creation order)
+  - [ ] Structured `<!-- depends-on: ... -->` annotations for blocked items
+
 ---
 
 ## File Structure (Actual)
@@ -926,12 +970,26 @@ fastowl/
 │   │   │   ├── index.ts          # Entry point
 │   │   │   ├── db/               # SQLite + migrations
 │   │   │   ├── routes/           # REST API routes
-│   │   │   └── services/         # WebSocket, etc.
+│   │   │   ├── services/         # Services (agent, taskQueue, continuousBuild, backlog/, etc.)
+│   │   │   └── __tests__/        # Vitest suites + helpers/fakeEnvironment.ts
+│   │   └── package.json
+│   ├── cli/                      # @fastowl/cli — `fastowl` binary
+│   │   ├── src/
+│   │   │   ├── index.ts          # Entry point (commander)
+│   │   │   ├── client.ts         # Fetch wrapper for the backend API
+│   │   │   └── commands/         # task.ts, backlog.ts
+│   │   ├── README.md
 │   │   └── package.json
 │   └── shared/                   # Shared types
 │       ├── src/
 │       │   └── index.ts          # All shared types
 │       └── package.json
+├── docs/
+│   ├── AUTONOMOUS_BUILD.md       # Read-later design doc for self-building loops
+│   ├── CONTINUOUS_BUILD.md       # Phase 20 feature doc
+│   ├── SETUP.md                  # User env vars / account setup
+│   ├── SSH_VM_SETUP.md           # Running FastOwl against an SSH VM
+│   └── TESTING.md                # Testing strategy + current coverage
 ├── claude.md                     # This file
 ├── tsconfig.json                 # Root TS config
 └── package.json                  # Workspace root
@@ -940,6 +998,52 @@ fastowl/
 ---
 
 ## Session Notes
+
+### Session 10 (Continuous Build — Phase 20)
+Shipped the whole "point FastOwl at a TODO doc and it builds it" feature end-to-end, covering 20.1–20.5.
+
+- **Backlog model** (`packages/backend/src/services/backlog/`):
+  - `parser.ts` — GitHub-flavored markdown checklist parser with section scoping (`#/##/###`), indentation-based nesting, `(blocked)` / `[blocked]` detection, stable SHA1-based external IDs.
+  - `service.ts` — DB helpers + `syncSource(id)` which reads the file via `environmentService.exec` and upserts items in a transaction, retiring vanished items rather than deleting (preserves claimed-task linkage).
+  - Migrations 006 (`backlog_sources` + `backlog_items`) and 007 (`repository_id` on sources).
+  - REST at `/api/v1/backlog/*` (sources CRUD + sync, items list, schedule trigger).
+
+- **Scheduler** (`packages/backend/src/services/continuousBuild.ts`):
+  - New in-process domain bus at `packages/backend/src/services/events.ts`. `emitTaskStatus` now fires on both websocket AND domainEvents.
+  - Subscribes to `task:status`: on `completed` marks the claimed backlog item complete; on `failed/cancelled` releases the claim; on `awaiting_review` or any terminal status, re-evaluates `scheduleNext`.
+  - `scheduleNext` respects workspace `continuousBuild.enabled/maxConcurrent/requireApproval`. Transactionally inserts a `code_writing` task row (status `queued`), claims the item, emits `task:status`.
+  - Periodic 60s tick as safety net for missed events.
+
+- **UI** (`apps/desktop/src/renderer/components/panels/SettingsPanel.tsx`):
+  - New "Continuous Build" nav section. Toggle + `maxConcurrent` select + require-approval switch.
+  - Source manager: add markdown_file source (path + section + environment), sync button per source, delete button.
+  - Items preview with status chips.
+  - "Run scheduler" button kicks `POST /backlog/schedule` for the current workspace.
+
+- **`@fastowl/cli`** (new workspace `packages/cli`):
+  - `fastowl task create|list|ready` + `fastowl backlog sources|sync|items|schedule` + `fastowl ping`.
+  - Thin fetch client (`src/client.ts`) using native fetch, unwraps `ApiResponse<T>`, throws typed `ApiError` on failure.
+  - Commander-based command setup. Env-aware defaults read `FASTOWL_API_URL`, `FASTOWL_WORKSPACE_ID`, `FASTOWL_TASK_ID`.
+  - README at `packages/cli/README.md`, 3 client tests, wired into root `typecheck`.
+
+- **Agent env injection**:
+  - `agent.ts` now builds an inline `KEY=val KEY=val claude` prefix via new exported `buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl })`.
+  - For **local** envs, `FASTOWL_API_URL=http://localhost:${PORT}` is included. For **SSH** envs it's omitted — the remote shell supplies it via `.bashrc` (see SSH setup doc).
+  - Workspace/task IDs are always included so `fastowl task create` works without flags in the child session.
+
+- **Docs**:
+  - `docs/SSH_VM_SETUP.md` — full end-to-end: install Claude CLI + fastowl on the VM, three networking options (SSH reverse tunnel / LAN bind / backend on VM), wire up the SSH env in the desktop app, first task, turn on Continuous Build. Troubleshooting section covers the common cases (`claude: command not found`, `ECONNREFUSED` on child CLI calls, SSH drop).
+  - `docs/CONTINUOUS_BUILD.md` — feature-level walkthrough: mental model, backlog file format, task-spawns-task via CLI, "turn it on for FastOwl itself" recipe, known limitations.
+
+- **Tests**: 59 backend → 64 backend + 3 CLI = 67 total Vitest + 1 Jest smoke.
+  - Parser: 9 tests (flat, nesting, section scoping, stop-at-heading, blocked detection, stable IDs, blank-skip, case-insensitive heading).
+  - Service: 9 tests (round-trip, update, delete, syncSource add/retire/claim-preserved, nextActionableItem, skip-claimed, null-when-empty).
+  - Scheduler: 8 tests (disabled no-op, spawn-on-empty, maxConcurrent cap, approval hold, approval-off proceed, task-completed → item-completed, task-failed → item-released, disabled-source skip).
+  - Env prefix: 5 tests (API-URL default/override, task id optional, single-quote escape, SSH exclusion).
+  - CLI: 3 tests (unwrap success, throw on error, POST body).
+  - Extended `fakeEnvironment` helper to stub `exec` in addition to `spawnInteractive` so the backlog service's file-read path is testable without a real shell.
+
+Deferred for 20.6: FastOwl MCP server. Deferred for 20.7: GitHub/Linear sources, priority inference, cross-source scheduling, structured `depends-on` annotations.
 
 ### Session 1 (Initial)
 - Created this document
