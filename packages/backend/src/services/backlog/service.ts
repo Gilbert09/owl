@@ -275,7 +275,7 @@ export const backlogService = new BacklogService();
 
 async function readSourceContent(source: BacklogSource): Promise<string> {
   if (source.config.type === 'markdown_file') {
-    const envId = source.environmentId ?? (await firstLocalEnvironmentId());
+    const envId = source.environmentId ?? (await firstAvailableEnvironmentId());
     if (!envId) throw new Error('No environment available to read backlog source');
     const { stdout, code } = await environmentService.exec(
       envId,
@@ -300,9 +300,17 @@ function parseSourceContent(
   return [];
 }
 
-async function firstLocalEnvironmentId(): Promise<string | null> {
+/**
+ * Pick a sensible default environment for ad-hoc work (e.g. syncing a
+ * backlog source that didn't specify one). Prefers local; falls back
+ * to any connected daemon. Returns null if nothing executable exists.
+ */
+async function firstAvailableEnvironmentId(): Promise<string | null> {
   const envs = await environmentService.getAllEnvironments();
-  return envs.find((e) => e.type === 'local')?.id ?? null;
+  const local = envs.find((e) => e.type === 'local');
+  if (local) return local.id;
+  const daemon = envs.find((e) => e.type === 'daemon' && e.status === 'connected');
+  return daemon?.id ?? null;
 }
 
 function escapeShell(value: string): string {

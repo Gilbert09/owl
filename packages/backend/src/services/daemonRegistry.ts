@@ -10,6 +10,7 @@ import {
 } from '@fastowl/shared';
 import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
+import { emitEnvironmentStatus } from './websocket.js';
 
 /**
  * Per-process state of every daemon currently connected over WebSocket.
@@ -148,14 +149,15 @@ class DaemonRegistry extends EventEmitter {
       }
     }
     this.active.set(active.environmentId, active);
-    // Heartbeat: stamp last_seen_at now; the sweeper re-stamps every
-    // minute for as long as the daemon stays connected.
-    this.touchLastSeen(active.environmentId);
+    // Flip the env row to `connected` so the scheduler + desktop see
+    // the daemon as live. touchLastSeen also bumps last_seen_at.
+    this.markEnvConnected(active.environmentId);
   }
 
   /** Called when the WS closes. */
   unregister(environmentId: string): void {
     this.active.delete(environmentId);
+    this.markEnvDisconnected(environmentId);
     // Reject anything still waiting — the backend-side caller will
     // bubble up a "daemon disconnected" error.
     for (const [id, pending] of this.pending) {
@@ -165,6 +167,29 @@ class DaemonRegistry extends EventEmitter {
         this.pending.delete(id);
       }
     }
+  }
+
+  private markEnvConnected(environmentId: string): void {
+    const now = new Date();
+    getDbClient()
+      .update(environmentsTable)
+      .set({ status: 'connected', lastSeenAt: now, lastConnected: now, error: null })
+      .where(eq(environmentsTable.id, environmentId))
+      .then(
+        () => emitEnvironmentStatus(environmentId, 'connected'),
+        (err) => console.error('daemonRegistry: mark connected failed:', err)
+      );
+  }
+
+  private markEnvDisconnected(environmentId: string): void {
+    getDbClient()
+      .update(environmentsTable)
+      .set({ status: 'disconnected' })
+      .where(eq(environmentsTable.id, environmentId))
+      .then(
+        () => emitEnvironmentStatus(environmentId, 'disconnected'),
+        (err) => console.error('daemonRegistry: mark disconnected failed:', err)
+      );
   }
 
   /** Is the daemon for this env currently connected? */
@@ -229,20 +254,6 @@ class DaemonRegistry extends EventEmitter {
     this.emit(event.type, environmentId, event);
   }
 
-  private touchLastSeen(environmentId: string): void {
-    // Fire-and-forget; last_seen_at drives the desktop's green/amber
-    // dot, not auth, so a failure here is non-fatal. The `.then(..,..)`
-    // form forces the Drizzle builder to execute eagerly — plain
-    // `.catch()` on an unthenable builder leaves the query unresolved.
-    getDbClient()
-      .update(environmentsTable)
-      .set({ lastSeenAt: new Date() })
-      .where(eq(environmentsTable.id, environmentId))
-      .then(
-        () => {},
-        () => {}
-      );
-  }
 }
 
 function hashToken(token: string): string {

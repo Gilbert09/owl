@@ -115,8 +115,11 @@ async function main() {
 }
 
 /**
- * Connect to every saved environment on startup. Local envs always
- * "connect" (it's a no-op). SSH envs try their stored credentials.
+ * Reconcile env.status on startup. Local envs "connect" synthetically
+ * (backend-local PTY is always available). SSH envs retry their stored
+ * creds. Daemon envs are marked disconnected by default — they'll flip
+ * to `connected` when the daemon dials back in; the WS registers that
+ * via daemonRegistry.register.
  */
 async function connectSavedEnvironments() {
   const db = getDbClient();
@@ -126,6 +129,13 @@ async function connectSavedEnvironments() {
       await db
         .update(environmentsTable)
         .set({ status: 'connected' })
+        .where(eq(environmentsTable.id, env.id));
+      continue;
+    }
+    if (env.type === 'daemon') {
+      await db
+        .update(environmentsTable)
+        .set({ status: 'disconnected' })
         .where(eq(environmentsTable.id, env.id));
       continue;
     }
