@@ -23,7 +23,7 @@ export function initDatabase(): Database.Database {
   return db;
 }
 
-function runMigrations(db: Database.Database): void {
+export function runMigrations(db: Database.Database): void {
   // Create migrations table if not exists
   db.exec(`
     CREATE TABLE IF NOT EXISTS migrations (
@@ -47,12 +47,12 @@ function runMigrations(db: Database.Database): void {
   }
 }
 
-interface Migration {
+export interface Migration {
   name: string;
   sql: string;
 }
 
-function getMigrations(): Migration[] {
+export function getMigrations(): Migration[] {
   return [
     {
       name: '001_initial_schema',

@@ -13,10 +13,12 @@ import { emitAgentStatus, emitAgentOutput, emitInboxNew, emitTaskOutput, emitTas
 import { DB } from '../db/index.js';
 
 // Patterns to detect Claude CLI status
-const STATUS_PATTERNS = {
-  // Claude is thinking/working
+export const STATUS_PATTERNS = {
+  // Claude is thinking/working. Note: tool-use indicators ("> Running ...")
+  // are intentionally NOT included here — they're matched by the more
+  // specific STATUS_PATTERNS.toolUse and including a catch-all `/^>/` here
+  // would override the tool_use classification in the cascade.
   working: [
-    /^>/,  // Tool use indicator
     /^\s*\d+\s*│/,  // Code block line numbers
     /Thinking\.\.\./i,
     /Working on/i,
@@ -67,6 +69,70 @@ const STATUS_PATTERNS = {
     /^> Searching/i,
   ],
 };
+
+/**
+ * Pure status detection from Claude CLI output. Extracted so it can be
+ * unit-tested independently of the live agent service.
+ *
+ * Takes the recent output (typically the last ~10 lines) and the current
+ * status, returns the derived status. Priority cascade preserves the
+ * historical behavior: tool_use → error → awaiting_input → completed → working.
+ */
+export function detectStatusFromOutput(
+  recentOutput: string,
+  current: { status: AgentStatus; attention: AgentAttention }
+): { status: AgentStatus; attention: AgentAttention } {
+  let newStatus: AgentStatus = current.status;
+  let newAttention: AgentAttention = current.attention;
+
+  for (const pattern of STATUS_PATTERNS.toolUse) {
+    if (pattern.test(recentOutput)) {
+      newStatus = 'tool_use';
+      newAttention = 'none';
+      break;
+    }
+  }
+
+  for (const pattern of STATUS_PATTERNS.error) {
+    if (pattern.test(recentOutput)) {
+      newStatus = 'error';
+      newAttention = 'high';
+      break;
+    }
+  }
+
+  if (newStatus !== 'error') {
+    for (const pattern of STATUS_PATTERNS.awaitingInput) {
+      if (pattern.test(recentOutput)) {
+        newStatus = 'awaiting_input';
+        newAttention = 'high';
+        break;
+      }
+    }
+  }
+
+  if (newStatus !== 'error' && newStatus !== 'awaiting_input') {
+    for (const pattern of STATUS_PATTERNS.completed) {
+      if (pattern.test(recentOutput)) {
+        newStatus = 'completed';
+        newAttention = 'low';
+        break;
+      }
+    }
+  }
+
+  if (newStatus !== 'error' && newStatus !== 'awaiting_input' && newStatus !== 'completed') {
+    for (const pattern of STATUS_PATTERNS.working) {
+      if (pattern.test(recentOutput)) {
+        newStatus = 'working';
+        newAttention = 'none';
+        break;
+      }
+    }
+  }
+
+  return { status: newStatus, attention: newAttention };
+}
 
 export interface ActiveAgent {
   id: string;
@@ -449,69 +515,15 @@ class AgentService extends EventEmitter {
    * Analyze output to detect status
    */
   private analyzeOutput(agent: ActiveAgent): void {
-    // Get last few lines for analysis
-    const lines = agent.outputBuffer.split('\n').slice(-10);
-    const recentOutput = lines.join('\n');
+    const recentOutput = agent.outputBuffer.split('\n').slice(-10).join('\n');
+    const { status: newStatus, attention: newAttention } = detectStatusFromOutput(
+      recentOutput,
+      { status: agent.status, attention: agent.attention }
+    );
 
-    let newStatus: AgentStatus = agent.status;
-    let newAttention: AgentAttention = agent.attention;
-
-    // Check for tool use first (takes priority)
-    for (const pattern of STATUS_PATTERNS.toolUse) {
-      if (pattern.test(recentOutput)) {
-        newStatus = 'tool_use';
-        newAttention = 'none';
-        break;
-      }
-    }
-
-    // Check for errors
-    for (const pattern of STATUS_PATTERNS.error) {
-      if (pattern.test(recentOutput)) {
-        newStatus = 'error';
-        newAttention = 'high';
-        break;
-      }
-    }
-
-    // Check for awaiting input
-    if (newStatus !== 'error') {
-      for (const pattern of STATUS_PATTERNS.awaitingInput) {
-        if (pattern.test(recentOutput)) {
-          newStatus = 'awaiting_input';
-          newAttention = 'high';
-          break;
-        }
-      }
-    }
-
-    // Check for completion
-    if (newStatus !== 'error' && newStatus !== 'awaiting_input') {
-      for (const pattern of STATUS_PATTERNS.completed) {
-        if (pattern.test(recentOutput)) {
-          newStatus = 'completed';
-          newAttention = 'low';
-          break;
-        }
-      }
-    }
-
-    // Check for working
-    if (newStatus !== 'error' && newStatus !== 'awaiting_input' && newStatus !== 'completed') {
-      for (const pattern of STATUS_PATTERNS.working) {
-        if (pattern.test(recentOutput)) {
-          newStatus = 'working';
-          newAttention = 'none';
-          break;
-        }
-      }
-    }
-
-    // Update if changed
     if (newStatus !== agent.status || newAttention !== agent.attention) {
       this.updateAgentStatus(agent.id, newStatus, newAttention);
 
-      // Create inbox item if attention needed
       if (newAttention === 'high' && agent.attention !== 'high') {
         this.createInboxItemForAgent(agent, newStatus);
       }
