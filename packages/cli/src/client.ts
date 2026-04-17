@@ -1,4 +1,5 @@
 import type { ApiResponse } from '@fastowl/shared';
+import { getAuthToken } from './config.js';
 
 const DEFAULT_BASE = process.env.FASTOWL_API_URL || 'http://localhost:4747';
 
@@ -17,11 +18,22 @@ export async function request<T>(
   base: string = DEFAULT_BASE
 ): Promise<T> {
   const url = `${base}/api/v1${path}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  if (res.status === 401) {
+    throw new ApiError(
+      'Not authenticated. Run `fastowl token set` (paste the token from the desktop app → Settings → Copy CLI token) or set FASTOWL_AUTH_TOKEN.',
+      401
+    );
+  }
 
   let payload: ApiResponse<T>;
   try {

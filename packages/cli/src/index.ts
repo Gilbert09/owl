@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { registerTaskCommands } from './commands/task.js';
 import { registerBacklogCommands } from './commands/backlog.js';
+import { registerTokenCommands } from './commands/token.js';
 import { baseUrl } from './client.js';
 
 const program = new Command();
@@ -14,6 +15,7 @@ program
 
 registerTaskCommands(program);
 registerBacklogCommands(program);
+registerTokenCommands(program);
 
 program
   .command('ping')

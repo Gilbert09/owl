@@ -9,6 +9,16 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * MCP runs inside a child Claude process; the parent is responsible for
+ * setting FASTOWL_AUTH_TOKEN on spawn. We don't fall back to the CLI's
+ * on-disk token file because MCP servers aren't tied to a shell user.
+ */
+function getAuthToken(): string | null {
+  const t = process.env.FASTOWL_AUTH_TOKEN;
+  return t && t.trim() ? t.trim() : null;
+}
+
 export async function request<T>(
   method: string,
   path: string,
@@ -16,11 +26,23 @@ export async function request<T>(
   base: string = DEFAULT_BASE
 ): Promise<T> {
   const url = `${base}/api/v1${path}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const res = await fetch(url, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
+
+  if (res.status === 401) {
+    throw new ApiError(
+      'Not authenticated. FASTOWL_AUTH_TOKEN is missing — the parent agent process must set it on spawn.',
+      401
+    );
+  }
+
   let payload: ApiResponse<T>;
   try {
     payload = (await res.json()) as ApiResponse<T>;
