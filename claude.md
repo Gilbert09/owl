@@ -634,12 +634,13 @@ A prioritized list of items requiring human attention:
   - [ ] Database optimization
   - [ ] Memory management
 
-- [ ] **12.5 Testing** (plan published, not yet implemented)
+- [ ] **12.5 Testing** (IN PROGRESS - Phase A + B landed)
   - See [`docs/TESTING.md`](./docs/TESTING.md) for the full plan (stack, layers, CI wiring, rollout)
-  - [ ] Phase A: Vitest on backend + port existing desktop test
-  - [ ] Phase B: Backend service tests (taskQueue, agent, git, migrations)
-  - [ ] Phase C: Backend route tests via supertest
-  - [ ] Phase D: Frontend hook tests
+  - [x] Phase A: Vitest on backend; desktop Jest setup fixed for headless CI (matchMedia polyfill, dropped build-exists guard)
+  - [x] Phase B: Backend service tests — migrations (6), status detection (10), gitService (8), taskQueue (8). 32 passing; fake-environment harness at `src/__tests__/helpers/fakeEnvironment.ts` usable by any service that touches environments.
+  - [ ] Phase B cont'd: agentService integration tests (lifecycle, inbox item creation), prMonitor tests, ai service tests
+  - [ ] Phase C: Backend route tests via supertest (tasks, repositories, workspaces, github, inbox routes)
+  - [ ] Phase D: Frontend hook tests (useTaskActions, useApiConnection) and component tests (TerminalHistory, TaskDiff)
   - [ ] Phase E: Playwright E2E for 5 golden flows
 
 - [ ] **12.6 Documentation**
