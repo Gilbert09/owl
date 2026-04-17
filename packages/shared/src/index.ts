@@ -216,6 +216,8 @@ export interface BacklogSource {
   enabled: boolean;
   /** Environment to read the source from. Defaults to the first local env. */
   environmentId?: string;
+  /** Repository that generated tasks should target (branch + cwd). */
+  repositoryId?: string;
   config: BacklogSourceConfig;
   lastSyncedAt?: string;
   createdAt: string;
@@ -262,12 +264,14 @@ export interface CreateBacklogSourceRequest {
   type: BacklogSourceType;
   config: BacklogSourceConfig;
   environmentId?: string;
+  repositoryId?: string;
   enabled?: boolean;
 }
 
 export interface UpdateBacklogSourceRequest {
   enabled?: boolean;
   environmentId?: string;
+  repositoryId?: string;
   config?: BacklogSourceConfig;
 }
 

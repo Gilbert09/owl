@@ -11,6 +11,7 @@ import { taskQueueService } from './services/taskQueue.js';
 import { githubService } from './services/github.js';
 import { prMonitorService } from './services/prMonitor.js';
 import { backlogService } from './services/backlog/service.js';
+import { continuousBuildScheduler } from './services/continuousBuild.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -29,6 +30,7 @@ async function main() {
   githubService.init(db);
   prMonitorService.init(db);
   backlogService.init(db);
+  continuousBuildScheduler.init(db);
 
   // Create Express app
   const app = express();
@@ -75,6 +77,7 @@ async function main() {
     console.log('Shutting down...');
 
     // Shutdown services
+    continuousBuildScheduler.shutdown();
     prMonitorService.shutdown();
     taskQueueService.shutdown();
     agentService.shutdown();

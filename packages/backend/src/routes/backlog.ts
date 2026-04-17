@@ -8,6 +8,7 @@ import type {
 } from '@fastowl/shared';
 import { DB } from '../db/index.js';
 import { backlogService } from '../services/backlog/service.js';
+import { continuousBuildScheduler } from '../services/continuousBuild.js';
 
 export function backlogRoutes(_db: DB): Router {
   const router = Router();
@@ -86,6 +87,20 @@ export function backlogRoutes(_db: DB): Router {
     }
     const items = backlogService.listItemsForWorkspace(workspaceId);
     res.json({ success: true, data: items } as ApiResponse<BacklogItem[]>);
+  });
+
+  // Manually kick the Continuous Build scheduler for a workspace
+  router.post('/schedule', async (req, res) => {
+    const workspaceId = req.body?.workspaceId as string | undefined;
+    if (!workspaceId) {
+      return res.status(400).json({ success: false, error: 'workspaceId is required' });
+    }
+    try {
+      await continuousBuildScheduler.scheduleNext(workspaceId);
+      res.json({ success: true } as ApiResponse<void>);
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   return router;

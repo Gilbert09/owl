@@ -1,5 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import type { WSEvent } from '@fastowl/shared';
+import type { TaskStatus, WSEvent } from '@fastowl/shared';
+import { domainEvents } from './events.js';
 
 // Store connected clients
 const clients = new Set<WebSocket>();
@@ -120,6 +121,11 @@ export function emitTaskStatus(workspaceId: string, taskId: string, status: stri
     type: 'task:status',
     payload: { taskId, status, result },
     timestamp: new Date().toISOString(),
+  });
+  domainEvents.emit('task:status', {
+    workspaceId,
+    taskId,
+    status: status as TaskStatus,
   });
 }
 

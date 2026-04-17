@@ -44,20 +44,22 @@ class BacklogService {
     type: BacklogSourceType;
     config: BacklogSourceConfig;
     environmentId?: string;
+    repositoryId?: string;
     enabled?: boolean;
   }): BacklogSource {
     const db = this.requireDb();
     const id = uuid();
     const now = new Date().toISOString();
     db.prepare(
-      `INSERT INTO backlog_sources (id, workspace_id, type, enabled, environment_id, config, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO backlog_sources (id, workspace_id, type, enabled, environment_id, repository_id, config, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       input.workspaceId,
       input.type,
       input.enabled === false ? 0 : 1,
       input.environmentId ?? null,
+      input.repositoryId ?? null,
       JSON.stringify(input.config),
       now,
       now
@@ -67,7 +69,12 @@ class BacklogService {
 
   updateSource(
     id: string,
-    patch: { enabled?: boolean; environmentId?: string; config?: BacklogSourceConfig }
+    patch: {
+      enabled?: boolean;
+      environmentId?: string;
+      repositoryId?: string;
+      config?: BacklogSourceConfig;
+    }
   ): BacklogSource | null {
     const db = this.requireDb();
     const existing = this.getSource(id);
@@ -83,6 +90,10 @@ class BacklogService {
     if (patch.environmentId !== undefined) {
       updates.push('environment_id = ?');
       values.push(patch.environmentId || null);
+    }
+    if (patch.repositoryId !== undefined) {
+      updates.push('repository_id = ?');
+      values.push(patch.repositoryId || null);
     }
     if (patch.config !== undefined) {
       updates.push('config = ?');
@@ -311,6 +322,7 @@ function rowToSource(row: any): BacklogSource {
     type: row.type,
     enabled: row.enabled === 1,
     environmentId: row.environment_id || undefined,
+    repositoryId: row.repository_id || undefined,
     config: JSON.parse(row.config),
     lastSyncedAt: row.last_synced_at || undefined,
     createdAt: row.created_at,

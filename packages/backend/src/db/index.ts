@@ -231,6 +231,12 @@ export function getMigrations(): Migration[] {
         CREATE INDEX idx_backlog_items_claimed ON backlog_items(claimed_task_id);
       `,
     },
+    {
+      name: '007_add_backlog_source_repository',
+      sql: `
+        ALTER TABLE backlog_sources ADD COLUMN repository_id TEXT REFERENCES repositories(id) ON DELETE SET NULL;
+      `,
+    },
   ];
 }
 
