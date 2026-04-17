@@ -40,14 +40,15 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 > Full list in [`docs/ROADMAP.md`](./docs/ROADMAP.md). Definition of done for "production ready" is in [`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md).
 
-1. **Phase 18.1 + 18.4 — Hosted backend on Railway + Supabase Postgres** (ACTIVE)
-   Drizzle ORM migration, Supabase Postgres, Railway deploy, auth middleware. Eliminates the reverse-tunnel / `.bashrc` dance. Session 12 left Phase A + B done; Phase C (services rewrite to Drizzle) is the next atomic commit — resume from the plan in `docs/SESSIONS.md#session-12`.
-
-2. **Phase 18.3 — Daemon split + auto-install over SSH** (NEXT)
+1. **Phase 18.3 — Daemon split + auto-install over SSH** (NEXT)
    Extract env/agent/git services into `packages/daemon`. Single-file binary. "Add SSH env → install daemon" checkbox in desktop. Interim: `scripts/bootstrap-vm.sh`.
 
-3. **Phase 17.3 — Notifications on `awaiting_review`** (QUICK WIN)
+2. **Phase 17.3 — Notifications on `awaiting_review`** (QUICK WIN)
    Desktop + OS notification when a Continuous Build task lands for review.
+
+3. **Phase 18.2 polish** — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
+
+**Recently landed** (Session 13): end-to-end auth — Supabase GitHub OAuth, JWT middleware, `owner_id` scoping, RLS defense in depth, desktop login + CLI/MCP bearer tokens.
 
 ## File Structure
 
