@@ -2,8 +2,18 @@ import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
 import { and, eq, SQL } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
-import { agents as agentsTable } from '../db/schema.js';
+import {
+  agents as agentsTable,
+  workspaces as workspacesTable,
+} from '../db/schema.js';
 import { agentService } from '../services/agent.js';
+import {
+  assertUser,
+  handleAccessError,
+  requireAgentAccess,
+  requireEnvironmentAccess,
+  requireWorkspaceAccess,
+} from '../middleware/auth.js';
 import type {
   Agent,
   AgentStatus,
@@ -16,25 +26,46 @@ export function agentRoutes(): Router {
   const router = Router();
 
   router.get('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const { workspaceId, environmentId, status } = req.query;
 
-    const conditions: SQL[] = [];
+    if (workspaceId) {
+      try {
+        await requireWorkspaceAccess(req, workspaceId as string);
+      } catch (err) {
+        return handleAccessError(err, res);
+      }
+    }
+    if (environmentId) {
+      try {
+        await requireEnvironmentAccess(req, environmentId as string);
+      } catch (err) {
+        return handleAccessError(err, res);
+      }
+    }
+
+    const conditions: SQL[] = [eq(workspacesTable.ownerId, user.id)];
     if (workspaceId) conditions.push(eq(agentsTable.workspaceId, workspaceId as string));
     if (environmentId) conditions.push(eq(agentsTable.environmentId, environmentId as string));
     if (status) conditions.push(eq(agentsTable.status, status as string));
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
     const rows = await db
-      .select()
+      .select({ agent: agentsTable })
       .from(agentsTable)
-      .where(whereClause)
+      .innerJoin(workspacesTable, eq(agentsTable.workspaceId, workspacesTable.id))
+      .where(and(...conditions))
       .orderBy(agentsTable.createdAt);
 
-    res.json({ success: true, data: rows.map(rowToAgent) } as ApiResponse<Agent[]>);
+    res.json({ success: true, data: rows.map((r) => rowToAgent(r.agent)) } as ApiResponse<Agent[]>);
   });
 
   router.get('/:id', async (req, res) => {
+    try {
+      await requireAgentAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -48,8 +79,14 @@ export function agentRoutes(): Router {
   });
 
   router.post('/start', async (req, res) => {
-    const db = getDbClient();
     const body = req.body as StartAgentRequest;
+    try {
+      await requireWorkspaceAccess(req, body.workspaceId);
+      await requireEnvironmentAccess(req, body.environmentId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const db = getDbClient();
     const id = uuid();
     const now = new Date();
 
@@ -71,22 +108,16 @@ export function agentRoutes(): Router {
       .where(eq(agentsTable.id, id))
       .limit(1);
 
-    // TODO: Actually spawn the Claude process on the environment.
-
     res.status(201).json({ success: true, data: rowToAgent(rows[0]) } as ApiResponse<Agent>);
   });
 
   router.post('/:id/input', async (req, res) => {
-    const db = getDbClient();
-    const rows = await db
-      .select({ id: agentsTable.id })
-      .from(agentsTable)
-      .where(eq(agentsTable.id, req.params.id))
-      .limit(1);
-    if (!rows[0]) {
-      return res.status(404).json({ success: false, error: 'Agent not found' });
+    try {
+      await requireAgentAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
     }
-
+    const db = getDbClient();
     const { input } = req.body as { input: string };
     agentService.sendInput(req.params.id, input);
 
@@ -99,15 +130,12 @@ export function agentRoutes(): Router {
   });
 
   router.post('/:id/stop', async (req, res) => {
-    const db = getDbClient();
-    const rows = await db
-      .select({ id: agentsTable.id })
-      .from(agentsTable)
-      .where(eq(agentsTable.id, req.params.id))
-      .limit(1);
-    if (!rows[0]) {
-      return res.status(404).json({ success: false, error: 'Agent not found' });
+    try {
+      await requireAgentAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
     }
+    const db = getDbClient();
 
     await db
       .update(agentsTable)
@@ -123,6 +151,11 @@ export function agentRoutes(): Router {
   });
 
   router.delete('/:id', async (req, res) => {
+    try {
+      await requireAgentAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const result = await db
       .delete(agentsTable)

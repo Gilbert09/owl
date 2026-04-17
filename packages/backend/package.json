@@ -19,6 +19,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.90.0",
     "@fastowl/shared": "*",
+    "@supabase/supabase-js": "^2.103.3",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "drizzle-orm": "^0.45.2",

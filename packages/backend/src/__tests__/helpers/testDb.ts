@@ -5,10 +5,7 @@ import { drizzle as drizzlePglite } from 'drizzle-orm/pglite';
 import * as schema from '../../db/schema.js';
 import { setDbClient, resetDbClient, type Database } from '../../db/client.js';
 
-const MIGRATION_SQL_PATH = path.resolve(
-  __dirname,
-  '../../db/migrations/0000_initial.sql'
-);
+const MIGRATIONS_DIR = path.resolve(__dirname, '../../db/migrations');
 
 /**
  * Spin up a fresh in-memory Postgres via pglite, apply the Drizzle migration,
@@ -27,15 +24,22 @@ export async function createTestDb(): Promise<{
   const pglite = new PGlite();
   const db = drizzlePglite(pglite, { schema, casing: 'snake_case' }) as unknown as Database;
 
-  // drizzle-kit generates a file with `--> statement-breakpoint` between
-  // statements. Splitting on that marker gives us one call per statement.
-  const sqlText = fs.readFileSync(MIGRATION_SQL_PATH, 'utf-8');
-  const statements = sqlText
-    .split('--> statement-breakpoint')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  for (const stmt of statements) {
-    await pglite.exec(stmt);
+  // Apply every generated migration in order. drizzle-kit names them
+  // `NNNN_<slug>.sql` and writes `--> statement-breakpoint` between
+  // statements; splitting on that marker gives one call per statement.
+  const migrationFiles = fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+  for (const file of migrationFiles) {
+    const sqlText = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf-8');
+    const statements = sqlText
+      .split('--> statement-breakpoint')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) {
+      await pglite.exec(stmt);
+    }
   }
 
   setDbClient(db);
@@ -49,3 +53,21 @@ export async function createTestDb(): Promise<{
     },
   };
 }
+
+/**
+ * Seed a user row. Tests that insert workspaces/environments must reference
+ * an existing user since owner_id is NOT NULL. Defaults to a stable id so
+ * tests can cross-reference without wiring the id through every helper.
+ */
+export async function seedUser(
+  db: Database,
+  overrides: Partial<{ id: string; email: string }> = {}
+): Promise<{ id: string; email: string }> {
+  const id = overrides.id ?? 'user-test';
+  const email = overrides.email ?? `${id}@example.test`;
+  await db.insert(schema.users).values({ id, email }).onConflictDoNothing();
+  return { id, email };
+}
+
+/** Stable test user id — every fixture defaults to this unless overridden. */
+export const TEST_USER_ID = 'user-test';

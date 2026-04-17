@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { backlogService } from '../services/backlog/service.js';
 import { environmentService } from '../services/environment.js';
-import { createTestDb } from './helpers/testDb.js';
+import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import { installFakeEnvironment, type FakeEnvironmentHandle } from './helpers/fakeEnvironment.js';
 import { type Database } from '../db/client.js';
 import {
@@ -13,6 +13,7 @@ import {
 async function seedWorkspace(db: Database, id = 'ws1') {
   await db.insert(workspacesTable).values({
     id,
+    ownerId: TEST_USER_ID,
     name: 'ws',
     settings: { autoAssignTasks: true, maxConcurrentAgents: 3 },
   });
@@ -21,6 +22,7 @@ async function seedWorkspace(db: Database, id = 'ws1') {
 async function seedLocalEnv(db: Database, id = 'env-local') {
   await db.insert(environmentsTable).values({
     id,
+    ownerId: TEST_USER_ID,
     name: 'Local',
     type: 'local',
     config: { type: 'local' },
@@ -36,6 +38,7 @@ describe('backlogService', () => {
     const testDb = await createTestDb();
     db = testDb.db;
     cleanup = testDb.cleanup;
+    await seedUser(db);
     await seedWorkspace(db);
     await seedLocalEnv(db);
   });

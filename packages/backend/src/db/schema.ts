@@ -24,16 +24,43 @@ import {
   index,
 } from 'drizzle-orm/pg-core';
 
-// ---------- Workspaces ----------
+// ---------- Users ----------
+//
+// Mirror of Supabase's `auth.users`, keyed by the same UUID. We never write
+// to `auth.users` directly — Supabase owns it — but we store our own row
+// per authenticated user so we can FK ownership columns against it and hang
+// app-specific fields (github_username, preferences) off it later.
+//
+// Rows are upserted by the JWT-verifying middleware on the first request
+// after sign-in.
 
-export const workspaces = pgTable('workspaces', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  description: text('description'),
-  settings: jsonb('settings').notNull().default({}),
+export const users = pgTable('users', {
+  id: text('id').primaryKey(), // == auth.users.id (uuid)
+  email: text('email').notNull(),
+  githubUsername: text('github_username'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+// ---------- Workspaces ----------
+
+export const workspaces = pgTable(
+  'workspaces',
+  {
+    id: text('id').primaryKey(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    settings: jsonb('settings').notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    ownerIdx: index('idx_workspaces_owner').on(t.ownerId),
+  })
+);
 
 // ---------- Repositories ----------
 
@@ -77,17 +104,26 @@ export const integrations = pgTable(
 
 // ---------- Environments ----------
 
-export const environments = pgTable('environments', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  type: text('type').notNull(), // 'local' | 'ssh' | 'coder'
-  status: text('status').notNull().default('disconnected'),
-  config: jsonb('config').notNull(),
-  lastConnected: timestamp('last_connected', { withTimezone: true }),
-  error: text('error'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const environments = pgTable(
+  'environments',
+  {
+    id: text('id').primaryKey(),
+    ownerId: text('owner_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    type: text('type').notNull(), // 'local' | 'ssh' | 'coder'
+    status: text('status').notNull().default('disconnected'),
+    config: jsonb('config').notNull(),
+    lastConnected: timestamp('last_connected', { withTimezone: true }),
+    error: text('error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    ownerIdx: index('idx_environments_owner').on(t.ownerId),
+  })
+);
 
 // ---------- Tasks ----------
 

@@ -1,5 +1,10 @@
 import { Router } from 'express';
 import { prMonitorService } from '../services/prMonitor.js';
+import {
+  handleAccessError,
+  requireRepositoryAccess,
+  requireWorkspaceAccess,
+} from '../middleware/auth.js';
 
 export function repositoryRoutes(): Router {
   const router = Router();
@@ -8,6 +13,11 @@ export function repositoryRoutes(): Router {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
       return res.status(400).json({ success: false, error: 'workspaceId is required' });
+    }
+    try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
     }
     const repos = await prMonitorService.getWatchedRepos(workspaceId);
     res.json({ success: true, data: repos });
@@ -22,6 +32,11 @@ export function repositoryRoutes(): Router {
       });
     }
     try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    try {
       const watched = await prMonitorService.addWatchedRepo(workspaceId, owner, repo, url);
       res.json({ success: true, data: watched });
     } catch (err: unknown) {
@@ -31,6 +46,11 @@ export function repositoryRoutes(): Router {
   });
 
   router.delete('/:id', async (req, res) => {
+    try {
+      await requireRepositoryAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const { id } = req.params;
     try {
       await prMonitorService.removeWatchedRepo(id);
@@ -41,6 +61,9 @@ export function repositoryRoutes(): Router {
     }
   });
 
+  // Force-poll is an infrastructure trigger; it refreshes PR state for
+  // every watched repo across all users. No user scoping — but still auth
+  // required (rate-limit + only valid users).
   router.post('/poll', async (_req, res) => {
     try {
       await prMonitorService.forcePoll();

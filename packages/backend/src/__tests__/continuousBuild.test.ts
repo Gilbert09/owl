@@ -4,7 +4,7 @@ import { backlogService } from '../services/backlog/service.js';
 import { environmentService } from '../services/environment.js';
 import { continuousBuildScheduler } from '../services/continuousBuild.js';
 import { installFakeEnvironment, type FakeEnvironmentHandle } from './helpers/fakeEnvironment.js';
-import { createTestDb } from './helpers/testDb.js';
+import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import { type Database } from '../db/client.js';
 import {
   workspaces as workspacesTable,
@@ -30,6 +30,7 @@ async function seedWorkspace(
   }
   await db.insert(workspacesTable).values({
     id,
+    ownerId: TEST_USER_ID,
     name: 'ws',
     settings,
   });
@@ -38,6 +39,7 @@ async function seedWorkspace(
 async function seedLocalEnv(db: Database, id = 'env-local') {
   await db.insert(environmentsTable).values({
     id,
+    ownerId: TEST_USER_ID,
     name: 'Local',
     type: 'local',
     config: { type: 'local' },
@@ -79,6 +81,7 @@ describe('continuousBuildScheduler', () => {
     const testDb = await createTestDb();
     db = testDb.db;
     cleanup = testDb.cleanup;
+    await seedUser(db);
     await seedLocalEnv(db);
     // Init services that read from DB. Our `init()` methods are idempotent
     // and all use `getDbClient()` lazily, which now points at the pglite
@@ -242,6 +245,7 @@ describe('continuousBuildScheduler', () => {
     // Disconnected SSH env
     await db.insert(environmentsTable).values({
       id: 'env-ssh',
+      ownerId: TEST_USER_ID,
       name: 'Remote',
       type: 'ssh',
       status: 'disconnected',

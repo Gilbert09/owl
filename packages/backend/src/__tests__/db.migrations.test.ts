@@ -21,6 +21,7 @@ describe('Drizzle migration', () => {
     const tables = result.rows.map((r) => r.table_name);
 
     for (const expected of [
+      'users',
       'workspaces',
       'repositories',
       'integrations',
@@ -33,6 +34,20 @@ describe('Drizzle migration', () => {
       'backlog_items',
     ]) {
       expect(tables).toContain(expected);
+    }
+  });
+
+  it('workspaces and environments have owner_id columns', async () => {
+    const testDb = await createTestDb();
+    cleanup = testDb.cleanup;
+
+    for (const table of ['workspaces', 'environments']) {
+      const result = await testDb.pglite.query<{ column_name: string }>(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = '${table}'
+      `);
+      const cols = result.rows.map((r) => r.column_name);
+      expect(cols).toContain('owner_id');
     }
   });
 

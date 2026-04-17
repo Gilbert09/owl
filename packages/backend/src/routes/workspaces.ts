@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import { workspaces as workspacesTable } from '../db/schema.js';
+import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import type {
   Workspace,
   CreateWorkspaceRequest,
@@ -13,21 +14,24 @@ import type {
 export function workspaceRoutes(): Router {
   const router = Router();
 
-  router.get('/', async (_req, res) => {
+  router.get('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
       .select()
       .from(workspacesTable)
+      .where(eq(workspacesTable.ownerId, user.id))
       .orderBy(workspacesTable.name);
     res.json({ success: true, data: rows.map(rowToWorkspace) } as ApiResponse<Workspace[]>);
   });
 
   router.get('/:id', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
       .select()
       .from(workspacesTable)
-      .where(eq(workspacesTable.id, req.params.id))
+      .where(and(eq(workspacesTable.id, req.params.id), eq(workspacesTable.ownerId, user.id)))
       .limit(1);
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Workspace not found' });
@@ -36,6 +40,7 @@ export function workspaceRoutes(): Router {
   });
 
   router.post('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const body = req.body as CreateWorkspaceRequest;
     const id = uuid();
@@ -43,6 +48,7 @@ export function workspaceRoutes(): Router {
 
     await db.insert(workspacesTable).values({
       id,
+      ownerId: user.id,
       name: body.name,
       description: body.description ?? null,
       settings: { autoAssignTasks: true, maxConcurrentAgents: 3 },
@@ -59,6 +65,11 @@ export function workspaceRoutes(): Router {
   });
 
   router.patch('/:id', async (req, res) => {
+    try {
+      await requireWorkspaceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const body = req.body as UpdateWorkspaceRequest;
     const existing = await db
@@ -95,10 +106,11 @@ export function workspaceRoutes(): Router {
   });
 
   router.delete('/:id', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const result = await db
       .delete(workspacesTable)
-      .where(eq(workspacesTable.id, req.params.id))
+      .where(and(eq(workspacesTable.id, req.params.id), eq(workspacesTable.ownerId, user.id)))
       .returning({ id: workspacesTable.id });
     if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Workspace not found' });

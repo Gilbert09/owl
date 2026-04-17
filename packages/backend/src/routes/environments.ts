@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
+import { assertUser } from '../middleware/auth.js';
 import type {
   Environment,
   EnvironmentConfig,
@@ -14,21 +15,24 @@ import type {
 export function environmentRoutes(): Router {
   const router = Router();
 
-  router.get('/', async (_req, res) => {
+  router.get('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
       .select()
       .from(environmentsTable)
+      .where(eq(environmentsTable.ownerId, user.id))
       .orderBy(environmentsTable.name);
     res.json({ success: true, data: rows.map(rowToEnvironment) } as ApiResponse<Environment[]>);
   });
 
   router.get('/:id', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
       .select()
       .from(environmentsTable)
-      .where(eq(environmentsTable.id, req.params.id))
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
       .limit(1);
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
@@ -37,6 +41,7 @@ export function environmentRoutes(): Router {
   });
 
   router.post('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const body = req.body as CreateEnvironmentRequest;
     const id = uuid();
@@ -45,6 +50,7 @@ export function environmentRoutes(): Router {
 
     await db.insert(environmentsTable).values({
       id,
+      ownerId: user.id,
       name: body.name,
       type: body.type,
       status: initialStatus,
@@ -62,6 +68,7 @@ export function environmentRoutes(): Router {
   });
 
   router.patch('/:id', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const body = req.body as {
       name?: string;
@@ -71,7 +78,7 @@ export function environmentRoutes(): Router {
     const existing = await db
       .select()
       .from(environmentsTable)
-      .where(eq(environmentsTable.id, req.params.id))
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
       .limit(1);
     if (!existing[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
@@ -99,10 +106,11 @@ export function environmentRoutes(): Router {
   });
 
   router.delete('/:id', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const result = await db
       .delete(environmentsTable)
-      .where(eq(environmentsTable.id, req.params.id))
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
       .returning({ id: environmentsTable.id });
     if (result.length === 0) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
@@ -110,13 +118,13 @@ export function environmentRoutes(): Router {
     res.json({ success: true } as ApiResponse<void>);
   });
 
-  // Test connection (placeholder)
   router.post('/:id/test', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
       .select({ id: environmentsTable.id })
       .from(environmentsTable)
-      .where(eq(environmentsTable.id, req.params.id))
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
       .limit(1);
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });

@@ -8,6 +8,13 @@ import type {
 } from '@fastowl/shared';
 import { backlogService } from '../services/backlog/service.js';
 import { continuousBuildScheduler } from '../services/continuousBuild.js';
+import {
+  handleAccessError,
+  requireBacklogSourceAccess,
+  requireEnvironmentAccess,
+  requireRepositoryAccess,
+  requireWorkspaceAccess,
+} from '../middleware/auth.js';
 
 export function backlogRoutes(): Router {
   const router = Router();
@@ -17,11 +24,21 @@ export function backlogRoutes(): Router {
     if (!workspaceId) {
       return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
+    try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const sources = await backlogService.listSources(workspaceId);
     res.json({ success: true, data: sources } as ApiResponse<BacklogSource[]>);
   });
 
   router.get('/sources/:id', async (req, res) => {
+    try {
+      await requireBacklogSourceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const source = await backlogService.getSource(req.params.id);
     if (!source) {
       return res.status(404).json({ success: false, error: 'Source not found' });
@@ -37,11 +54,23 @@ export function backlogRoutes(): Router {
         error: 'workspaceId, type, config are required',
       });
     }
+    try {
+      await requireWorkspaceAccess(req, body.workspaceId);
+      if (body.environmentId) await requireEnvironmentAccess(req, body.environmentId);
+      if (body.repositoryId) await requireRepositoryAccess(req, body.repositoryId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const source = await backlogService.createSource(body);
     res.status(201).json({ success: true, data: source } as ApiResponse<BacklogSource>);
   });
 
   router.patch('/sources/:id', async (req, res) => {
+    try {
+      await requireBacklogSourceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const body = req.body as UpdateBacklogSourceRequest;
     const updated = await backlogService.updateSource(req.params.id, body);
     if (!updated) {
@@ -51,6 +80,11 @@ export function backlogRoutes(): Router {
   });
 
   router.delete('/sources/:id', async (req, res) => {
+    try {
+      await requireBacklogSourceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const ok = await backlogService.deleteSource(req.params.id);
     if (!ok) {
       return res.status(404).json({ success: false, error: 'Source not found' });
@@ -59,6 +93,11 @@ export function backlogRoutes(): Router {
   });
 
   router.post('/sources/:id/sync', async (req, res) => {
+    try {
+      await requireBacklogSourceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     try {
       const result = await backlogService.syncSource(req.params.id);
       res.json({ success: true, data: result } as ApiResponse<typeof result>);
@@ -69,6 +108,11 @@ export function backlogRoutes(): Router {
   });
 
   router.get('/sources/:id/items', async (req, res) => {
+    try {
+      await requireBacklogSourceAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const items = await backlogService.listItems(req.params.id);
     res.json({ success: true, data: items } as ApiResponse<BacklogItem[]>);
   });
@@ -78,6 +122,11 @@ export function backlogRoutes(): Router {
     if (!workspaceId) {
       return res.status(400).json({ success: false, error: 'workspaceId is required' });
     }
+    try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const items = await backlogService.listItemsForWorkspace(workspaceId);
     res.json({ success: true, data: items } as ApiResponse<BacklogItem[]>);
   });
@@ -86,6 +135,11 @@ export function backlogRoutes(): Router {
     const workspaceId = req.body?.workspaceId as string | undefined;
     if (!workspaceId) {
       return res.status(400).json({ success: false, error: 'workspaceId is required' });
+    }
+    try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
     }
     try {
       await continuousBuildScheduler.scheduleNext(workspaceId);

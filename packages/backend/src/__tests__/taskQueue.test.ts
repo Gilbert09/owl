@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { taskQueueService } from '../services/taskQueue.js';
-import { createTestDb } from './helpers/testDb.js';
+import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import { type Database } from '../db/client.js';
 import {
   workspaces as workspacesTable,
@@ -13,6 +13,7 @@ import {
 async function seedWorkspace(db: Database, id = 'ws1', name = 'Default') {
   await db.insert(workspacesTable).values({
     id,
+    ownerId: TEST_USER_ID,
     name,
     settings: { autoAssignTasks: true, maxConcurrentAgents: 3 },
   });
@@ -57,6 +58,7 @@ describe('taskQueueService', () => {
     const testDb = await createTestDb();
     db = testDb.db;
     cleanup = testDb.cleanup;
+    await seedUser(db);
     await seedWorkspace(db);
   });
 
@@ -81,6 +83,7 @@ describe('taskQueueService', () => {
     it('filters by workspaceId when provided', async () => {
       await db.insert(workspacesTable).values({
         id: 'ws2',
+        ownerId: TEST_USER_ID,
         name: 'Other',
         settings: {},
       });
@@ -166,6 +169,7 @@ describe('taskQueueService', () => {
     it('leaves in_progress tasks alone when the agent is actively working', async () => {
       await db.insert(environmentsTable).values({
         id: 'env1',
+        ownerId: TEST_USER_ID,
         name: 'Local',
         type: 'local',
         config: { type: 'local' },

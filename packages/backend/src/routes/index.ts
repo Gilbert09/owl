@@ -4,12 +4,22 @@ import { environmentRoutes } from './environments.js';
 import { taskRoutes } from './tasks.js';
 import { agentRoutes } from './agents.js';
 import { inboxRoutes } from './inbox.js';
-import { githubRoutes } from './github.js';
+import { githubRoutes, githubPublicRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
 import { backlogRoutes } from './backlog.js';
+import { requireAuth } from '../middleware/auth.js';
 
 export function setupRoutes(app: Express): void {
   const api = '/api/v1';
+
+  // Public routes: the GitHub OAuth callback is hit by GitHub's browser
+  // redirect, not by our authenticated desktop client, so it must stay
+  // unauth'd. State-token validation inside the handler prevents CSRF.
+  app.use(`${api}/github`, githubPublicRoutes());
+
+  // Everything below is authenticated. The middleware populates req.user
+  // and refuses requests without a valid Supabase JWT.
+  app.use(`${api}`, requireAuth);
 
   app.use(`${api}/workspaces`, workspaceRoutes());
   app.use(`${api}/environments`, environmentRoutes());

@@ -5,12 +5,21 @@ import { getDbClient } from '../db/client.js';
 import {
   tasks as tasksTable,
   repositories as repositoriesTable,
+  workspaces as workspacesTable,
+  environments as environmentsTableRef,
 } from '../db/schema.js';
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { emitTaskStatus } from '../services/websocket.js';
 import { generateTaskMetadata, isConfigured as isAIConfigured } from '../services/ai.js';
+import {
+  assertUser,
+  handleAccessError,
+  requireEnvironmentAccess,
+  requireTaskAccess,
+  requireWorkspaceAccess,
+} from '../middleware/auth.js';
 import type {
   Task,
   TaskPriority,
@@ -61,12 +70,23 @@ export function taskRoutes(): Router {
     }
   });
 
-  // List tasks (with optional filters)
+  // List tasks (with optional filters). Always scoped to the caller's
+  // workspaces — the inner join on workspaces.owner_id enforces it even if
+  // a workspaceId filter is omitted.
   router.get('/', async (req, res) => {
+    const user = assertUser(req);
     const db = getDbClient();
     const { workspaceId, status, type } = req.query;
 
-    const conditions: SQL[] = [];
+    if (workspaceId) {
+      try {
+        await requireWorkspaceAccess(req, workspaceId as string);
+      } catch (err) {
+        return handleAccessError(err, res);
+      }
+    }
+
+    const conditions: SQL[] = [eq(workspacesTable.ownerId, user.id)];
     if (workspaceId) conditions.push(eq(tasksTable.workspaceId, workspaceId as string));
     if (status) conditions.push(eq(tasksTable.status, status as string));
     if (type) conditions.push(eq(tasksTable.type, type as string));
@@ -79,19 +99,25 @@ export function taskRoutes(): Router {
     END`;
 
     const rows = await db
-      .select()
+      .select({ task: tasksTable })
       .from(tasksTable)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .innerJoin(workspacesTable, eq(tasksTable.workspaceId, workspacesTable.id))
+      .where(and(...conditions))
       .orderBy(priorityCase, desc(tasksTable.createdAt));
 
     res.json({
       success: true,
-      data: rows.map((row) => rowToTask(row)),
+      data: rows.map((r) => rowToTask(r.task)),
     } as ApiResponse<Task[]>);
   });
 
   // Get single task (includes agent status if running)
   router.get('/:id', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -118,8 +144,16 @@ export function taskRoutes(): Router {
 
   // Create task
   router.post('/', async (req, res) => {
-    const db = getDbClient();
     const body = req.body as CreateTaskRequest;
+    try {
+      await requireWorkspaceAccess(req, body.workspaceId);
+      if (body.assignedEnvironmentId) {
+        await requireEnvironmentAccess(req, body.assignedEnvironmentId);
+      }
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const db = getDbClient();
     const id = uuid();
     const now = new Date();
 
@@ -147,6 +181,11 @@ export function taskRoutes(): Router {
 
   // Update task
   router.patch('/:id', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const body = req.body as {
       status?: TaskStatus;
@@ -208,6 +247,11 @@ export function taskRoutes(): Router {
 
   // Retry/reset a task back to queued
   router.post('/:id/retry', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const existing = await db
       .select({ id: tasksTable.id })
@@ -239,6 +283,11 @@ export function taskRoutes(): Router {
 
   // Start executing a task (spawns an agent)
   router.post('/:id/start', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -260,14 +309,19 @@ export function taskRoutes(): Router {
 
     let environmentId = task.assignedEnvironmentId;
     if (!environmentId) {
-      const environments = await environmentService.getAllEnvironments();
-      const connected = environments.find((e) => e.status === 'connected');
+      const connected = await findConnectedEnvironmentForUser(req);
       if (!connected) {
         return res
           .status(400)
           .json({ success: false, error: 'No connected environments available' });
       }
-      environmentId = connected.id;
+      environmentId = connected;
+    } else {
+      try {
+        await requireEnvironmentAccess(req, environmentId);
+      } catch (err) {
+        return handleAccessError(err, res);
+      }
     }
 
     const envStatus = await environmentService.getStatus(environmentId);
@@ -377,6 +431,11 @@ export function taskRoutes(): Router {
 
   // Send input to a running task
   router.post('/:id/input', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const { input } = req.body as { input: string };
     if (!input) {
@@ -413,6 +472,11 @@ export function taskRoutes(): Router {
 
   // Mark a running task as ready for review.
   router.post('/:id/ready-for-review', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -453,6 +517,11 @@ export function taskRoutes(): Router {
 
   // Approve an awaiting_review task → completed
   router.post('/:id/approve', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
@@ -484,6 +553,11 @@ export function taskRoutes(): Router {
 
   // Reject an awaiting_review task → back to queued
   router.post('/:id/reject', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
@@ -514,6 +588,11 @@ export function taskRoutes(): Router {
 
   // Stop a running task
   router.post('/:id/stop', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -558,6 +637,11 @@ export function taskRoutes(): Router {
 
   // Get the diff of a task's work against the base branch
   router.get('/:id/diff', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -592,15 +676,19 @@ export function taskRoutes(): Router {
 
     let environmentId = task.assignedEnvironmentId;
     if (!environmentId) {
-      const connected = (await environmentService.getAllEnvironments()).find(
-        (e) => e.status === 'connected'
-      );
+      const connected = await findConnectedEnvironmentForUser(req);
       if (!connected) {
         return res
           .status(400)
           .json({ success: false, error: 'No connected environment to compute diff' });
       }
-      environmentId = connected.id;
+      environmentId = connected;
+    } else {
+      try {
+        await requireEnvironmentAccess(req, environmentId);
+      } catch (err) {
+        return handleAccessError(err, res);
+      }
     }
 
     try {
@@ -620,6 +708,11 @@ export function taskRoutes(): Router {
 
   // Get terminal output for a task
   router.get('/:id/terminal', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select({
@@ -647,6 +740,11 @@ export function taskRoutes(): Router {
 
   // Delete task
   router.delete('/:id', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
     const db = getDbClient();
     const rows = await db
       .select()
@@ -672,6 +770,28 @@ export function taskRoutes(): Router {
   });
 
   return router;
+}
+
+/**
+ * Pick an auto-assignable environment for the current user. Returns the
+ * environment id of the first connected env, or null when they have none.
+ * Kept here rather than on `environmentService` because the service is
+ * stateless re: users and we want the scoping explicit at the call site.
+ */
+async function findConnectedEnvironmentForUser(req: import('express').Request): Promise<string | null> {
+  const user = assertUser(req);
+  const db = getDbClient();
+  const rows = await db
+    .select({ id: environmentsTableRef.id })
+    .from(environmentsTableRef)
+    .where(
+      and(
+        eq(environmentsTableRef.ownerId, user.id),
+        eq(environmentsTableRef.status, 'connected')
+      )
+    )
+    .limit(1);
+  return rows[0]?.id ?? null;
 }
 
 function rowToTask(

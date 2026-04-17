@@ -1,23 +1,41 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import { eq } from 'drizzle-orm';
 import type { TaskStatus, WSEvent } from '@fastowl/shared';
 import { domainEvents } from './events.js';
+import { verifyTokenAndGetUser, type AuthUser } from '../middleware/auth.js';
+import { getDbClient } from '../db/client.js';
+import { workspaces as workspacesTable } from '../db/schema.js';
 
 // Store connected clients
 const clients = new Set<WebSocket>();
 
-// Store subscriptions (client -> workspaceIds)
+// Store subscriptions (client -> workspaceIds) and identities.
 const subscriptions = new Map<WebSocket, Set<string>>();
+const connectionUsers = new Map<WebSocket, AuthUser>();
 
 export function setupWebSocket(wss: WebSocketServer): void {
-  wss.on('connection', (ws: WebSocket) => {
-    console.log('WebSocket client connected');
+  wss.on('connection', async (ws: WebSocket, req) => {
+    const token = extractTokenFromUpgrade(req.url);
+    if (!token) {
+      ws.close(4401, 'missing token');
+      return;
+    }
+
+    const user = await verifyTokenAndGetUser(token).catch(() => null);
+    if (!user) {
+      ws.close(4401, 'invalid token');
+      return;
+    }
+
+    console.log(`WebSocket client connected (user=${user.id})`);
     clients.add(ws);
     subscriptions.set(ws, new Set());
+    connectionUsers.set(ws, user);
 
     ws.on('message', (data: Buffer) => {
       try {
         const message = JSON.parse(data.toString());
-        handleMessage(ws, message);
+        void handleMessage(ws, message);
       } catch (err) {
         console.error('Invalid WebSocket message:', err);
       }
@@ -27,15 +45,16 @@ export function setupWebSocket(wss: WebSocketServer): void {
       console.log('WebSocket client disconnected');
       clients.delete(ws);
       subscriptions.delete(ws);
+      connectionUsers.delete(ws);
     });
 
     ws.on('error', (err) => {
       console.error('WebSocket error:', err);
       clients.delete(ws);
       subscriptions.delete(ws);
+      connectionUsers.delete(ws);
     });
 
-    // Send connection confirmation
     sendToClient(ws, {
       type: 'connection:status',
       payload: { connected: true },
@@ -44,17 +63,33 @@ export function setupWebSocket(wss: WebSocketServer): void {
   });
 }
 
-function handleMessage(ws: WebSocket, message: any): void {
+/** Parse the `?token=<jwt>` query param off the upgrade URL. */
+function extractTokenFromUpgrade(url: string | undefined): string | null {
+  if (!url) return null;
+  try {
+    // Provide a dummy base; the ws URL is path-relative.
+    const parsed = new URL(url, 'http://localhost');
+    return parsed.searchParams.get('token');
+  } catch {
+    return null;
+  }
+}
+
+async function handleMessage(ws: WebSocket, message: any): Promise<void> {
   switch (message.type) {
-    case 'subscribe':
-      // Subscribe to workspace events
-      if (message.workspaceId) {
+    case 'subscribe': {
+      // Only allow subscribing to a workspace the connected user owns.
+      if (!message.workspaceId) break;
+      const user = connectionUsers.get(ws);
+      if (!user) break;
+      const allowed = await userOwnsWorkspace(user.id, message.workspaceId);
+      if (allowed) {
         subscriptions.get(ws)?.add(message.workspaceId);
       }
       break;
+    }
 
     case 'unsubscribe':
-      // Unsubscribe from workspace events
       if (message.workspaceId) {
         subscriptions.get(ws)?.delete(message.workspaceId);
       }
@@ -71,6 +106,16 @@ function handleMessage(ws: WebSocket, message: any): void {
     default:
       console.log('Unknown WebSocket message type:', message.type);
   }
+}
+
+async function userOwnsWorkspace(userId: string, workspaceId: string): Promise<boolean> {
+  const db = getDbClient();
+  const rows = await db
+    .select({ ownerId: workspacesTable.ownerId })
+    .from(workspacesTable)
+    .where(eq(workspacesTable.id, workspaceId))
+    .limit(1);
+  return rows[0]?.ownerId === userId;
 }
 
 function sendToClient(ws: WebSocket, event: WSEvent): void {
