@@ -83,7 +83,7 @@ Configured from **Settings → Integrations** inside the app:
 
 - **GitHub**: OAuth flow — enables PR monitoring, PR review/response workflows, and the GitHub panel.
 - **Anthropic API** (env var `ANTHROPIC_API_KEY`): enables auto-generation of task titles/descriptions from prompts.
-- *(Planned)* Slack, PostHog — tracked in `claude.md`.
+- *(Planned)* Slack, PostHog — tracked in [`docs/ROADMAP.md`](./docs/ROADMAP.md).
 
 ---
 
@@ -114,7 +114,7 @@ Data is local-first. The backend is architected to be deployable as a shared ser
 
 ## Project status
 
-FastOwl is under active development. See [`claude.md`](./claude.md) for the full phase-by-phase TODO list, architectural decisions, and recent session notes.
+FastOwl is under active development. See [`CLAUDE.md`](./CLAUDE.md) for project orientation and active priorities, [`docs/ROADMAP.md`](./docs/ROADMAP.md) for the phase-by-phase TODO list, [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for architectural decisions, and [`docs/SESSIONS.md`](./docs/SESSIONS.md) for recent session notes.
 
 Shipped so far: environment management (local + SSH), task queue with live terminal + xterm.js, GitHub OAuth + PR monitoring + PR actions, task branches, approval gates with diff preview + terminal history, typed task system (code/pr_response/pr_review/manual).
 

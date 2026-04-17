@@ -33,7 +33,7 @@ Drop the "backend on laptop + reverse tunnel" model entirely. Run the
 backend on a real host, use a real database, and connect desktop + VMs
 to it over the public internet (HTTPS + auth).
 
-**Concretely** (Phase 18.1 / 18.4 in `claude.md`):
+**Concretely** (Phase 18.1 / 18.4 in [`ROADMAP.md`](./ROADMAP.md)):
 
 - Pick an ORM with migration tooling — **Drizzle** (TS-first, Supabase-friendly)
 - Port migrations 001-007 from hand-rolled SQL to Drizzle
@@ -111,7 +111,7 @@ CLI starts hitting walls.
 Continuous Build is "production ready" when:
 
 1. A new user can sign up, add an SSH VM, and have Continuous Build
-   running on `claude.md`'s Priority Queue within 10 minutes, with zero
+   running on [`ROADMAP.md`](./ROADMAP.md)'s Priority Queue within 10 minutes, with zero
    manual installs or config edits.
 2. The system runs unattended overnight: tasks land in the inbox, the
    scheduler respects the approval gate, failures don't cascade.

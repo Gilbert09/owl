@@ -91,8 +91,8 @@ reference.
 ## Turning it on for FastOwl itself
 
 The meta-case: configure a FastOwl workspace to continuously build the
-`Priority Queue` section of the project's own `claude.md`. This is
-"FastOwl eats its own dog food" (Option C in
+`Priority Queue` section of the project's own [`docs/ROADMAP.md`](./ROADMAP.md).
+This is "FastOwl eats its own dog food" (Option C in
 [AUTONOMOUS_BUILD.md](./AUTONOMOUS_BUILD.md)).
 
 Exact steps once your SSH VM is set up (see [SSH_VM_SETUP.md](./SSH_VM_SETUP.md)):
@@ -106,7 +106,7 @@ Exact steps once your SSH VM is set up (see [SSH_VM_SETUP.md](./SSH_VM_SETUP.md)
    - Toggle **enabled**
    - `maxConcurrent: 1`, `requireApproval: On` — don't let it stampede
    - **Add source**:
-     - File path: `/home/<you>/fastowl/claude.md` (absolute, on the VM)
+     - File path: `/home/<you>/fastowl/docs/ROADMAP.md` (absolute, on the VM)
      - Section: `Priority Queue (Next Up)`
      - Environment: your SSH env
 6. Sync the source — you should see the numbered priority-queue items show
