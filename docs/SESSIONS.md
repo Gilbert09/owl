@@ -2,6 +2,29 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 16 (Phase 18.3.B foundation — daemon relay layer)
+Option-1 relay shipped. Child processes spawned by a daemon (`claude` running a task, `fastowl` CLI calls from within that Claude, any MCP server) now reach the backend through a local HTTP proxy on the daemon, which tunnels each request over the daemon's authenticated WS. No user JWT ever lives on the VM.
+
+- **Protocol**: added `ProxyHttpRequest` / `ProxyHttpResult` to the daemon↔backend wire. Request is { method, path, headers, body (base64) } — full REST round-trip, not a typed RPC surface. Keeps every existing route available to daemon children without duplicating the API.
+- **Backend auth refactor**: `requireAuth` now accepts two credential paths. Path 1 (existing): `Authorization: Bearer <Supabase JWT>`. Path 2 (new): `X-Fastowl-Internal-User: <uuid>` + `X-Fastowl-Internal-Token: <secret>`. The secret is minted once at process boot with `randomBytes(48)` and held only in memory — reboot rotates it. Comparison is `timingSafeEqual`. Internal requests resolve the user from the `users` table directly, skipping the Supabase round-trip.
+- **Backend proxy dispatcher** (`services/daemonProxyHandler.ts`): when a daemon sends `proxy_http_request` on its WS, backend looks up `env.owner_id`, makes a localhost `fetch` against `http://127.0.0.1:${PORT}${path}` with `internalProxyHeaders(ownerId)`, and ships the response back in a `proxy_http_response`. Drops `authorization`, `cookie`, `host`, and hop-by-hop headers from the inbound side; drops `content-length` / `transfer-encoding` from the outbound response (daemon recomputes).
+- **Daemon proxy server** (`proxyServer.ts`): HTTP server bound to `127.0.0.1:0` (random port). Every inbound request is serialized into `proxy_http_request`, sent over the WS, and awaited up to 60s. On daemon start, `FASTOWL_API_URL=http://127.0.0.1:<port>` is set as a child-env override; `FASTOWL_AUTH_TOKEN` is always scrubbed from the spawn env so a stale user token can't leak through.
+- **Daemon WS client**: now sends daemon→backend `request` messages (previously only events). Tracks its own `pendingProxyRequests` map with 60s timeouts; rejects them all on shutdown.
+- **Tests**: `daemonProxy.test.ts` mounts `requireAuth` on a minimal Express app and exercises the internal-header path — valid user, wrong token, unknown user. All four pass; full backend suite is 74/74.
+
+- **Still to land in 18.3.B**:
+  - Rewire scheduler / taskQueue so tasks actually execute on `daemon` envs end-to-end (today they still prefer legacy `local`/`ssh`).
+  - `fastowl-daemon install` + server-hosted `install.sh` + tarball publication (probably from Railway `/daemon/latest.tar.gz` for MVP).
+  - Desktop "Add SSH environment → Install FastOwl daemon" checkbox that SSHes in, runs the install, polls for the daemon to dial back.
+  - Ownership propagation: provisioning an env + dispatching a proxy request both hinge on `env.owner_id`; need a regression test that covers user-A-VM cannot proxy as user-B.
+
+- **How to exercise the relay today**:
+  1. `npm run dev -w @fastowl/backend`
+  2. Create a daemon env + pairing token via REST (auth'd with your CLI token as before).
+  3. `node packages/daemon/dist/index.js --pairing-token <x> --backend-url http://localhost:4747`
+  4. Daemon logs `listening on http://127.0.0.1:<port>`.
+  5. From the shell where the daemon is running: `FASTOWL_API_URL=http://127.0.0.1:<port> FASTOWL_AUTH_TOKEN= fastowl workspace list` — request hits the local proxy, tunnels over WS, backend answers as the daemon's owner.
+
 ## Session 15 (Phase 18.3.A — daemon package + WS transport)
 Foundation for the SSH auto-install flow. Daemon package exists and can dial the hosted backend; backend has a `/daemon-ws` endpoint, a registry that tracks live daemons, and a `daemon` env type that proxies commands through. No UX change yet — Phase 18.3.B bolts the "Install daemon" checkbox onto the Add-SSH-env dialog.
 

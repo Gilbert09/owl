@@ -6,9 +6,11 @@ import {
   type DaemonHello,
   type DaemonHelloAck,
   type DaemonMessage,
+  type DaemonResponse,
   DAEMON_CLOSE_UNAUTHORIZED,
 } from '@fastowl/shared';
 import { daemonRegistry } from './daemonRegistry.js';
+import { handleProxyHttpRequest } from './daemonProxyHandler.js';
 
 /**
  * Wire the `/daemon-ws` endpoint onto an existing WebSocketServer. A
@@ -104,10 +106,15 @@ export async function handleConnection(ws: WebSocket): Promise<void> {
       case 'event':
         daemonRegistry.handleEvent(environmentId, msg.payload);
         break;
-      case 'request':
-        // Daemons don't send requests today. If we add them (e.g.,
-        // daemon needs to ask backend for a config blob), branch here.
+      case 'request': {
+        // Daemon → backend requests are today only the proxy path —
+        // child processes on the VM making REST calls that we re-issue
+        // as authenticated localhost fetches. Extend this switch if/when
+        // we add other daemon-initiated operations.
+        const envId = environmentId; // TS narrowing
+        void dispatchDaemonRequest(ws, envId, msg);
         break;
+      }
       default:
         // hello / hello_ack post-handshake is invalid; ignore.
         break;
@@ -131,3 +138,41 @@ export async function handleConnection(ws: WebSocket): Promise<void> {
  * Avoid the unused-import noise when we only re-export types.
  */
 export type { DaemonHello };
+
+/**
+ * Dispatch a daemon-initiated request. Today the only kind is the
+ * HTTP proxy; anything else returns a `not implemented` response so
+ * the daemon doesn't hang on a missing handler.
+ */
+async function dispatchDaemonRequest(
+  ws: WebSocket,
+  environmentId: string,
+  req: Extract<DaemonMessage, { kind: 'request' }>
+): Promise<void> {
+  let response: DaemonResponse;
+  try {
+    if (req.payload.op === 'proxy_http_request') {
+      const result = await handleProxyHttpRequest(environmentId, req.payload);
+      response = { kind: 'response', id: req.id, ok: true, data: result };
+    } else {
+      response = {
+        kind: 'response',
+        id: req.id,
+        ok: false,
+        error: `daemon→backend op not supported: ${req.payload.op}`,
+      };
+    }
+  } catch (err) {
+    response = {
+      kind: 'response',
+      id: req.id,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    ws.send(encodeDaemonMessage(response));
+  } catch (err) {
+    console.error('daemon-ws: failed to send response:', err);
+  }
+}

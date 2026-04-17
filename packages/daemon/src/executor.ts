@@ -15,6 +15,35 @@ import type { ExecResult } from '@fastowl/shared';
 
 const ptySessions = new Map<string, pty.IPty>();
 
+/**
+ * Extra env vars the WS client asks us to inject into every child we
+ * spawn — primarily `FASTOWL_API_URL` pointing at the daemon's local
+ * proxy server. We also unset `FASTOWL_AUTH_TOKEN` so the CLI doesn't
+ * pick up a stale token from the daemon's shell: auth is supplied
+ * entirely by the proxy path.
+ */
+let childEnvOverrides: Record<string, string | undefined> = {};
+
+export function setChildEnv(overrides: Record<string, string | undefined>): void {
+  childEnvOverrides = overrides;
+}
+
+function buildChildEnv(): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === 'string') merged[k] = v;
+  }
+  for (const [k, v] of Object.entries(childEnvOverrides)) {
+    if (v === undefined) delete merged[k];
+    else merged[k] = v;
+  }
+  // Always scrub — children should go through the daemon's proxy, not
+  // use any inherited user JWT. The daemon holds a device token on the
+  // WS side; that's the only credential that should live on this host.
+  delete merged.FASTOWL_AUTH_TOKEN;
+  return merged;
+}
+
 export interface SessionEvents {
   onData: (sessionId: string, data: Buffer) => void;
   onClose: (sessionId: string, exitCode: number) => void;
@@ -32,7 +61,7 @@ export async function exec(
   return new Promise((resolve) => {
     const proc = spawn('bash', ['-c', command], {
       cwd,
-      env: process.env,
+      env: buildChildEnv(),
     });
 
     let stdout = '';
@@ -85,7 +114,7 @@ export function spawnInteractive(
     cols: opts.cols ?? 80,
     rows: opts.rows ?? 24,
     cwd: opts.cwd,
-    env: process.env as Record<string, string>,
+    env: buildChildEnv(),
   });
   ptySessions.set(sessionId, pt);
 

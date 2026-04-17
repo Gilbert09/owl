@@ -49,9 +49,10 @@ export interface DaemonHelloAck {
 
 // ---------- Request/response ----------
 //
-// Requests flow backend → daemon (commands to execute) and the daemon
-// answers. We don't currently have daemon-initiated requests; daemons
-// only send events upward.
+// Requests flow in both directions. backend → daemon for execution
+// commands (exec, spawn, git, …). daemon → backend for *proxied* REST
+// calls that originated inside a task's child process — see
+// `ProxyHttpRequest` below.
 
 export type DaemonRequestPayload =
   | ExecRequest
@@ -59,7 +60,8 @@ export type DaemonRequestPayload =
   | WriteSessionRequest
   | KillSessionRequest
   | GitCommandRequest
-  | PingRequest;
+  | PingRequest
+  | ProxyHttpRequest;
 
 export interface DaemonRequest {
   kind: 'request';
@@ -127,6 +129,35 @@ export interface GitCommandRequest {
 
 export interface PingRequest {
   op: 'ping';
+}
+
+/**
+ * Proxied REST call originating inside a task's child process. The daemon
+ * runs a tiny HTTP server on localhost; the spawned process talks to
+ * that server (via `FASTOWL_API_URL=http://127.0.0.1:<port>`) instead
+ * of hitting Railway directly. The daemon wraps the request in this
+ * payload and forwards it over its authenticated WS; backend makes the
+ * corresponding internal call on behalf of `env.owner_id`.
+ *
+ * No user JWT ever lives on the VM — the daemon's device token is the
+ * only long-lived credential on that side.
+ */
+export interface ProxyHttpRequest {
+  op: 'proxy_http_request';
+  method: string;
+  /** `/api/v1/tasks?workspaceId=...`. Absolute path, no origin. */
+  path: string;
+  /** Only request headers worth forwarding (content-type, accept, …).
+   *  We deliberately drop hop-by-hop headers on both sides. */
+  headers: Record<string, string>;
+  /** Base64 body, empty string for no-body requests. */
+  bodyBase64: string;
+}
+
+export interface ProxyHttpResult {
+  status: number;
+  headers: Record<string, string>;
+  bodyBase64: string;
 }
 
 // ---------- Events (daemon → backend) ----------

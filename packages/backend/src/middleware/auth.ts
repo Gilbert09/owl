@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { eq } from 'drizzle-orm';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import { getDbClient } from '../db/client.js';
 import {
   users as usersTable,
@@ -108,6 +109,74 @@ export class AuthError extends Error {
   }
 }
 
+// ---------- Internal proxy auth ----------
+//
+// The daemon runs a local HTTP proxy on the VM that funnels REST calls
+// from child processes (claude → fastowl / MCP) over its authenticated
+// WS. On the backend side, the WS handler re-issues those requests as
+// localhost HTTP calls with two headers:
+//   - `X-Fastowl-Internal-User: <uuid>` — the user id the proxy should
+//     act as (resolved from env.owner_id).
+//   - `X-Fastowl-Internal-Token: <secret>` — a per-process secret that
+//     proves the call originated inside this backend. Never leaves memory.
+//
+// The secret is minted once at boot with `randomBytes(48)` and held in
+// a module-private closure. Loss of the process = loss of the secret,
+// by design.
+
+const INTERNAL_SECRET = randomBytes(48).toString('hex');
+
+/** Backend-internal consumer — WS proxy handler — calls this to get the
+ *  two headers it needs to dispatch an authenticated localhost request. */
+export function internalProxyHeaders(userId: string): Record<string, string> {
+  return {
+    'x-fastowl-internal-user': userId,
+    'x-fastowl-internal-token': INTERNAL_SECRET,
+  };
+}
+
+/**
+ * Check and consume the internal auth headers if present. Returns the
+ * AuthUser when they're valid, null when absent, throws `AuthError`
+ * when present-but-invalid (caller surfaces 401).
+ */
+async function checkInternalAuth(req: Request): Promise<AuthUser | null> {
+  const providedToken = req.headers['x-fastowl-internal-token'];
+  const providedUser = req.headers['x-fastowl-internal-user'];
+  if (!providedToken || !providedUser) return null;
+  if (typeof providedToken !== 'string' || typeof providedUser !== 'string') {
+    throw new AuthError('unauthorized', 'Malformed internal auth headers');
+  }
+
+  // Constant-time comparison so timing attacks can't reveal the secret.
+  // Pad to fixed length first (Buffer.from on a shorter/longer string
+  // would length-leak on the timingSafeEqual call).
+  const providedBuf = Buffer.from(providedToken);
+  const expectedBuf = Buffer.from(INTERNAL_SECRET);
+  if (
+    providedBuf.length !== expectedBuf.length ||
+    !timingSafeEqual(providedBuf, expectedBuf)
+  ) {
+    throw new AuthError('unauthorized', 'Invalid internal token');
+  }
+
+  // Resolve the user — internal requests always identify by user id.
+  const db = getDbClient();
+  const rows = await db
+    .select()
+    .from(usersTable)
+    .where(eq(usersTable.id, providedUser))
+    .limit(1);
+  if (!rows[0]) {
+    throw new AuthError('unauthorized', 'Internal user not found');
+  }
+  return {
+    id: rows[0].id,
+    email: rows[0].email,
+    githubUsername: rows[0].githubUsername ?? undefined,
+  };
+}
+
 /**
  * Express middleware: requires a valid Supabase JWT. Populates `req.user`.
  * Any failure (missing, malformed, expired, forbidden) short-circuits with
@@ -118,13 +187,23 @@ export async function requireAuth(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const token = extractBearerToken(req.headers.authorization);
-  if (!token) {
-    res.status(401).json({ success: false, error: 'Missing bearer token' });
-    return;
-  }
-
   try {
+    // 1) Internal proxy headers take precedence. Set by the daemon WS
+    //    handler making localhost calls on behalf of a device-token-
+    //    authenticated daemon. No JWT round-trip to Supabase.
+    const internalUser = await checkInternalAuth(req);
+    if (internalUser) {
+      req.user = internalUser;
+      next();
+      return;
+    }
+
+    // 2) Normal path: Supabase JWT from the Authorization header.
+    const token = extractBearerToken(req.headers.authorization);
+    if (!token) {
+      res.status(401).json({ success: false, error: 'Missing bearer token' });
+      return;
+    }
     const user = await verifyTokenAndGetUser(token);
     if (!user) {
       res.status(401).json({ success: false, error: 'Invalid or expired token' });
@@ -135,6 +214,10 @@ export async function requireAuth(
   } catch (err) {
     if (err instanceof AuthError && err.code === 'forbidden') {
       res.status(403).json({ success: false, error: err.message });
+      return;
+    }
+    if (err instanceof AuthError && err.code === 'unauthorized') {
+      res.status(401).json({ success: false, error: err.message });
       return;
     }
     console.error('Auth middleware failed:', err);

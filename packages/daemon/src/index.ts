@@ -15,7 +15,7 @@ async function main(): Promise<void> {
 
   console.log(`fastowl-daemon starting — backend=${config.backendUrl}`);
   const client = new DaemonWsClient(config);
-  client.start();
+  await client.start();
 
   const shutdown = () => {
     console.log('fastowl-daemon shutting down');

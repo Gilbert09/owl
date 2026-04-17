@@ -1,4 +1,5 @@
 import os from 'os';
+import { randomBytes } from 'crypto';
 import WebSocket from 'ws';
 import {
   encodeDaemonMessage,
@@ -9,11 +10,14 @@ import {
   type DaemonRequest,
   type DaemonResponse,
   type DaemonEventPayload,
+  type ProxyHttpRequest,
+  type ProxyHttpResult,
   DAEMON_CLOSE_UNAUTHORIZED,
 } from '@fastowl/shared';
-import { exec, spawnInteractive, writeSession, killSession } from './executor.js';
+import { exec, spawnInteractive, writeSession, killSession, setChildEnv } from './executor.js';
 import { gitDispatch } from './git.js';
 import { saveConfig, loadConfig, type ResolvedConfig } from './config.js';
+import { DaemonProxyServer } from './proxyServer.js';
 
 const DAEMON_VERSION = '0.1.0';
 const INITIAL_RECONNECT_MS = 1000;
@@ -33,17 +37,60 @@ export class DaemonWsClient {
   private reconnectMs = INITIAL_RECONNECT_MS;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private shuttingDown = false;
+  private proxyServer: DaemonProxyServer | null = null;
+  private pendingProxyRequests = new Map<
+    string,
+    { resolve: (r: ProxyHttpResult) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+  >();
 
   constructor(private config: ResolvedConfig) {}
 
-  start(): void {
+  async start(): Promise<void> {
+    // Stand up the local proxy first so spawn_interactive handlers can
+    // hand its URL to children from their very first request.
+    this.proxyServer = new DaemonProxyServer((req) => this.sendProxyRequest(req));
+    await this.proxyServer.start();
+    setChildEnv({ FASTOWL_API_URL: this.proxyServer.getChildApiUrl() });
     this.connect();
   }
 
   shutdown(): void {
     this.shuttingDown = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    for (const [, pending] of this.pendingProxyRequests) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('daemon shutting down'));
+    }
+    this.pendingProxyRequests.clear();
+    this.proxyServer?.shutdown();
+    this.proxyServer = null;
     this.ws?.close();
+  }
+
+  /**
+   * Send a daemon→backend request and wait for the matching response.
+   * The only daemon-initiated request today is the HTTP proxy — see
+   * `DaemonProxyServer`.
+   */
+  private async sendProxyRequest(payload: ProxyHttpRequest): Promise<ProxyHttpResult> {
+    if (this.ws?.readyState !== WebSocket.OPEN) {
+      throw new Error('daemon WS not connected to backend');
+    }
+    const id = randomBytes(8).toString('hex');
+    return new Promise<ProxyHttpResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingProxyRequests.delete(id);
+        reject(new Error('proxy request timed out'));
+      }, 60_000);
+      this.pendingProxyRequests.set(id, { resolve, reject, timer });
+      try {
+        this.ws!.send(encodeDaemonMessage({ kind: 'request', id, payload }));
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingProxyRequests.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 
   private connect(): void {
@@ -123,10 +170,20 @@ export class DaemonWsClient {
       case 'request':
         await this.handleRequest(msg);
         return;
-      case 'response':
-        // Daemon only receives responses to requests it sent. We don't
-        // currently send any; ignore for now.
+      case 'response': {
+        // Response to a daemon-initiated request — today, only proxy
+        // HTTP round-trips.
+        const pending = this.pendingProxyRequests.get(msg.id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.pendingProxyRequests.delete(msg.id);
+        if (msg.ok) {
+          pending.resolve(msg.data as ProxyHttpResult);
+        } else {
+          pending.reject(new Error(msg.error ?? 'proxy request failed'));
+        }
         return;
+      }
       case 'event':
         // Backend doesn't push events to daemon; ignore for forward-compat.
         return;
