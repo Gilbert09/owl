@@ -24,6 +24,19 @@ export async function createTestDb(): Promise<{
   const pglite = new PGlite();
   const db = drizzlePglite(pglite, { schema, casing: 'snake_case' }) as unknown as Database;
 
+  // pglite doesn't ship Supabase's `auth` schema. Our RLS policies call
+  // `auth.uid()`, so stub it here — returns null when no JWT claim is set,
+  // which (combined with pglite running as superuser) leaves test queries
+  // effectively RLS-bypassing. Matches prod behaviour where the backend
+  // connects with the service-role key.
+  await pglite.exec(`CREATE SCHEMA IF NOT EXISTS auth`);
+  await pglite.exec(`
+    CREATE OR REPLACE FUNCTION auth.uid() RETURNS text
+    LANGUAGE sql STABLE AS $$
+      SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')
+    $$;
+  `);
+
   // Apply every generated migration in order. drizzle-kit names them
   // `NNNN_<slug>.sql` and writes `--> statement-breakpoint` between
   // statements; splitting on that marker gives one call per statement.

@@ -78,4 +78,31 @@ describe('Drizzle migration', () => {
     const cols = result.rows.map((r) => r.column_name);
     expect(cols).toContain('repository_id');
   });
+
+  it('enables RLS on every user-scoped table (settings stays global)', async () => {
+    const testDb = await createTestDb();
+    cleanup = testDb.cleanup;
+
+    const result = await testDb.pglite.query<{ tablename: string; rowsecurity: boolean }>(`
+      SELECT tablename, rowsecurity FROM pg_tables
+      WHERE schemaname = 'public'
+    `);
+    const map = new Map(result.rows.map((r) => [r.tablename, r.rowsecurity]));
+
+    for (const table of [
+      'users',
+      'workspaces',
+      'environments',
+      'repositories',
+      'integrations',
+      'tasks',
+      'agents',
+      'inbox_items',
+      'backlog_sources',
+      'backlog_items',
+    ]) {
+      expect(map.get(table)).toBe(true);
+    }
+    expect(map.get('settings')).toBe(false);
+  });
 });

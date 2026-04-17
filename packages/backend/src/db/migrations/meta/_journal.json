@@ -15,6 +15,13 @@
       "when": 1776441525515,
       "tag": "0001_users_and_ownership",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1776442000000,
+      "tag": "0002_enable_rls",
+      "breakpoints": true
     }
   ]
 }
