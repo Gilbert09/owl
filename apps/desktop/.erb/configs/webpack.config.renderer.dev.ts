@@ -142,6 +142,12 @@ const configuration: webpack.Configuration = {
      */
     new webpack.EnvironmentPlugin({
       NODE_ENV: 'development',
+      // Supabase auth config is injected from the shell env at build time.
+      // Defaults let the renderer bundle without the vars set; runtime
+      // checks surface a useful error instead of a cryptic undefined.
+      FASTOWL_SUPABASE_URL: '',
+      FASTOWL_SUPABASE_ANON_KEY: '',
+      FASTOWL_API_URL: 'http://localhost:4747',
     }),
 
     new webpack.LoaderOptionsPlugin({

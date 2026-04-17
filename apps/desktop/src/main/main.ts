@@ -22,12 +22,92 @@ class AppUpdater {
 }
 
 let mainWindow: BrowserWindow | null = null;
+// Buffer callbacks that arrive before the renderer is ready — macOS
+// open-url can fire during app launch, before any window exists.
+let pendingAuthCallbackUrl: string | null = null;
 
 ipcMain.on('ipc-example', async (event, arg) => {
   const msgTemplate = (pingPong: string) => `IPC test: ${pingPong}`;
   console.log(msgTemplate(arg));
   event.reply('ipc-example', msgTemplate('pong'));
 });
+
+// ============================================================================
+// Auth deep-link handling
+// ============================================================================
+//
+// After a user signs in via GitHub in their system browser, Supabase
+// redirects to `fastowl://auth-callback#access_token=...&refresh_token=...`.
+// The OS hands that URL to whichever app claims the `fastowl` scheme —
+// i.e. us. We forward it over IPC to the renderer, which feeds the tokens
+// to the Supabase client.
+
+const DEEP_LINK_SCHEME = 'fastowl';
+
+function registerDeepLinkProtocol() {
+  if (process.defaultApp) {
+    // Dev: Electron needs to know the script path so `fastowl://` reopens
+    // the running instance instead of launching a fresh electron binary.
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
+        path.resolve(process.argv[1]),
+      ]);
+    }
+  } else {
+    app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME);
+  }
+}
+
+function forwardAuthCallback(url: string) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('auth:callback', url);
+    // Pop the window to the front so the user sees confirmation.
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  } else {
+    pendingAuthCallbackUrl = url;
+  }
+}
+
+// macOS delivers deep links via open-url even for already-running apps.
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (url.startsWith(`${DEEP_LINK_SCHEME}://`)) {
+    forwardAuthCallback(url);
+  }
+});
+
+// Windows/Linux deliver deep links as a second argv to a second instance.
+// We grab the single-instance lock and handle it on `second-instance`.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_event, argv) => {
+    const url = argv.find((a) => a.startsWith(`${DEEP_LINK_SCHEME}://`));
+    if (url) forwardAuthCallback(url);
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
+// Renderer asks us to open OAuth URLs in the default browser.
+ipcMain.handle('auth:open-external', async (_event, url: string) => {
+  await shell.openExternal(url);
+});
+
+// Renderer asks on mount for any deep-link that arrived before it was ready.
+ipcMain.handle('auth:drain-pending', async () => {
+  const pending = pendingAuthCallbackUrl;
+  pendingAuthCallbackUrl = null;
+  return pending;
+});
+
+registerDeepLinkProtocol();
+
+// ============================================================================
 
 if (process.env.NODE_ENV === 'production') {
   const sourceMapSupport = require('source-map-support');
@@ -89,6 +169,11 @@ const createWindow = async () => {
       mainWindow.minimize();
     } else {
       mainWindow.show();
+    }
+    // If a deep-link came in while the window was booting, deliver it now.
+    if (pendingAuthCallbackUrl) {
+      mainWindow.webContents.send('auth:callback', pendingAuthCallbackUrl);
+      pendingAuthCallbackUrl = null;
     }
   });
 

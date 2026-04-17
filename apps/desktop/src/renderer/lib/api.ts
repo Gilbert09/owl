@@ -1,3 +1,4 @@
+import { getSupabase, isSupabaseConfigured } from './supabase';
 import type {
   Workspace,
   Environment,
@@ -16,25 +17,40 @@ import type {
   WSEvent,
 } from '@fastowl/shared';
 
-// In Electron renderer, use hardcoded defaults for development
-// In production, these could be configured via electron-store or IPC
-const API_BASE = 'http://localhost:4747/api/v1';
-const WS_URL = 'ws://localhost:4747/ws';
+// Resolve the backend URL from the build-time env (see webpack configs).
+// Falls back to local dev so a fresh checkout Just Works.
+const BASE_URL = process.env.FASTOWL_API_URL || 'http://localhost:4747';
+const API_BASE = `${BASE_URL}/api/v1`;
+const WS_URL = BASE_URL.replace(/^http/, 'ws') + '/ws';
 
 // ============================================================================
 // HTTP Client
 // ============================================================================
+
+/**
+ * Pull the current access token off the Supabase client's in-memory session.
+ * Returns null when we're not logged in; callers surface a clear error then.
+ */
+async function getAuthToken(): Promise<string | null> {
+  if (!isSupabaseConfigured()) return null;
+  const { data } = await getSupabase().auth.getSession();
+  return data.session?.access_token ?? null;
+}
 
 async function request<T>(
   method: string,
   path: string,
   body?: unknown
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  const token = await getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
   const response = await fetch(`${API_BASE}${path}`, {
     method,
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -341,11 +357,20 @@ class WebSocketClient {
   private maxReconnectAttempts = 10;
   private subscribedWorkspaces: Set<string> = new Set();
 
-  connect(): void {
+  async connect(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
+    const token = await getAuthToken();
+    if (!token) {
+      // Defer until we have a session — callers usually gate this behind
+      // the AuthProvider so it's a transient case on cold start.
+      console.log('WebSocket connect deferred: no auth token yet');
+      return;
+    }
     console.log('Connecting to WebSocket...');
-    this.ws = new WebSocket(WS_URL);
+    // Pass token as query param — upgrade requests in browsers/Electron
+    // don't let you set custom headers, so this is the canonical path.
+    this.ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
 
     this.ws.onopen = () => {
       console.log('WebSocket connected');
@@ -445,7 +470,7 @@ class WebSocketClient {
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
 
     this.reconnectTimer = window.setTimeout(() => {
-      this.connect();
+      void this.connect();
     }, delay);
   }
 }

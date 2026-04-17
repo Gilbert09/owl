@@ -24,9 +24,10 @@ export function useApiConnection() {
     updateEnvironment,
   } = useWorkspaceStore();
 
-  // Connect to WebSocket on mount
+  // Connect to WebSocket on mount. `connect()` is async because it needs
+  // to fetch the auth token before opening the socket.
   useEffect(() => {
-    wsClient.connect();
+    void wsClient.connect();
     return () => {
       wsClient.disconnect();
     };

@@ -110,6 +110,10 @@ const configuration: webpack.Configuration = {
     new webpack.EnvironmentPlugin({
       NODE_ENV: 'production',
       DEBUG_PROD: false,
+      // See the dev config for why these default to empty strings.
+      FASTOWL_SUPABASE_URL: '',
+      FASTOWL_SUPABASE_ANON_KEY: '',
+      FASTOWL_API_URL: 'http://localhost:4747',
     }),
 
     new MiniCssExtractPlugin({
