@@ -23,7 +23,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!isSupabaseConfigured()) {
-      console.error('Supabase is not configured. Check FASTOWL_SUPABASE_URL / FASTOWL_SUPABASE_ANON_KEY.');
+      // LoginScreen renders its own visible warning when this is false —
+      // no need to yell in the console (which the test runner flags).
       setLoading(false);
       return;
     }

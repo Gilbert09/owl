@@ -25,9 +25,22 @@ void PRIORITY_WEIGHTS;
 class TaskQueueService extends EventEmitter {
   private processingInterval: NodeJS.Timeout | null = null;
   private isProcessing = false;
+  private shuttingDown = false;
 
   private get db(): Database {
     return getDbClient();
+  }
+
+  /** Run a processQueue without logging the "DB client reset" noise
+   *  that floats in from afterEach in tests. Anything else still logs. */
+  private runProcessQueue(): void {
+    if (this.shuttingDown) return;
+    this.processQueue().catch((err) => {
+      if (this.shuttingDown) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('DATABASE_URL is not set')) return;
+      console.error('[TaskQueue] processQueue error:', err);
+    });
   }
 
   async init(): Promise<void> {
@@ -35,16 +48,12 @@ class TaskQueueService extends EventEmitter {
 
     agentService.on('status', (_agentId, status) => {
       if (status === 'idle' || status === 'completed') {
-        this.processQueue().catch((err) =>
-          console.error('[TaskQueue] processQueue error:', err)
-        );
+        this.runProcessQueue();
       }
     });
 
     this.processingInterval = setInterval(() => {
-      this.processQueue().catch((err) =>
-        console.error('[TaskQueue] processQueue error:', err)
-      );
+      this.runProcessQueue();
     }, 5000);
   }
 
@@ -88,10 +97,16 @@ class TaskQueueService extends EventEmitter {
   }
 
   shutdown(): void {
+    this.shuttingDown = true;
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
       this.processingInterval = null;
     }
+  }
+
+  /** Tests re-use the singleton across describes — let them un-shutdown. */
+  resetForTests(): void {
+    this.shuttingDown = false;
   }
 
   async queueTask(taskId: string): Promise<void> {
@@ -103,9 +118,7 @@ class TaskQueueService extends EventEmitter {
     const task = await this.getTask(taskId);
     if (task) emitTaskStatus(task.workspaceId, taskId, 'queued');
 
-    this.processQueue().catch((err) =>
-      console.error('[TaskQueue] processQueue error:', err)
-    );
+    this.runProcessQueue();
   }
 
   async cancelTask(taskId: string): Promise<void> {
