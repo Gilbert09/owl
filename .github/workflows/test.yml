@@ -35,6 +35,9 @@ jobs:
       - name: Build desktop app
         run: npm run build -w @fastowl/desktop
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Lint
         run: npm run lint
 

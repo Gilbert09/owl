@@ -16,7 +16,8 @@
     "build:backend": "npm run build -w @fastowl/backend",
     "package": "npm run package -w @fastowl/desktop",
     "lint": "npm run lint --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run build -w @fastowl/shared && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
