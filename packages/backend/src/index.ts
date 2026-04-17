@@ -6,6 +6,8 @@ import { WebSocketServer } from 'ws';
 import { eq } from 'drizzle-orm';
 import { setupRoutes } from './routes/index.js';
 import { setupWebSocket } from './services/websocket.js';
+import { handleConnection as handleDaemonWsConnection } from './services/daemonWs.js';
+import { daemonRegistry } from './services/daemonRegistry.js';
 import { initDatabase } from './db/index.js';
 import { getDbClient, closeDbClient } from './db/client.js';
 import { environments as environmentsTable } from './db/schema.js';
@@ -36,6 +38,7 @@ async function main() {
   await prMonitorService.init();
   await backlogService.init();
   await continuousBuildScheduler.init();
+  daemonRegistry.init();
 
   const app = express();
   app.use(cors());
@@ -61,6 +64,21 @@ async function main() {
   const wss = new WebSocketServer({ server, path: '/ws' });
   setupWebSocket(wss);
 
+  // Separate WSS for the daemon channel so the user-facing WS and the
+  // daemon WS don't have to share handlers. `noServer: true` means we
+  // dispatch by path on `upgrade` ourselves.
+  const daemonWss = new WebSocketServer({ noServer: true });
+  daemonWss.on('connection', (ws) => { void handleDaemonWsConnection(ws); });
+  server.on('upgrade', (req, socket, head) => {
+    const { pathname } = new URL(req.url ?? '/', 'http://localhost');
+    if (pathname === '/daemon-ws') {
+      daemonWss.handleUpgrade(req, socket, head, (ws) => {
+        daemonWss.emit('connection', ws, req);
+      });
+    }
+    // `/ws` is handled automatically by the `wss` server's own `path` option.
+  });
+
   server.listen(PORT, () => {
     console.log(`FastOwl backend running on http://localhost:${PORT}`);
     console.log(`WebSocket available at ws://localhost:${PORT}/ws`);
@@ -78,6 +96,7 @@ async function main() {
     taskQueueService.shutdown();
     agentService.shutdown();
     environmentService.shutdown();
+    daemonRegistry.shutdown();
 
     server.close(async () => {
       await closeDbClient();

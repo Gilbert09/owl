@@ -1,6 +1,6 @@
 {
-  "id": "585df473-c754-4184-9d94-0b8a8e63e432",
-  "prevId": "dff946bb-e5f5-4405-bdbb-ea0db0ac21f6",
+  "id": "12d41d6f-16d5-48e5-8b07-ddbf7792ebee",
+  "prevId": "585df473-c754-4184-9d94-0b8a8e63e432",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -518,6 +518,18 @@
           "primaryKey": false,
           "notNull": true
         },
+        "device_token_hash": {
+          "name": "device_token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_seen_at": {
+          "name": "last_seen_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
         "last_connected": {
           "name": "last_connected",
           "type": "timestamp with time zone",
@@ -551,6 +563,21 @@
           "columns": [
             {
               "expression": "owner_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_environments_device_token": {
+          "name": "idx_environments_device_token",
+          "columns": [
+            {
+              "expression": "device_token_hash",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

@@ -1,0 +1,252 @@
+import { EventEmitter } from 'events';
+import { randomBytes, createHash } from 'crypto';
+import type { WebSocket } from 'ws';
+import { eq } from 'drizzle-orm';
+import {
+  encodeDaemonMessage,
+  type DaemonEventPayload,
+  type DaemonRequestPayload,
+  type DaemonMessage,
+} from '@fastowl/shared';
+import { getDbClient } from '../db/client.js';
+import { environments as environmentsTable } from '../db/schema.js';
+
+/**
+ * Per-process state of every daemon currently connected over WebSocket.
+ * The registry is the backend's view of the world; `environmentService`
+ * calls into it whenever the env's type is `daemon`.
+ *
+ * Pairing tokens are in-memory + short-lived (10 min). Device tokens
+ * are hashed and stored in `environments.device_token_hash`.
+ *
+ * Connection is keyed by environmentId. If a second daemon tries to
+ * pair for an env that already has one connected, the old one is
+ * evicted — useful when a service restarts and the TCP half-close
+ * hasn't propagated yet.
+ */
+
+interface Pairing {
+  environmentId: string;
+  ownerId: string;
+  expiresAt: number;
+}
+
+interface ActiveDaemon {
+  environmentId: string;
+  ws: WebSocket;
+  meta: {
+    os: string;
+    arch: string;
+    hostname: string;
+    daemonVersion: string;
+  };
+}
+
+class DaemonRegistry extends EventEmitter {
+  private pairings = new Map<string, Pairing>(); // pairing token → env
+  private active = new Map<string, ActiveDaemon>(); // environmentId → connection
+  private pending = new Map<string, {
+    resolve: (data: unknown) => void;
+    reject: (err: Error) => void;
+    timer: NodeJS.Timeout;
+  }>();
+
+  init(): void {
+    // No background timers today. Pairing tokens are swept inline on
+    // every `authenticate` call — it's cheap (the map is tiny) and it
+    // avoids a long-running setInterval that complicates test teardown.
+  }
+
+  shutdown(): void {
+    for (const [, active] of this.active) {
+      try {
+        active.ws.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.active.clear();
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('daemon registry shutting down'));
+      this.pending.delete(id);
+    }
+  }
+
+  private sweepExpiredPairings(now: number): void {
+    for (const [token, pairing] of this.pairings) {
+      if (pairing.expiresAt < now) this.pairings.delete(token);
+    }
+  }
+
+  /**
+   * Mint a one-shot pairing token for an existing daemon env. The
+   * daemon presents this token on its very first connect; backend
+   * swaps it for a long-lived device token on hello.
+   */
+  createPairingToken(environmentId: string, ownerId: string): string {
+    const token = randomBytes(32).toString('hex');
+    this.pairings.set(token, {
+      environmentId,
+      ownerId,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    return token;
+  }
+
+  /** Called by the WS endpoint once it's parsed a hello message. */
+  async authenticate(args: {
+    pairingToken?: string;
+    deviceToken?: string;
+  }): Promise<{ environmentId: string; newDeviceToken?: string } | null> {
+    const now = Date.now();
+    this.sweepExpiredPairings(now);
+
+    if (args.pairingToken) {
+      const pairing = this.pairings.get(args.pairingToken);
+      if (!pairing || pairing.expiresAt < now) return null;
+      this.pairings.delete(args.pairingToken);
+
+      // Pairing succeeded. Mint a long-lived device token, hash it,
+      // store on the env row, return the raw value exactly once.
+      const deviceToken = randomBytes(32).toString('hex');
+      const hash = hashToken(deviceToken);
+      await getDbClient()
+        .update(environmentsTable)
+        .set({ deviceTokenHash: hash, updatedAt: new Date() })
+        .where(eq(environmentsTable.id, pairing.environmentId));
+
+      return { environmentId: pairing.environmentId, newDeviceToken: deviceToken };
+    }
+
+    if (args.deviceToken) {
+      const hash = hashToken(args.deviceToken);
+      const rows = await getDbClient()
+        .select({ id: environmentsTable.id })
+        .from(environmentsTable)
+        .where(eq(environmentsTable.deviceTokenHash, hash))
+        .limit(1);
+      if (!rows[0]) return null;
+      return { environmentId: rows[0].id };
+    }
+
+    return null;
+  }
+
+  /**
+   * Register a live daemon connection. Evicts any prior connection
+   * for the same environment id — duplicate connects usually mean a
+   * stale socket that hasn't timed out yet.
+   */
+  register(active: ActiveDaemon): void {
+    const prior = this.active.get(active.environmentId);
+    if (prior) {
+      try {
+        prior.ws.close(4409, 'replaced by new connection');
+      } catch {
+        // ignore
+      }
+    }
+    this.active.set(active.environmentId, active);
+    // Heartbeat: stamp last_seen_at now; the sweeper re-stamps every
+    // minute for as long as the daemon stays connected.
+    this.touchLastSeen(active.environmentId);
+  }
+
+  /** Called when the WS closes. */
+  unregister(environmentId: string): void {
+    this.active.delete(environmentId);
+    // Reject anything still waiting — the backend-side caller will
+    // bubble up a "daemon disconnected" error.
+    for (const [id, pending] of this.pending) {
+      if (id.startsWith(`${environmentId}:`)) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('daemon disconnected'));
+        this.pending.delete(id);
+      }
+    }
+  }
+
+  /** Is the daemon for this env currently connected? */
+  isConnected(environmentId: string): boolean {
+    return this.active.has(environmentId);
+  }
+
+  listConnected(): string[] {
+    return [...this.active.keys()];
+  }
+
+  /**
+   * Send a request to a daemon and await its response. Rejects if the
+   * daemon disconnects before replying or the 30s timeout fires.
+   */
+  async request<TResult = unknown>(
+    environmentId: string,
+    payload: DaemonRequestPayload,
+    timeoutMs = 30_000
+  ): Promise<TResult> {
+    const active = this.active.get(environmentId);
+    if (!active) throw new Error(`daemon not connected for env ${environmentId}`);
+
+    const id = `${environmentId}:${randomBytes(8).toString('hex')}`;
+    const message: DaemonMessage = { kind: 'request', id, payload };
+
+    return new Promise<TResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`daemon request timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(id, {
+        resolve: (data) => resolve(data as TResult),
+        reject,
+        timer,
+      });
+      try {
+        active.ws.send(encodeDaemonMessage(message));
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
+  }
+
+  /** Resolve a pending request when the matching response arrives. */
+  resolveResponse(id: string, ok: boolean, data: unknown, error?: string): void {
+    const pending = this.pending.get(id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pending.delete(id);
+    if (ok) pending.resolve(data);
+    else pending.reject(new Error(error ?? 'daemon request failed'));
+  }
+
+  /** Handle an event (unsolicited message) from a daemon. */
+  handleEvent(environmentId: string, event: DaemonEventPayload): void {
+    // We intentionally don't touch `last_seen_at` on every event —
+    // session.data can fire hundreds of times per second. The liveness
+    // signal lives on register() plus a future heartbeat loop.
+    this.emit(event.type, environmentId, event);
+  }
+
+  private touchLastSeen(environmentId: string): void {
+    // Fire-and-forget; last_seen_at drives the desktop's green/amber
+    // dot, not auth, so a failure here is non-fatal. The `.then(..,..)`
+    // form forces the Drizzle builder to execute eagerly — plain
+    // `.catch()` on an unthenable builder leaves the query unresolved.
+    getDbClient()
+      .update(environmentsTable)
+      .set({ lastSeenAt: new Date() })
+      .where(eq(environmentsTable.id, environmentId))
+      .then(
+        () => {},
+        () => {}
+      );
+  }
+}
+
+function hashToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex');
+}
+
+export const daemonRegistry = new DaemonRegistry();

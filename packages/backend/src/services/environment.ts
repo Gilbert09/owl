@@ -7,6 +7,7 @@ import type {
   SSHEnvironmentConfig,
 } from '@fastowl/shared';
 import { sshService } from './ssh.js';
+import { daemonRegistry } from './daemonRegistry.js';
 import { getDbClient, type Database } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { spawn, ChildProcess } from 'child_process';
@@ -47,6 +48,16 @@ class EnvironmentService extends EventEmitter {
       this.updateEnvironmentStatus(environmentId, status, error).catch((err) =>
         console.error('Failed to update environment status:', err)
       );
+    });
+
+    // Forward daemon session events under the same names the rest of
+    // the backend (agent service, git service) already listens for.
+    daemonRegistry.on('session.data', (_envId, event) => {
+      const data = Buffer.from(event.dataBase64, 'base64');
+      this.emit('session:data', event.sessionId, data);
+    });
+    daemonRegistry.on('session.close', (_envId, event) => {
+      this.emit('session:close', event.sessionId, event.exitCode);
     });
   }
 
@@ -110,6 +121,21 @@ class EnvironmentService extends EventEmitter {
       case 'ssh':
         await sshService.connect(environmentId, env.config as SSHEnvironmentConfig);
         break;
+      case 'daemon':
+        // "Connect" on a daemon env is a DB-level op — the daemon itself
+        // maintains its outbound WS connection independently. We just
+        // mark the status; the registry updates last_seen_at as messages
+        // flow.
+        if (daemonRegistry.isConnected(environmentId)) {
+          await this.updateEnvironmentStatus(environmentId, 'connected');
+        } else {
+          await this.updateEnvironmentStatus(
+            environmentId,
+            'disconnected',
+            'daemon not connected'
+          );
+        }
+        break;
       case 'coder':
         throw new Error('Coder environments not yet implemented');
       default:
@@ -158,6 +184,12 @@ class EnvironmentService extends EventEmitter {
         const fullCommand = options.cwd ? `cd ${options.cwd} && ${command}` : command;
         return sshService.exec(environmentId, fullCommand);
       }
+      case 'daemon': {
+        return daemonRegistry.request<{ stdout: string; stderr: string; code: number }>(
+          environmentId,
+          { op: 'exec', command, cwd: options.cwd }
+        );
+      }
       default:
         throw new Error(`Cannot exec on environment type: ${env.type}`);
     }
@@ -187,6 +219,17 @@ class EnvironmentService extends EventEmitter {
         sshService.writeToPTY(sessionId, `${command}\n`);
         break;
       }
+      case 'daemon': {
+        await daemonRegistry.request(environmentId, {
+          op: 'spawn_interactive',
+          sessionId,
+          command,
+          cwd: options.cwd,
+          rows: options.rows,
+          cols: options.cols,
+        });
+        break;
+      }
       default:
         throw new Error(`Cannot spawn interactive on environment type: ${env.type}`);
     }
@@ -203,6 +246,21 @@ class EnvironmentService extends EventEmitter {
       localProc.process.stdin?.write(data);
       return;
     }
+    // Try any connected daemon — sessions are keyed globally, so we
+    // look for the one that actually owns this session id.
+    for (const envId of daemonRegistry.listConnected()) {
+      void daemonRegistry
+        .request(envId, {
+          op: 'write_session',
+          sessionId,
+          dataBase64: Buffer.from(data, 'utf-8').toString('base64'),
+        })
+        .catch(() => {
+          // Session belongs to a different daemon; ignore.
+        });
+    }
+    // Fall back to SSH if no daemon claimed it. Idempotent: ssh will
+    // no-op for unknown session ids.
     sshService.writeToPTY(sessionId, data);
   }
 
@@ -218,6 +276,11 @@ class EnvironmentService extends EventEmitter {
       localProc.process.kill('SIGTERM');
       this.localProcesses.delete(sessionId);
       return;
+    }
+    for (const envId of daemonRegistry.listConnected()) {
+      void daemonRegistry
+        .request(envId, { op: 'kill_session', sessionId })
+        .catch(() => {});
     }
     sshService.closePTY(sessionId);
   }
@@ -238,6 +301,9 @@ class EnvironmentService extends EventEmitter {
     if (!env) return 'disconnected';
     if (env.type === 'local') return 'connected';
     if (env.type === 'ssh') return sshService.getStatus(environmentId);
+    if (env.type === 'daemon') {
+      return daemonRegistry.isConnected(environmentId) ? 'connected' : 'disconnected';
+    }
     return 'disconnected';
   }
 

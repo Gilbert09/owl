@@ -2,6 +2,36 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 15 (Phase 18.3.A — daemon package + WS transport)
+Foundation for the SSH auto-install flow. Daemon package exists and can dial the hosted backend; backend has a `/daemon-ws` endpoint, a registry that tracks live daemons, and a `daemon` env type that proxies commands through. No UX change yet — Phase 18.3.B bolts the "Install daemon" checkbox onto the Add-SSH-env dialog.
+
+- **Wire protocol** in `@fastowl/shared/daemonProtocol.ts`: JSON-framed WS envelopes with `hello` / `hello_ack` / `request` / `response` / `event`. Correlation IDs on request/response. Close codes in the 4xxx range for a daemon to log a clear reason (4401 unauthorized, 4409 duplicate, 4500 server shutdown). Encoded as `JSON.stringify(envelope)` so the same types also work over stdio if we ever need a local test daemon.
+- **`packages/daemon`** (new workspace): `executor.ts` wraps `child_process.spawn` + `node-pty`, `git.ts` mirrors backend `gitService` via exec, `wsClient.ts` handles the dial/hello/reconnect loop (exponential backoff capped at 30 s), `config.ts` resolves CLI args / env vars / `~/.fastowl/daemon.json` with that precedence. Bin is `fastowl-daemon`.
+- **Schema**: `environments` gets `device_token_hash` (SHA-256 of the long-lived daemon token) and `last_seen_at`, plus a new env type `daemon`. Migration 0003. `0002_snapshot.json` got re-ided because Stage 5's manual copy had a duplicate id that collided with drizzle-kit on regen.
+- **Backend**:
+  - `services/daemonRegistry.ts` owns pairings (in-memory, 10 min TTL) and live daemon connections. Mints device tokens, matches them on reconnect, issues requests with 30 s timeouts, routes responses by correlation id, forwards events as `session.data` / `session.close` / `status` EventEmitter events. No background timers — pairing expiry is swept inline on each `authenticate` call so tests don't have to deal with open timer handles.
+  - `services/daemonWs.ts` accepts connections at `/daemon-ws`, enforces a 5-second hello timeout, hands auth off to the registry, then routes subsequent messages.
+  - `services/environment.ts` gained `case 'daemon':` branches for `connect`, `exec`, `spawnInteractive`, `writeToSession`, `killSession`, `getStatus`. Sub-daemon events flow back through the existing `session:data` / `session:close` EventEmitter the rest of the backend already listens for.
+  - `index.ts`: separate `WebSocketServer({ noServer: true })` for daemon upgrades, path-dispatched on the HTTP `upgrade` event so the existing `/ws` keeps its own handler.
+  - `routes/environments.ts`: new `POST /:id/pairing-token` mints a one-shot pairing token for a daemon env. Validates ownership + env type. 10-minute TTL.
+- **Tests**: `daemonRegistry.test.ts` covers pairing-then-device handshake, reconnect-with-device-token, request/response round-trip, in-flight rejection on disconnect, and event forwarding. Uses a `FakeWs` EventEmitter stand-in so no sockets or network. 70/70 green.
+
+- **Deliberately deferred to follow-ups**:
+  - Bundled daemon spawn from Electron main — the user has to run the daemon manually (CLI) for now. Next: desktop spawns daemon as a child process on app start, creates a local daemon env, pairs automatically.
+  - Liveness heartbeat (periodic `last_seen_at` stamp while connected) — today it's set on register only.
+  - UI to create a daemon env + show the `fastowl-daemon --pairing-token X --backend-url Y` command.
+  - Legacy `local` / `ssh` env types still exist and still work when the backend runs on the user's laptop; only the `daemon` type works against the hosted backend.
+
+- **How to try it locally** (dev loop):
+  1. Point desktop at local backend: `FASTOWL_API_URL=http://localhost:4747` in `apps/desktop/.env`, rebuild.
+  2. Start the backend (`npm run dev -w @fastowl/backend`).
+  3. Create a daemon env via API: `POST /api/v1/environments` with `{ "type": "daemon", "name": "My Mac", "config": {} }` (requires bearer token from desktop login → Copy CLI token).
+  4. Mint a pairing token: `POST /api/v1/environments/:id/pairing-token`.
+  5. Run the daemon: `node packages/daemon/dist/index.js --pairing-token <token> --backend-url http://localhost:4747`.
+  6. Watch it pair, write `~/.fastowl/daemon.json`, stay connected. Restart with no args and it reconnects using the stored device token.
+
+- **Next action (Phase 18.3.B)**: "Add SSH environment → Install FastOwl daemon" checkbox in the desktop dialog. Backend SSHes in, runs a server-hosted `install.sh`, writes a systemd/launchd unit, starts the service. At that point: one click to onboard a VM.
+
 ## Session 14 (Phase 18.4 — backend on Railway)
 Backend now live at `https://fastowl-backend-production.up.railway.app`. Health check passes, migrations ran on startup, RLS confirmed on every user-scoped table. Desktop `.env` flipped to point at Railway.
 

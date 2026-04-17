@@ -4,6 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { assertUser } from '../middleware/auth.js';
+import { daemonRegistry } from '../services/daemonRegistry.js';
 import type {
   Environment,
   EnvironmentConfig,
@@ -130,6 +131,33 @@ export function environmentRoutes(): Router {
       return res.status(404).json({ success: false, error: 'Environment not found' });
     }
     res.json({ success: true, data: { connected: true } });
+  });
+
+  // Mint a one-time pairing token for a daemon env. The UI shows the
+  // token + backend URL; user runs `fastowl-daemon --pairing-token X
+  // --backend-url Y` on the target machine. Tokens expire in 10m.
+  router.post('/:id/pairing-token', async (req, res) => {
+    const user = assertUser(req);
+    const db = getDbClient();
+    const rows = await db
+      .select({ type: environmentsTable.type })
+      .from(environmentsTable)
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
+      .limit(1);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, error: 'Environment not found' });
+    }
+    if (rows[0].type !== 'daemon') {
+      return res
+        .status(400)
+        .json({ success: false, error: 'Pairing tokens are only valid for daemon environments' });
+    }
+
+    const token = daemonRegistry.createPairingToken(req.params.id, user.id);
+    res.json({
+      success: true,
+      data: { pairingToken: token, expiresInSeconds: 600 },
+    });
   });
 
   return router;

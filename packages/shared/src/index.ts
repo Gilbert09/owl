@@ -68,7 +68,7 @@ export interface ContinuousBuildSettings {
 // Environment
 // ============================================================================
 
-export type EnvironmentType = 'local' | 'ssh' | 'coder';
+export type EnvironmentType = 'local' | 'ssh' | 'coder' | 'daemon';
 
 export type EnvironmentStatus =
   | 'connected'
@@ -459,3 +459,9 @@ export interface StartAgentRequest {
 export interface SendAgentInputRequest {
   input: string;
 }
+
+// ============================================================================
+// Daemon wire protocol
+// ============================================================================
+
+export * from './daemonProtocol.js';

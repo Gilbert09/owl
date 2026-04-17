@@ -583,10 +583,10 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] Auth middleware on Express routes + WebSocket upgrade
 
 - [ ] **18.3 Split backend into server + daemon**
-  - [ ] New `packages/server` — hosted control plane: routes, DB, auth, GitHub integration, PR monitor, inbox. No ssh2/node-pty.
-  - [ ] New `packages/daemon` — local execution: extracted environment/agent/git services + outbound WS client that connects to the hosted server
-  - [ ] Wire protocol: server → daemon commands (spawn agent, send input, stop, git ops); daemon → server events (terminal output, status changes)
-  - [ ] Daemon auth: device-scoped token minted by server on first link
+  - [~] New `packages/server` — hosted control plane. 18.3.A landed the daemon-on-the-other-side of the split; dropping ssh2/node-pty from the backend waits until legacy `local`/`ssh` env types are deprecated.
+  - [x] New `packages/daemon` — `@fastowl/daemon` workspace with `executor.ts`, `git.ts`, `wsClient.ts`, `config.ts`. Session 15.
+  - [x] Wire protocol in `@fastowl/shared/daemonProtocol.ts`: hello / request-response / events. Session 15.
+  - [x] Daemon auth: one-shot pairing token → long-lived device token (SHA-256 hash stored). Session 15.
   - [ ] **Bundled daemon**: child process of the Electron app for the user's own machine
   - [ ] **Deployable daemon**: `fastowl-daemon` as a standalone binary/CLI distributable to VMs
     - [ ] Single-file binary (pkg, bun --compile, or Docker image)

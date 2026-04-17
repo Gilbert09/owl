@@ -22,6 +22,13 @@
       "when": 1776442000000,
       "tag": "0002_enable_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1776460744537,
+      "tag": "0003_daemon_tokens",
+      "breakpoints": true
     }
   ]
 }

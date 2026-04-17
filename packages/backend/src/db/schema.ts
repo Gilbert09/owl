@@ -112,9 +112,20 @@ export const environments = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    type: text('type').notNull(), // 'local' | 'ssh' | 'coder'
+    // 'local' and 'ssh' are legacy (execution happens inside the backend
+    // process — only useful when the backend runs on the user's laptop).
+    // 'daemon' is the forward-looking type: execution happens in a
+    // `@fastowl/daemon` process that dials into the backend.
+    type: text('type').notNull(), // 'local' | 'ssh' | 'coder' | 'daemon'
     status: text('status').notNull().default('disconnected'),
     config: jsonb('config').notNull(),
+    // Long-lived token the daemon presents on every reconnect. We store
+    // a SHA-256 hash only — raw token is handed to the daemon once at
+    // pairing time and never leaves its disk.
+    deviceTokenHash: text('device_token_hash'),
+    // Updated whenever a daemon sends any WS traffic. Drives the
+    // "connected" status in the desktop and scheduler gating.
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
     lastConnected: timestamp('last_connected', { withTimezone: true }),
     error: text('error'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -122,6 +133,7 @@ export const environments = pgTable(
   },
   (t) => ({
     ownerIdx: index('idx_environments_owner').on(t.ownerId),
+    deviceTokenIdx: index('idx_environments_device_token').on(t.deviceTokenHash),
   })
 );
 

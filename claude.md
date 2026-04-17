@@ -40,8 +40,8 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 > Full list in [`docs/ROADMAP.md`](./docs/ROADMAP.md). Definition of done for "production ready" is in [`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md).
 
-1. **Phase 18.3 — Daemon split + auto-install over SSH** (NEXT)
-   Extract env/agent/git services into `packages/daemon`. Single-file binary. "Add SSH env → install daemon" checkbox in desktop. Interim: `scripts/bootstrap-vm.sh`.
+1. **Phase 18.3.B — SSH auto-install of the daemon** (NEXT)
+   Desktop "Add SSH env → Install FastOwl daemon" checkbox. Backend SSHes in, runs a server-hosted install script, sets up systemd/launchd. Depends on 18.3.A (landed).
 
 2. **Phase 17.3 — Notifications on `awaiting_review`** (QUICK WIN)
    Desktop + OS notification when a Continuous Build task lands for review.
@@ -49,6 +49,7 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 3. **Phase 18.2 polish** — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
 
 **Recently landed**:
+- Session 15 (Phase 18.3.A): daemon split foundation — new `packages/daemon`, `/daemon-ws` endpoint, `daemon` env type. Daemon can pair with the backend and proxy exec/spawn/git. UX (auto-install over SSH) still ahead in 18.3.B.
 - Session 14 (Phase 18.4): backend deployed to Railway at `https://fastowl-backend-production.up.railway.app`. Dockerfile + railway.toml + CI workflow. Desktop `.env` now points at hosted backend.
 - Session 13 (Phase 18.2): end-to-end auth — Supabase GitHub OAuth, JWT middleware, `owner_id` scoping, RLS defense in depth, desktop login + CLI/MCP bearer tokens.
 
