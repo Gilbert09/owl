@@ -119,6 +119,34 @@ Not yet officially released but community versions exist — search `posthog mcp
 
 Community MCP server exists at https://github.com/superfly/fly-mcp. Uses the same `FLY_API_TOKEN`.
 
+### FastOwl MCP (local)
+
+Exposes FastOwl's own task + backlog operations as Claude tools. Useful for letting a Claude Code session (or a child agent running inside a FastOwl task) create tasks, sync backlog sources, and kick the Continuous Build scheduler without dropping to a shell.
+
+```bash
+# build first
+npm run build -w @fastowl/shared -w @fastowl/mcp-server
+
+# register
+claude mcp add fastowl -- node "$(pwd)/packages/mcp-server/dist/index.js"
+```
+
+Or add to `~/.claude/mcp_servers.json` manually:
+
+```jsonc
+{
+  "mcpServers": {
+    "fastowl": {
+      "command": "node",
+      "args": ["/absolute/path/to/fastowl/packages/mcp-server/dist/index.js"],
+      "env": { "FASTOWL_API_URL": "http://localhost:4747" }
+    }
+  }
+}
+```
+
+No external account needed — it talks to your local FastOwl backend. For agents FastOwl spawns, parent-injected env vars (`FASTOWL_WORKSPACE_ID`, `FASTOWL_TASK_ID`) mean the tools work argument-free.
+
 After adding any MCP server, restart Claude Code. Verify with `/mcp` in the prompt.
 
 ---

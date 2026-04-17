@@ -574,8 +574,7 @@ A prioritized list of items requiring human attention:
    - Follow `docs/SSH_VM_SETUP.md` to install the CLI on the VM and configure `FASTOWL_API_URL`.
    - Turn on Continuous Build pointed at `claude.md` `Priority Queue (Next Up)` section.
 
-10. **Phase 20.6 - FastOwl MCP server** (Enhanced UX for child Claudes)
-    - Wrap CLI commands as first-class Claude tools.
+10. ~~**Phase 20.6 - FastOwl MCP server**~~ DONE — `@fastowl/mcp-server` with 7 tools over stdio, registered via `docs/SETUP.md`.
 
 11. **Phase 13.2 - Native UI Overlays** (Enhanced UX)
     - Clickable options, approval buttons on Claude TUI
@@ -922,9 +921,12 @@ A prioritized list of items requiring human attention:
   - [x] `docs/SSH_VM_SETUP.md` with three networking options (SSH reverse tunnel, LAN bind, backend-on-VM) and troubleshooting
   - [ ] End-to-end user verification on the real VM (requires user action)
 
-- [ ] **20.6 FastOwl MCP server (follow-up)**
-  - [ ] New `packages/mcp-server` wrapping the CLI commands as Claude tools
-  - [ ] Document in `docs/SETUP.md` how to register it in `~/.claude/mcp_servers.json`
+- [x] **20.6 FastOwl MCP server** (COMPLETED)
+  - [x] New `packages/mcp-server` workspace using `@modelcontextprotocol/sdk` over stdio
+  - [x] Seven tools: `fastowl_create_task`, `fastowl_list_tasks`, `fastowl_mark_ready_for_review`, `fastowl_list_backlog_items`, `fastowl_list_backlog_sources`, `fastowl_sync_backlog_source`, `fastowl_schedule`
+  - [x] Tools pick up `FASTOWL_WORKSPACE_ID` / `FASTOWL_TASK_ID` from env so child Claudes in FastOwl-spawned sessions call them argument-free
+  - [x] Registration instructions in `docs/SETUP.md` (FastOwl MCP section)
+  - [x] 7 handler tests (list schema, create_task path, error surfacing, env-id fallback, missing-id error, list formatting, schedule body)
 
 - [ ] **20.7 Nice-to-haves (deferred)**
   - [ ] GitHub issues as a backlog source type
