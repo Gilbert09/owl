@@ -237,10 +237,15 @@ class AgentService extends EventEmitter {
     // Inline env vars expose FastOwl context to the child process so that
     // `fastowl` CLI invocations (for task-spawns-task) have context without
     // needing to be configured per-run.
-    const claudeCommand = `${buildFastOwlEnvPrefix(workspaceId, taskId)}claude`;
+    //
+    // For SSH environments, we skip FASTOWL_API_URL — "localhost" on the
+    // VM isn't this process. The remote shell is expected to set it via
+    // .bashrc / the install doc (docs/SSH_VM_SETUP.md).
+    const env = environmentService.getEnvironment(environmentId);
+    const includeApiUrl = env?.type === 'local';
+    const claudeCommand = `${buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl })}claude`;
 
     // Determine working directory: use task's repo path, then fall back to environment's default
-    const env = environmentService.getEnvironment(environmentId);
     const cwd = workingDirectory || (env?.config.type === 'ssh'
       ? (env.config as any).workingDirectory
       : (env?.config as any)?.workingDirectory);
@@ -668,14 +673,23 @@ export const agentService = new AgentService();
  * Build an inline `KEY=val ` prefix for a shell command so child Claudes
  * can find their parent FastOwl via the CLI. Values are single-quoted and
  * safely escaped for bash.
+ *
+ * Pass `includeApiUrl: false` for SSH environments — "localhost" on the
+ * VM isn't this process. The remote shell is expected to set FASTOWL_API_URL
+ * via .bashrc or similar (see docs/SSH_VM_SETUP.md).
  */
-export function buildFastOwlEnvPrefix(workspaceId: string, taskId?: string): string {
-  const port = process.env.PORT || '4747';
-  const apiUrl = process.env.FASTOWL_API_URL || `http://localhost:${port}`;
-  const parts = [
-    `FASTOWL_API_URL=${shellQuote(apiUrl)}`,
-    `FASTOWL_WORKSPACE_ID=${shellQuote(workspaceId)}`,
-  ];
+export function buildFastOwlEnvPrefix(
+  workspaceId: string,
+  taskId?: string,
+  opts: { includeApiUrl?: boolean } = {}
+): string {
+  const parts: string[] = [];
+  if (opts.includeApiUrl !== false) {
+    const port = process.env.PORT || '4747';
+    const apiUrl = process.env.FASTOWL_API_URL || `http://localhost:${port}`;
+    parts.push(`FASTOWL_API_URL=${shellQuote(apiUrl)}`);
+  }
+  parts.push(`FASTOWL_WORKSPACE_ID=${shellQuote(workspaceId)}`);
   if (taskId) parts.push(`FASTOWL_TASK_ID=${shellQuote(taskId)}`);
   return parts.join(' ') + ' ';
 }

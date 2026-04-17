@@ -38,4 +38,11 @@ describe('buildFastOwlEnvPrefix', () => {
     // The escaped form is: 'ws-it'\''s-quoted'
     expect(prefix).toContain(`FASTOWL_WORKSPACE_ID='ws-it'\\''s-quoted'`);
   });
+
+  it('omits FASTOWL_API_URL for SSH environments (includeApiUrl=false)', () => {
+    const prefix = buildFastOwlEnvPrefix('ws-1', 't-1', { includeApiUrl: false });
+    expect(prefix).not.toContain('FASTOWL_API_URL');
+    expect(prefix).toContain(`FASTOWL_WORKSPACE_ID='ws-1'`);
+    expect(prefix).toContain(`FASTOWL_TASK_ID='t-1'`);
+  });
 });
