@@ -2,6 +2,15 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 17 (test hang fix — daemonRegistry fire-and-forget UPDATE race)
+CI (and local `npm test`) had been timing out in `daemonRegistry.test.ts`. Diagnosed as a race between `markEnvConnected` (fired by `register()`) and `markEnvDisconnected` (fired by `unregister()`) — both are fire-and-forget `.update()` calls on the same environment row. Under pglite (the test harness), running two unawaited UPDATEs on the same row concurrently **pins the worker at 100% CPU** inside pglite's WASM scheduler. Bisected down from the whole file → to the fourth test ("disconnecting a daemon rejects its in-flight requests") — the one case that exercises both register+unregister inline — and traced it to a hang at `pglite.waitReady` in the *next* test's `beforeEach` (WASM init starves once the previous test leaves pending in-flight queries behind).
+
+- **Fix**: introduced a private `dbTail: Promise<void>` in `daemonRegistry` that serializes every env-status flip. `markEnvConnected` and `markEnvDisconnected` now `.then()`-append onto `dbTail` so writes happen in order, never concurrently for the same row. Added `flushPending()` and made `shutdown()` `async` + await `flushPending()` so tests cleanly drain before pglite closes.
+- **Callers updated**: `packages/backend/src/index.ts` SIGTERM handler + `daemonRegistry.test.ts` afterEach now `await daemonRegistry.shutdown()`.
+- **Result**: full backend suite goes from timing out to **74/74 passed in 11.6s**. `daemonRegistry.test.ts` on its own: 5/5 in 4s.
+- **Why the race didn't show up on real Postgres**: a real connection supports multiple concurrent statements; pglite serializes through a single WASM instance and the fire-and-forget pattern leaves the worker's microtask queue clogged when the following test tries to spin up a fresh pglite. Production (Supabase) was fine.
+- **Files**: `packages/backend/src/services/daemonRegistry.ts`, `packages/backend/src/index.ts`, `packages/backend/src/__tests__/daemonRegistry.test.ts`.
+
 ## Session 17 (Phase 18.3.B — SSH auto-install of the daemon)
 The "give me SSH creds and I'll do the rest" path. Desktop's Add Environment dialog now has a **Remote VM (FastOwl daemon)** type with two modes: **auto-install over SSH** (backend SSHes in and runs a hosted install script) or **manual** (shows a copy-paste one-liner). Either way, a daemon env is created, a pairing token is minted, and the env flips to `connected` as soon as the daemon dials back — no user JWT ever touches the VM.
 

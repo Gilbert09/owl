@@ -44,7 +44,7 @@ describe('daemonRegistry', () => {
   });
 
   afterEach(async () => {
-    daemonRegistry.shutdown();
+    await daemonRegistry.shutdown();
     daemonRegistry.removeAllListeners();
     await cleanup?.();
     cleanup = null;

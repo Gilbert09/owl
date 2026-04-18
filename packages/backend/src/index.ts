@@ -96,7 +96,7 @@ async function main() {
     taskQueueService.shutdown();
     agentService.shutdown();
     environmentService.shutdown();
-    daemonRegistry.shutdown();
+    await daemonRegistry.shutdown();
 
     server.close(async () => {
       await closeDbClient();

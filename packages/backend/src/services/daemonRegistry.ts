@@ -51,6 +51,10 @@ class DaemonRegistry extends EventEmitter {
     reject: (err: Error) => void;
     timer: NodeJS.Timeout;
   }>();
+  // Serialise DB writes for env status flips so a register()/unregister()
+  // pair can't race two concurrent UPDATEs at the same row. Also lets
+  // `flushPending()` (used by tests + shutdown) wait for them to settle.
+  private dbTail: Promise<void> = Promise.resolve();
 
   init(): void {
     // No background timers today. Pairing tokens are swept inline on
@@ -58,7 +62,7 @@ class DaemonRegistry extends EventEmitter {
     // avoids a long-running setInterval that complicates test teardown.
   }
 
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     for (const [, active] of this.active) {
       try {
         active.ws.close();
@@ -72,6 +76,17 @@ class DaemonRegistry extends EventEmitter {
       pending.reject(new Error('daemon registry shutting down'));
       this.pending.delete(id);
     }
+    // Drain any in-flight env-status writes before returning so tests
+    // that call shutdown() + close pglite don't race with a pending UPDATE.
+    await this.flushPending();
+  }
+
+  /**
+   * Resolves when all fire-and-forget env-status writes queued so far
+   * have settled. Useful for tests and graceful shutdown.
+   */
+  async flushPending(): Promise<void> {
+    await this.dbTail;
   }
 
   private sweepExpiredPairings(now: number): void {
@@ -169,27 +184,49 @@ class DaemonRegistry extends EventEmitter {
     }
   }
 
+  /**
+   * Queue an env-status flip on the shared dbTail. Serialising means two
+   * register()/unregister() calls in quick succession can't issue two
+   * UPDATEs concurrently — which under pglite (test harness) races at
+   * the WASM layer and has been seen to hang the worker entirely.
+   */
+  private queueEnvStatus(
+    environmentId: string,
+    apply: () => Promise<void>,
+    label: string
+  ): void {
+    this.dbTail = this.dbTail
+      .then(apply)
+      .catch((err) => console.error(`daemonRegistry: ${label} failed:`, err));
+  }
+
   private markEnvConnected(environmentId: string): void {
-    const now = new Date();
-    getDbClient()
-      .update(environmentsTable)
-      .set({ status: 'connected', lastSeenAt: now, lastConnected: now, error: null })
-      .where(eq(environmentsTable.id, environmentId))
-      .then(
-        () => emitEnvironmentStatus(environmentId, 'connected'),
-        (err) => console.error('daemonRegistry: mark connected failed:', err)
-      );
+    this.queueEnvStatus(
+      environmentId,
+      async () => {
+        const now = new Date();
+        await getDbClient()
+          .update(environmentsTable)
+          .set({ status: 'connected', lastSeenAt: now, lastConnected: now, error: null })
+          .where(eq(environmentsTable.id, environmentId));
+        emitEnvironmentStatus(environmentId, 'connected');
+      },
+      'mark connected'
+    );
   }
 
   private markEnvDisconnected(environmentId: string): void {
-    getDbClient()
-      .update(environmentsTable)
-      .set({ status: 'disconnected' })
-      .where(eq(environmentsTable.id, environmentId))
-      .then(
-        () => emitEnvironmentStatus(environmentId, 'disconnected'),
-        (err) => console.error('daemonRegistry: mark disconnected failed:', err)
-      );
+    this.queueEnvStatus(
+      environmentId,
+      async () => {
+        await getDbClient()
+          .update(environmentsTable)
+          .set({ status: 'disconnected' })
+          .where(eq(environmentsTable.id, environmentId));
+        emitEnvironmentStatus(environmentId, 'disconnected');
+      },
+      'mark disconnected'
+    );
   }
 
   /** Is the daemon for this env currently connected? */
