@@ -2,6 +2,24 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 17 (failure-cascade hardening — scheduler backoff + stuck-task recovery)
+Pass over the Continuous Build scheduler + task queue to close the "runs unattended overnight" part of the DoD. Three cascades fixed: deterministic-failure infinite loop, ghost tasks that never recover from a silent agent death, and the markdown-sync-clobbers-running-task case.
+
+- **Failure counter + backoff + auto-block** (`services/continuousBuild.ts` + `services/backlog/service.ts`):
+  - New columns on `backlog_items`: `consecutive_failures` (int, default 0) + `last_failure_at` (timestamptz, nullable). Migration `0004_backlog_failure_tracking.sql`.
+  - Scheduler's `onTaskStatus` now distinguishes `failed` (counts as a failure, bumps counter + stamps time) from `cancelled` (user-initiated, doesn't count). Completed/approved resets the counter to 0.
+  - Backoff schedule: 1m → 5m → 15m → 60m by failure count. `nextActionableItem` filters on `lastFailureAt <= cutoff` and the scheduler re-checks the backoff window for the candidate. A looping broken TODO can't hog the queue anymore.
+  - After 5 consecutive failures the item flips to `blocked`. Human has to fix whatever's deterministically wrong, then unblock it in the UI.
+- **Periodic stuck-task recovery** (`services/taskQueue.ts`): `recoverStuckTasks` used to run only at `init()`. Now also runs every 2 minutes on a timer, and the query picks up an extra case — tasks whose `updated_at` hasn't moved in 20 minutes (proxy for "agent silently dropped"). Covers daemon disconnects mid-task, hung processes, etc. — previously those required a service restart to clear.
+- **Guard claimed items against sync auto-completion** (`services/backlog/service.ts`): when a backlog item disappears from the markdown source, `syncSource` auto-marks it completed — but only if it's **not currently claimed**. Previously a running task could have its item silently marked complete by a concurrent markdown edit, orphaning the task's work.
+- **Tests** (+7 total): 5 scheduler tests (failure → counter bump, backoff window, 5th failure blocks, cancelled doesn't count, complete clears counter, sync-with-claim is no-op), 1 taskQueue test (time-based staleness recovery), 1 backlog test (claim survives sync-side-delete). Full suite stays fast — 74+6 = 80 tests in ~11s.
+
+- **Why these three and not others from the failure-path audit**: the audit (via explore subagent) turned up more — orphaned git branches, fire-and-forget promise paths in agent status updates, approval-reject flow — but these three were the direct blockers for "unattended overnight": an infinite loop is catastrophic, a stuck task needs periodic rescue, and a sync-race is a silent data-loss bug. The others are quality-of-life and can land when they land.
+
+- **Schema note**: `BacklogItem` gains two fields in `@fastowl/shared` — `consecutiveFailures: number` + `lastFailureAt?: string`. Renderer components that destructure backlog items keep working (new fields are additive); the UI doesn't render them yet, but they're available for a future "this item has failed N times" badge.
+
+- **Files**: `packages/backend/src/services/continuousBuild.ts`, `packages/backend/src/services/backlog/service.ts`, `packages/backend/src/services/taskQueue.ts`, `packages/backend/src/db/schema.ts`, `packages/backend/src/db/migrations/0004_backlog_failure_tracking.sql` (new), `packages/shared/src/index.ts`, tests across three files.
+
 ## Session 17 (test hang fix — daemonRegistry fire-and-forget UPDATE race)
 CI (and local `npm test`) had been timing out in `daemonRegistry.test.ts`. Diagnosed as a race between `markEnvConnected` (fired by `register()`) and `markEnvDisconnected` (fired by `unregister()`) — both are fire-and-forget `.update()` calls on the same environment row. Under pglite (the test harness), running two unawaited UPDATEs on the same row concurrently **pins the worker at 100% CPU** inside pglite's WASM scheduler. Bisected down from the whole file → to the fourth test ("disconnecting a daemon rejects its in-flight requests") — the one case that exercises both register+unregister inline — and traced it to a hang at `pglite.waitReady` in the *next* test's `beforeEach` (WASM init starves once the previous test leaves pending in-flight queries behind).
 

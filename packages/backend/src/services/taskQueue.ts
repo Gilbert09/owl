@@ -22,8 +22,19 @@ const PRIORITY_WEIGHTS: Record<TaskPriority, number> = {
 // Silence unused warning: kept as canonical source of the priority order.
 void PRIORITY_WEIGHTS;
 
+/** How often recoverStuckTasks runs outside of init(). */
+const STUCK_TASK_CHECK_MS = 2 * 60 * 1000;
+/**
+ * A task that's been `in_progress` for longer than this — without any
+ * updated_at activity from the agent service — is considered stuck even
+ * if its agent still exists. Typically means the agent session died
+ * abnormally or the daemon connection dropped.
+ */
+const IN_PROGRESS_STALE_AFTER_MS = 20 * 60 * 1000;
+
 class TaskQueueService extends EventEmitter {
   private processingInterval: NodeJS.Timeout | null = null;
+  private stuckTaskInterval: NodeJS.Timeout | null = null;
   private isProcessing = false;
   private shuttingDown = false;
 
@@ -55,14 +66,37 @@ class TaskQueueService extends EventEmitter {
     this.processingInterval = setInterval(() => {
       this.runProcessQueue();
     }, 5000);
+
+    // Periodically recover stuck tasks — not just at boot. Agents can
+    // die mid-task (daemon disconnect, process crash) during normal
+    // operation; without this, a failed in_progress task would languish
+    // until the next service restart.
+    this.stuckTaskInterval = setInterval(() => {
+      if (this.shuttingDown) return;
+      this.recoverStuckTasks().catch((err) => {
+        if (this.shuttingDown) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes('DATABASE_URL is not set')) return;
+        console.error('[TaskQueue] recoverStuckTasks error:', err);
+      });
+    }, STUCK_TASK_CHECK_MS);
   }
 
   /**
-   * Tasks that are `in_progress` but have no live agent (either never
-   * attached, or the process died) get reset to `queued` so they're
-   * pickable again on the next tick.
+   * Reset tasks that are `in_progress` but have no live agent driving
+   * them. Two criteria:
+   *   1. The assigned agent doesn't exist or is in a terminal status
+   *      (completed/error/idle) — agent process died.
+   *   2. The task has been in_progress for >= IN_PROGRESS_STALE_AFTER_MS
+   *      without `updated_at` moving — the agent might still exist but
+   *      is silent (daemon disconnect, hung process, etc).
+   *
+   * Matched tasks go back to `queued`, their assigned_agent_id cleared,
+   * so they're pickable on the next tick.
    */
   private async recoverStuckTasks(): Promise<void> {
+    const staleCutoff = new Date(Date.now() - IN_PROGRESS_STALE_AFTER_MS);
+
     const stuckTasks = await this.db
       .select({
         id: tasksTable.id,
@@ -77,7 +111,8 @@ class TaskQueueService extends EventEmitter {
           or(
             isNull(tasksTable.assignedAgentId),
             isNull(agentsTable.id),
-            inArray(agentsTable.status, ['completed', 'error', 'idle'])
+            inArray(agentsTable.status, ['completed', 'error', 'idle']),
+            sql`${tasksTable.updatedAt} < ${staleCutoff}`
           )
         )
       );
@@ -101,6 +136,10 @@ class TaskQueueService extends EventEmitter {
     if (this.processingInterval) {
       clearInterval(this.processingInterval);
       this.processingInterval = null;
+    }
+    if (this.stuckTaskInterval) {
+      clearInterval(this.stuckTaskInterval);
+      this.stuckTaskInterval = null;
     }
   }
 

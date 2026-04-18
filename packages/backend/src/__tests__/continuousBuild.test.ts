@@ -10,6 +10,7 @@ import {
   workspaces as workspacesTable,
   environments as environmentsTable,
   tasks as tasksTable,
+  backlogItems as backlogItemsTable,
 } from '../db/schema.js';
 
 async function seedWorkspace(
@@ -292,5 +293,118 @@ describe('continuousBuildScheduler', () => {
     const meta = rows[0].metadata as { backlogItemId?: string; backlogSourceId?: string };
     expect(meta.backlogItemId).toBeTruthy();
     expect(meta.backlogSourceId).toBe(sourceId);
+  });
+
+  it('failed tasks bump consecutiveFailures + backoff blocks immediate retry', async () => {
+    await seedWorkspace(db, 'ws1', { enabled: true, maxConcurrent: 5, requireApproval: false });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] flaky item\n' } });
+    const { sourceId } = await seedBacklog();
+    await backlogService.syncSource(sourceId);
+
+    await continuousBuildScheduler.scheduleNext('ws1');
+    const firstTask = (await db.select().from(tasksTable))[0];
+
+    const { emitTaskStatus } = await import('../services/websocket.js');
+    emitTaskStatus('ws1', firstTask.id, 'failed');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const items = await backlogService.listItems(sourceId);
+    expect(items[0].consecutiveFailures).toBe(1);
+    expect(items[0].lastFailureAt).toBeDefined();
+    expect(items[0].claimedTaskId).toBeUndefined();
+
+    // Scheduler should NOT spawn a second task because the item is
+    // still in its backoff window.
+    await continuousBuildScheduler.scheduleNext('ws1');
+    expect(await countTasks(db, 'ws1')).toBe(1);
+  });
+
+  it('blocks an item after 5 consecutive failures', async () => {
+    await seedWorkspace(db, 'ws1', { enabled: true, maxConcurrent: 5, requireApproval: false });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] broken item\n' } });
+    const { sourceId } = await seedBacklog();
+    await backlogService.syncSource(sourceId);
+    const item = (await backlogService.listItems(sourceId))[0];
+
+    // Fast-forward the failure counter directly. The scheduler treats
+    // any "5th consecutive failure" signal as the trigger to block.
+    await db
+      .update(backlogItemsTable)
+      .set({ consecutiveFailures: 4 })
+      .where(eq(backlogItemsTable.id, item.id));
+
+    await continuousBuildScheduler.scheduleNext('ws1');
+    const task = (await db.select().from(tasksTable))[0];
+
+    const { emitTaskStatus } = await import('../services/websocket.js');
+    emitTaskStatus('ws1', task.id, 'failed');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const after = (await backlogService.listItems(sourceId))[0];
+    expect(after.consecutiveFailures).toBe(5);
+    expect(after.blocked).toBe(true);
+  });
+
+  it('a cancelled task does not bump the failure counter', async () => {
+    await seedWorkspace(db, 'ws1', { enabled: true });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] user-cancelled\n' } });
+    const { sourceId } = await seedBacklog();
+    await backlogService.syncSource(sourceId);
+
+    await continuousBuildScheduler.scheduleNext('ws1');
+    const task = (await db.select().from(tasksTable))[0];
+
+    const { emitTaskStatus } = await import('../services/websocket.js');
+    emitTaskStatus('ws1', task.id, 'cancelled');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const after = (await backlogService.listItems(sourceId))[0];
+    expect(after.consecutiveFailures).toBe(0);
+    expect(after.lastFailureAt).toBeUndefined();
+    expect(after.claimedTaskId).toBeUndefined();
+  });
+
+  it('completing an item wipes its failure counter', async () => {
+    await seedWorkspace(db, 'ws1', { enabled: true });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] recovered\n' } });
+    const { sourceId } = await seedBacklog();
+    await backlogService.syncSource(sourceId);
+    const item = (await backlogService.listItems(sourceId))[0];
+
+    // Simulate some prior failures then a successful run.
+    await db
+      .update(backlogItemsTable)
+      .set({ consecutiveFailures: 3, lastFailureAt: new Date() })
+      .where(eq(backlogItemsTable.id, item.id));
+
+    await backlogService.completeItem(item.id);
+
+    const after = (await backlogService.listItems(sourceId))[0];
+    expect(after.completed).toBe(true);
+    expect(after.consecutiveFailures).toBe(0);
+    expect(after.lastFailureAt).toBeUndefined();
+  });
+
+  it('syncSource does not auto-complete an item with an active claim', async () => {
+    await seedWorkspace(db, 'ws1', { enabled: true });
+    fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] keep me\n' } });
+    const { sourceId } = await seedBacklog();
+    await backlogService.syncSource(sourceId);
+
+    // Spawn a task for the item — this claims it.
+    await continuousBuildScheduler.scheduleNext('ws1');
+    const item = (await backlogService.listItems(sourceId))[0];
+    expect(item.claimedTaskId).toBeTruthy();
+
+    // User edits the markdown and removes the line while the task
+    // is still running. The sync should NOT mark it completed while
+    // the claim is live.
+    fake.restore();
+    fake = installFakeEnvironment({ outputs: { 'cat ': '' } });
+    await backlogService.syncSource(sourceId);
+
+    const after = (await backlogService.listItems(sourceId))[0];
+    expect(after.completed).toBe(false);
+    expect(after.claimedTaskId).toBe(item.claimedTaskId);
   });
 });

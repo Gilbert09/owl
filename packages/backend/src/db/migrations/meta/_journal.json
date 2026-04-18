@@ -29,6 +29,13 @@
       "when": 1776460744537,
       "tag": "0003_daemon_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1776502429339,
+      "tag": "0004_backlog_failure_tracking",
+      "breakpoints": true
     }
   ]
 }

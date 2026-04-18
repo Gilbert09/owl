@@ -150,6 +150,48 @@ describe('backlogService', () => {
       expect(removed.completed).toBe(true);
     });
 
+    it('does NOT auto-complete an item that has disappeared but is still claimed', async () => {
+      fake = installFakeEnvironment({
+        outputs: { 'cat ': '- [ ] mid-flight\n' },
+      });
+
+      const src = await backlogService.createSource({
+        workspaceId: 'ws1',
+        environmentId: 'env-local',
+        type: 'markdown_file',
+        config: { type: 'markdown_file', path: '/tmp/todo.md' },
+      });
+      await backlogService.syncSource(src.id);
+      const items = await backlogService.listItems(src.id);
+
+      // Seed a task + claim the item as if a Continuous Build task is
+      // currently running against it.
+      await db.insert(tasksTable).values({
+        id: 'task-live',
+        workspaceId: 'ws1',
+        type: 'code_writing',
+        status: 'in_progress',
+        priority: 'medium',
+        title: 'live',
+        description: 'desc',
+      });
+      await backlogService.claimItem(items[0].id, 'task-live');
+
+      // User edits the markdown mid-flight and removes the line.
+      fake.restore();
+      fake = installFakeEnvironment({
+        outputs: { 'cat ': '' },
+      });
+      const result = await backlogService.syncSource(src.id);
+
+      // Item should stay incomplete + still claimed — the running task
+      // is the source of truth, not the mutated markdown.
+      expect(result.retired).toBe(0);
+      const after = (await backlogService.listItems(src.id))[0];
+      expect(after.completed).toBe(false);
+      expect(after.claimedTaskId).toBe('task-live');
+    });
+
     it('preserves claimed_task_id across syncs', async () => {
       fake = installFakeEnvironment({
         outputs: { 'cat ': '- [ ] keep\n' },

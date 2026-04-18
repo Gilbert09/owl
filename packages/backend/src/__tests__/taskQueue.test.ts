@@ -193,5 +193,44 @@ describe('taskQueueService', () => {
         .limit(1);
       expect(rows[0].status).toBe('in_progress');
     });
+
+    it('recovers tasks whose updatedAt is older than the staleness threshold', async () => {
+      // Agent is "working" but the task hasn't moved in >20 min — the
+      // daemon probably died silently. The time-based check should pick
+      // this up even though the agent row still looks healthy.
+      await db.insert(environmentsTable).values({
+        id: 'env1',
+        ownerId: TEST_USER_ID,
+        name: 'Local',
+        type: 'local',
+        config: { type: 'local' },
+      });
+      await db.insert(agentsTable).values({
+        id: 'agent-ghost',
+        environmentId: 'env1',
+        workspaceId: 'ws1',
+        status: 'working',
+        attention: 'none',
+        lastActivity: new Date(),
+      });
+
+      const longAgo = new Date(Date.now() - 30 * 60 * 1000); // 30 minutes ago
+      await seedTask(db, { id: 't1', status: 'in_progress', assignedAgentId: 'agent-ghost' });
+      // Backdate updatedAt so the staleness check kicks in.
+      await db
+        .update(tasksTable)
+        .set({ updatedAt: longAgo })
+        .where(eq(tasksTable.id, 't1'));
+
+      await callRecover();
+
+      const rows = await db
+        .select({ status: tasksTable.status, assignedAgentId: tasksTable.assignedAgentId })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, 't1'))
+        .limit(1);
+      expect(rows[0].status).toBe('queued');
+      expect(rows[0].assignedAgentId).toBeNull();
+    });
   });
 });

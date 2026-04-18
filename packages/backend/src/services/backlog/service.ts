@@ -1,5 +1,5 @@
 import { v4 as uuid } from 'uuid';
-import { and, asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull, lte, or, sql } from 'drizzle-orm';
 import type {
   BacklogItem,
   BacklogSource,
@@ -196,13 +196,20 @@ class BacklogService {
       }
 
       for (const existing of existingItems) {
-        if (!parsedExternalIds.has(existing.externalId) && !existing.completed) {
-          await tx
-            .update(backlogItemsTable)
-            .set({ completed: true, updatedAt: now })
-            .where(eq(backlogItemsTable.id, existing.id));
-          retired++;
-        }
+        if (parsedExternalIds.has(existing.externalId)) continue;
+        if (existing.completed) continue;
+        // If a task is currently working this item, don't silently
+        // mark it complete just because the markdown changed — the
+        // user may have rewritten the item as part of their edits, or
+        // be mid-edit. Leave the claim intact; when the task finishes
+        // normally the onTaskStatus handler will do the right thing.
+        if (existing.claimedTaskId) continue;
+
+        await tx
+          .update(backlogItemsTable)
+          .set({ completed: true, updatedAt: now })
+          .where(eq(backlogItemsTable.id, existing.id));
+        retired++;
       }
 
       await tx
@@ -222,7 +229,11 @@ class BacklogService {
       .where(eq(backlogItemsTable.id, itemId));
   }
 
-  /** Release an item (e.g. its task failed or was cancelled). */
+  /**
+   * Release an item without recording a failure — e.g. the task was
+   * cancelled by a user. The failure counter is untouched, so the next
+   * pickup happens immediately.
+   */
   async releaseItem(itemId: string): Promise<void> {
     await this.db
       .update(backlogItemsTable)
@@ -230,19 +241,79 @@ class BacklogService {
       .where(eq(backlogItemsTable.id, itemId));
   }
 
+  /**
+   * Release + stamp a failure. Increments `consecutiveFailures` and
+   * records `lastFailureAt` so the scheduler can back off on repeat
+   * failures and eventually block the item after too many.
+   *
+   * Returns the new failure count so callers can log / decide to block.
+   */
+  async releaseItemWithFailure(itemId: string): Promise<number> {
+    const now = new Date();
+    const rows = await this.db
+      .update(backlogItemsTable)
+      .set({
+        claimedTaskId: null,
+        consecutiveFailures: sql`${backlogItemsTable.consecutiveFailures} + 1`,
+        lastFailureAt: now,
+        updatedAt: now,
+      })
+      .where(eq(backlogItemsTable.id, itemId))
+      .returning({ consecutiveFailures: backlogItemsTable.consecutiveFailures });
+    return rows[0]?.consecutiveFailures ?? 0;
+  }
+
+  /**
+   * Reset failure tracking — called when an item's task succeeds (or a
+   * reviewer approves it). Keeps the item's state clean if the user
+   * manually intervenes and fixes whatever was wrong.
+   */
+  async clearFailureCount(itemId: string): Promise<void> {
+    await this.db
+      .update(backlogItemsTable)
+      .set({ consecutiveFailures: 0, lastFailureAt: null, updatedAt: new Date() })
+      .where(eq(backlogItemsTable.id, itemId));
+  }
+
+  /**
+   * Flip an item to blocked. Used when the scheduler gives up after too
+   * many consecutive failures — blocked items need human intervention
+   * before the queue picks them up again.
+   */
+  async blockItem(itemId: string): Promise<void> {
+    await this.db
+      .update(backlogItemsTable)
+      .set({ blocked: true, updatedAt: new Date() })
+      .where(eq(backlogItemsTable.id, itemId));
+  }
+
   /** Mark an item completed — used when a task wrapping it is approved. */
   async completeItem(itemId: string): Promise<void> {
     await this.db
       .update(backlogItemsTable)
-      .set({ completed: true, updatedAt: new Date() })
+      .set({
+        completed: true,
+        consecutiveFailures: 0,
+        lastFailureAt: null,
+        updatedAt: new Date(),
+      })
       .where(eq(backlogItemsTable.id, itemId));
   }
 
   /**
    * Pick the next actionable item from a source: unblocked, not completed,
-   * not claimed, in source order. Returns null if nothing's ready.
+   * not claimed, and out of any current backoff window. Orders by source
+   * order so a user's priority-sorted TODO stays in order.
+   *
+   * `backoffCutoff` is "`lastFailureAt` must be null OR <= this time" —
+   * callers compute it from the current clock + the backoff for the
+   * item's existing failure count.
    */
-  async nextActionableItem(sourceId: string): Promise<BacklogItem | null> {
+  async nextActionableItem(
+    sourceId: string,
+    opts: { backoffCutoff?: Date } = {}
+  ): Promise<BacklogItem | null> {
+    const cutoff = opts.backoffCutoff ?? new Date();
     const rows = await this.db
       .select()
       .from(backlogItemsTable)
@@ -251,7 +322,11 @@ class BacklogService {
           eq(backlogItemsTable.sourceId, sourceId),
           eq(backlogItemsTable.completed, false),
           eq(backlogItemsTable.blocked, false),
-          isNull(backlogItemsTable.claimedTaskId)
+          isNull(backlogItemsTable.claimedTaskId),
+          or(
+            isNull(backlogItemsTable.lastFailureAt),
+            lte(backlogItemsTable.lastFailureAt, cutoff)
+          )
         )
       )
       .orderBy(asc(backlogItemsTable.orderIndex))
@@ -344,6 +419,8 @@ function rowToItem(row: typeof backlogItemsTable.$inferSelect): BacklogItem {
     blocked: row.blocked,
     claimedTaskId: row.claimedTaskId ?? undefined,
     orderIndex: row.orderIndex,
+    consecutiveFailures: row.consecutiveFailures,
+    lastFailureAt: row.lastFailureAt ? row.lastFailureAt.toISOString() : undefined,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

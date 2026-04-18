@@ -286,6 +286,14 @@ export const backlogItems = pgTable(
       onDelete: 'set null',
     }),
     orderIndex: integer('order_index').notNull().default(0),
+    /**
+     * Count of consecutive task failures for this item. Reset to 0 on
+     * success. The scheduler uses this for backoff + eventual blocking
+     * so a deterministically broken TODO doesn't infinite-loop the queue.
+     */
+    consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+    /** Timestamp of the last failed task on this item — drives backoff. */
+    lastFailureAt: timestamp('last_failure_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

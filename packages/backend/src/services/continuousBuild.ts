@@ -21,6 +21,28 @@ import { emitTaskStatus } from './websocket.js';
 const TERMINAL_STATUSES: TaskStatus[] = ['completed', 'failed', 'cancelled'];
 
 /**
+ * Exponential-ish backoff (in ms) to apply to a backlog item after
+ * successive failures. Indexed by failure count.
+ *   1st failure → 1 min
+ *   2nd       → 5 min
+ *   3rd       → 15 min
+ *   4+        → 60 min
+ *
+ * After BLOCK_AFTER_FAILURES consecutive failures the item is marked
+ * `blocked` and won't be retried automatically — a human has to
+ * unblock it in the UI after fixing whatever's deterministically
+ * broken.
+ */
+const FAILURE_BACKOFF_MS = [0, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+const BLOCK_AFTER_FAILURES = 5;
+
+function backoffForFailures(count: number): number {
+  if (count <= 0) return 0;
+  const idx = Math.min(count, FAILURE_BACKOFF_MS.length - 1);
+  return FAILURE_BACKOFF_MS[idx];
+}
+
+/**
  * Keeps the task queue warm from a workspace's backlog sources.
  *
  * Subscribes to `task:status` domain events. When a task that was claimed
@@ -93,8 +115,24 @@ class ContinuousBuildScheduler {
         continue;
       }
 
+      // Ask the backlog for an item that's out of backoff. We hand it
+      // the cutoff "lastFailureAt <= now - backoff_for_current_count"
+      // — since the backoff width depends on the per-item failure
+      // count, fetch a candidate and re-check its backoff window here.
       const item = await backlogService.nextActionableItem(source.id);
       if (!item) continue;
+
+      const waitMs = backoffForFailures(item.consecutiveFailures);
+      if (item.lastFailureAt && waitMs > 0) {
+        const readyAt = new Date(item.lastFailureAt).getTime() + waitMs;
+        if (Date.now() < readyAt) {
+          const secs = Math.ceil((readyAt - Date.now()) / 1000);
+          console.log(
+            `[ContinuousBuild] Item ${item.id} still in backoff (~${secs}s left); skipping.`
+          );
+          continue;
+        }
+      }
 
       this.creating.add(workspaceId);
       try {
@@ -127,8 +165,25 @@ class ContinuousBuildScheduler {
     if (item) {
       if (evt.status === 'completed') {
         await backlogService.completeItem(item.id);
-      } else if (evt.status === 'failed' || evt.status === 'cancelled') {
+      } else if (evt.status === 'cancelled') {
+        // User-initiated cancel — release the item so it's pickable
+        // immediately. Don't count this as a failure.
         await backlogService.releaseItem(item.id);
+      } else if (evt.status === 'failed') {
+        const failures = await backlogService.releaseItemWithFailure(item.id);
+        if (failures >= BLOCK_AFTER_FAILURES) {
+          console.warn(
+            `[ContinuousBuild] Item ${item.id} ("${item.text.slice(0, 60)}") hit ` +
+            `${failures} consecutive failures — blocking. Fix and unblock manually.`
+          );
+          await backlogService.blockItem(item.id);
+        } else {
+          const waitMs = backoffForFailures(failures);
+          console.log(
+            `[ContinuousBuild] Item ${item.id} failed (${failures}/${BLOCK_AFTER_FAILURES}); ` +
+            `backing off ${Math.round(waitMs / 1000)}s before retry.`
+          );
+        }
       }
     }
 

@@ -263,6 +263,10 @@ export interface BacklogItem {
   /** Task currently working on this item, if any. */
   claimedTaskId?: string;
   orderIndex: number;
+  /** How many times in a row a task on this item has failed. Drives scheduler backoff. */
+  consecutiveFailures: number;
+  /** Timestamp of the most recent failed task on this item, if any. */
+  lastFailureAt?: string;
   createdAt: string;
   updatedAt: string;
 }
