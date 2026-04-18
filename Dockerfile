@@ -82,6 +82,11 @@ COPY --from=builder /app/packages/backend/node_modules ./packages/backend/node_m
 COPY --from=builder /app/packages/backend/dist ./packages/backend/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 
+# Daemon install script served at GET /daemon/install.sh. Not part of
+# the backend build, but has to be on disk at runtime for the route to
+# stream it.
+COPY scripts ./scripts
+
 EXPOSE 4747
 WORKDIR /app/packages/backend
 CMD ["node", "dist/index.js"]

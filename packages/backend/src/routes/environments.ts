@@ -5,6 +5,7 @@ import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { assertUser } from '../middleware/auth.js';
 import { daemonRegistry } from '../services/daemonRegistry.js';
+import { installDaemonOverSsh } from '../services/daemonInstaller.js';
 import type {
   Environment,
   EnvironmentConfig,
@@ -12,6 +13,14 @@ import type {
   CreateEnvironmentRequest,
   ApiResponse,
 } from '@fastowl/shared';
+
+/**
+ * Default backend URL the daemon should dial. Used when the caller of
+ * `POST /:id/install-daemon` doesn't override it. Prefer the explicit
+ * env var; fall back to the request origin at handler time (we don't
+ * know the host at module load).
+ */
+const DEFAULT_BACKEND_URL = process.env.FASTOWL_PUBLIC_BACKEND_URL;
 
 export function environmentRoutes(): Router {
   const router = Router();
@@ -158,6 +167,94 @@ export function environmentRoutes(): Router {
       success: true,
       data: { pairingToken: token, expiresInSeconds: 600 },
     });
+  });
+
+  // Provision the daemon on a remote host over SSH. The backend dials
+  // the target, pipes the install script, and waits for the daemon to
+  // dial back (the actual `connected` transition is driven by
+  // `daemonRegistry.register`, not this handler — this endpoint just
+  // runs the installer and returns its log).
+  //
+  // Credentials are accepted in the body, used once, and never stored.
+  router.post('/:id/install-daemon', async (req, res) => {
+    const user = assertUser(req);
+    const db = getDbClient();
+    const rows = await db
+      .select({ type: environmentsTable.type })
+      .from(environmentsTable)
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
+      .limit(1);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, error: 'Environment not found' });
+    }
+    if (rows[0].type !== 'daemon') {
+      return res.status(400).json({
+        success: false,
+        error: 'install-daemon can only target daemon environments',
+      });
+    }
+
+    const body = req.body as {
+      host?: string;
+      port?: number;
+      username?: string;
+      authMethod?: 'password' | 'privateKey';
+      password?: string;
+      privateKey?: string;
+      passphrase?: string;
+      backendUrl?: string;
+    };
+
+    if (!body.host || !body.username || !body.authMethod) {
+      return res.status(400).json({
+        success: false,
+        error: 'host, username, and authMethod are required',
+      });
+    }
+
+    const pairingToken = daemonRegistry.createPairingToken(req.params.id, user.id);
+    const backendUrl =
+      body.backendUrl ??
+      DEFAULT_BACKEND_URL ??
+      // Reconstruct from the request headers as a last resort. Railway
+      // sets `x-forwarded-proto` + `host` correctly.
+      `${req.protocol}://${req.get('host')}`;
+
+    try {
+      const result = await installDaemonOverSsh({
+        host: body.host,
+        port: body.port,
+        username: body.username,
+        authMethod: body.authMethod,
+        password: body.password,
+        privateKey: body.privateKey,
+        passphrase: body.passphrase,
+        backendUrl,
+        pairingToken,
+      });
+
+      if (!result.success) {
+        return res.status(502).json({
+          success: false,
+          error: result.error ?? 'install script failed',
+          log: result.log,
+          exitCode: result.exitCode,
+        });
+      }
+
+      res.json({
+        success: true,
+        data: {
+          log: result.log,
+          exitCode: result.exitCode,
+          backendUrl,
+        },
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('install-daemon failed:', msg);
+      res.status(500).json({ success: false, error: msg });
+    }
   });
 
   return router;

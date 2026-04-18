@@ -2,6 +2,41 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 17 (Phase 18.3.B — SSH auto-install of the daemon)
+The "give me SSH creds and I'll do the rest" path. Desktop's Add Environment dialog now has a **Remote VM (FastOwl daemon)** type with two modes: **auto-install over SSH** (backend SSHes in and runs a hosted install script) or **manual** (shows a copy-paste one-liner). Either way, a daemon env is created, a pairing token is minted, and the env flips to `connected` as soon as the daemon dials back — no user JWT ever touches the VM.
+
+- **Shared types**: added `DaemonEnvironmentConfig` (`type: 'daemon'`, `hostname?`, `workingDirectory?`) to the `EnvironmentConfig` union + `InstallDaemonOverSshRequest`/`Response`. Keeps the Environment type honest now that daemon envs are first-class.
+- **`scripts/install-daemon.sh`** (new): OS-aware provisioning script served via the backend. Installs Node 22 (NodeSource on Debian/Ubuntu, yum-nodesource on RHEL, `brew` on macOS, nvm fallback), installs `build-essential` + `python3` on Linux for node-pty, clones `Gilbert09/owl`, builds `@fastowl/shared` + `@fastowl/daemon`, runs the daemon once in foreground with `--pairing-token` to exchange for a device token (watches the on-disk config file for `deviceToken` to appear, times out at 60s), then writes a systemd unit at `/etc/systemd/system/fastowl-daemon.service` (Linux) or a launchd plist at `~/Library/LaunchAgents/dev.fastowl.daemon.plist` (darwin). Idempotent — safe to re-run.
+- **Backend public route** (`routes/daemon.ts`): `GET /daemon/install.sh` serves the script. Unauthenticated by design — the credential is the pairing token, not the HTTP request. Dockerfile now `COPY scripts ./scripts` so the script is on disk at runtime.
+- **Backend SSH installer** (`services/daemonInstaller.ts`): uses ssh2 to dial the target, supports `password` + `privateKey` auth (raw PEM content, not file paths — the private key gets pasted into the desktop UI and is used once per install), exec's `curl -fsSL <backend>/daemon/install.sh | bash -s -- --backend-url ... --pairing-token ...`, captures stdout+stderr, returns the log. 5-minute timeout.
+- **Backend route**: `POST /api/v1/environments/:id/install-daemon` — owner-scoped, validates env type is `daemon`, mints a fresh pairing token on every call, resolves the backend URL from `FASTOWL_PUBLIC_BACKEND_URL` env var (falls back to `req.protocol://req.host`), hands off to `installDaemonOverSsh`. Returns `{ success, log, exitCode, backendUrl }`.
+- **Desktop UI** (`AddEnvironmentModal.tsx`): rewritten around three types. "Remote VM (FastOwl daemon)" is the new default for cloud-backend users; "SSH (legacy)" is kept behind a warning for local-backend users. In daemon/ssh-install mode: host/port/user + (password | pasted PEM key + optional passphrase). In daemon/manual mode: after creation, shows the copy-paste one-liner with a Copy button. Either way, after submit, the modal polls `GET /environments/:id` every 3s and flips to "Daemon connected!" when the backend sees the daemon dial back.
+- **Docs**: Roadmap 18.3 flipped to `[x]` for remote install; single-file binary is deferred (git-clone install works end-to-end). Priority queue now has 17.3 (notifications) at the top.
+
+- **Design decisions**:
+  - **Git clone, not a prebuilt binary** — the MVP install path shells out to `git clone` + `npm install` + `npm run build` rather than shipping a prebuilt tarball. Reasons: `node-pty` is a native module, and cross-compiling a binary that works on linux/amd64 + linux/arm64 + darwin/arm64 adds a whole CI pipeline. The git-clone path uses whatever Node is on the target, builds native modules in place, and avoids a new release surface. Downside: first install on a VM takes ~2 minutes instead of ~10 seconds. Acceptable for now.
+  - **Pasted PEM instead of key file** — the hosted backend can't read the user's `~/.ssh/id_rsa`. The install endpoint accepts the private key contents in the request body, uses it for a single ssh2 connection, and never stores it. Memory-only, dies with the request. Same principle as the install-script one-liner: the credential exists in the path of the install and nowhere else.
+  - **One pairing token per install call** — every `POST /install-daemon` invocation mints a fresh token (even for the same env). Avoids the "pairing token reuse" failure mode if the previous install timed out or was interrupted. Tokens expire in 10min anyway, so there's no cleanup debt.
+  - **Polling instead of WebSocket for "daemon connected"** — the modal polls the env's status every 3s. Could push an `environment:status` WS event (we already emit them), but the modal is short-lived enough that polling is simpler than hooking into the store and filtering.
+
+- **Still to land (deferred)**:
+  - Symmetric uninstall flow (delete env → SSH in → systemctl disable + rm). Not critical.
+  - Prebuilt daemon binary (`bun --compile`) — avoids the ~2min first-install npm install step. Nice-to-have.
+  - Wire-up streaming install logs to the modal via WS (today we only show the log after the install finishes). UX nit.
+  - End-to-end test of the install flow against a real VM. Covered manually; no CI yet.
+
+- **Files touched**: `packages/shared/src/index.ts` (DaemonEnvironmentConfig + install API types); `scripts/install-daemon.sh` (new); `packages/backend/src/routes/daemon.ts` (new); `packages/backend/src/routes/index.ts` (mount `/daemon`); `packages/backend/src/services/daemonInstaller.ts` (new); `packages/backend/src/routes/environments.ts` (install-daemon endpoint); `Dockerfile` (COPY scripts); `apps/desktop/src/renderer/lib/api.ts` (pairingToken + installDaemon helpers); `apps/desktop/src/renderer/components/modals/AddEnvironmentModal.tsx` (rewritten).
+
+- **How to exercise it locally**:
+  1. `npm run dev -w @fastowl/backend` (local backend on 4747)
+  2. Open desktop, Settings → Environments → Add
+  3. Pick **Remote VM (FastOwl daemon)** → **Show me the install command** (the SSH path requires a real VM)
+  4. Name it, Generate → copy the one-liner
+  5. On any VM: paste the command (it'll curl from `http://localhost:4747/daemon/install.sh` which only works from the same network; for a real test, set `FASTOWL_PUBLIC_BACKEND_URL` to the hosted URL)
+  6. Modal flips to "Daemon connected!" when the daemon dials back.
+
+- **Next action**: **Phase 17.3 — Notifications on `awaiting_review`.** Desktop-side OS notification (Electron `Notification` API) + per-task-type preferences in Settings. Quick win now that 18.3.B is done.
+
 ## Session 16 (Phase 18.3.B foundation — daemon relay layer)
 Option-1 relay shipped. Child processes spawned by a daemon (`claude` running a task, `fastowl` CLI calls from within that Claude, any MCP server) now reach the backend through a local HTTP proxy on the daemon, which tunnels each request over the daemon's authenticated WS. No user JWT ever lives on the VM.
 

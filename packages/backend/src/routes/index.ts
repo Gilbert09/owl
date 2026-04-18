@@ -7,6 +7,7 @@ import { inboxRoutes } from './inbox.js';
 import { githubRoutes, githubPublicRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
 import { backlogRoutes } from './backlog.js';
+import { daemonPublicRoutes } from './daemon.js';
 import { requireAuth } from '../middleware/auth.js';
 
 export function setupRoutes(app: Express): void {
@@ -16,6 +17,12 @@ export function setupRoutes(app: Express): void {
   // redirect, not by our authenticated desktop client, so it must stay
   // unauth'd. State-token validation inside the handler prevents CSRF.
   app.use(`${api}/github`, githubPublicRoutes());
+
+  // Public daemon install endpoint — serves the shell script that a VM
+  // runs to set itself up. The script itself requires a pairing token
+  // (passed as a flag) to actually authenticate, so the HTTP endpoint
+  // can safely be unauth'd.
+  app.use('/daemon', daemonPublicRoutes());
 
   // Everything below is authenticated. The middleware populates req.user
   // and refuses requests without a valid Supabase JWT.

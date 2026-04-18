@@ -89,7 +89,8 @@ export interface Environment {
 export type EnvironmentConfig =
   | LocalEnvironmentConfig
   | SSHEnvironmentConfig
-  | CoderEnvironmentConfig;
+  | CoderEnvironmentConfig
+  | DaemonEnvironmentConfig;
 
 export interface LocalEnvironmentConfig {
   type: 'local';
@@ -110,6 +111,14 @@ export interface CoderEnvironmentConfig {
   type: 'coder';
   workspaceName: string;
   coderUrl: string;
+}
+
+export interface DaemonEnvironmentConfig {
+  type: 'daemon';
+  /** Where the daemon was provisioned, for UI display. */
+  hostname?: string;
+  /** Working directory override for tasks running on this daemon. */
+  workingDirectory?: string;
 }
 
 // ============================================================================
@@ -423,6 +432,27 @@ export interface CreateEnvironmentRequest {
 
 export interface TestEnvironmentRequest {
   config: EnvironmentConfig;
+}
+
+/** Provision the FastOwl daemon on a remote VM over SSH. */
+export interface InstallDaemonOverSshRequest {
+  host: string;
+  port?: number;
+  username: string;
+  authMethod: 'key' | 'password' | 'agent';
+  /** Path to a private key on the *server* side (or `~/.ssh/id_rsa`). */
+  privateKeyPath?: string;
+  /** Raw password, if `authMethod === 'password'`. */
+  password?: string;
+  /** Optional base URL override — defaults to the current backend's public URL. */
+  backendUrl?: string;
+}
+
+export interface InstallDaemonOverSshResponse {
+  success: boolean;
+  /** Transcript of the install script stdout+stderr. */
+  log: string;
+  error?: string;
 }
 
 // Task API

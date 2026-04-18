@@ -85,6 +85,29 @@ export const environments = {
   delete: (id: string) => request<void>('DELETE', `/environments/${id}`),
   test: (id: string) =>
     request<{ connected: boolean }>('POST', `/environments/${id}/test`),
+  pairingToken: (id: string) =>
+    request<{ pairingToken: string; expiresInSeconds: number }>(
+      'POST',
+      `/environments/${id}/pairing-token`
+    ),
+  installDaemon: (
+    id: string,
+    data: {
+      host: string;
+      port?: number;
+      username: string;
+      authMethod: 'password' | 'privateKey';
+      password?: string;
+      privateKey?: string;
+      passphrase?: string;
+      backendUrl?: string;
+    }
+  ) =>
+    request<{ log: string; exitCode: number; backendUrl: string }>(
+      'POST',
+      `/environments/${id}/install-daemon`,
+      data
+    ),
 };
 
 // Agents
