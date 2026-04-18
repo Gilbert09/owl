@@ -20,8 +20,8 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
    - Desktop "Add Environment → Remote VM (FastOwl daemon)" with SSH auto-install landed in Session 17
    - Remaining: single-file binary + symmetric uninstall (low priority — git-clone install works today)
 
-3. **Phase 17.3 — Notifications on `awaiting_review`** (QUICK WIN, now top of queue)
-   - Desktop + OS notification when a Continuous Build task lands for review
+3. ~~Phase 17.3 — Notifications on `awaiting_review`~~ DONE (Session 17)
+   - Desktop OS notification when a Continuous Build task lands for review. Toggle + permission hint in Settings → Appearance.
 
 --- done above ---
 
@@ -556,10 +556,12 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] Option to just create inbox item for manual start
   - [ ] Rate limiting (max concurrent auto-tasks)
 
-- [ ] **17.3 Notification Preferences**
-  - [ ] Per-task-type notification settings
-  - [ ] Desktop notifications for approval requests
-  - [ ] Digest mode (batch notifications)
+- [x] **17.3 Notification Preferences** (Session 17, basic)
+  - [x] Desktop OS notifications for `awaiting_review` transitions — fires a native notification via the renderer's `Notification` API (Electron auto-bridges to macOS Notification Center / Windows Action Center / Linux libnotify)
+  - [x] Toggle in Settings → Appearance → Notifications; preference persisted in localStorage
+  - [x] Only fires on true status transitions (not idempotent restates)
+  - [ ] Per-task-type notification settings — deferred (currently only awaiting_review)
+  - [ ] Digest mode (batch notifications) — deferred
 
 ## Phase 18: Hosted Backend + Local Daemon
 

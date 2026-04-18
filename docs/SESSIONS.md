@@ -35,7 +35,18 @@ The "give me SSH creds and I'll do the rest" path. Desktop's Add Environment dia
   5. On any VM: paste the command (it'll curl from `http://localhost:4747/daemon/install.sh` which only works from the same network; for a real test, set `FASTOWL_PUBLIC_BACKEND_URL` to the hosted URL)
   6. Modal flips to "Daemon connected!" when the daemon dials back.
 
-- **Next action**: **Phase 17.3 — Notifications on `awaiting_review`.** Desktop-side OS notification (Electron `Notification` API) + per-task-type preferences in Settings. Quick win now that 18.3.B is done.
+- **Next action**: **Phase 18.2 polish** (proper `fastowl login` PKCE + CLI refresh-token rotation + cross-user HTTP-layer integration test) or **Phase 18.3 polish** (single-file daemon binary via `bun --compile`).
+
+### Phase 17.3 landed in the same session
+
+Desktop OS notification fires when any task transitions into `awaiting_review`. Implementation is surprisingly small — the renderer already subscribes to `task:status` events; added a pre-update status check to detect the transition (to avoid firing on idempotent restates), then `new Notification(...)` in the granted-permission path. Electron bridges the renderer-side `Notification` constructor to the native OS surface — no preload work, no main-process IPC.
+
+- **Preference**: stored in `localStorage` under `fastowl:notify:awaitingReview`. Default on. Toggled from Settings → Appearance → Notifications.
+- **Permission**: requested lazily on first-eligible event. Settings toggle also requests eagerly on flip-to-on so the permission prompt doesn't race with the actual event. When the OS-level permission is denied, the settings panel surfaces a "Notifications are blocked at the OS level" hint.
+- **Click-through**: `n.onclick = () => window.focus()` brings the app forward. Could later deep-link to the specific task (route + select) but the inbox + queue are both visible on the main screen.
+- **Transition semantics**: we grab the previous task from the store BEFORE applying the update, so `wasAwaitingReview` reflects the prior state. If a WS event arrives that re-states `awaiting_review` without a transition (recovery path, duplicate event), no notification fires.
+- **Files**: `apps/desktop/src/renderer/hooks/useApi.ts` (new `maybeNotifyAwaitingReview` + pref helpers); `apps/desktop/src/renderer/components/panels/SettingsPanel.tsx` (Notifications card in AppearanceSettings); `docs/ROADMAP.md` + `CLAUDE.md` + this note.
+- **Deferred**: per-task-type toggles, digest mode, click-through that deep-links to the task. None block the "production ready" goal.
 
 ## Session 16 (Phase 18.3.B foundation — daemon relay layer)
 Option-1 relay shipped. Child processes spawned by a daemon (`claude` running a task, `fastowl` CLI calls from within that Claude, any MCP server) now reach the backend through a local HTTP proxy on the daemon, which tunnels each request over the daemon's authenticated WS. No user JWT ever lives on the VM.

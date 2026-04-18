@@ -75,10 +75,21 @@ export function useApiConnection() {
     // Task status updates
     unsubscribers.push(
       wsClient.on<TaskStatusEvent>('task:status', (payload) => {
+        const store = useWorkspaceStore.getState();
+        const existing = store.tasks.find((t) => t.id === payload.taskId);
+        const wasAwaitingReview = existing?.status === 'awaiting_review';
+
         updateTask(payload.taskId, {
           status: payload.status,
           result: payload.result,
         });
+
+        // Desktop OS notification on transition into awaiting_review.
+        // Only fires when it's a real transition (not an idempotent
+        // restate), and only when the user has granted permission.
+        if (payload.status === 'awaiting_review' && !wasAwaitingReview) {
+          maybeNotifyAwaitingReview(existing?.title ?? 'Task', existing?.workspaceId);
+        }
       })
     );
 
@@ -478,4 +489,73 @@ export function useWorkspaceActions() {
   );
 
   return { createWorkspace, updateWorkspace, deleteWorkspace, updateCurrentWorkspaceSettings };
+}
+
+// ============================================================================
+// Notifications
+// ============================================================================
+
+const NOTIFY_PREF_KEY = 'fastowl:notify:awaitingReview';
+
+/** Read the user's preference for awaiting_review notifications. Default on. */
+function isAwaitingReviewNotifyEnabled(): boolean {
+  try {
+    const raw = localStorage.getItem(NOTIFY_PREF_KEY);
+    return raw === null ? true : raw === 'true';
+  } catch {
+    return true;
+  }
+}
+
+/** Write the user's preference. */
+export function setAwaitingReviewNotifyEnabled(enabled: boolean): void {
+  try {
+    localStorage.setItem(NOTIFY_PREF_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // ignore quota / privacy-mode issues
+  }
+}
+
+export function getAwaitingReviewNotifyEnabled(): boolean {
+  return isAwaitingReviewNotifyEnabled();
+}
+
+/**
+ * Fire a desktop notification when a task lands in awaiting_review.
+ * Electron bridges `new Notification(...)` to the native OS notification
+ * center — no preload plumbing needed.
+ *
+ * Permission is requested lazily: if it's `default`, we ask on first
+ * eligible event. Users can disable via the Settings toggle.
+ */
+function maybeNotifyAwaitingReview(title: string, _workspaceId?: string): void {
+  if (!isAwaitingReviewNotifyEnabled()) return;
+  if (typeof Notification === 'undefined') return;
+
+  const fire = () => {
+    try {
+      const n = new Notification('FastOwl — task awaiting review', {
+        body: title,
+        silent: false,
+      });
+      n.onclick = () => {
+        // Focus the desktop window. In Electron, window.focus() + a
+        // message to the main process would be cleaner, but the default
+        // behaviour already brings the window to front on most OSes.
+        try { window.focus(); } catch { /* ignore */ }
+      };
+    } catch {
+      // Permission denied or renderer in a weird state — drop silently.
+    }
+  };
+
+  if (Notification.permission === 'granted') {
+    fire();
+  } else if (Notification.permission !== 'denied') {
+    Notification.requestPermission()
+      .then((perm) => {
+        if (perm === 'granted') fire();
+      })
+      .catch(() => { /* ignore */ });
+  }
 }

@@ -40,14 +40,14 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 > Full list in [`docs/ROADMAP.md`](./docs/ROADMAP.md). Definition of done for "production ready" is in [`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md).
 
-1. **Phase 17.3 — Notifications on `awaiting_review`** (NEXT, QUICK WIN)
-   Desktop + OS notification when a Continuous Build task lands for review. Electron `Notification` API + per-task-type toggles in Settings.
+1. **Phase 18.2 polish** (NEXT) — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
 
-2. **Phase 18.2 polish** — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
+2. **Phase 18.3 polish** — single-file daemon binary (`bun --compile`) to skip the ~2min first-install `npm install`; symmetric uninstall flow when an env is deleted; stream install logs to the modal via WS.
 
-3. **Phase 18.3 polish** — single-file daemon binary (`bun --compile`) to skip the ~2min first-install `npm install`; symmetric uninstall flow when an env is deleted; stream install logs to the modal via WS.
+3. **Phase 17.3 polish** — per-task-type notification toggles, digest mode (batch notifications), click-through opens the task. Basic awaiting_review notification shipped in Session 17.
 
 **Recently landed**:
+- Session 17 (Phase 17.3 — notifications quick win): desktop OS notification fires when a task transitions into `awaiting_review`. Toggle + permission hint in Settings → Appearance → Notifications. Uses renderer `Notification` API — Electron bridges to the native OS surface.
 - Session 17 (Phase 18.3.B): SSH auto-install. Desktop "Add Environment → Remote VM (FastOwl daemon)" with two modes (auto-install over SSH, manual one-liner). Backend dials the target via ssh2, pipes `curl /daemon/install.sh | bash`, the script builds `@fastowl/daemon` + writes a systemd/launchd unit, daemon pairs + dials back, modal polls for `connected`.
 - Session 16 (Phase 18.3.B foundation): daemon relay layer + daemon envs first-class in scheduling + CI hygiene. Daemon runs a local HTTP proxy; child processes' REST calls tunnel over its WS. Backend accepts internal-auth headers in parallel with JWT. No user JWT on the VM. Scheduler/backlog fall back to any connected daemon when no env is pinned.
 - Session 15 (Phase 18.3.A): daemon split foundation — new `packages/daemon`, `/daemon-ws` endpoint, `daemon` env type. Daemon can pair with the backend and proxy exec/spawn/git.
