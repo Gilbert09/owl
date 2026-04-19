@@ -128,6 +128,21 @@ export const environments = pgTable(
     lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
     lastConnected: timestamp('last_connected', { withTimezone: true }),
     error: text('error'),
+    /**
+     * When true, FastOwl spawns autonomous Claude tasks on this env with
+     * `--dangerously-skip-permissions`, which lets Claude run bash / file
+     * edits / MCP calls without prompting. Appropriate for throwaway
+     * daemon VMs where the blast radius is bounded. Dangerous for
+     * `local` envs (your own machine) — defaults off; toggle from
+     * Settings → Environments if you know what you're doing.
+     *
+     * `false` falls back to `--permission-mode acceptEdits`, which will
+     * still block on bash prompts the scheduler can't answer, so
+     * autonomous runs on a strict env are best-effort.
+     */
+    autonomousBypassPermissions: boolean('autonomous_bypass_permissions')
+      .notNull()
+      .default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

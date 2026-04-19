@@ -229,22 +229,28 @@ class AgentService extends EventEmitter {
 
     let claudeCommand: string;
     if (autonomous && prompt) {
-      // Autonomous tasks run in a FastOwl-managed branch and are
-      // scheduler-gated — nothing good comes from pausing on a trust /
-      // permission prompt (nobody's watching to click OK).
+      // Autonomous tasks are scheduler-gated; there's nobody to answer
+      // permission prompts in real time. Two modes, decided by the env:
       //
-      // `--permission-mode acceptEdits` covers file edits but NOT the
-      // "new MCP server found in .mcp.json: X" trust prompt, which
-      // blocks the whole run. `--dangerously-skip-permissions` bypasses
-      // every prompt including MCP trust — appropriate for headless runs
-      // where the supervising process is FastOwl itself.
+      //   env.autonomousBypassPermissions === true
+      //     → `--dangerously-skip-permissions`. Bypasses every prompt
+      //       (bash / edits / MCP trust). Trust surface = whoever the
+      //       env runs as. Appropriate for daemon VMs (throwaway) and
+      //       explicitly opted-in local envs.
       //
-      // `--verbose` surfaces tool-use events in the output stream so the
-      // task terminal shows what Claude is actually doing, not just the
-      // final message.
+      //   env.autonomousBypassPermissions === false
+      //     → `--permission-mode acceptEdits`. Silent for file edits
+      //       but WILL pause on bash prompts / unknown MCP trust. User
+      //       can still type into the task terminal's input field to
+      //       approve / select an option; session's not dead.
+      //
+      // `--verbose` in both paths so the terminal shows tool use, not
+      // just the final assistant message.
+      const permFlag = env?.autonomousBypassPermissions
+        ? '--dangerously-skip-permissions'
+        : '--permission-mode acceptEdits';
       claudeCommand =
-        `${envPrefix}claude --print --verbose ` +
-        `--dangerously-skip-permissions ${shellQuote(prompt)}`;
+        `${envPrefix}claude --print --verbose ${permFlag} ${shellQuote(prompt)}`;
     } else {
       claudeCommand = `${envPrefix}claude`;
     }

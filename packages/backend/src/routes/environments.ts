@@ -53,10 +53,18 @@ export function environmentRoutes(): Router {
   router.post('/', async (req, res) => {
     const user = assertUser(req);
     const db = getDbClient();
-    const body = req.body as CreateEnvironmentRequest;
+    const body = req.body as CreateEnvironmentRequest & { autonomousBypassPermissions?: boolean };
     const id = uuid();
     const now = new Date();
     const initialStatus = body.type === 'local' ? 'connected' : 'disconnected';
+
+    // Daemon envs are throwaway VMs, so default them to "bypass
+    // permissions" for autonomous tasks. Local / ssh are the user's own
+    // hardware — defaults to strict; users opt in from Settings if they
+    // know what they're doing. Either default is overridable via an
+    // explicit request body flag.
+    const autonomousBypass =
+      body.autonomousBypassPermissions ?? body.type === 'daemon';
 
     await db.insert(environmentsTable).values({
       id,
@@ -65,6 +73,7 @@ export function environmentRoutes(): Router {
       type: body.type,
       status: initialStatus,
       config: body.config,
+      autonomousBypassPermissions: autonomousBypass,
       createdAt: now,
       updatedAt: now,
     });
@@ -84,6 +93,7 @@ export function environmentRoutes(): Router {
       name?: string;
       config?: EnvironmentConfig;
       status?: EnvironmentStatus;
+      autonomousBypassPermissions?: boolean;
     };
     const existing = await db
       .select()
@@ -98,6 +108,9 @@ export function environmentRoutes(): Router {
     if (body.name !== undefined) updates.name = body.name;
     if (body.config !== undefined) updates.config = body.config;
     if (body.status !== undefined) updates.status = body.status;
+    if (body.autonomousBypassPermissions !== undefined) {
+      updates.autonomousBypassPermissions = body.autonomousBypassPermissions;
+    }
 
     if (Object.keys(updates).length > 0) {
       updates.updatedAt = new Date();
@@ -269,5 +282,6 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     config: row.config as EnvironmentConfig,
     lastConnected: row.lastConnected ? row.lastConnected.toISOString() : undefined,
     error: row.error ?? undefined,
+    autonomousBypassPermissions: row.autonomousBypassPermissions,
   };
 }

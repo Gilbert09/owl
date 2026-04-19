@@ -34,6 +34,20 @@ FastOwl spawns `claude` (interactive mode) via node-pty on the chosen environmen
 
 Verify by running `claude --version` as the shell user FastOwl will use.
 
+**One-time MCP trust approval** (only if you run autonomous tasks in **strict** mode on this environment — i.e., the env's "Allow unattended Claude runs to bypass permission prompts" toggle is OFF):
+
+FastOwl's repo root ships a `.mcp.json` registering the Supabase MCP server. On first encounter, Claude Code prompts you to trust it. Autonomous runs can't answer that prompt, so do it once interactively:
+
+```bash
+cd ~/path/to/fastowl    # or wherever the clone lives on this env
+claude                  # opens the TUI
+# → prompted: "New MCP server found in .mcp.json: supabase — use this?"
+# → pick "Use this and all future MCP servers in this project"
+# → Ctrl-D to exit
+```
+
+The approval lands in your user-level Claude config and sticks. You don't need to do this on daemon envs that have "bypass permissions" enabled — they skip all prompts by design.
+
 ### 3. GitHub OAuth app (already scaffolded in backend)
 
 Used by Phase 6 integration (connect GitHub → PR monitoring, PR actions, repo listing).

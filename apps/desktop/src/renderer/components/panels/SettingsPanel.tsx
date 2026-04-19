@@ -29,7 +29,12 @@ import {
   Copy,
   LogOut,
 } from 'lucide-react';
-import type { BacklogSource, BacklogItem, MarkdownFileBacklogConfig } from '@fastowl/shared';
+import type {
+  BacklogSource,
+  BacklogItem,
+  Environment,
+  MarkdownFileBacklogConfig,
+} from '@fastowl/shared';
 import { api, GitHubStatus, GitHubUser, GitHubRepo, WatchedRepo } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -648,10 +653,11 @@ function IntegrationsSettings() {
 }
 
 function EnvironmentsSettings() {
-  const { environments } = useWorkspaceStore();
+  const { environments, setEnvironments } = useWorkspaceStore();
   const { deleteEnvironment, testConnection } = useEnvironmentActions();
   const [showAddModal, setShowAddModal] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
+  const [togglingBypass, setTogglingBypass] = useState<string | null>(null);
 
   const handleTest = async (envId: string) => {
     setTesting(envId);
@@ -665,6 +671,30 @@ function EnvironmentsSettings() {
   const handleDelete = async (envId: string) => {
     if (confirm('Are you sure you want to remove this environment?')) {
       await deleteEnvironment(envId);
+    }
+  };
+
+  const handleToggleBypass = async (env: Environment, next: boolean) => {
+    // Extra friction for flipping a LOCAL env into "bypass everything"
+    // mode — that's the your-whole-machine-is-at-stake branch.
+    if (next && env.type !== 'daemon') {
+      const ok = confirm(
+        `Allow unattended Claude runs on "${env.name}" to bypass all permission prompts?\n\n` +
+        `This environment is type "${env.type}" — autonomous tasks will be able to run any shell command, ` +
+        `edit any file, and call any MCP tool WITHOUT asking you first. Use only if you trust the tasks ` +
+        `that will run here (e.g., your own backlog against your own repo).\n\n` +
+        `Recommended: keep this OFF for local / ssh envs; only enable for disposable daemon VMs.`
+      );
+      if (!ok) return;
+    }
+    setTogglingBypass(env.id);
+    try {
+      const updated = await api.environments.update(env.id, {
+        autonomousBypassPermissions: next,
+      } as unknown as Partial<Environment>);
+      setEnvironments(environments.map((e) => (e.id === env.id ? updated : e)));
+    } finally {
+      setTogglingBypass(null);
     }
   };
 
@@ -754,6 +784,27 @@ function EnvironmentsSettings() {
                       {env.error}
                     </div>
                   )}
+                  <label className="flex items-start gap-2 mt-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={env.autonomousBypassPermissions}
+                      disabled={togglingBypass === env.id}
+                      onChange={(e) => void handleToggleBypass(env, e.target.checked)}
+                      className="mt-0.5"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium">
+                        Allow unattended Claude runs to bypass permission prompts
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {env.type === 'daemon'
+                          ? 'Recommended for throwaway daemon VMs — the blast radius is bounded to this machine.'
+                          : env.autonomousBypassPermissions
+                            ? 'Enabled on a non-daemon env: Claude can run any shell command and edit any file on this machine during autonomous tasks.'
+                            : 'Off (recommended for non-daemon envs). Autonomous tasks use acceptEdits mode; they may pause on bash / MCP trust prompts — you can answer from the task terminal input below.'}
+                      </p>
+                    </div>
+                  </label>
                 </div>
                 <div className="flex items-center gap-2">
                   <Button

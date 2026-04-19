@@ -84,6 +84,14 @@ export interface Environment {
   config: EnvironmentConfig;
   lastConnected?: string;
   error?: string;
+  /**
+   * When true, autonomous Claude tasks on this env bypass every
+   * permission prompt (bash / edits / MCP trust). Appropriate for
+   * throwaway daemon VMs; dangerous for `local`. Defaults to false;
+   * toggle from Settings → Environments. See
+   * `services/agent.ts` for how this gates the --permission-mode flag.
+   */
+  autonomousBypassPermissions: boolean;
 }
 
 export type EnvironmentConfig =

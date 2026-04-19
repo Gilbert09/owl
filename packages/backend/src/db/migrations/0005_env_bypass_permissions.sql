@@ -1,0 +1,1 @@
+ALTER TABLE "environments" ADD COLUMN "autonomous_bypass_permissions" boolean DEFAULT false NOT NULL;
