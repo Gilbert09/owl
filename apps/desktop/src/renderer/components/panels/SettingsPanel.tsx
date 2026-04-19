@@ -455,17 +455,18 @@ function IntegrationsSettings() {
     loadGitHubStatus();
   }, [loadGitHubStatus]);
 
-  // Check URL params for OAuth callback result
+  // OAuth happens in the system browser, not the renderer, so we can't
+  // read query params off window.location. Instead, re-check status
+  // whenever the app regains focus — the user will naturally come back
+  // to FastOwl after completing the flow in their browser.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('github_connected') === 'true') {
-      // Clear the URL params
-      window.history.replaceState({}, '', window.location.pathname);
-      loadGitHubStatus();
-    } else if (params.get('github_error')) {
-      setError(params.get('github_error'));
-      window.history.replaceState({}, '', window.location.pathname);
-    }
+    const onFocus = () => { void loadGitHubStatus(); };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onFocus);
+    };
   }, [loadGitHubStatus]);
 
   const handleGitHubConnect = async () => {

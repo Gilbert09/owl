@@ -34,13 +34,18 @@ export function githubPublicRoutes(): Router {
     const { code, state, error, error_description } = req.query;
 
     if (error) {
-      return res.redirect(
-        `/?github_error=${encodeURIComponent(error_description as string || (error as string))}`
+      return res.status(400).type('html').send(
+        renderCallbackPage({
+          ok: false,
+          message: (error_description as string) || (error as string) || 'GitHub OAuth error',
+        })
       );
     }
 
     if (!code || !state) {
-      return res.redirect('/?github_error=missing_params');
+      return res.status(400).type('html').send(
+        renderCallbackPage({ ok: false, message: 'Missing code or state parameter' })
+      );
     }
 
     const stateStr = state as string;
@@ -48,7 +53,9 @@ export function githubPublicRoutes(): Router {
 
     const pendingState = pendingOAuthStates.get(stateToken);
     if (!pendingState || pendingState.workspaceId !== workspaceId) {
-      return res.redirect('/?github_error=invalid_state');
+      return res.status(400).type('html').send(
+        renderCallbackPage({ ok: false, message: 'Invalid OAuth state — try again from FastOwl' })
+      );
     }
 
     pendingOAuthStates.delete(stateToken);
@@ -61,14 +68,59 @@ export function githubPublicRoutes(): Router {
         tokenData.token_type,
         tokenData.scope
       );
-      res.redirect('/?github_connected=true');
+      res.type('html').send(renderCallbackPage({ ok: true, message: 'GitHub connected!' }));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-      res.redirect(`/?github_error=${encodeURIComponent(message)}`);
+      res.status(500).type('html').send(renderCallbackPage({ ok: false, message }));
     }
   });
 
   return router;
+}
+
+/**
+ * Render the minimal callback landing page. The user's browser opened
+ * the OAuth flow and GitHub redirects back here — we need to give them
+ * *something* to look at before they close the tab. The desktop app
+ * polls its GitHub status on focus, so there's no need for a deep link.
+ */
+function renderCallbackPage(opts: { ok: boolean; message: string }): string {
+  const color = opts.ok ? '#16a34a' : '#dc2626';
+  const title = opts.ok ? 'GitHub connected' : 'Connection failed';
+  const safe = escapeHtml(opts.message);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FastOwl — ${escapeHtml(title)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #0b0b0f; color: #e5e7eb; display: grid; place-items: center;
+           min-height: 100vh; margin: 0; }
+    .card { background: #16161d; border: 1px solid #27272f; border-radius: 12px;
+            padding: 32px 40px; max-width: 420px; text-align: center; }
+    h1 { margin: 0 0 8px 0; font-size: 20px; color: ${color}; }
+    p { margin: 0; color: #9ca3af; font-size: 14px; line-height: 1.5; }
+    .hint { margin-top: 18px; font-size: 12px; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>${escapeHtml(title)}</h1>
+    <p>${safe}</p>
+    <p class="hint">You can close this tab and return to FastOwl.</p>
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /**

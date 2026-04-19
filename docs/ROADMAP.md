@@ -44,6 +44,8 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 
 ## Backlog
 
+- [ ] **Show logged-in user in the app chrome** — bottom-left of the sidebar should display GitHub username + avatar so users know which account they're using (especially on laptops with multiple GitHub accounts).
+- [ ] **Auto-connect GitHub integration from the Supabase login session** — today users sign in with GitHub OAuth (Supabase), then *separately* click "Connect GitHub" in Settings → Integrations to run a second OAuth flow. Supabase's sign-in session already returns `provider_token` with `repo` scope — we should pull it off `session.provider_token` on first login and store it as the workspace's GitHub integration token, skipping the second flow.
 - [x] **Change default ports** — Changed from 3001 to 4747 to avoid conflicts with common dev servers
 - [x] **Fix ESLint configuration** — Removed broken 'erb' extends, simplified config, fixed all lint errors
 
