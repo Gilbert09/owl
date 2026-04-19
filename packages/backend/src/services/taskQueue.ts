@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import type { Task, TaskPriority, Agent, TaskStatus, TaskType } from '@fastowl/shared';
 import { isAgentTask } from '@fastowl/shared';
 import { agentService } from './agent.js';
@@ -112,7 +112,7 @@ class TaskQueueService extends EventEmitter {
             isNull(tasksTable.assignedAgentId),
             isNull(agentsTable.id),
             inArray(agentsTable.status, ['completed', 'error', 'idle']),
-            sql`${tasksTable.updatedAt} < ${staleCutoff}`
+            lt(tasksTable.updatedAt, staleCutoff)
           )
         )
       );
