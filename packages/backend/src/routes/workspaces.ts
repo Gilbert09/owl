@@ -1,11 +1,17 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { and, eq } from 'drizzle-orm';
-import { getDbClient } from '../db/client.js';
-import { workspaces as workspacesTable } from '../db/schema.js';
+import { and, eq, inArray } from 'drizzle-orm';
+import { getDbClient, type Database } from '../db/client.js';
+import {
+  workspaces as workspacesTable,
+  repositories as repositoriesTable,
+  integrations as integrationsTable,
+} from '../db/schema.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import type {
   Workspace,
+  Repository,
+  WorkspaceIntegrations,
   CreateWorkspaceRequest,
   UpdateWorkspaceRequest,
   ApiResponse,
@@ -22,7 +28,11 @@ export function workspaceRoutes(): Router {
       .from(workspacesTable)
       .where(eq(workspacesTable.ownerId, user.id))
       .orderBy(workspacesTable.name);
-    res.json({ success: true, data: rows.map(rowToWorkspace) } as ApiResponse<Workspace[]>);
+    const relations = await loadWorkspaceRelations(db, rows.map((r) => r.id));
+    res.json({
+      success: true,
+      data: rows.map((r) => rowToWorkspace(r, relations)),
+    } as ApiResponse<Workspace[]>);
   });
 
   router.get('/:id', async (req, res) => {
@@ -36,7 +46,11 @@ export function workspaceRoutes(): Router {
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Workspace not found' });
     }
-    res.json({ success: true, data: rowToWorkspace(rows[0]) } as ApiResponse<Workspace>);
+    const relations = await loadWorkspaceRelations(db, [rows[0].id]);
+    res.json({
+      success: true,
+      data: rowToWorkspace(rows[0], relations),
+    } as ApiResponse<Workspace>);
   });
 
   router.post('/', async (req, res) => {
@@ -61,7 +75,11 @@ export function workspaceRoutes(): Router {
       .from(workspacesTable)
       .where(eq(workspacesTable.id, id))
       .limit(1);
-    res.status(201).json({ success: true, data: rowToWorkspace(rows[0]) } as ApiResponse<Workspace>);
+    // Fresh workspace has no repos or integrations yet — skip the load.
+    res.status(201).json({
+      success: true,
+      data: rowToWorkspace(rows[0], { reposByWorkspace: new Map(), integrationsByWorkspace: new Map() }),
+    } as ApiResponse<Workspace>);
   });
 
   router.patch('/:id', async (req, res) => {
@@ -102,7 +120,11 @@ export function workspaceRoutes(): Router {
       .from(workspacesTable)
       .where(eq(workspacesTable.id, req.params.id))
       .limit(1);
-    res.json({ success: true, data: rowToWorkspace(rows[0]) } as ApiResponse<Workspace>);
+    const relations = await loadWorkspaceRelations(db, [rows[0].id]);
+    res.json({
+      success: true,
+      data: rowToWorkspace(rows[0], relations),
+    } as ApiResponse<Workspace>);
   });
 
   router.delete('/:id', async (req, res) => {
@@ -121,13 +143,74 @@ export function workspaceRoutes(): Router {
   return router;
 }
 
-function rowToWorkspace(row: typeof workspacesTable.$inferSelect): Workspace {
+interface WorkspaceRelations {
+  reposByWorkspace: Map<string, Repository[]>;
+  integrationsByWorkspace: Map<string, WorkspaceIntegrations>;
+}
+
+/**
+ * Batch-load repos + integrations for a set of workspaces. One query per
+ * table, grouped by workspaceId. Keeps `GET /workspaces` at O(1) queries
+ * rather than N+1 as the list grows.
+ */
+async function loadWorkspaceRelations(
+  db: Database,
+  workspaceIds: string[]
+): Promise<WorkspaceRelations> {
+  if (workspaceIds.length === 0) {
+    return { reposByWorkspace: new Map(), integrationsByWorkspace: new Map() };
+  }
+
+  const repoRows = await db
+    .select()
+    .from(repositoriesTable)
+    .where(inArray(repositoriesTable.workspaceId, workspaceIds));
+  const reposByWorkspace = new Map<string, Repository[]>();
+  for (const row of repoRows) {
+    const arr = reposByWorkspace.get(row.workspaceId) ?? [];
+    arr.push({
+      id: row.id,
+      name: row.name,
+      url: row.url,
+      localPath: row.localPath ?? undefined,
+      defaultBranch: row.defaultBranch,
+    });
+    reposByWorkspace.set(row.workspaceId, arr);
+  }
+
+  const integrationRows = await db
+    .select()
+    .from(integrationsTable)
+    .where(inArray(integrationsTable.workspaceId, workspaceIds));
+  const integrationsByWorkspace = new Map<string, WorkspaceIntegrations>();
+  for (const row of integrationRows) {
+    const existing = integrationsByWorkspace.get(row.workspaceId) ?? {};
+    // Expose presence + enabled flag only — never leak the token blob
+    // out of the API. Frontend reads connection state via the dedicated
+    // `/github` (etc.) endpoints when it needs more detail.
+    if (row.type === 'github') {
+      existing.github = { enabled: row.enabled, watchedRepos: [] };
+    } else if (row.type === 'slack') {
+      existing.slack = { enabled: row.enabled, watchedChannels: [] };
+    } else if (row.type === 'posthog') {
+      existing.posthog = { enabled: row.enabled };
+    }
+    integrationsByWorkspace.set(row.workspaceId, existing);
+  }
+
+  return { reposByWorkspace, integrationsByWorkspace };
+}
+
+function rowToWorkspace(
+  row: typeof workspacesTable.$inferSelect,
+  relations: WorkspaceRelations
+): Workspace {
   return {
     id: row.id,
     name: row.name,
     description: row.description ?? undefined,
-    repos: [], // TODO: Load from repositories table
-    integrations: {}, // TODO: Load from integrations table
+    repos: relations.reposByWorkspace.get(row.id) ?? [],
+    integrations: relations.integrationsByWorkspace.get(row.id) ?? {},
     settings: (row.settings as Workspace['settings']) ?? {
       autoAssignTasks: true,
       maxConcurrentAgents: 3,

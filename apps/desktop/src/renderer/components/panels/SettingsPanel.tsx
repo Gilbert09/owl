@@ -113,7 +113,7 @@ export function SettingsPanel() {
 
 function WorkspaceSettings() {
   const { workspaces, currentWorkspaceId } = useWorkspaceStore();
-  const { updateCurrentWorkspaceSettings } = useWorkspaceActions();
+  const { updateCurrentWorkspaceSettings, refreshWorkspaces } = useWorkspaceActions();
   const [isUpdating, setIsUpdating] = useState(false);
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
 
@@ -188,6 +188,8 @@ function WorkspaceSettings() {
         repo.name
       );
       setWatchedRepos((prev) => [...prev, watched]);
+      // Keep the workspace store in sync so the sidebar count updates.
+      void refreshWorkspaces();
       setShowRepoSelector(false);
       setRepoSearch('');
     } finally {
@@ -200,6 +202,7 @@ function WorkspaceSettings() {
     try {
       await api.repositories.remove(repoId);
       setWatchedRepos((prev) => prev.filter((r) => r.id !== repoId));
+      void refreshWorkspaces();
     } finally {
       setLoadingRepos(false);
     }

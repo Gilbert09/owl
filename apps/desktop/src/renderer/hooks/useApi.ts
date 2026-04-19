@@ -488,7 +488,23 @@ export function useWorkspaceActions() {
     [currentWorkspaceId, setWorkspaces]
   );
 
-  return { createWorkspace, updateWorkspace, deleteWorkspace, updateCurrentWorkspaceSettings };
+  /**
+   * Re-fetch the workspace list. Callers trigger this after mutations
+   * that change workspace *relations* (e.g., adding/removing a repo)
+   * so derived UI like the sidebar's repo count stays in sync.
+   */
+  const refreshWorkspaces = useCallback(async () => {
+    const workspaces = await api.workspaces.list();
+    setWorkspaces(workspaces);
+  }, [setWorkspaces]);
+
+  return {
+    createWorkspace,
+    updateWorkspace,
+    deleteWorkspace,
+    updateCurrentWorkspaceSettings,
+    refreshWorkspaces,
+  };
 }
 
 // ============================================================================

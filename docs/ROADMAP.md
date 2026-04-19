@@ -46,6 +46,9 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 
 - [ ] **Show logged-in user in the app chrome** — bottom-left of the sidebar should display GitHub username + avatar so users know which account they're using (especially on laptops with multiple GitHub accounts).
 - [ ] **Auto-connect GitHub integration from the Supabase login session** — today users sign in with GitHub OAuth (Supabase), then *separately* click "Connect GitHub" in Settings → Integrations to run a second OAuth flow. Supabase's sign-in session already returns `provider_token` with `repo` scope — we should pull it off `session.provider_token` on first login and store it as the workspace's GitHub integration token, skipping the second flow.
+- [x] **Workspace endpoint returns empty `repos` + `integrations`** — Fixed 2026-04-19. `rowToWorkspace` in `routes/workspaces.ts` was returning hardcoded empty arrays/maps (two `// TODO: Load from ... table` markers). Now batches the joins so `GET /workspaces` is O(1) queries and the sidebar's "N repos" count actually updates when you watch/unwatch a repo.
+- [ ] **Coder environments not implemented** — `services/environment.ts` throws `'Coder environments not yet implemented'` on `connect`. Not on the critical path; `daemon` envs + `local` cover the use cases today. Tracked here so it's not rediscovered as a surprise.
+- [ ] **`node --ignore-scripts` and other eslint-disables are load-bearing** — a few `eslint-disable-next-line` / `@ts-ignore` sites exist (`middleware/auth.ts` namespace augmentation, `apps/desktop/src/main/main.ts` console usage, Electron ERB build scripts). All intentional and low-risk; noted for a future "lint-cleanup" pass if it's ever worth the churn.
 - [x] **Change default ports** — Changed from 3001 to 4747 to avoid conflicts with common dev servers
 - [x] **Fix ESLint configuration** — Removed broken 'erb' extends, simplified config, fixed all lint errors
 
