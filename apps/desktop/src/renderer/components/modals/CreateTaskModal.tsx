@@ -92,12 +92,22 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
   const typeConfig = typeOptions.find((t) => t.value === type)!;
   const isAgent = isAgentTask(type);
 
-  // Load repositories when modal opens
+  // Load repositories when modal opens. When there's exactly one watched
+  // repo, default the dropdown to it — no point making the user pick
+  // from a list of one.
   useEffect(() => {
     if (open && currentWorkspaceId) {
-      api.repositories.list(currentWorkspaceId).then(setRepositories).catch(console.error);
+      api.repositories
+        .list(currentWorkspaceId)
+        .then((repos) => {
+          setRepositories(repos);
+          if (repos.length === 1 && !repositoryId) {
+            setRepositoryId(repos[0].id);
+          }
+        })
+        .catch(console.error);
     }
-  }, [open, currentWorkspaceId]);
+  }, [open, currentWorkspaceId, repositoryId]);
 
   // Auto-generate metadata when prompt changes (debounced)
   useEffect(() => {

@@ -298,8 +298,11 @@ function deriveTitle(text: string): string {
 }
 
 function buildPrompt(sourcePath: string, itemText: string): string {
-  // Autonomous Continuous Build tasks run via `claude --print --permission-mode
-  // acceptEdits`. Completion = process exit.
+  // Autonomous Continuous Build tasks run via
+  //   `claude --print --verbose --dangerously-skip-permissions <prompt>`
+  // Completion = process exit. See agentService.startAgent() for the
+  // rationale on --dangerously-skip-permissions (MCP trust prompts would
+  // otherwise block a headless run).
   return [
     `You are working autonomously on a FastOwl Continuous Build task.`,
     `Implement the following TODO item from \`${sourcePath}\`:`,

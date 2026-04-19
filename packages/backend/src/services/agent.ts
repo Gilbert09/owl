@@ -229,8 +229,22 @@ class AgentService extends EventEmitter {
 
     let claudeCommand: string;
     if (autonomous && prompt) {
+      // Autonomous tasks run in a FastOwl-managed branch and are
+      // scheduler-gated — nothing good comes from pausing on a trust /
+      // permission prompt (nobody's watching to click OK).
+      //
+      // `--permission-mode acceptEdits` covers file edits but NOT the
+      // "new MCP server found in .mcp.json: X" trust prompt, which
+      // blocks the whole run. `--dangerously-skip-permissions` bypasses
+      // every prompt including MCP trust — appropriate for headless runs
+      // where the supervising process is FastOwl itself.
+      //
+      // `--verbose` surfaces tool-use events in the output stream so the
+      // task terminal shows what Claude is actually doing, not just the
+      // final message.
       claudeCommand =
-        `${envPrefix}claude --print --permission-mode acceptEdits ${shellQuote(prompt)}`;
+        `${envPrefix}claude --print --verbose ` +
+        `--dangerously-skip-permissions ${shellQuote(prompt)}`;
     } else {
       claudeCommand = `${envPrefix}claude`;
     }
