@@ -111,13 +111,14 @@ Each slice is independently landable and pushable to `main`. Mark `[x]` when mer
 
 ### Slice 8 — Tests + docs
 
-- [ ] Integration test: backend SIGKILL mid-task → task recovers (Slice 6).
-- [ ] Integration test: daemon disconnect/reconnect replays buffered output.
-- [ ] Unit test: `localDaemon.ts` install/uninstall idempotence (mocked `launchctl`/`systemctl`).
-- [ ] `docs/ARCHITECTURE.md`: rewrite "Environments" section — two user-facing types (local, remote), one transport (daemon WS).
-- [ ] `docs/SESSIONS.md`: append a session note per landed slice.
-- [ ] `docs/ROADMAP.md`: mark Phase 18.3 (daemon split) as fully done; add Phase 18.5 pointing at this doc; strike `ssh`/`coder` from Phase 1.2 type list.
-- [ ] `CLAUDE.md`: update "Core Concepts" env type list.
+- [x] `docs/ARCHITECTURE.md` rewritten: system diagram, two-type env model, zero-native-deps tech stack.
+- [x] `docs/SESSIONS.md` Session 19 entry covering all 8 slices with commit hashes.
+- [x] `docs/ROADMAP.md` Phase 18.5 marked done.
+- [x] `CLAUDE.md` Core Concepts env section rewritten; "Daemon" bullet added.
+- [x] `daemonRegistry.test.ts` fixtures updated with `liveSessionIds` to match the Slice 6 interface.
+- [ ] **Deferred** — Integration test for the Slice 6 reconcile sweep. First draft (`agentReconcile.test.ts`) hung under vitest: the `resumeRun` stub returned a forever-pending `completion` promise that deadlocked teardown. The logic is narrow + manually smoke-tested (pkill -9 → restart leaves the task in_progress). Needs a stub with a resolvable promise and probably a refactor so `cleanupStaleAgents` is callable without booting the full service graph.
+- [ ] **Deferred** — Ring buffer for session output during disconnect. Output emitted while the WS is dead is still dropped; only new output after reconnect flows through. Daemon side: bounded ring buffer per session; replay on reconnect.
+- [ ] **Deferred** — Unit tests for `localDaemon.ts` (launchctl/systemctl mocks). The module is mostly shell-outs, so an integration test via a packaged build is higher-value than mocked unit tests.
 
 ## Open questions (resolved)
 
