@@ -81,6 +81,7 @@ describe('daemonRegistry', () => {
       environmentId: 'env-rpc',
       ws: ws as unknown as never,
       meta: { os: 'darwin', arch: 'arm64', hostname: 'mac', daemonVersion: '0.1.0' },
+      liveSessionIds: new Set(),
     });
 
     // Kick off a request — the registry serializes it to the ws.
@@ -99,6 +100,7 @@ describe('daemonRegistry', () => {
       environmentId: 'env-drop',
       ws: ws as unknown as never,
       meta: { os: 'darwin', arch: 'arm64', hostname: 'mac', daemonVersion: '0.1.0' },
+      liveSessionIds: new Set(),
     });
 
     const inflight = daemonRegistry.request('env-drop', { op: 'ping' });

@@ -2,6 +2,36 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 19 — Daemon everywhere (Phase 18.5)
+
+One-session refactor that collapses `local`/`ssh`/`daemon`/`coder` env types into `local | remote` with a single transport: every environment is backed by a `@fastowl/daemon` process dialling the backend over WebSocket. The immediate trigger: backend restart was SIGPIPE-killing local tasks because the child's stdin was piped directly to the backend process. The daemon now owns those pipes, so backend deploys don't take down in-flight work.
+
+Eight slices, each a landable git push to `main`. Design doc: [`DAEMON_EVERYWHERE.md`](./DAEMON_EVERYWHERE.md) — kept as the live task list throughout.
+
+- **Slice 1 — single-file daemon binary** (`8b26059`): `packages/daemon/scripts/build-binary.sh` + `.github/workflows/build-daemon-binaries.yml` cross-compile `bun build --compile` to five targets (darwin-arm64/x64, linux-x64/arm64, windows-x64) on one Ubuntu runner. `ws` + workspace imports work under `bun --compile`, verified by the smoke test that runs the linux binary with no args and checks the config-resolution error message.
+
+- **Slice 2 — bundle binary in the Electron `.app`** (`4518746`): platform-specific `extraResources` entries in `apps/desktop/package.json` using `${arch}` macros; each packaged build pulls the matching binary from `packages/daemon/dist/fastowl-daemon-*` and drops it at `Contents/Resources/daemon/fastowl-daemon`. Root `npm run package` runs `build:binary:all -w @fastowl/daemon` before invoking electron-builder. `publish.yml` gains a `setup-bun` step.
+
+- **Slice 3 — localDaemon install module** (`81bfb4a`): new `apps/desktop/src/main/localDaemon.ts`. macOS writes `~/Library/LaunchAgents/com.fastowl.daemon.plist` (`KeepAlive=true`, `RunAtLoad=true`, logs to `~/Library/Logs/FastOwl/`) and calls `launchctl bootstrap gui/<uid>` — `bootout` first so re-install is idempotent. Linux writes `~/.config/systemd/user/fastowl-daemon.service` with `Restart=always` and runs `systemctl --user daemon-reload && enable --now`. Windows deferred. Dev mode spawns `tsx packages/daemon/src/index.ts` under Electron's lifetime for fast iteration.
+
+- **Slice 4 — auto-pair on first launch** (`806bfef` + fixes): IPC handlers (`daemon:is-paired`, `daemon:host-label`, `daemon:configure-and-start`, `daemon:ensure-running`) in `main.ts`; preload bridge; renderer `useLocalDaemon()` hook in `AuthedApp`. Flow: after login, the hook creates a "This Mac (<hostname>)" env, mints a pairing token, hands it to main, main writes `~/.fastowl/daemon.json` + spawns/installs the daemon. Follow-ups landed same session: (a) daemon accepts `pairingToken` from the config file as a fallback (`141ccd3`); (b) `wss`/`daemonWss` routing fixed — the `{server, path: '/ws'}` auto-handler was aborting every non-`/ws` upgrade with 400, so the local daemon could never connect. Both WSS's are now `noServer: true`, dispatched by path in one handler. (c) `useLocalDaemon` looks up an existing "This Mac" env before creating, so failed pairs don't accumulate orphans (`6677b00`). (d) Local daemon env defaults to `autonomousBypassPermissions: false` (the override is for remote VMs) (`ad4ed76`).
+
+- **Slice 5 — collapse env types** (`7907b35`): `EnvironmentType = 'local' | 'remote'`. Migration `0009_daemon_everywhere.sql` rewrites existing `daemon`-with-"This Mac" name → `local`, other `daemon` → `remote`, deletes stale `ssh`/`coder` rows. `services/environment.ts` rewritten ~200 LOC shorter — no switch on `env.type`, everything routes through `daemonRegistry`. Deleted: `services/ssh.ts`, `services/daemonInstaller.ts`, the SSH auto-install route, `docs/SSH_VM_SETUP.md`, `ssh2` + `@types/ssh2` deps. `AddEnvironmentModal` simplified from 626 → 210 LOC (one flow: name → pair → poll). SettingsPanel branches on `local`/`remote`. Dockerfile drops its `npm rebuild ssh2` step — backend now has zero native deps.
+
+- **Slice 6 — session survival across backend restart** (`0cb795a`): the payoff. Daemon hello now carries `activeSessions: [{sessionId, pid, startedAt}]`. Backend `daemonRegistry` stores `liveSessionIds` per connected daemon, exposes `isSessionLive()` + `connectedEnvironmentIds()`, emits `daemon:connected`. `agent.cleanupStaleAgents` rewritten from "blanket-fail on boot" to a 60s-grace reconcile sweep with a fast path: once every expected env's daemon has dialled in, sweep immediately. Follow-up (`f93267e`): `agentStructuredService.resumeRun()` rehydrates per-run state from `tasks.transcript` + re-subscribes to session events, so surviving agents produce live UI events — not just stay alive. Final polish (`36fcc04`): `permission_token` column on agents + `permissionService.rehydrateRun()`; a child mid-PreToolUse at restart continues to authenticate.
+
+- **Slice 7 — lifecycle surface + uninstall flow** (`02c1b5c`): Settings → Environments "This Mac" card shows launchd install + PID status, refreshes every 5s, has a Restart button. App menu → Daemon submenu with Restart + "Uninstall FastOwl daemon and quit…" (confirm dialog + full wipe). `scripts/fastowl-uninstall.sh` bundled via extraResources — usable from the `.app` or the repo for users who deleted the app before uninstalling.
+
+- **Slice 8 — tests + docs**: new `agentReconcile.test.ts` covering the Slice 6 sweep (survivor kept / non-survivor failed / `isSessionLive` round-trip). Existing `daemonRegistry.test.ts` fixture updated for the new `liveSessionIds` required field. `ARCHITECTURE.md` and `CLAUDE.md` Core Concepts rewritten around the two-type, one-transport model. `ROADMAP.md` marks Phase 18.5 done; SSH + Coder types struck from Phase 1.2's env-type list.
+
+**What this buys**:
+- Backend restart / deploy no longer kills running tasks. Verified manually (`pkill -9` on the dev backend; task stays in_progress; output resumes). Single biggest day-to-day reliability win.
+- One execution path. Every `env.type === '…'` switch across backend/desktop/cli/mcp is gone. New features touch one surface.
+- Backend has zero native deps. `ssh2` + `node-pty` both retired — Dockerfile is lighter; CI stops hitting native-build flakiness.
+- Local-daemon UX: zero-click pairing, OS-service lifetime, restart + uninstall from the menu.
+
+**Known limits**: session output during the disconnect window is still dropped (no ring buffer yet — tracked in `DAEMON_EVERYWHERE.md` as a Slice 6 gap). Daemon-process crash still kills its children (Electron crash → local-daemon crash → task dies); rarer than backend deploys, handled by launchd's `KeepAlive=true` auto-restart.
+
 ## Session 18 (structured-renderer Slice 4 — daemon/SSH support + PTY deletion)
 The big cleanup pass. Structured renderer now covers every env type — local (in-process spawn), daemon (new `stream_spawn` wire op), SSH (ssh2 exec channel with `pty: false`) — and the PTY path is gone. Landed as three commits (4a daemon, 4b SSH, 4c deletion) so each step was revertable on its own.
 

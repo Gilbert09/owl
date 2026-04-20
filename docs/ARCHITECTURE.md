@@ -11,40 +11,50 @@ Architectural decisions, core concept deep-dives, and resolved questions. Histor
 │  │  Inbox   │ │  Tasks   │ │  GitHub  │ │    Settings      │    │
 │  │  Panel   │ │  Panel   │ │  Panel   │ │                  │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘    │
-│                              │                                   │
-│   Tasks Panel shows: task list + terminal view for running tasks │
-│                     IPC (electron)                               │
+│                                                                  │
+│   Also in the main process: FastOwl daemon (launchd/systemd      │
+│   user service). Bundled binary. Survives app quit; only a       │
+│   "Uninstall & quit" or reboot removes it.                       │
 └─────────────────────────────────────────────────────────────────┘
                                │
-                    WebSocket/REST API
+                    WebSocket/REST API (user-facing)
                                │
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Backend Server                            │
+│                   Backend (hosted on Railway)                    │
 │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────────┐    │
 │  │  Agent   │ │ Environ- │ │   Task   │ │   Integration    │    │
 │  │ Service  │ │   ment   │ │  Queue   │ │     Manager      │    │
-│  │(internal)│ │ Manager  │ │          │ │ (GH,Slack,etc)   │    │
 │  └──────────┘ └──────────┘ └──────────┘ └──────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              │                │                │
-         SSH/Coder          GitHub           Slack
-         (Environments)     API              API
+                   │                │
+           WS /daemon-ws       GitHub / Slack APIs
+                   │
+       ┌───────────┴────────────┐
+       │                        │
+  Local daemon             Remote daemon
+  (bundled, this Mac)      (paired VM)
+       │                        │
+       └── child_process.spawn(claude …)
 ```
+
+Every environment — `local` or `remote` — is backed by a `@fastowl/daemon` process dialling into the backend over WebSocket. The daemon owns the child-process pipes, so a backend restart no longer SIGPIPEs running tasks.
 
 ## Tech Stack
 
 **Frontend (Electron)**
 - React 19 + TypeScript
-- Zustand (state), Tailwind + shadcn/ui (UI), xterm.js (terminals)
+- Zustand (state), Tailwind + shadcn/ui (UI)
 - Electron contextBridge for IPC (typed channels)
 
 **Backend**
-- TypeScript on Node.js (single-language stack with frontend)
-- Express + WebSocket
-- SQLite (better-sqlite3) locally; Drizzle ORM scaffolded for hosted Postgres (Supabase) — see [`CONTINUOUS_BUILD_ROADMAP.md`](./CONTINUOUS_BUILD_ROADMAP.md) for the migration
-- ssh2 for SSH connections / PTY
+- TypeScript on Node.js, Express + WebSocket
+- Supabase Postgres via Drizzle ORM; migrations applied at boot
+- Zero native deps after the "daemon everywhere" refactor (node-pty dropped in Phase 13.2 Slice 4c; ssh2 dropped in Phase 18.5 Slice 5)
+
+**Daemon**
+- TypeScript, `ws`, compiled to a self-contained binary with `bun build --compile`
+- Runs as a launchd user agent (macOS) or `systemd --user` unit (Linux) — installed by the desktop app on first launch
+- See [`DAEMON_EVERYWHERE.md`](./DAEMON_EVERYWHERE.md) for the design
 
 ## Core Concepts (Detail)
 
@@ -52,13 +62,11 @@ Architectural decisions, core concept deep-dives, and resolved questions. Histor
 Groups related repositories and configuration (integrations, repo paths per environment, auto-clone settings). Example: a "PostHog" workspace with `posthog/posthog`, `posthog/posthog.com`, `posthog/charts`.
 
 ### Environments
-A machine where work executes. Types:
-- **Local**: the user's own machine
-- **SSH**: remote machines via SSH (e.g., `ssh vm1`)
-- **Coder Devbox**: managed workspaces (future)
-- **Future**: dev containers, cloud VMs
+A machine where work executes. Two types, both daemon-backed:
+- **Local**: the daemon bundled with the desktop app, running on your own Mac / Linux box. Installed as a user-level OS service on first app launch; survives the app being quit.
+- **Remote**: a daemon installed on a separate machine (VM, workstation, GPU rig) via the pairing flow. Add one from Settings → Environments → Add.
 
-Git uses the machine's configured git user — no special FastOwl config.
+The backend only speaks the daemon WS protocol — there is no in-process spawn path and no ssh2 path anymore. Git uses the machine's configured git user — no special FastOwl config.
 
 ### Tasks
 Primary unit of work. Types: `code_writing`, `pr_response`, `pr_review`, `manual`.

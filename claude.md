@@ -28,7 +28,8 @@ When a session lands non-trivial work, append a note to `docs/SESSIONS.md`. When
 ## Core Concepts (at a glance)
 
 - **Workspace** — groups related repos + integrations (e.g., "PostHog" = `posthog/posthog` + `posthog/posthog.com` + `posthog/charts`)
-- **Environment** — a machine where work runs: `local`, `ssh`, (future: Coder, dev containers)
+- **Environment** — a machine where work runs. Two types, both daemon-backed over WS: `local` (bundled daemon on your Mac/Linux box) and `remote` (paired VM / workstation). Legacy `ssh`/`coder` and in-process `local`-spawn are gone.
+- **Daemon** — a `@fastowl/daemon` process that owns child-process pipes; dials the backend over WebSocket. Local daemon ships bundled with the desktop app and runs as a launchd/systemd user service (survives app quit).
 - **Task** — the unit of work. Types: `code_writing`, `pr_response`, `pr_review`, `manual`. Lifecycle: `pending` → `queued` → `in_progress` → `awaiting_review` → `completed`
 - **Tasks own agents** — users manage tasks; agents are internal, spawned per task
 - **Approval gates** — agent tasks land in `awaiting_review` on clean exit; user approves/rejects before anything pushes to the world

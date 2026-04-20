@@ -9,13 +9,11 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 > The top three are the active work for "Continuous Build, production ready."
 > See `docs/CONTINUOUS_BUILD_ROADMAP.md` for the full plan.
 
-1. **Phase 18.5 — Daemon everywhere** (ACTIVE) — see [`docs/DAEMON_EVERYWHERE.md`](./DAEMON_EVERYWHERE.md)
-   - Compile daemon to a single binary, ship it inside the desktop `.app`
-   - Install as a user-level OS service (launchd / systemd --user) so it outlives the desktop app
-   - Collapse env types to `local | remote`; both transport via daemon WS
-   - Session survival across backend restart — rework `cleanupStaleAgents` to reconcile, not nuke
-   - Rip out `ssh` env type and `ssh2` dependency
-   - Superseded Phase 18.1/18.4 in the priority queue (those shipped in Session 13–14)
+1. ~~**Phase 18.5 — Daemon everywhere**~~ DONE (Session 19) — see [`docs/DAEMON_EVERYWHERE.md`](./DAEMON_EVERYWHERE.md)
+   - All 8 slices landed: single-file binary, bundled in .app, launchd/systemd install, auto-pair, env-type collapse (local|remote), session survival + state rehydration + permission-token persistence across restart, lifecycle UI + uninstall, tests + docs
+   - Backend restart no longer kills in-flight tasks
+   - Zero native deps on the backend (ssh2 + node-pty both retired)
+   - Known remaining gap: no ring buffer for session output during disconnect window (tracked in the design doc)
 
 2. ~~Phase 18.3 — Daemon split + auto-install over SSH~~ DONE (Session 17)
    - `packages/daemon` split landed in Session 15 (18.3.A)
