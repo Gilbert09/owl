@@ -112,7 +112,10 @@ class TaskQueueService extends EventEmitter {
           or(
             isNull(tasksTable.assignedAgentId),
             isNull(agentsTable.id),
-            inArray(agentsTable.status, ['completed', 'error', 'idle']),
+            // `idle` deliberately NOT here: interactive structured runs
+            // sit in `idle` between turns while the child waits on
+            // stdin. That's the intended steady state, not stuck.
+            inArray(agentsTable.status, ['completed', 'error']),
             lt(tasksTable.updatedAt, staleCutoff)
           )
         )
@@ -120,15 +123,26 @@ class TaskQueueService extends EventEmitter {
 
     if (stuckTasks.length === 0) return;
 
-    // Filter out tasks that LOOK stuck (no updated_at movement) but
-    // actually have a live permission prompt waiting on the user.
-    // The child is blocked on the hook → no stdout → no transcript
-    // persist → updated_at doesn't bump. But the agent is alive and
-    // waiting patiently. Don't flip those to failed.
+    // Two extra filters on top of the SQL match:
+    //  1. Permission-pending: hook is blocked on a user click, so
+    //     stdout is silent and `updated_at` won't budge. Legitimate.
+    //  2. Live agent in memory: `cleanupStaleAgents` removes dead
+    //     agent rows at boot, but between boots a task may match the
+    //     `updated_at < cutoff` clause despite having a healthy
+    //     in-memory agent (e.g. the user left the task idle in
+    //     interactive mode for 20+ min). Don't reset those — we'd
+    //     kill a live session and re-spawn the seed prompt, which is
+    //     a very bad surprise.
     const actionable = stuckTasks.filter((t) => {
       if (permissionService.hasPendingForTask(t.id)) {
         console.log(
           `[TaskQueue] Task "${t.title}" looks stuck but has pending permission prompts — leaving alone`
+        );
+        return false;
+      }
+      if (agentService.getAgentByTaskId(t.id)) {
+        console.log(
+          `[TaskQueue] Task "${t.title}" looks stuck but has a live in-memory agent — leaving alone`
         );
         return false;
       }
