@@ -13,7 +13,8 @@ import { Badge } from '../ui/badge';
 import { Card } from '../ui/card';
 import { ScrollArea } from '../ui/scroll-area';
 import { useWorkspaceStore } from '../../stores/workspace';
-import type { InboxItem, InboxItemType } from '@fastowl/shared';
+import { api } from '../../lib/api';
+import type { InboxItem, InboxItemType, InboxAction } from '@fastowl/shared';
 
 const typeIcons: Record<InboxItemType, React.ElementType> = {
   agent_question: MessageSquare,
@@ -35,10 +36,58 @@ const priorityColors = {
 };
 
 export function InboxPanel() {
-  const { inboxItems, markInboxRead, markInboxActioned } = useWorkspaceStore();
+  const {
+    inboxItems,
+    markInboxRead,
+    markInboxActioned,
+    selectTask,
+    setActivePanel,
+  } = useWorkspaceStore();
 
+  // Three buckets. "Actioned" items (user clicked an action button
+  // but didn't dismiss) stay visible under EARLIER so the history
+  // doesn't silently vanish — the 3-dots menu handles explicit
+  // dismissal (TODO).
   const unreadItems = inboxItems.filter((i) => i.status === 'unread');
-  const readItems = inboxItems.filter((i) => i.status === 'read');
+  const earlierItems = inboxItems.filter(
+    (i) => i.status === 'read' || i.status === 'actioned'
+  );
+
+  /**
+   * Dispatch an inbox action. `view_task` + `view_agent` just
+   * navigate; they don't mark the item `actioned` (user might want
+   * to come back). Everything else falls through to "mark actioned"
+   * which hides the item from the "NEW" bucket.
+   */
+  const handleAction = async (item: InboxItem, action: InboxAction) => {
+    if (action.action === 'view_task' || action.action === 'view_agent') {
+      if (item.status === 'unread') {
+        markInboxRead(item.id);
+        void api.inbox.markRead(item.id).catch((err) =>
+          console.error('[inbox] markRead failed:', err)
+        );
+      }
+      const sourceId = item.source.id;
+      if (sourceId) {
+        selectTask(sourceId);
+        setActivePanel('queue');
+      }
+      return;
+    }
+    // Generic "dismiss-style" action.
+    markInboxActioned(item.id);
+    void api.inbox.markActioned(item.id).catch((err) =>
+      console.error('[inbox] markActioned failed:', err)
+    );
+  };
+
+  const handleRead = (item: InboxItem) => {
+    if (item.status !== 'unread') return;
+    markInboxRead(item.id);
+    void api.inbox.markRead(item.id).catch((err) =>
+      console.error('[inbox] markRead failed:', err)
+    );
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -79,25 +128,25 @@ export function InboxPanel() {
                     <InboxItemCard
                       key={item.id}
                       item={item}
-                      onRead={() => markInboxRead(item.id)}
-                      onAction={() => markInboxActioned(item.id)}
+                      onRead={() => handleRead(item)}
+                      onAction={(action) => handleAction(item, action)}
                     />
                   ))}
                 </div>
               </div>
             )}
-            {readItems.length > 0 && (
+            {earlierItems.length > 0 && (
               <div>
                 <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
                   EARLIER
                 </h3>
                 <div className="space-y-2">
-                  {readItems.map((item) => (
+                  {earlierItems.map((item) => (
                     <InboxItemCard
                       key={item.id}
                       item={item}
-                      onRead={() => markInboxRead(item.id)}
-                      onAction={() => markInboxActioned(item.id)}
+                      onRead={() => handleRead(item)}
+                      onAction={(action) => handleAction(item, action)}
                     />
                   ))}
                 </div>
@@ -113,7 +162,7 @@ export function InboxPanel() {
 interface InboxItemCardProps {
   item: InboxItem;
   onRead: () => void;
-  onAction: () => void;
+  onAction: (action: InboxAction) => void;
 }
 
 function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
@@ -189,7 +238,7 @@ function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
               className="h-7 text-xs"
               onClick={(e) => {
                 e.stopPropagation();
-                onAction();
+                onAction(action);
               }}
             >
               {action.label}

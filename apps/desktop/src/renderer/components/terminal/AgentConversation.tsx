@@ -41,7 +41,7 @@ export function AgentConversation({
 
   if (blocks.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-xs text-muted-foreground">
+      <div className="h-full flex items-center justify-center text-xs text-zinc-500 bg-[#1a1a1a]">
         Waiting for the agent to start…
       </div>
     );
@@ -50,7 +50,7 @@ export function AgentConversation({
   return (
     <div
       ref={scrollRef}
-      className="h-full overflow-auto px-4 py-3 text-sm text-foreground/90 bg-[#1a1a1a] space-y-2"
+      className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2"
     >
       {blocks.map((block) => (
         <BlockView key={block.key} block={block} taskId={taskId} interactive={interactive} />
@@ -295,7 +295,7 @@ function ThinkingBlock({ text }: { text: string }) {
       title="Thinking"
       dim
     >
-      <div className="whitespace-pre-wrap text-xs text-foreground/60 leading-relaxed">{text}</div>
+      <div className="whitespace-pre-wrap text-xs text-zinc-400 leading-relaxed">{text}</div>
     </Collapsible>
   );
 }
@@ -310,7 +310,7 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
       title={
         <span>
           <span className="text-blue-300">{name}</span>
-          <span className="ml-2 text-muted-foreground font-normal">
+          <span className="ml-2 text-zinc-400 font-normal">
             {summariseArgs(input)}
           </span>
         </span>
@@ -343,7 +343,7 @@ function ToolResultBlock({ content, isError }: { content: unknown; isError: bool
       }
       dim
     >
-      <pre className="text-xs font-mono whitespace-pre-wrap text-foreground/70 bg-black/30 rounded p-2 overflow-x-auto">
+      <pre className="text-xs font-mono whitespace-pre-wrap text-zinc-200 bg-black/30 rounded p-2 overflow-x-auto">
         {text}
       </pre>
     </Collapsible>
@@ -463,7 +463,7 @@ function PermissionBlock({
 
 function SystemBlock({ text, subtype }: { text: string; subtype?: string }) {
   return (
-    <div className="text-xs text-muted-foreground italic border-l-2 border-muted-foreground/20 pl-2">
+    <div className="text-xs text-zinc-400 italic border-l-2 border-zinc-700 pl-2">
       {subtype ? <span className="uppercase tracking-wide mr-1">{subtype}</span> : null}
       {text}
     </div>
@@ -489,7 +489,7 @@ function ResultBlock({
     <div
       className={cn(
         'mt-3 pt-2 border-t text-xs flex items-center gap-3',
-        isError ? 'border-red-500/30 text-red-300' : 'border-border text-muted-foreground'
+        isError ? 'border-red-500/30 text-red-300' : 'border-zinc-800 text-zinc-400'
       )}
     >
       <span className={isError ? 'font-medium' : ''}>
@@ -540,9 +540,9 @@ function Collapsible({
         className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-left hover:bg-white/5 rounded-t"
       >
         {open ? (
-          <ChevronDown className="w-3 h-3 flex-none text-muted-foreground" />
+          <ChevronDown className="w-3 h-3 flex-none text-zinc-400" />
         ) : (
-          <ChevronRight className="w-3 h-3 flex-none text-muted-foreground" />
+          <ChevronRight className="w-3 h-3 flex-none text-zinc-400" />
         )}
         {icon}
         <span className="font-medium">{title}</span>
@@ -561,7 +561,7 @@ function PrettyJson({ value }: { value: unknown }) {
     }
   }, [value]);
   return (
-    <pre className="text-xs font-mono whitespace-pre-wrap text-foreground/70 bg-black/30 rounded p-2 overflow-x-auto">
+    <pre className="text-xs font-mono whitespace-pre-wrap text-zinc-200 bg-black/30 rounded p-2 overflow-x-auto">
       {text}
     </pre>
   );
@@ -607,7 +607,7 @@ function renderMarkdownish(text: string): React.ReactNode {
           className="text-xs font-mono whitespace-pre-wrap bg-black/40 rounded p-2 overflow-x-auto my-1"
         >
           {lang && (
-            <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">
+            <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
               {lang}
             </div>
           )}

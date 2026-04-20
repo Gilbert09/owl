@@ -182,11 +182,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     })),
 
   markInboxActioned: (id) =>
-    set((state) => ({
-      inboxItems: state.inboxItems.map((i) =>
-        i.id === id ? { ...i, status: 'actioned' as const } : i
-      ),
-    })),
+    set((state) => {
+      const existing = state.inboxItems.find((i) => i.id === id);
+      const wasUnread = existing?.status === 'unread';
+      return {
+        inboxItems: state.inboxItems.map((i) =>
+          i.id === id ? { ...i, status: 'actioned' as const } : i
+        ),
+        unreadCount: wasUnread
+          ? Math.max(0, state.unreadCount - 1)
+          : state.unreadCount,
+      };
+    }),
 
   toggleSidebar: () =>
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
