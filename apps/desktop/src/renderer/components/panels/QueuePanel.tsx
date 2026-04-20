@@ -336,6 +336,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
   const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask, deleteTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const task = tasks.find((t) => t.id === taskId);
   const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
 
@@ -418,8 +419,13 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   const handleDeleteTask = async () => {
     if (!window.confirm('Delete this failed task? This cannot be undone.')) return;
     setIsLoading(true);
+    setActionError(null);
     try {
       await deleteTask(taskId);
+    } catch (err) {
+      // Surface the backend error inline — "delete does nothing" was
+      // the previous UX because the finally block hid rejections.
+      setActionError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
       setIsLoading(false);
     }
@@ -575,6 +581,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                   <Trash2 className="w-4 h-4 mr-1" />
                   Delete
                 </Button>
+                {actionError && (
+                  <span className="text-xs text-destructive self-center ml-2">
+                    {actionError}
+                  </span>
+                )}
               </>
             )}
             {['pending', 'queued'].includes(task.status) && (

@@ -423,6 +423,7 @@ export type WSEventType =
   | 'task:output'
   | 'task:event'
   | 'task:update'
+  | 'task:deleted'
   | 'task:agent_status'
   | 'inbox:new'
   | 'inbox:update'
@@ -457,6 +458,10 @@ export interface TaskStatusEvent {
 export interface TaskUpdateEvent {
   taskId: string;
   updates: Partial<Task>;
+}
+
+export interface TaskDeletedEvent {
+  taskId: string;
 }
 
 export interface TaskOutputEvent {

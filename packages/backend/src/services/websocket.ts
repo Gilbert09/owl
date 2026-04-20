@@ -194,6 +194,14 @@ export function emitTaskUpdate(
   });
 }
 
+export function emitTaskDeleted(workspaceId: string, taskId: string): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:deleted',
+    payload: { taskId },
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function emitTaskOutput(workspaceId: string, taskId: string, output: string, append: boolean): void {
   broadcastToWorkspace(workspaceId, {
     type: 'task:output',

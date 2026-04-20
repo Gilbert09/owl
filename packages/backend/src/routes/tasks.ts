@@ -11,7 +11,7 @@ import {
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
-import { emitTaskStatus, emitTaskUpdate } from '../services/websocket.js';
+import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
   generateTaskMetadata,
   generateTaskTitle,
@@ -862,27 +862,39 @@ export function taskRoutes(): Router {
       return handleAccessError(err, res);
     }
     const db = getDbClient();
-    const rows = await db
-      .select()
-      .from(tasksTable)
-      .where(eq(tasksTable.id, req.params.id))
-      .limit(1);
-    if (rows[0]) {
-      const task = rowToTask(rows[0]);
-      if (task.status === 'in_progress') {
+    try {
+      const rows = await db
+        .select()
+        .from(tasksTable)
+        .where(eq(tasksTable.id, req.params.id))
+        .limit(1);
+      const task = rows[0] ? rowToTask(rows[0]) : null;
+      if (task && task.status === 'in_progress') {
         const activeAgent = agentService.getAgentByTaskId(task.id);
         if (activeAgent) agentService.stopAgent(activeAgent.id);
       }
-    }
 
-    const result = await db
-      .delete(tasksTable)
-      .where(eq(tasksTable.id, req.params.id))
-      .returning({ id: tasksTable.id });
-    if (result.length === 0) {
-      return res.status(404).json({ success: false, error: 'Task not found' });
+      const result = await db
+        .delete(tasksTable)
+        .where(eq(tasksTable.id, req.params.id))
+        .returning({ id: tasksTable.id });
+      if (result.length === 0) {
+        return res.status(404).json({ success: false, error: 'Task not found' });
+      }
+      // Broadcast so other connected clients (and as defense in depth,
+      // the originating client) drop the row from their local state.
+      if (task) {
+        emitTaskDeleted(task.workspaceId, task.id);
+      }
+      res.json({ success: true } as ApiResponse<void>);
+    } catch (err) {
+      // Surface DB errors (FK violations, RLS denials, etc.) — the old
+      // handler swallowed them as a generic 500 with no body, which made
+      // "delete silently fails" reports very hard to debug.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[tasks] delete failed for ${req.params.id}:`, err);
+      res.status(500).json({ success: false, error: `Delete failed: ${message}` });
     }
-    res.json({ success: true } as ApiResponse<void>);
   });
 
   return router;

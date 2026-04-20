@@ -76,6 +76,17 @@ export function useApiConnection() {
       })
     );
 
+    // Task deletions — single source of truth for dropping a task
+    // from the local store. `useTaskActions.deleteTask` also calls
+    // the store directly as an optimistic step, but this is the
+    // authoritative signal (handles multi-client + scheduler-side
+    // cleanups consistently).
+    unsubscribers.push(
+      wsClient.on<{ taskId: string }>('task:deleted', (payload) => {
+        useWorkspaceStore.getState().removeTask(payload.taskId);
+      })
+    );
+
     // Task status updates
     unsubscribers.push(
       wsClient.on<TaskStatusEvent>('task:status', (payload) => {
