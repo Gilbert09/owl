@@ -13,6 +13,14 @@ import path from 'path';
 export interface DaemonConfig {
   backendUrl: string;
   deviceToken?: string; // set after the first successful pairing
+  /**
+   * One-shot pairing token. Unlike the device token, this is cleared
+   * from the file as soon as the daemon successfully pairs (see
+   * `wsClient.handleHelloAck`). Seeded here by the desktop app's
+   * auto-pair flow so daemons installed as a user service can pick
+   * it up without needing to pass it as a CLI arg each boot.
+   */
+  pairingToken?: string;
 }
 
 const USER_CONFIG = path.join(os.homedir(), '.fastowl', 'daemon.json');
@@ -60,8 +68,11 @@ export interface ResolvedConfig {
  *   2. Env vars (FASTOWL_BACKEND_URL, FASTOWL_PAIRING_TOKEN)
  *   3. On-disk config file
  *
- * Pairing tokens are never persisted — they're one-shot. Device tokens
- * only come from the config file (the backend writes them after pairing).
+ * Pairing tokens ARE accepted from the file — the desktop app's
+ * auto-pair flow seeds them there for launchd/systemd-managed daemons.
+ * They're still one-shot at the protocol level: `handleHelloAck`
+ * clears the field from the file the moment pairing succeeds.
+ * Device tokens come from the config file only (backend writes them).
  */
 export function resolveConfig(argv: string[]): ResolvedConfig {
   const cli = parseCliArgs(argv);
@@ -75,7 +86,8 @@ export function resolveConfig(argv: string[]): ResolvedConfig {
     );
   }
 
-  const pairingToken = cli.pairingToken ?? process.env.FASTOWL_PAIRING_TOKEN;
+  const pairingToken =
+    cli.pairingToken ?? process.env.FASTOWL_PAIRING_TOKEN ?? file?.pairingToken;
   const deviceToken = file?.deviceToken;
 
   if (!pairingToken && !deviceToken) {

@@ -204,14 +204,22 @@ export class DaemonWsClient {
     console.log(`daemon: paired with environmentId=${ack.environmentId}`);
     // On first successful pairing, the backend returns a long-lived
     // device token. Persist it so subsequent boots skip the pairing step.
+    // Also clear any file-seeded pairing token (one-shot) now that it's
+    // served its purpose.
     if (ack.deviceToken && ack.deviceToken !== this.config.deviceToken) {
-      const existing = loadConfig();
+      const existing = loadConfig() ?? {};
       saveConfig({
         backendUrl: this.config.backendUrl,
         ...existing,
         deviceToken: ack.deviceToken,
+        pairingToken: undefined,
       });
       this.config = { ...this.config, deviceToken: ack.deviceToken, pairingToken: undefined };
+    } else if (loadConfig()?.pairingToken) {
+      // Reconnect with an already-valid device token but a stale
+      // pairing token hanging around in the file. Scrub it.
+      const existing = loadConfig() ?? { backendUrl: this.config.backendUrl };
+      saveConfig({ ...existing, pairingToken: undefined });
     }
   }
 
