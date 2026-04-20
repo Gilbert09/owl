@@ -426,7 +426,7 @@ function PermissionBlock({
             : `Approve ${toolName}?`}
         </span>
       </div>
-      <PrettyJson value={toolInput} />
+      <ToolInputPreview toolName={toolName} toolInput={toolInput} />
       {!resolved && interactive && (
         <div className="mt-2.5 flex flex-wrap gap-2">
           <Button
@@ -550,6 +550,186 @@ function Collapsible({
       {open && <div className="px-2.5 pb-2.5">{children}</div>}
     </div>
   );
+}
+
+/**
+ * Tool-aware preview for permission cards. Raw JSON is unreadable for
+ * common tools (Grep, Bash, Edit, ...) — instead surface the fields
+ * that matter for an approval decision. User can still drill into the
+ * full JSON via the "Show full input" toggle.
+ *
+ * Unknown tools fall back to the JSON dump so this is never worse
+ * than the previous default.
+ */
+function ToolInputPreview({
+  toolName,
+  toolInput,
+}: {
+  toolName: string;
+  toolInput: unknown;
+}) {
+  const [showJson, setShowJson] = useState(false);
+  const summary = renderToolInputSummary(toolName, toolInput);
+
+  return (
+    <div className="space-y-2">
+      {summary ?? <PrettyJson value={toolInput} />}
+      {summary && (
+        <button
+          type="button"
+          onClick={() => setShowJson((v) => !v)}
+          className="text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
+        >
+          {showJson ? 'Hide full input' : 'Show full input'}
+        </button>
+      )}
+      {summary && showJson && <PrettyJson value={toolInput} />}
+    </div>
+  );
+}
+
+function renderToolInputSummary(
+  toolName: string,
+  toolInput: unknown
+): React.ReactNode | null {
+  if (!toolInput || typeof toolInput !== 'object') return null;
+  const input = toolInput as Record<string, unknown>;
+
+  const field = (
+    label: string,
+    value: unknown,
+    opts: { mono?: boolean; block?: boolean } = {}
+  ) => {
+    if (value === undefined || value === null || value === '') return null;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    return (
+      <div
+        key={label}
+        className={cn(
+          'flex gap-2',
+          opts.block ? 'flex-col' : 'items-baseline'
+        )}
+      >
+        <span className="text-[11px] uppercase tracking-wide text-zinc-500 shrink-0">
+          {label}
+        </span>
+        <span
+          className={cn(
+            'text-zinc-100 break-all',
+            opts.mono && 'font-mono text-xs'
+          )}
+        >
+          {text}
+        </span>
+      </div>
+    );
+  };
+
+  const wrap = (children: React.ReactNode) => (
+    <div className="bg-black/30 rounded p-2 space-y-1">{children}</div>
+  );
+
+  switch (toolName) {
+    case 'Bash':
+      return wrap(
+        <>
+          {field('command', input.command, { mono: true, block: true })}
+          {field('description', input.description)}
+          {typeof input.timeout === 'number' && field('timeout', `${input.timeout}ms`)}
+        </>
+      );
+    case 'Read':
+      return wrap(
+        <>
+          {field('file', input.file_path, { mono: true })}
+          {input.offset !== undefined && field('offset', input.offset)}
+          {input.limit !== undefined && field('limit', input.limit)}
+        </>
+      );
+    case 'Edit':
+    case 'Write':
+      return wrap(
+        <>
+          {field('file', input.file_path, { mono: true })}
+          {typeof input.old_string === 'string' && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-zinc-500 mb-1">
+                replace
+              </div>
+              <pre className="font-mono text-xs bg-red-500/10 text-red-200 rounded px-2 py-1 whitespace-pre-wrap break-all">
+                {truncate(input.old_string as string, 400)}
+              </pre>
+            </div>
+          )}
+          {typeof input.new_string === 'string' && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-zinc-500 mb-1">
+                with
+              </div>
+              <pre className="font-mono text-xs bg-green-500/10 text-green-200 rounded px-2 py-1 whitespace-pre-wrap break-all">
+                {truncate(input.new_string as string, 400)}
+              </pre>
+            </div>
+          )}
+          {toolName === 'Write' && typeof input.content === 'string' && (
+            <pre className="font-mono text-xs bg-green-500/10 text-green-200 rounded px-2 py-1 whitespace-pre-wrap break-all">
+              {truncate(input.content as string, 400)}
+            </pre>
+          )}
+        </>
+      );
+    case 'Grep':
+      return wrap(
+        <>
+          {field('pattern', input.pattern, { mono: true })}
+          {field('path', input.path, { mono: true })}
+          {field('glob', input.glob, { mono: true })}
+          {field('type', input.type)}
+          {field('output', input.output_mode)}
+        </>
+      );
+    case 'Glob':
+      return wrap(
+        <>
+          {field('pattern', input.pattern, { mono: true })}
+          {field('path', input.path, { mono: true })}
+        </>
+      );
+    case 'WebFetch':
+    case 'WebSearch':
+      return wrap(
+        <>
+          {field('url', input.url, { mono: true })}
+          {field('query', input.query)}
+          {field('prompt', input.prompt)}
+        </>
+      );
+    case 'Task':
+    case 'Agent':
+      return wrap(
+        <>
+          {field('description', input.description)}
+          {field('subagent', input.subagent_type)}
+          {typeof input.prompt === 'string' && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wide text-zinc-500 mb-1">
+                prompt
+              </div>
+              <pre className="font-mono text-xs whitespace-pre-wrap break-all text-zinc-200">
+                {truncate(input.prompt as string, 600)}
+              </pre>
+            </div>
+          )}
+        </>
+      );
+    default:
+      return null;
+  }
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + `\n… [${text.length - max} more chars]`;
 }
 
 function PrettyJson({ value }: { value: unknown }) {
