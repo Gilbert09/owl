@@ -63,9 +63,16 @@ export function AgentConversation({
   const blocks = useMemo(() => buildBlocks(transcript ?? []), [transcript]);
 
   if (blocks.length === 0) {
+    // Task may have events but none render as blocks yet (the very
+    // first few events are `system/init`, `rate_limit_event`,
+    // `message_start`). Give the user a less-ominous message than
+    // "waiting to start" if we've seen any activity at all.
+    const hasAnyEvents = (transcript?.length ?? 0) > 0;
     return (
       <div className="h-full flex items-center justify-center text-xs text-zinc-500 bg-[#1a1a1a]">
-        Waiting for the agent to start…
+        {hasAnyEvents
+          ? 'Claude is thinking…'
+          : 'Waiting for the agent to start…'}
       </div>
     );
   }
@@ -124,6 +131,17 @@ type Block =
 function buildBlocks(events: AgentEvent[]): Block[] {
   const blocks: Block[] = [];
   const permissionByRequestId = new Map<string, number>(); // requestId → blocks index
+  // Live-stream accumulator. The CLI emits `stream_event`s with
+  // incremental `content_block_delta`s as Claude writes; the full
+  // `assistant` event only lands when the turn is DONE. Until Slice 4c
+  // polish we were skipping stream_events entirely, so the terminal
+  // stayed blank for several seconds per turn. Now: accumulate the
+  // text deltas into a tail block that the user sees grow in real
+  // time. When the canonical `assistant` event arrives for the same
+  // message id, we reset the accumulator and let the assistant path
+  // below render the final content as normal blocks.
+  let streamingText = '';
+  let streamingMsgId: string | undefined;
 
   for (const event of events) {
     const seqKey = String(event.seq);
@@ -171,6 +189,15 @@ function buildBlocks(events: AgentEvent[]): Block[] {
     }
 
     if (event.type === 'assistant') {
+      // Finalise any in-flight streaming text for this message — the
+      // assistant event carries the canonical content, so we should
+      // stop appending deltas to the tail block (the assistant path
+      // below pushes proper text/tool_use/thinking blocks instead).
+      const msgId = (event.message as { id?: string } | undefined)?.id;
+      if (msgId && msgId === streamingMsgId) {
+        streamingText = '';
+        streamingMsgId = undefined;
+      }
       const content = (event.message as { content?: unknown })?.content;
       if (!Array.isArray(content)) continue;
       for (let i = 0; i < content.length; i++) {
@@ -253,9 +280,46 @@ function buildBlocks(events: AgentEvent[]): Block[] {
       continue;
     }
 
-    // `stream_event`, `rate_limit_event`, and anything else the CLI
-    // emits are suppressed — they flow through for debugging but the
-    // conversation view doesn't need them.
+    if (event.type === 'stream_event') {
+      const inner = event.event as
+        | {
+            type?: string;
+            message?: { id?: string };
+            delta?: { type?: string; text?: string };
+          }
+        | undefined;
+      if (!inner) continue;
+      if (inner.type === 'message_start' && inner.message?.id) {
+        // New turn starting — reset the accumulator. The message id
+        // lets us match this streaming session to its forthcoming
+        // `assistant` event.
+        streamingMsgId = inner.message.id;
+        streamingText = '';
+        continue;
+      }
+      if (
+        inner.type === 'content_block_delta' &&
+        inner.delta?.type === 'text_delta' &&
+        typeof inner.delta.text === 'string'
+      ) {
+        streamingText += inner.delta.text;
+        continue;
+      }
+      continue;
+    }
+
+    // `rate_limit_event` and anything else unrecognised: suppressed.
+  }
+
+  // If the latest turn is still in-flight (assistant event hasn't
+  // landed yet), show the accumulated streaming text as a tail block
+  // so the user sees the response building in real time.
+  if (streamingText) {
+    blocks.push({
+      kind: 'text',
+      key: `stream-${streamingMsgId ?? 'live'}`,
+      text: streamingText,
+    });
   }
 
   return blocks;

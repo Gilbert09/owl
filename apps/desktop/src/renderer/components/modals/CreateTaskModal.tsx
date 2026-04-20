@@ -72,7 +72,8 @@ const typeOptions: {
 ];
 
 export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
-  const { environments, currentWorkspaceId } = useWorkspaceStore();
+  const { environments, currentWorkspaceId, selectTask, setActivePanel } =
+    useWorkspaceStore();
   const { createTask } = useTaskActions();
 
   const [title, setTitle] = useState('');
@@ -123,7 +124,7 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     setError(null);
 
     try {
-      await createTask({
+      const created = await createTask({
         workspaceId: currentWorkspaceId,
         title: effectiveTitle,
         description: effectiveDescription,
@@ -133,6 +134,13 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
         repositoryId: isAgent && repositoryId ? repositoryId : undefined,
         assignedEnvironmentId: isAgent && environmentId ? environmentId : undefined,
       });
+      // Jump straight to the new task's detail pane — user wants to
+      // watch it run. Also force the Tasks panel visible in case the
+      // user was on Inbox / GitHub when they hit Add.
+      if (created?.id) {
+        selectTask(created.id);
+        setActivePanel('queue');
+      }
       onOpenChange(false);
       setTitle('');
       setDescription('');
@@ -147,7 +155,7 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     } finally {
       setIsLoading(false);
     }
-  }, [title, description, type, priority, prompt, repositoryId, environmentId, currentWorkspaceId, createTask, onOpenChange, isAgent]);
+  }, [title, description, type, priority, prompt, repositoryId, environmentId, currentWorkspaceId, createTask, onOpenChange, isAgent, selectTask, setActivePanel]);
 
   const handleClose = useCallback(() => {
     if (!isLoading) {
