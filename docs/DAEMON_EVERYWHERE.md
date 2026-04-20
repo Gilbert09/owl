@@ -117,7 +117,7 @@ Each slice is independently landable and pushable to `main`. Mark `[x]` when mer
 - [x] `CLAUDE.md` Core Concepts env section rewritten; "Daemon" bullet added.
 - [x] `daemonRegistry.test.ts` fixtures updated with `liveSessionIds` to match the Slice 6 interface.
 - [ ] **Deferred** — Integration test for the Slice 6 reconcile sweep. First draft (`agentReconcile.test.ts`) hung under vitest: the `resumeRun` stub returned a forever-pending `completion` promise that deadlocked teardown. The logic is narrow + manually smoke-tested (pkill -9 → restart leaves the task in_progress). Needs a stub with a resolvable promise and probably a refactor so `cleanupStaleAgents` is callable without booting the full service graph.
-- [ ] **Deferred** — Ring buffer for session output during disconnect. Output emitted while the WS is dead is still dropped; only new output after reconnect flows through. Daemon side: bounded ring buffer per session; replay on reconnect.
+- [x] Ring buffer for session output during disconnect — daemon's `wsClient` queues event messages when `ws.readyState !== OPEN` (4MB cap, drop-oldest on overflow). Flushed in order on `hello_ack`, before any new traffic goes out. Requests/responses are not buffered — their callers own timeouts.
 - [ ] **Deferred** — Unit tests for `localDaemon.ts` (launchctl/systemctl mocks). The module is mostly shell-outs, so an integration test via a packaged build is higher-value than mocked unit tests.
 
 ## Open questions (resolved)

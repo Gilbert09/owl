@@ -84,6 +84,7 @@ interface WorkspaceState {
   setTasks: (tasks: Task[]) => void;
   updateTask: (id: string, updates: Partial<Task>) => void;
   addTask: (task: Task) => void;
+  removeTask: (id: string) => void;
 
   setRepositories: (repos: WatchedRepo[]) => void;
 
@@ -159,6 +160,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
 
   addTask: (task) =>
     set((state) => ({ tasks: [...state.tasks, task] })),
+
+  removeTask: (id) =>
+    set((state) => ({
+      tasks: state.tasks.filter((t) => t.id !== id),
+      selectedTaskId: state.selectedTaskId === id ? null : state.selectedTaskId,
+    })),
 
   setRepositories: (repos) => set({ repositories: repos }),
 

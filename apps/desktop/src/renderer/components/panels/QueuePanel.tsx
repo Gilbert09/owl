@@ -15,6 +15,7 @@ import {
   Sparkles,
   Eye,
   Hand,
+  Trash2,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -333,7 +334,7 @@ interface TaskDetailProps {
 
 function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
-  const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask } = useTaskActions();
+  const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask, deleteTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
   const task = tasks.find((t) => t.id === taskId);
   const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
@@ -409,6 +410,16 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     setIsLoading(true);
     try {
       await rejectTask(taskId);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteTask = async () => {
+    if (!window.confirm('Delete this failed task? This cannot be undone.')) return;
+    setIsLoading(true);
+    try {
+      await deleteTask(taskId);
     } finally {
       setIsLoading(false);
     }
@@ -555,10 +566,16 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               </Button>
             )}
             {task.status === 'failed' && (
-              <Button size="sm" onClick={handleRetryTask} disabled={isLoading}>
-                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1" />}
-                Retry
-              </Button>
+              <>
+                <Button size="sm" onClick={handleRetryTask} disabled={isLoading}>
+                  {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1" />}
+                  Retry
+                </Button>
+                <Button size="sm" variant="destructive" onClick={handleDeleteTask} disabled={isLoading}>
+                  <Trash2 className="w-4 h-4 mr-1" />
+                  Delete
+                </Button>
+              </>
             )}
             {['pending', 'queued'].includes(task.status) && (
               <Button size="sm" variant="destructive" onClick={handleCancelTask} disabled={isLoading}>

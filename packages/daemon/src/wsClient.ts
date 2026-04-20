@@ -207,6 +207,11 @@ export class DaemonWsClient {
 
   private handleHelloAck(ack: DaemonHelloAck): void {
     console.log(`daemon: paired with environmentId=${ack.environmentId}`);
+    // Backend is authenticated and ready — replay anything that was
+    // emitted while the WS was down. Fire-and-forget: if the
+    // connection drops again mid-flush the remainder stays queued
+    // for the next reconnect.
+    this.flushOutbound();
     // On first successful pairing, the backend returns a long-lived
     // device token. Persist it so subsequent boots skip the pairing step.
     // Also clear any file-seeded pairing token (one-shot) now that it's
@@ -313,9 +318,64 @@ export class DaemonWsClient {
     this.send({ kind: 'event', payload });
   }
 
+  /**
+   * Session output + close events that happened while the WS was
+   * down. We re-send them as soon as the next connection is up so
+   * the backend (and desktop, via transcript + live stream) doesn't
+   * see a hole in the conversation after a backend restart /
+   * deploy / network blip.
+   *
+   * Bounded by byte size so pathological runs (multi-GB test output
+   * with a dead backend) don't exhaust daemon memory. Drop-oldest
+   * policy on overflow — newer output is usually more valuable than
+   * the very start of a 4MB-ago stream, and the backend still has
+   * partial context from whatever arrived before the drop.
+   */
+  private outboundQueue: string[] = [];
+  private outboundQueueBytes = 0;
+  private readonly OUTBOUND_QUEUE_MAX_BYTES = 4 * 1024 * 1024;
+
   private send(msg: DaemonMessage): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-    this.ws.send(encodeDaemonMessage(msg));
+    const encoded = encodeDaemonMessage(msg);
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(encoded);
+      return;
+    }
+    // Only buffer events — proxy requests/responses are one-off and
+    // their callers surface their own timeout errors. Buffering them
+    // risks the pending-request map getting out of sync with whatever
+    // the backend actually processed on reconnect.
+    if (msg.kind !== 'event') return;
+    this.enqueueOutbound(encoded);
+  }
+
+  private enqueueOutbound(encoded: string): void {
+    const size = Buffer.byteLength(encoded);
+    while (
+      this.outboundQueue.length > 0 &&
+      this.outboundQueueBytes + size > this.OUTBOUND_QUEUE_MAX_BYTES
+    ) {
+      const dropped = this.outboundQueue.shift();
+      if (dropped !== undefined) this.outboundQueueBytes -= Buffer.byteLength(dropped);
+    }
+    this.outboundQueue.push(encoded);
+    this.outboundQueueBytes += size;
+  }
+
+  private flushOutbound(): void {
+    if (this.outboundQueue.length === 0) return;
+    const count = this.outboundQueue.length;
+    const bytes = this.outboundQueueBytes;
+    while (
+      this.outboundQueue.length > 0 &&
+      this.ws?.readyState === WebSocket.OPEN
+    ) {
+      const next = this.outboundQueue.shift();
+      if (next === undefined) break;
+      this.outboundQueueBytes -= Buffer.byteLength(next);
+      this.ws.send(next);
+    }
+    console.log(`daemon: flushed ${count} buffered events (${bytes} bytes)`);
   }
 }
 

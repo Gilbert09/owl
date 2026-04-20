@@ -313,7 +313,7 @@ export function useAgentActions() {
  * Hook for task actions
  */
 export function useTaskActions() {
-  const { addTask, updateTask } = useWorkspaceStore();
+  const { addTask, updateTask, removeTask } = useWorkspaceStore();
 
   const createTask = useCallback(
     async (data: Parameters<typeof api.tasks.create>[0]) => {
@@ -405,6 +405,14 @@ export function useTaskActions() {
     [updateTask]
   );
 
+  const deleteTask = useCallback(
+    async (taskId: string) => {
+      await api.tasks.delete(taskId);
+      removeTask(taskId);
+    },
+    [removeTask]
+  );
+
   return {
     createTask,
     updateTaskStatus,
@@ -417,6 +425,7 @@ export function useTaskActions() {
     readyForReview,
     approveTask,
     rejectTask,
+    deleteTask,
   };
 }
 
