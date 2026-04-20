@@ -706,7 +706,9 @@ export function taskRoutes(): Router {
     }
   });
 
-  // Get terminal output for a task
+  // Get terminal output for a task. Returns the PTY transcript (bytes)
+  // and the structured transcript (JSONL events) — caller decides which
+  // to render based on `metadata.runtime`.
   router.get('/:id/terminal', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -718,6 +720,8 @@ export function taskRoutes(): Router {
       .select({
         status: tasksTable.status,
         terminalOutput: tasksTable.terminalOutput,
+        transcript: tasksTable.transcript,
+        metadata: tasksTable.metadata,
       })
       .from(tasksTable)
       .where(eq(tasksTable.id, req.params.id))
@@ -734,8 +738,18 @@ export function taskRoutes(): Router {
 
     res.json({
       success: true,
-      data: { terminalOutput },
-    } as ApiResponse<{ terminalOutput: string }>);
+      data: {
+        terminalOutput,
+        transcript: (rows[0].transcript as Task['transcript']) ?? undefined,
+        runtime:
+          (rows[0].metadata as { runtime?: string } | null | undefined)?.runtime ??
+          'pty',
+      },
+    } as ApiResponse<{
+      terminalOutput: string;
+      transcript?: Task['transcript'];
+      runtime: string;
+    }>);
   });
 
   // Delete task
@@ -817,5 +831,8 @@ function rowToTask(
     updatedAt: row.updatedAt.toISOString(),
     completedAt: row.completedAt ? row.completedAt.toISOString() : undefined,
     terminalOutput: opts.includeTerminalOutput ? row.terminalOutput || undefined : undefined,
+    transcript: opts.includeTerminalOutput
+      ? ((row.transcript as Task['transcript']) ?? undefined)
+      : undefined,
   };
 }

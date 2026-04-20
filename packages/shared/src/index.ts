@@ -92,7 +92,21 @@ export interface Environment {
    * `services/agent.ts` for how this gates the --permission-mode flag.
    */
   autonomousBypassPermissions: boolean;
+  /**
+   * How tasks on this env are driven + rendered:
+   *  - `pty`         (default) spawns the `claude` CLI in an interactive
+   *                  PTY. Raw bytes flow through XTerm. Works for every
+   *                  env type.
+   *  - `structured`  spawns `claude -p --output-format stream-json` and
+   *                  consumes JSONL events. Desktop renders a structured
+   *                  conversation (markdown text, collapsible tool calls,
+   *                  per-tool permission prompts). Slice 1 supports
+   *                  `local` envs only.
+   */
+  renderer: EnvironmentRenderer;
 }
+
+export type EnvironmentRenderer = 'pty' | 'structured';
 
 export type EnvironmentConfig =
   | LocalEnvironmentConfig
@@ -210,6 +224,13 @@ export interface Task {
   agentStatus?: AgentStatus;
   agentAttention?: AgentAttention;
   terminalOutput?: string;
+  /**
+   * Structured JSONL event log for tasks driven by the `structured`
+   * renderer. One entry per event emitted by the CLI's stream-json
+   * output (assistant/tool_use/tool_result/result/etc). Null for
+   * PTY-rendered tasks.
+   */
+  transcript?: AgentEvent[];
 }
 
 export interface TaskResult {
@@ -345,15 +366,59 @@ export interface InboxAction {
 }
 
 // ============================================================================
+// Structured agent events (stream-json renderer)
+// ============================================================================
+
+/**
+ * A single event from the `claude -p --output-format stream-json --verbose`
+ * pipeline. We store these verbatim — shape matches the CLI's output —
+ * plus a monotonically-increasing `seq` so reconnecting clients can ask
+ * for "everything after N".
+ *
+ * Deliberately permissive typing: the CLI's stream is still evolving, and
+ * we don't want a schema mismatch to drop events we could otherwise
+ * render. Renderer should switch on `type` + `subtype` and ignore things
+ * it doesn't recognize.
+ */
+export interface AgentEvent {
+  /** Monotonic per-task sequence number, assigned backend-side. */
+  seq: number;
+  /** The CLI event type: `system` | `assistant` | `user` | `stream_event` | `result` | `rate_limit_event` | ... */
+  type: string;
+  /** The CLI event subtype (e.g. `init`, `status`, `success`). Not all events have one. */
+  subtype?: string;
+  /** Session id the CLI assigned to this run. Lets us `--resume` later. */
+  session_id?: string;
+  /** For assistant/user events — the message content blocks. */
+  message?: {
+    role?: string;
+    content?: unknown;
+    [k: string]: unknown;
+  };
+  /** For `stream_event` — the partial API delta. */
+  event?: unknown;
+  /** For `result` — final summary. */
+  result?: string;
+  total_cost_usd?: number;
+  is_error?: boolean;
+  permission_denials?: Array<{ tool_name: string; tool_use_id?: string; tool_input?: unknown }>;
+  usage?: unknown;
+  /** Anything else the CLI emits. */
+  [k: string]: unknown;
+}
+
+// ============================================================================
 // WebSocket Events
 // ============================================================================
 
 export type WSEventType =
   | 'agent:status'
   | 'agent:output'
+  | 'agent:event'
   | 'agent:attention'
   | 'task:status'
   | 'task:output'
+  | 'task:event'
   | 'task:agent_status'
   | 'inbox:new'
   | 'inbox:update'
@@ -406,6 +471,17 @@ export interface EnvironmentStatusEvent {
   error?: string;
 }
 
+export interface AgentEventBroadcast {
+  agentId: string;
+  taskId?: string;
+  event: AgentEvent;
+}
+
+export interface TaskEventBroadcast {
+  taskId: string;
+  event: AgentEvent;
+}
+
 // ============================================================================
 // API Types
 // ============================================================================
@@ -440,6 +516,7 @@ export interface CreateEnvironmentRequest {
   name: string;
   type: EnvironmentType;
   config: Omit<EnvironmentConfig, 'type'> & { type: EnvironmentType };
+  renderer?: EnvironmentRenderer;
 }
 
 export interface TestEnvironmentRequest {

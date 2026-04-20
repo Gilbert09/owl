@@ -160,7 +160,11 @@ export const tasks = {
   approve: (id: string) => request<Task>('POST', `/tasks/${id}/approve`),
   reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
   getTerminal: (id: string) =>
-    request<{ terminalOutput: string }>('GET', `/tasks/${id}/terminal`),
+    request<{
+      terminalOutput: string;
+      transcript?: Task['transcript'];
+      runtime?: string;
+    }>('GET', `/tasks/${id}/terminal`),
   getDiff: (id: string) =>
     request<{ diff: string }>('GET', `/tasks/${id}/diff`),
   // Generate task metadata from prompt using AI

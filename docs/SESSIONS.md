@@ -2,6 +2,48 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 18 (structured-renderer Slice 1 — stream-json plumbing)
+Start of the move from raw-PTY CLI output to a structured conversation renderer. The original plan was to swap the `claude` CLI for `@anthropic-ai/claude-agent-sdk`, but research + a spike showed the SDK is API-key-only by policy — Claude Pro/Max subscription auth is explicitly unsupported, so migrating would force every existing user onto metered API billing. Path C instead: keep spawning the `claude` binary (so OAuth subscription auth continues to work) but switch to `--output-format stream-json --verbose --include-partial-messages`, which emits the same structured events the SDK does. All three planned phases (A autonomous-strict, B autonomous-bypass, C interactive) land on this shared foundation.
+
+- **Spike findings** (documented before coding):
+  - `claude -p --output-format stream-json --verbose` emits JSONL for `system` / `assistant` / `user` / `stream_event` / `result` — content blocks include `text`, `thinking`, `tool_use`, `tool_result`. Init event shows `apiKeySource: "none"` confirming OAuth creds from `~/.claude/` are honored.
+  - `--include-partial-messages` adds `content_block_delta` events (chunky but usable text streaming).
+  - `PreToolUse` hooks configured via `--settings '<inline-json>'` synchronously gate tool use — our eventual permission-callback path for Slice 2.
+  - Inline `--settings` JSON works, so no temp-file-per-spawn plumbing needed.
+
+- **Shared types** (`packages/shared/src/index.ts`): `Environment.renderer: 'pty' | 'structured'` + new `EnvironmentRenderer`. `Task.transcript?: AgentEvent[]`. `AgentEvent` defined permissively (mirrors the CLI's own schema — `type`, optional `subtype`, `message`, `event`, `result`, etc., plus our own `seq: number` for ordering). Two new WS event types: `agent:event` and `task:event` with `AgentEventBroadcast` / `TaskEventBroadcast` payloads.
+
+- **DB migration** (`0006_structured_renderer.sql`): `environments.renderer` (text, default `'pty'`), `tasks.transcript` (jsonb nullable). Fresh installs default to `'pty'` — no behavioural change for existing envs/tasks.
+
+- **New service** (`packages/backend/src/services/agentStructured.ts`, ~230 LOC):
+  - `AgentStructuredService.start(opts)` non-PTY-spawns `claude` with the stream-json argv, writes the prompt on stdin, and parses stdout line by line via `JsonlLineParser`.
+  - Each parsed event gets a monotonic `seq` stamp, appended to an in-memory transcript, broadcast as `agent:event` + `task:event`, and persisted to `tasks.transcript` every 25 events (and unconditionally on `type === 'result'`).
+  - Transcripts are capped at `TRANSCRIPT_MAX_EVENTS = 2000`: above the cap, the middle drops out with a `{type: 'system', subtype: 'truncated'}` marker. Prevents one unruly autonomous task from nuking the jsonb column.
+  - `stop()` kills the child with SIGTERM; the `completion` promise resolves with whatever exit code the child produces.
+  - Stderr from the child is surfaced as synthetic `system/stderr` events so the UI can render CLI misbehaviour.
+
+- **Dispatcher** (`packages/backend/src/services/agent.ts`): `startAgent` checks `env.renderer === 'structured' && env.type === 'local' && autonomous && prompt` — if true, calls the new `startStructuredAgent` path; otherwise the existing PTY path. The structured path inserts the same `agents` / `tasks` rows (so inbox, task list, stop endpoint all keep working uniformly), writes `task.metadata.runtime = 'structured'` so the UI can pick the right renderer, and maps exit code onto the existing `awaiting_review` / `failed` rules via a new `handleStructuredExit`. `stopAgent` routes to `agentStructuredService.stop()` for structured sessions and the existing PTY kill for everyone else.
+
+- **Routes** (`packages/backend/src/routes/environments.ts`): `POST /environments` accepts optional `renderer` on create (defaults to `'pty'`, silently falls back to `'pty'` for non-local envs in Slice 1). `PATCH /environments/:id` honors `renderer` updates with the same guard. Both echo `renderer` in responses. `GET /tasks/:id/terminal` now returns `{ terminalOutput, transcript, runtime }` so callers can pick the right renderer.
+
+- **WS helpers** (`packages/backend/src/services/websocket.ts`): `emitAgentEvent` + `emitTaskEvent` broadcast structured events to workspace subscribers.
+
+- **Desktop**:
+  - New `apps/desktop/src/renderer/components/terminal/StructuredTranscript.tsx` (interim Slice-1 renderer): one line per event, colour-coded by type, with a one-line summary (text snippet, `→ tool(args)`, `← ok/err`, cost for `result`). Replaced by Slice 2's `AgentConversation.tsx`.
+  - `TaskTerminal.tsx` branches on `task.metadata.runtime === 'structured'` — renders `StructuredTranscript` instead of `XTerm`.
+  - `TerminalHistory.tsx` rewritten to fetch `{ terminalOutput, transcript, runtime }` and pick the renderer per-task.
+  - `useApi.ts` subscribes to `task:event`, dedups by `seq`, maintains a sorted transcript on the task store entry.
+
+- **Tests**: 12 new unit tests in `agentStructured.test.ts` covering the JSONL parser (partial-line buffering, multi-chunk assembly, blank-line handling, malformed-line tolerance) + `buildClaudeArgs` (bypass mode flag, stream-json defaults, session-persistence disabled). Full suite: **101 tests passing** in ~27s. The end-to-end spawn path is easiest to validate by hand with a running backend — no fake-CLI fixture yet.
+
+- **Deliberate scope boundaries for Slice 1**:
+  - Only wired for `autonomous && prompt` tasks on `local` envs. Interactive user-initiated tasks + SSH/daemon envs stay on the existing PTY path until Slice 2/3 and a daemon-side follow-up.
+  - Bypass-permissions only. Per-tool Approve/Deny UI comes in Slice 2 via a `PreToolUse` hook invoking an in-process FastOwl endpoint.
+  - Interim renderer is deliberately ugly — validates plumbing; Slice 2 builds the markdown + collapsible-tool-call conversation UI.
+  - No back-migration of historical `terminal_output` — legacy PTY tasks keep rendering via XTerm forever; the runtime field is sticky per task.
+
+- **Files**: `packages/shared/src/index.ts`, `packages/backend/src/db/schema.ts`, `packages/backend/src/db/migrations/0006_structured_renderer.sql` (new), `packages/backend/src/db/migrations/meta/0006_snapshot.json` (new, regenerated journal), `packages/backend/src/services/agentStructured.ts` (new), `packages/backend/src/services/agent.ts`, `packages/backend/src/services/environment.ts`, `packages/backend/src/services/websocket.ts`, `packages/backend/src/routes/environments.ts`, `packages/backend/src/routes/tasks.ts`, `packages/backend/src/__tests__/agentStructured.test.ts` (new), `apps/desktop/src/renderer/components/terminal/StructuredTranscript.tsx` (new), `apps/desktop/src/renderer/components/panels/TaskTerminal.tsx`, `apps/desktop/src/renderer/components/panels/TerminalHistory.tsx`, `apps/desktop/src/renderer/hooks/useApi.ts`, `apps/desktop/src/renderer/lib/api.ts`.
+
 ## Session 17 (failure-cascade hardening — scheduler backoff + stuck-task recovery)
 Pass over the Continuous Build scheduler + task queue to close the "runs unattended overnight" part of the DoD. Three cascades fixed: deterministic-failure infinite loop, ghost tasks that never recover from a silent agent death, and the markdown-sync-clobbers-running-task case.
 

@@ -43,6 +43,13 @@
       "when": 1776635612002,
       "tag": "0005_env_bypass_permissions",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1776677293276,
+      "tag": "0006_structured_renderer",
+      "breakpoints": true
     }
   ]
 }

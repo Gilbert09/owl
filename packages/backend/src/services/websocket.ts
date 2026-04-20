@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { eq } from 'drizzle-orm';
-import type { TaskStatus, WSEvent } from '@fastowl/shared';
+import type { AgentEvent, TaskStatus, WSEvent } from '@fastowl/shared';
 import { domainEvents } from './events.js';
 import { verifyTokenAndGetUser, type AuthUser } from '../middleware/auth.js';
 import { getDbClient } from '../db/client.js';
@@ -186,6 +186,31 @@ export function emitTaskAgentStatus(workspaceId: string, taskId: string, status:
   broadcastToWorkspace(workspaceId, {
     type: 'task:agent_status',
     payload: { taskId, status, attention },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitAgentEvent(
+  workspaceId: string,
+  agentId: string,
+  taskId: string | undefined,
+  event: AgentEvent
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'agent:event',
+    payload: { agentId, taskId, event },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitTaskEvent(
+  workspaceId: string,
+  taskId: string,
+  event: AgentEvent
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:event',
+    payload: { taskId, event },
     timestamp: new Date().toISOString(),
   });
 }

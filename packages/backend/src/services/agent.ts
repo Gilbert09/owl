@@ -10,6 +10,7 @@ import type {
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { sshService } from './ssh.js';
+import { agentStructuredService } from './agentStructured.js';
 import {
   emitAgentStatus,
   emitAgentOutput,
@@ -222,10 +223,33 @@ class AgentService extends EventEmitter {
     const now = new Date();
 
     const env = await environmentService.getEnvironment(environmentId);
+    const autonomous = taskId ? await this.isAutonomousTask(taskId) : false;
+    const cwd = workingDirectory || (env?.config.type === 'ssh'
+      ? (env.config as { workingDirectory?: string }).workingDirectory
+      : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
+
+    // Structured renderer path: non-PTY spawn of `claude -p
+    // --output-format stream-json`. Slice 1 is autonomous-only (bypass
+    // permissions) — interactive + per-tool approvals come in Slice 2/3.
+    const useStructured = env?.renderer === 'structured' && env.type === 'local' && autonomous && !!prompt;
+    if (useStructured) {
+      await this.startStructuredAgent({
+        agentId,
+        sessionId,
+        environmentId,
+        workspaceId,
+        taskId,
+        prompt: prompt!,
+        cwd,
+        now,
+      });
+      const agent = await this.getAgent(agentId);
+      if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
+      return agent;
+    }
+
     const includeApiUrl = env?.type === 'local';
     const envPrefix = buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl });
-
-    const autonomous = taskId ? await this.isAutonomousTask(taskId) : false;
 
     let claudeCommand: string;
     if (autonomous && prompt) {
@@ -254,10 +278,6 @@ class AgentService extends EventEmitter {
     } else {
       claudeCommand = `${envPrefix}claude`;
     }
-
-    const cwd = workingDirectory || (env?.config.type === 'ssh'
-      ? (env.config as { workingDirectory?: string }).workingDirectory
-      : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
 
     await environmentService.spawnInteractive(environmentId, sessionId, claudeCommand, {
       cwd,
@@ -308,6 +328,139 @@ class AgentService extends EventEmitter {
     return agent;
   }
 
+  /**
+   * Kick off a structured-renderer agent. Shares agent/task rows with the
+   * PTY path (so the rest of the app — inbox, task list, etc. — doesn't
+   * care which path drove the run), but uses `agentStructuredService`
+   * for I/O and completion.
+   */
+  private async startStructuredAgent(opts: {
+    agentId: string;
+    sessionId: string;
+    environmentId: string;
+    workspaceId: string;
+    taskId?: string;
+    prompt: string;
+    cwd?: string;
+    now: Date;
+  }): Promise<void> {
+    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now } = opts;
+
+    // Same FASTOWL_* context the CLI path uses, just passed through the
+    // child_process env rather than an inline shell prefix — no quoting
+    // concerns.
+    const port = process.env.PORT || '4747';
+    const envVars: Record<string, string> = {
+      FASTOWL_API_URL: process.env.FASTOWL_API_URL || `http://localhost:${port}`,
+      FASTOWL_WORKSPACE_ID: workspaceId,
+    };
+    if (taskId) envVars.FASTOWL_TASK_ID = taskId;
+
+    // Track as an active agent so the rest of the status plumbing (task
+    // GET, agent GET, stop endpoint) works uniformly. `outputBuffer` is
+    // unused for this path — transcript lives on `tasks.transcript`.
+    const activeAgent: ActiveAgent = {
+      id: agentId,
+      environmentId,
+      workspaceId,
+      sessionId,
+      status: 'working',
+      attention: 'none',
+      outputBuffer: '',
+      lastActivityTime: now,
+      currentTaskId: taskId,
+    };
+    this.activeAgents.set(agentId, activeAgent);
+
+    await this.db.insert(agentsTable).values({
+      id: agentId,
+      environmentId,
+      workspaceId,
+      status: 'working',
+      attention: 'none',
+      currentTaskId: taskId ?? null,
+      terminalOutput: '',
+      lastActivity: now,
+      createdAt: now,
+    });
+
+    if (taskId) {
+      await this.db
+        .update(tasksTable)
+        .set({
+          assignedAgentId: agentId,
+          status: 'in_progress',
+          updatedAt: now,
+          // Record which runtime drove this task so the UI can pick the
+          // right renderer and reads from the right DB column.
+          metadata: sql`
+            COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
+          `,
+          transcript: [] as unknown as object,
+        })
+        .where(eq(tasksTable.id, taskId));
+    }
+
+    const run = agentStructuredService.start({
+      sessionKey: sessionId,
+      agentId,
+      workspaceId,
+      taskId,
+      cwd,
+      prompt,
+      permissionMode: 'bypass',
+      env: envVars,
+    });
+
+    emitAgentStatus(workspaceId, agentId, 'working', 'none');
+    if (taskId) {
+      emitTaskAgentStatus(workspaceId, taskId, 'working', 'none');
+    }
+
+    // Fire-and-forget the completion handler. The structured service
+    // owns the child process; we just wait for the exit code and map
+    // it onto the same "clean exit → awaiting_review, error → failed"
+    // rules the PTY path uses.
+    void run.completion.then(async (code) => {
+      try {
+        await agentStructuredService.flush(sessionId);
+        await this.handleStructuredExit(agentId, code);
+      } catch (err) {
+        console.error('[agent] structured-exit handler threw:', err);
+      }
+    });
+  }
+
+  private async handleStructuredExit(agentId: string, code: number): Promise<void> {
+    const agent = this.activeAgents.get(agentId);
+    if (!agent) return;
+
+    const finalStatus: AgentStatus = code === 0 ? 'completed' : 'error';
+    await this.updateAgentStatus(agentId, finalStatus, 'none');
+    this.activeAgents.delete(agentId);
+
+    await this.createInboxItemForAgent(agent, finalStatus);
+
+    if (agent.currentTaskId) {
+      const now = new Date();
+      if (code === 0) {
+        await this.db
+          .update(tasksTable)
+          .set({ status: 'awaiting_review', updatedAt: now })
+          .where(eq(tasksTable.id, agent.currentTaskId));
+        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
+      } else {
+        await this.db
+          .update(tasksTable)
+          .set({ status: 'failed', completedAt: now, updatedAt: now })
+          .where(eq(tasksTable.id, agent.currentTaskId));
+        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed');
+      }
+    }
+
+    await this.db.delete(agentsTable).where(eq(agentsTable.id, agentId));
+  }
+
   sendInput(agentId: string, input: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
@@ -320,7 +473,13 @@ class AgentService extends EventEmitter {
   stopAgent(agentId: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) return;
-    environmentService.killSession(agent.sessionId);
+    // Structured runs own their own child process; PTY runs go through
+    // environmentService. Both calls are safe no-ops for the other path.
+    if (agentStructuredService.has(agent.sessionId)) {
+      agentStructuredService.stop(agent.sessionId);
+    } else {
+      environmentService.killSession(agent.sessionId);
+    }
     this.activeAgents.delete(agentId);
 
     this.db

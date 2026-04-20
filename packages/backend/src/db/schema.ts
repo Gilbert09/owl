@@ -143,6 +143,14 @@ export const environments = pgTable(
     autonomousBypassPermissions: boolean('autonomous_bypass_permissions')
       .notNull()
       .default(false),
+    /**
+     * How tasks on this env are driven:
+     *   'pty'        (default) spawn `claude` in a PTY; raw bytes.
+     *   'structured' spawn `claude -p --output-format stream-json`;
+     *                JSONL events. See services/agentStructured.ts.
+     * Slice 1 only supports 'structured' on `local` envs.
+     */
+    renderer: text('renderer').notNull().default('pty'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -177,6 +185,12 @@ export const tasks = pgTable(
     }),
     branch: text('branch'),
     terminalOutput: text('terminal_output').notNull().default(''),
+    /**
+     * JSONL event log for structured-renderer tasks. Array of
+     * `AgentEvent` objects (from @fastowl/shared). Null for PTY tasks.
+     * Bounded by agentStructured.ts (last N events / size cap).
+     */
+    transcript: jsonb('transcript'),
     result: jsonb('result'),
     metadata: jsonb('metadata'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),

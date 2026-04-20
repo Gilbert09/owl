@@ -2,30 +2,43 @@ import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Terminal as TerminalIcon } from 'lucide-react';
 import { Button } from '../ui/button';
 import { XTerm } from '../terminal/XTerm';
+import { StructuredTranscript } from '../terminal/StructuredTranscript';
 import { api } from '../../lib/api';
+import type { AgentEvent } from '@fastowl/shared';
 
 interface TerminalHistoryProps {
   taskId: string;
 }
 
+interface Snapshot {
+  terminalOutput: string;
+  transcript?: AgentEvent[];
+  runtime: 'pty' | 'structured';
+}
+
 export function TerminalHistory({ taskId }: TerminalHistoryProps) {
-  const [output, setOutput] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setOutput(null);
+    setSnapshot(null);
 
     api.tasks
       .getTerminal(taskId)
       .then((data) => {
-        if (!cancelled) setOutput(data.terminalOutput || '');
+        if (cancelled) return;
+        setSnapshot({
+          terminalOutput: data.terminalOutput || '',
+          transcript: data.transcript,
+          runtime: (data.runtime as 'pty' | 'structured') ?? 'pty',
+        });
       })
       .catch((err) => {
         console.error('Failed to load terminal history:', err);
-        if (!cancelled) setOutput('');
+        if (!cancelled) setSnapshot({ terminalOutput: '', runtime: 'pty' });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -51,9 +64,18 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
     );
   }
 
-  if (!output) {
-    return null;
-  }
+  if (!snapshot) return null;
+
+  const hasContent =
+    snapshot.runtime === 'structured'
+      ? (snapshot.transcript?.length ?? 0) > 0
+      : snapshot.terminalOutput.length > 0;
+  if (!hasContent) return null;
+
+  const summary =
+    snapshot.runtime === 'structured'
+      ? `${snapshot.transcript?.length ?? 0} events`
+      : `${snapshot.terminalOutput.length.toLocaleString()} chars`;
 
   return (
     <div>
@@ -70,13 +92,15 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
         )}
         <TerminalIcon className="w-4 h-4 mr-1" />
         Terminal History
-        <span className="ml-2 text-xs text-muted-foreground font-normal">
-          ({output.length.toLocaleString()} chars)
-        </span>
+        <span className="ml-2 text-xs text-muted-foreground font-normal">({summary})</span>
       </Button>
       {expanded && (
         <div className="h-96 bg-[#1e1e1e] rounded-lg overflow-hidden border">
-          <XTerm output={output} inputEnabled={false} />
+          {snapshot.runtime === 'structured' ? (
+            <StructuredTranscript transcript={snapshot.transcript} />
+          ) : (
+            <XTerm output={snapshot.terminalOutput} inputEnabled={false} />
+          )}
         </div>
       )}
     </div>

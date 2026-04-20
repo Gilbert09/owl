@@ -9,6 +9,7 @@ import { installDaemonOverSsh } from '../services/daemonInstaller.js';
 import type {
   Environment,
   EnvironmentConfig,
+  EnvironmentRenderer,
   EnvironmentStatus,
   CreateEnvironmentRequest,
   ApiResponse,
@@ -66,6 +67,13 @@ export function environmentRoutes(): Router {
     const autonomousBypass =
       body.autonomousBypassPermissions ?? body.type === 'daemon';
 
+    // Slice 1: `structured` renderer only supported on local envs. SSH
+    // and daemon fall back to `pty` until we plumb streaming exec
+    // through those backends.
+    const requestedRenderer: EnvironmentRenderer = body.renderer ?? 'pty';
+    const renderer: EnvironmentRenderer =
+      requestedRenderer === 'structured' && body.type !== 'local' ? 'pty' : requestedRenderer;
+
     await db.insert(environmentsTable).values({
       id,
       ownerId: user.id,
@@ -74,6 +82,7 @@ export function environmentRoutes(): Router {
       status: initialStatus,
       config: body.config,
       autonomousBypassPermissions: autonomousBypass,
+      renderer,
       createdAt: now,
       updatedAt: now,
     });
@@ -94,6 +103,7 @@ export function environmentRoutes(): Router {
       config?: EnvironmentConfig;
       status?: EnvironmentStatus;
       autonomousBypassPermissions?: boolean;
+      renderer?: EnvironmentRenderer;
     };
     const existing = await db
       .select()
@@ -110,6 +120,16 @@ export function environmentRoutes(): Router {
     if (body.status !== undefined) updates.status = body.status;
     if (body.autonomousBypassPermissions !== undefined) {
       updates.autonomousBypassPermissions = body.autonomousBypassPermissions;
+    }
+    if (body.renderer !== undefined) {
+      // Same guard as POST: only local envs can run structured for now.
+      if (body.renderer === 'structured' && existing[0].type !== 'local') {
+        return res.status(400).json({
+          success: false,
+          error: 'structured renderer is only supported on local environments (Slice 1)',
+        });
+      }
+      updates.renderer = body.renderer;
     }
 
     if (Object.keys(updates).length > 0) {
@@ -283,5 +303,6 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     lastConnected: row.lastConnected ? row.lastConnected.toISOString() : undefined,
     error: row.error ?? undefined,
     autonomousBypassPermissions: row.autonomousBypassPermissions,
+    renderer: (row.renderer as EnvironmentRenderer) ?? 'pty',
   };
 }

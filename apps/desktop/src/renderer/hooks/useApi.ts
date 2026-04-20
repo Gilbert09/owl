@@ -7,6 +7,7 @@ import type {
   TaskStatusEvent,
   TaskOutputEvent,
   TaskAgentStatusEvent,
+  TaskEventBroadcast,
   InboxNewEvent,
   EnvironmentStatusEvent,
   WorkspaceSettings,
@@ -114,6 +115,23 @@ export function useApiConnection() {
           agentStatus: payload.status,
           agentAttention: payload.attention,
         });
+      })
+    );
+
+    // Structured-renderer events (stream-json). Each event is appended
+    // to the task's in-memory transcript. Out-of-order events (rare but
+    // possible across WS reconnects) are resolved by the event's `seq`.
+    unsubscribers.push(
+      wsClient.on<TaskEventBroadcast>('task:event', (payload) => {
+        const store = useWorkspaceStore.getState();
+        const task = store.tasks.find((t) => t.id === payload.taskId);
+        if (!task) return;
+        const existing = task.transcript ?? [];
+        // Dedup on `seq`: reconnects can replay events the client
+        // already has.
+        if (existing.some((e) => e.seq === payload.event.seq)) return;
+        const next = [...existing, payload.event].sort((a, b) => a.seq - b.seq);
+        updateTask(payload.taskId, { transcript: next });
       })
     );
 

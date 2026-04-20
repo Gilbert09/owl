@@ -418,6 +418,7 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     lastConnected: row.lastConnected ? row.lastConnected.toISOString() : undefined,
     error: row.error || undefined,
     autonomousBypassPermissions: row.autonomousBypassPermissions,
+    renderer: (row.renderer as Environment['renderer']) ?? 'pty',
   };
 }
 

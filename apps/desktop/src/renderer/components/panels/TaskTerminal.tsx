@@ -14,8 +14,20 @@ import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { XTerm } from '../terminal/XTerm';
+import { StructuredTranscript } from '../terminal/StructuredTranscript';
 import { useTaskActions } from '../../hooks/useApi';
 import type { Task, AgentStatus, AgentAttention } from '@fastowl/shared';
+
+/**
+ * A task is using the structured renderer if its metadata records
+ * `runtime: 'structured'` (set by `startStructuredAgent` on the
+ * backend). All rendering decisions branch off this one check so we
+ * don't have to plumb a separate prop through the tree.
+ */
+function isStructuredTask(task: Task): boolean {
+  const runtime = (task.metadata as { runtime?: string } | undefined)?.runtime;
+  return runtime === 'structured';
+}
 
 interface TaskTerminalProps {
   task: Task;
@@ -166,10 +178,14 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
       {/* Terminal Content */}
       <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
-        <XTerm
-          output={terminalOutput}
-          inputEnabled={agentStatus === 'awaiting_input'}
-        />
+        {isStructuredTask(task) ? (
+          <StructuredTranscript transcript={task.transcript} />
+        ) : (
+          <XTerm
+            output={terminalOutput}
+            inputEnabled={agentStatus === 'awaiting_input'}
+          />
+        )}
       </div>
 
       {/* Input Area - always visible for interactive terminal */}
