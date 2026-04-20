@@ -10,6 +10,8 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:binary": "scripts/build-binary.sh",
+    "build:binary:all": "scripts/build-binary.sh all",
     "dev": "tsx src/index.ts",
     "lint": "eslint src --ext .ts",
     "test": "vitest run --passWithNoTests"

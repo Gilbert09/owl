@@ -1,0 +1,84 @@
+name: Build daemon binaries
+
+# Produces compiled single-file daemon binaries for every supported platform.
+# Runs on any push that touches the daemon or the shared protocol, plus
+# every PR so we catch breakage before merge. Uploads the binaries as
+# workflow artifacts; the desktop publish pipeline will fetch them once
+# bundling is wired up (see docs/DAEMON_EVERYWHERE.md, Slice 2).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/daemon/**'
+      - 'packages/shared/**'
+      - '.github/workflows/build-daemon-binaries.yml'
+  pull_request:
+    paths:
+      - 'packages/daemon/**'
+      - 'packages/shared/**'
+      - '.github/workflows/build-daemon-binaries.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Bun cross-compiles every target from one host, so a single Linux
+    # runner is cheaper + faster than a matrix. If we hit cross-compile
+    # issues we can split this into a matrix later.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node (for workspace install)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install workspace dependencies
+        run: npm install
+
+      - name: Build @fastowl/shared (daemon imports from it)
+        run: npm run build -w @fastowl/shared
+
+      - name: Compile daemon binaries (all targets)
+        run: npm run build:binary:all -w @fastowl/daemon
+
+      - name: List outputs
+        run: ls -lh packages/daemon/dist/
+
+      - name: Smoke test — linux binary runs and prints usage
+        run: |
+          ./packages/daemon/dist/fastowl-daemon-linux-x64 --help 2>&1 | head -20 || true
+          # `--help` isn't implemented yet, so we verify the binary
+          # at least loads by checking the config-resolution error
+          # path fires with a clean exit rather than a crash.
+          set +e
+          output=$(./packages/daemon/dist/fastowl-daemon-linux-x64 2>&1)
+          code=$?
+          set -e
+          echo "exit code: ${code}"
+          echo "output:"
+          echo "${output}"
+          # Expect: exit 1, message about needing a backend URL or token.
+          if [[ "${code}" -ne 1 ]]; then
+            echo "expected exit 1 from missing-config run, got ${code}" >&2
+            exit 1
+          fi
+          if ! grep -qE "backend URL|pairing token|device token" <<<"${output}"; then
+            echo "expected config-related error output, got unexpected message" >&2
+            exit 1
+          fi
+          echo "smoke test ok"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fastowl-daemon-binaries
+          path: packages/daemon/dist/fastowl-daemon-*
+          if-no-files-found: error
+          retention-days: 30

@@ -16,6 +16,7 @@ After completing each task: stage relevant files, commit with a descriptive mess
 - **[`docs/ROADMAP.md`](./docs/ROADMAP.md)** — full phased TODO (Phase 1–20), backlog, known gaps, full priority queue
 - **[`docs/SESSIONS.md`](./docs/SESSIONS.md)** — chronological session notes
 - **[`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md)** — active "production ready" plan (hosted backend, daemon split, etc.)
+- **[`docs/DAEMON_EVERYWHERE.md`](./docs/DAEMON_EVERYWHERE.md)** — active refactor: daemon becomes a bundled OS-level user service; collapses local/ssh/daemon into one transport; fixes backend-restart session loss
 - **[`docs/CONTINUOUS_BUILD.md`](./docs/CONTINUOUS_BUILD.md)** — user-facing feature doc
 - **[`docs/SSH_VM_SETUP.md`](./docs/SSH_VM_SETUP.md)** — running against a remote VM
 - **[`docs/SETUP.md`](./docs/SETUP.md)** — env vars / account setup
@@ -40,9 +41,9 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for the full treatment.
 
 > Full list in [`docs/ROADMAP.md`](./docs/ROADMAP.md). Definition of done for "production ready" is in [`docs/CONTINUOUS_BUILD_ROADMAP.md`](./docs/CONTINUOUS_BUILD_ROADMAP.md).
 
-1. **Phase 18.2 polish** (NEXT) — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
+1. **Phase 18.5 — Daemon everywhere** (ACTIVE) — see [`docs/DAEMON_EVERYWHERE.md`](./docs/DAEMON_EVERYWHERE.md). One execution path for all envs: daemon runs as a long-lived OS user service bundled with the desktop app. Fixes backend-restart session loss, collapses env types to `local | remote`, rips out SSH.
 
-2. **Phase 18.3 polish** — single-file daemon binary (`bun --compile`) to skip the ~2min first-install `npm install`; symmetric uninstall flow when an env is deleted; stream install logs to the modal via WS.
+2. **Phase 18.2 polish** — proper `fastowl login` PKCE flow (replace copy-paste), CLI refresh-token rotation, cross-user HTTP-layer integration test, invite flow. See Session 13 in `docs/SESSIONS.md`.
 
 3. **Phase 17.3 polish** — per-task-type notification toggles, digest mode (batch notifications), click-through opens the task. Basic awaiting_review notification shipped in Session 17.
 
