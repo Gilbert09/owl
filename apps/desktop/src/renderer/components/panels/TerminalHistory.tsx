@@ -2,13 +2,14 @@ import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Terminal as TerminalIcon } from 'lucide-react';
 import { Button } from '../ui/button';
 import { XTerm } from '../terminal/XTerm';
-import { StructuredTranscript } from '../terminal/StructuredTranscript';
+import { AgentConversation } from '../terminal/AgentConversation';
 import { api } from '../../lib/api';
 import type { AgentEvent } from '@fastowl/shared';
 
 interface TerminalHistoryProps {
   taskId: string;
 }
+
 
 interface Snapshot {
   terminalOutput: string;
@@ -97,7 +98,11 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
       {expanded && (
         <div className="h-96 bg-[#1e1e1e] rounded-lg overflow-hidden border">
           {snapshot.runtime === 'structured' ? (
-            <StructuredTranscript transcript={snapshot.transcript} />
+            <AgentConversation
+              taskId={taskId}
+              transcript={snapshot.transcript}
+              interactive={false}
+            />
           ) : (
             <XTerm output={snapshot.terminalOutput} inputEnabled={false} />
           )}

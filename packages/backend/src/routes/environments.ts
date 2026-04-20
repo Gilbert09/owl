@@ -104,6 +104,7 @@ export function environmentRoutes(): Router {
       status?: EnvironmentStatus;
       autonomousBypassPermissions?: boolean;
       renderer?: EnvironmentRenderer;
+      toolAllowlist?: string[];
     };
     const existing = await db
       .select()
@@ -130,6 +131,18 @@ export function environmentRoutes(): Router {
         });
       }
       updates.renderer = body.renderer;
+    }
+    if (body.toolAllowlist !== undefined) {
+      // Normalise to a deduped list of trimmed tool names.
+      const seen = new Set<string>();
+      const normalised: string[] = [];
+      for (const raw of body.toolAllowlist) {
+        const t = typeof raw === 'string' ? raw.trim() : '';
+        if (!t || seen.has(t)) continue;
+        seen.add(t);
+        normalised.push(t);
+      }
+      updates.toolAllowlist = normalised;
     }
 
     if (Object.keys(updates).length > 0) {
@@ -304,5 +317,6 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     error: row.error ?? undefined,
     autonomousBypassPermissions: row.autonomousBypassPermissions,
     renderer: (row.renderer as EnvironmentRenderer) ?? 'pty',
+    toolAllowlist: (row.toolAllowlist as string[]) ?? [],
   };
 }

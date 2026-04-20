@@ -14,7 +14,7 @@ import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { XTerm } from '../terminal/XTerm';
-import { StructuredTranscript } from '../terminal/StructuredTranscript';
+import { AgentConversation } from '../terminal/AgentConversation';
 import { useTaskActions } from '../../hooks/useApi';
 import type { Task, AgentStatus, AgentAttention } from '@fastowl/shared';
 
@@ -179,7 +179,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
       {/* Terminal Content */}
       <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
         {isStructuredTask(task) ? (
-          <StructuredTranscript transcript={task.transcript} />
+          <AgentConversation taskId={task.id} transcript={task.transcript} interactive />
         ) : (
           <XTerm
             output={terminalOutput}

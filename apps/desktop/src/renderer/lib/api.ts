@@ -165,6 +165,22 @@ export const tasks = {
       transcript?: Task['transcript'];
       runtime?: string;
     }>('GET', `/tasks/${id}/terminal`),
+  respondToPermission: (
+    taskId: string,
+    requestId: string,
+    decision: 'allow' | 'deny',
+    persist: boolean
+  ) =>
+    request<{ success: boolean }>('POST', `/tasks/${taskId}/permission`, {
+      requestId,
+      decision,
+      persist,
+    }),
+  listPendingPermissions: (taskId: string) =>
+    request<{ pending: Array<{ requestId: string; toolName: string; toolInput: unknown; toolUseId?: string; requestedAt: string }> }>(
+      'GET',
+      `/tasks/${taskId}/permission/pending`
+    ),
   getDiff: (id: string) =>
     request<{ diff: string }>('GET', `/tasks/${id}/diff`),
   // Generate task metadata from prompt using AI

@@ -151,6 +151,14 @@ export const environments = pgTable(
      * Slice 1 only supports 'structured' on `local` envs.
      */
     renderer: text('renderer').notNull().default('pty'),
+    /**
+     * Tool names the user has pre-approved for this env — hook checks
+     * this list before surfacing a permission prompt. Scoped per-env
+     * (not per-task) so repeated "always allow Read" clicks stick
+     * across the env's whole task history. Populated by the desktop
+     * "Allow always" button. Example: `["Read", "Grep", "Bash(git *)"]`.
+     */
+    toolAllowlist: jsonb('tool_allowlist').notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

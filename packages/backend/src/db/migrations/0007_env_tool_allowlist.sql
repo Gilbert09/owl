@@ -1,0 +1,1 @@
+ALTER TABLE "environments" ADD COLUMN "tool_allowlist" jsonb DEFAULT '[]'::jsonb NOT NULL;

@@ -39,9 +39,9 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 
 13. **Phase 13.2 — Structured renderer + native UI overlays** (IN PROGRESS)
     - Slice 1 DONE (Session 18): backend plumbing via `claude -p --output-format stream-json`. `environments.renderer: 'pty' | 'structured'`, `tasks.transcript` jsonb, new `agentStructured` service, interim desktop renderer.
-    - Slice 2 (NEXT): `AgentConversation.tsx` (markdown, collapsible tool_use/tool_result/thinking, cost/token footer) + per-tool Approve/Deny UX via a `PreToolUse` hook invoking an in-process FastOwl endpoint.
-    - Slice 3: interactive multi-turn (`--input-format stream-json`) + session resume + slash-command passthrough.
-    - Follow-ups: daemon / SSH support for structured (needs a streaming-exec op on those backends).
+    - Slice 2 DONE (Session 18): `AgentConversation.tsx` (markdown-ish, collapsible tool_use/tool_result/thinking, cost/token footer) + per-tool Approve/Deny UX via a `PreToolUse` hook (`permissionHook.ts` / `permissionService.ts`). "Allow always" persists onto `environments.tool_allowlist`.
+    - Slice 3 (NEXT): interactive multi-turn (`--input-format stream-json`) + session resume + slash-command passthrough.
+    - Slice 4 (follow-up): migrate daemon + SSH envs to structured (needs a streaming-exec op on those backends), then delete PTY code + node-pty + XTerm + `tasks.terminal_output`.
 14. **Phase 16.3 — Automated PR Response** — hook PR monitor → auto-create `pr_response` tasks on new review comments
 15. **Phase 12.5 — Testing framework** — see `docs/TESTING.md`. 66 backend + 7 MCP + 3 CLI + 1 desktop tests now landed
 16. **Phase 18 (rest) — Deployment hardening** — after 18.1/18.3/18.4 land

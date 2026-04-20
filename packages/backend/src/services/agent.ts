@@ -11,6 +11,7 @@ import type {
 import { environmentService } from './environment.js';
 import { sshService } from './ssh.js';
 import { agentStructuredService } from './agentStructured.js';
+import { ensurePermissionHook } from './permissionHook.js';
 import {
   emitAgentStatus,
   emitAgentOutput,
@@ -229,8 +230,10 @@ class AgentService extends EventEmitter {
       : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
 
     // Structured renderer path: non-PTY spawn of `claude -p
-    // --output-format stream-json`. Slice 1 is autonomous-only (bypass
-    // permissions) — interactive + per-tool approvals come in Slice 2/3.
+    // --output-format stream-json`. Supports autonomous tasks only for
+    // now (interactive multi-turn lands in Slice 3). The env's
+    // `autonomousBypassPermissions` flag picks between bypass (no
+    // prompts) and strict (hook-driven per-tool approvals).
     const useStructured = env?.renderer === 'structured' && env.type === 'local' && autonomous && !!prompt;
     if (useStructured) {
       await this.startStructuredAgent({
@@ -242,6 +245,7 @@ class AgentService extends EventEmitter {
         prompt: prompt!,
         cwd,
         now,
+        permissionMode: env!.autonomousBypassPermissions ? 'bypass' : 'strict',
       });
       const agent = await this.getAgent(agentId);
       if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
@@ -343,18 +347,26 @@ class AgentService extends EventEmitter {
     prompt: string;
     cwd?: string;
     now: Date;
+    permissionMode: 'bypass' | 'strict';
   }): Promise<void> {
-    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now } = opts;
+    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now, permissionMode } = opts;
 
     // Same FASTOWL_* context the CLI path uses, just passed through the
     // child_process env rather than an inline shell prefix — no quoting
-    // concerns.
+    // concerns. FASTOWL_ENVIRONMENT_ID is used by the permission service
+    // to scope pre-approvals per-env.
     const port = process.env.PORT || '4747';
     const envVars: Record<string, string> = {
       FASTOWL_API_URL: process.env.FASTOWL_API_URL || `http://localhost:${port}`,
       FASTOWL_WORKSPACE_ID: workspaceId,
+      FASTOWL_ENVIRONMENT_ID: environmentId,
     };
     if (taskId) envVars.FASTOWL_TASK_ID = taskId;
+
+    // Strict mode needs the PreToolUse hook script on disk for the
+    // child to exec. Writing it is idempotent — first call after
+    // backend boot writes the file, subsequent calls reuse it.
+    const hookScriptPath = permissionMode === 'strict' ? await ensurePermissionHook() : undefined;
 
     // Track as an active agent so the rest of the status plumbing (task
     // GET, agent GET, stop endpoint) works uniformly. `outputBuffer` is
@@ -408,7 +420,8 @@ class AgentService extends EventEmitter {
       taskId,
       cwd,
       prompt,
-      permissionMode: 'bypass',
+      permissionMode,
+      hookScriptPath,
       env: envVars,
     });
 

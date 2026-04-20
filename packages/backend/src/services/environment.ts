@@ -419,6 +419,7 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     error: row.error || undefined,
     autonomousBypassPermissions: row.autonomousBypassPermissions,
     renderer: (row.renderer as Environment['renderer']) ?? 'pty',
+    toolAllowlist: (row.toolAllowlist as string[]) ?? [],
   };
 }
 

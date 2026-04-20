@@ -1,6 +1,12 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { eq } from 'drizzle-orm';
-import type { AgentEvent, TaskStatus, WSEvent } from '@fastowl/shared';
+import type {
+  AgentEvent,
+  PermissionRequest,
+  PermissionResponse,
+  TaskStatus,
+  WSEvent,
+} from '@fastowl/shared';
 import { domainEvents } from './events.js';
 import { verifyTokenAndGetUser, type AuthUser } from '../middleware/auth.js';
 import { getDbClient } from '../db/client.js';
@@ -211,6 +217,28 @@ export function emitTaskEvent(
   broadcastToWorkspace(workspaceId, {
     type: 'task:event',
     payload: { taskId, event },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitAgentPermissionRequest(
+  workspaceId: string,
+  req: PermissionRequest
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'agent:permission_request',
+    payload: req,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitAgentPermissionResponse(
+  workspaceId: string,
+  res: PermissionResponse & { agentId: string; taskId?: string }
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'agent:permission_response',
+    payload: res,
     timestamp: new Date().toISOString(),
   });
 }

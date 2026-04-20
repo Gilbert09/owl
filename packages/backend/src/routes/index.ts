@@ -8,6 +8,7 @@ import { githubRoutes, githubPublicRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
 import { backlogRoutes } from './backlog.js';
 import { daemonPublicRoutes } from './daemon.js';
+import { permissionHookRoutes, permissionDesktopRoutes } from './permission.js';
 import { requireAuth } from '../middleware/auth.js';
 
 export function setupRoutes(app: Express): void {
@@ -24,6 +25,12 @@ export function setupRoutes(app: Express): void {
   // can safely be unauth'd.
   app.use('/daemon', daemonPublicRoutes());
 
+  // PreToolUse hook endpoint — called by our child-process hook
+  // script. Authenticated by a per-run token (x-fastowl-permission-token),
+  // NOT a user JWT, because the child runs under the user's own shell
+  // and has no Supabase session. Token is minted in-process per run.
+  app.use(`${api}`, permissionHookRoutes());
+
   // Everything below is authenticated. The middleware populates req.user
   // and refuses requests without a valid Supabase JWT.
   app.use(`${api}`, requireAuth);
@@ -36,6 +43,7 @@ export function setupRoutes(app: Express): void {
   app.use(`${api}/github`, githubRoutes());
   app.use(`${api}/repositories`, repositoryRoutes());
   app.use(`${api}/backlog`, backlogRoutes());
+  app.use(`${api}`, permissionDesktopRoutes());
 
   app.use((req, res) => {
     res.status(404).json({ success: false, error: 'Not found' });

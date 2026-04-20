@@ -104,6 +104,14 @@ export interface Environment {
    *                  `local` envs only.
    */
   renderer: EnvironmentRenderer;
+  /**
+   * Tool names pre-approved on this env — the structured renderer's
+   * PreToolUse hook skips the permission prompt when the requested
+   * tool is in this list. Populated by the "Allow always" button in
+   * the Approve/Deny UI. Scoped per-env (not per-task) so approvals
+   * stick across every task on that machine.
+   */
+  toolAllowlist: string[];
 }
 
 export type EnvironmentRenderer = 'pty' | 'structured';
@@ -415,6 +423,8 @@ export type WSEventType =
   | 'agent:status'
   | 'agent:output'
   | 'agent:event'
+  | 'agent:permission_request'
+  | 'agent:permission_response'
   | 'agent:attention'
   | 'task:status'
   | 'task:output'
@@ -480,6 +490,45 @@ export interface AgentEventBroadcast {
 export interface TaskEventBroadcast {
   taskId: string;
   event: AgentEvent;
+}
+
+// ============================================================================
+// Permission prompts (structured renderer Slice 2)
+// ============================================================================
+
+/**
+ * A pending permission request. The child CLI's PreToolUse hook has
+ * asked the backend if it can run `toolName` with `toolInput`; the
+ * backend surfaces this request to the desktop until the user clicks
+ * Approve / Deny.
+ *
+ * Synthetic events of `type: 'fastowl_permission_request'` and
+ * `type: 'fastowl_permission_response'` are inserted into the task
+ * transcript so the renderer has a single ordered event stream. The
+ * `requestId` lets the response event close out the request block.
+ */
+export interface PermissionRequest {
+  requestId: string;
+  agentId: string;
+  taskId?: string;
+  toolName: string;
+  toolInput: unknown;
+  /** The CLI's session id for this run — lets us correlate with the tool_use event. */
+  sessionId?: string;
+  /** CLI-assigned tool_use id so the renderer can co-locate the request with the tool_use block. */
+  toolUseId?: string;
+  /** When the hook call was received. ISO timestamp. */
+  requestedAt: string;
+}
+
+export type PermissionDecision = 'allow' | 'deny';
+
+export interface PermissionResponse {
+  requestId: string;
+  decision: PermissionDecision;
+  /** "Allow always for this tool on this env" when `decision === 'allow'`. */
+  persist?: boolean;
+  reason?: string;
 }
 
 // ============================================================================
