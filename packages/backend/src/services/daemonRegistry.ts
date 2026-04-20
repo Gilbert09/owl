@@ -41,6 +41,13 @@ interface ActiveDaemon {
     hostname: string;
     daemonVersion: string;
   };
+  /**
+   * Session IDs the daemon claimed in its most recent hello. Used by
+   * agent.cleanupStaleAgents to tell "backend restarted, child still
+   * running" from "agent really died." Empty until a daemon sends
+   * activeSessions in hello.
+   */
+  liveSessionIds: Set<string>;
 }
 
 class DaemonRegistry extends EventEmitter {
@@ -167,6 +174,29 @@ class DaemonRegistry extends EventEmitter {
     // Flip the env row to `connected` so the scheduler + desktop see
     // the daemon as live. touchLastSeen also bumps last_seen_at.
     this.markEnvConnected(active.environmentId);
+    // Let agent-cleanup (and any other interested subscriber) know a
+    // daemon reconnected so they can reconcile session state.
+    this.emit('daemon:connected', active.environmentId);
+  }
+
+  /**
+   * True if any connected daemon has advertised this sessionId as
+   * still running. Used by agent cleanup to avoid killing in-progress
+   * tasks after a backend restart.
+   */
+  isSessionLive(sessionId: string): boolean {
+    for (const daemon of this.active.values()) {
+      if (daemon.liveSessionIds.has(sessionId)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Set of environments whose daemon is currently connected. Used by
+   * agent cleanup to decide which env's agents might still be live.
+   */
+  connectedEnvironmentIds(): Set<string> {
+    return new Set(this.active.keys());
   }
 
   /** Called when the WS closes. */

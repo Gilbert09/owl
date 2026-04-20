@@ -87,6 +87,9 @@ export async function handleConnection(ws: WebSocket): Promise<void> {
           hostname: msg.hostname,
           daemonVersion: msg.daemonVersion,
         },
+        liveSessionIds: new Set(
+          (msg.activeSessions ?? []).map((s) => s.sessionId),
+        ),
       });
       const ack: DaemonHelloAck = {
         kind: 'hello_ack',

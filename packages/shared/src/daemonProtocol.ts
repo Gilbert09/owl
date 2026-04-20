@@ -33,6 +33,22 @@ export interface DaemonHello {
   hostOs: 'darwin' | 'linux' | 'win32' | string;
   hostArch: 'x64' | 'arm64' | string;
   hostname: string;
+  /**
+   * Sessions the daemon still has live child processes for. Populated
+   * on reconnect so the backend (which may just have restarted) can
+   * tell which tasks are actually still running vs genuinely dead.
+   * Empty on first-ever connect; usually empty on normal reconnects
+   * too (daemon was idle).
+   *
+   * See services/agent.ts cleanupStaleAgents — without this, backend
+   * restart blanket-fails every in-progress task.
+   */
+  activeSessions?: Array<{
+    sessionId: string;
+    pid: number;
+    /** ms since epoch when the child was spawned. */
+    startedAt: number;
+  }>;
 }
 
 /**

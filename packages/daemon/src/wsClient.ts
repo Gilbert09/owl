@@ -21,6 +21,7 @@ import {
   killSession,
   closeStreamInput,
   setChildEnv,
+  listActiveSessions,
 } from './executor.js';
 import { gitDispatch } from './git.js';
 import { saveConfig, loadConfig, type ResolvedConfig } from './config.js';
@@ -119,7 +120,10 @@ export class DaemonWsClient {
     this.ws = ws;
 
     ws.on('open', () => {
-      console.log('daemon: ws open, sending hello');
+      const active = listActiveSessions();
+      console.log(
+        `daemon: ws open, sending hello (active sessions: ${active.length})`,
+      );
       this.reconnectMs = INITIAL_RECONNECT_MS;
       const hello: DaemonHello = {
         kind: 'hello',
@@ -129,6 +133,7 @@ export class DaemonWsClient {
         hostOs: os.platform(),
         hostArch: os.arch(),
         hostname: os.hostname(),
+        activeSessions: active,
       };
       ws.send(encodeDaemonMessage(hello));
     });

@@ -10,6 +10,7 @@ import type {
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { agentStructuredService } from './agentStructured.js';
+import { daemonRegistry } from './daemonRegistry.js';
 import { ensurePermissionHook } from './permissionHook.js';
 import {
   emitAgentStatus,
@@ -94,38 +95,122 @@ class AgentService extends EventEmitter {
     }, 60000);
   }
 
+  /**
+   * Reconcile in-progress agent rows against what daemons actually
+   * still have running after a backend restart.
+   *
+   * Pre-"daemon everywhere" this was a blanket nuke — agents ran as
+   * child processes of the backend, so backend exit = SIGPIPE = dead
+   * child, no exceptions. Now daemons own the child pipes and survive
+   * backend restart, so some "stale" agent rows actually describe
+   * live work.
+   *
+   * Flow:
+   *   1. Schedule a deferred sweep (60s grace) to give daemons time
+   *      to reconnect + advertise their activeSessions.
+   *   2. Subscribe to the registry's `daemon:connected` event so we
+   *      can also sweep early when all expected daemons have dialled
+   *      in (fast path for the common case).
+   *   3. At sweep time: any agent whose env's daemon claims its
+   *      session → leave alone (task stays in_progress; output will
+   *      resume via session events). Anything else → fail + delete.
+   *
+   * Known gap tracked for a follow-up: the `agentStructuredService`
+   * per-run state doesn't get rehydrated here, so even a surviving
+   * agent row won't produce live UI events until a future commit
+   * reconstructs that state from DB.
+   */
   private async cleanupStaleAgents(): Promise<void> {
-    // Agents are in-memory state — any row still present after a
-    // backend restart describes a dead child (SIGPIPE killed it the
-    // moment our stdout pipe closed). Scrub them.
-    const result = await this.db
-      .delete(agentsTable)
-      .where(inArray(agentsTable.status, ['idle', 'working', 'tool_use', 'awaiting_input']))
-      .returning({ id: agentsTable.id, currentTaskId: agentsTable.currentTaskId });
-    if (result.length === 0) return;
-
-    console.log(`Cleaned up ${result.length} stale agent records`);
-
-    // Flip the orphaned tasks from in_progress → failed immediately.
-    // `recoverStuckTasks` would eventually catch these via its 20min
-    // staleness sweep, but that window is terrible UX after a deploy —
-    // a user watching the task would see it "running" for 20 minutes
-    // with no real agent. Fail them now so the scheduler can retry
-    // straight away (Continuous Build backoff still applies).
-    const taskIds = result.map((r) => r.currentTaskId).filter((id): id is string => !!id);
-    if (taskIds.length === 0) return;
-
-    const now = new Date();
-    await this.db
-      .update(tasksTable)
-      .set({
-        status: 'failed',
-        completedAt: now,
-        updatedAt: now,
-        result: { success: false, error: 'backend restart orphaned the agent' },
+    const rows = await this.db
+      .select({
+        id: agentsTable.id,
+        environmentId: agentsTable.environmentId,
+        currentTaskId: agentsTable.currentTaskId,
       })
-      .where(and(inArray(tasksTable.id, taskIds), eq(tasksTable.status, 'in_progress')));
-    console.log(`Marked ${taskIds.length} orphaned tasks as failed (backend restart)`);
+      .from(agentsTable)
+      .where(inArray(agentsTable.status, ['idle', 'working', 'tool_use', 'awaiting_input']));
+    if (rows.length === 0) return;
+
+    console.log(
+      `[agent] reconciling ${rows.length} in-flight agent(s) after restart…`,
+    );
+
+    const GRACE_MS = 60_000;
+    const expectedEnvIds = new Set(rows.map((r) => r.environmentId));
+    // Sessions are keyed by `agent:<agentId>` — see `spawnStructuredRun`
+    // in this file and the daemon's streamSessions map. That naming is
+    // the contract we use to match DB rows against daemon-claimed
+    // live session ids.
+    const sessionIdFor = (agentId: string) => `agent:${agentId}`;
+
+    const sweep = async (): Promise<void> => {
+      daemonRegistry.off('daemon:connected', onDaemonConnected);
+      if (sweptOnce) return;
+      sweptOnce = true;
+
+      const toFail: typeof rows = [];
+      const survivors: typeof rows = [];
+      for (const row of rows) {
+        if (daemonRegistry.isSessionLive(sessionIdFor(row.id))) {
+          survivors.push(row);
+        } else {
+          toFail.push(row);
+        }
+      }
+
+      if (survivors.length > 0) {
+        console.log(
+          `[agent] ${survivors.length} agent(s) survived the restart — their daemons claim the sessions.`,
+        );
+      }
+      if (toFail.length === 0) return;
+
+      const failIds = toFail.map((r) => r.id);
+      const taskIds = toFail
+        .map((r) => r.currentTaskId)
+        .filter((id): id is string => !!id);
+      await this.db.delete(agentsTable).where(inArray(agentsTable.id, failIds));
+      if (taskIds.length > 0) {
+        const now = new Date();
+        await this.db
+          .update(tasksTable)
+          .set({
+            status: 'failed',
+            completedAt: now,
+            updatedAt: now,
+            result: {
+              success: false,
+              error: 'backend restart orphaned the agent',
+            },
+          })
+          .where(
+            and(inArray(tasksTable.id, taskIds), eq(tasksTable.status, 'in_progress')),
+          );
+      }
+      console.log(
+        `[agent] failed ${toFail.length} orphaned agent(s) + ${taskIds.length} task(s).`,
+      );
+    };
+
+    let sweptOnce = false;
+    // Fast path: once every expected env's daemon has reconnected,
+    // the reconcile answer is stable — no reason to wait for the
+    // 60s timer to elapse.
+    const onDaemonConnected = () => {
+      const connected = daemonRegistry.connectedEnvironmentIds();
+      const allIn = [...expectedEnvIds].every((id) => connected.has(id));
+      if (allIn) void sweep();
+    };
+    daemonRegistry.on('daemon:connected', onDaemonConnected);
+
+    // Safety net: if a daemon never dials back (its VM is offline,
+    // the user uninstalled it, etc.) we still fail after the grace
+    // window rather than leaving tasks stuck in_progress forever.
+    setTimeout(() => void sweep(), GRACE_MS).unref();
+
+    // Check immediately too: a local daemon bundled with the desktop
+    // app may already be connected by the time this runs.
+    onDaemonConnected();
   }
 
   shutdown(): void {

@@ -11,7 +11,33 @@ import type { ExecResult } from '@fastowl/shared';
  * reconnect-is-a-fresh-state contract.
  */
 
-const streamSessions = new Map<string, ChildProcessWithoutNullStreams>();
+interface StreamSession {
+  child: ChildProcessWithoutNullStreams;
+  /** ms since epoch when the session was spawned. */
+  startedAt: number;
+}
+
+const streamSessions = new Map<string, StreamSession>();
+
+/**
+ * Snapshot of every child still running. Used by the WS client to
+ * tell the backend which sessions are alive on reconnect, so a
+ * backend restart doesn't blanket-fail the corresponding tasks.
+ */
+export function listActiveSessions(): Array<{
+  sessionId: string;
+  pid: number;
+  startedAt: number;
+}> {
+  const out: Array<{ sessionId: string; pid: number; startedAt: number }> = [];
+  for (const [sessionId, session] of streamSessions) {
+    const pid = session.child.pid;
+    if (pid !== undefined) {
+      out.push({ sessionId, pid, startedAt: session.startedAt });
+    }
+  }
+  return out;
+}
 
 /**
  * Extra env vars the WS client asks us to inject into every child we
@@ -120,7 +146,7 @@ export function streamSpawn(
     env: childEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
   }) as ChildProcessWithoutNullStreams;
-  streamSessions.set(sessionId, child);
+  streamSessions.set(sessionId, { child, startedAt: Date.now() });
 
   if (opts.initialStdinBase64) {
     child.stdin.write(Buffer.from(opts.initialStdinBase64, 'base64'));
@@ -150,32 +176,32 @@ export function streamSpawn(
  * an interactive conversation; use `killSession` for abort.
  */
 export function closeStreamInput(sessionId: string): void {
-  const child = streamSessions.get(sessionId);
-  if (!child || !child.stdin || child.stdin.destroyed) return;
-  child.stdin.end();
+  const session = streamSessions.get(sessionId);
+  if (!session || !session.child.stdin || session.child.stdin.destroyed) return;
+  session.child.stdin.end();
 }
 
 /** Write bytes to a session's stdin. No-op if the session was already killed. */
 export function writeSession(sessionId: string, data: Buffer): void {
-  const child = streamSessions.get(sessionId);
-  if (child && child.stdin && !child.stdin.destroyed) {
-    child.stdin.write(data);
+  const session = streamSessions.get(sessionId);
+  if (session && session.child.stdin && !session.child.stdin.destroyed) {
+    session.child.stdin.write(data);
   }
 }
 
 /** Terminate a session. Emits the matching `session.close` event. */
 export function killSession(sessionId: string): void {
-  const child = streamSessions.get(sessionId);
-  if (!child) return;
-  try { child.kill('SIGTERM'); } catch {
+  const session = streamSessions.get(sessionId);
+  if (!session) return;
+  try { session.child.kill('SIGTERM'); } catch {
     // Already dead.
   }
 }
 
 /** For tests + shutdown. */
 export function shutdownAllSessions(): void {
-  for (const [, child] of streamSessions) {
-    try { child.kill('SIGTERM'); } catch {
+  for (const [, session] of streamSessions) {
+    try { session.child.kill('SIGTERM'); } catch {
       // ignore
     }
   }
