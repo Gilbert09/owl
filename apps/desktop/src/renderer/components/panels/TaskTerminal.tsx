@@ -16,6 +16,7 @@ import { Badge } from '../ui/badge';
 import { AgentConversation } from '../terminal/AgentConversation';
 import { useTaskActions } from '../../hooks/useApi';
 import { useWorkspaceStore } from '../../stores/workspace';
+import { api } from '../../lib/api';
 import type { Task, AgentStatus, AgentAttention } from '@fastowl/shared';
 
 interface TaskTerminalProps {
@@ -48,6 +49,7 @@ const attentionColors: Record<AgentAttention, string> = {
 export function TaskTerminal({ task }: TaskTerminalProps) {
   const { sendTaskInput, continueTask, stopTask, readyForReview } = useTaskActions();
   const environments = useWorkspaceStore((s) => s.environments);
+  const updateTask = useWorkspaceStore((s) => s.updateTask);
   const [inputValue, setInputValue] = useState('');
   const [isStopping, setIsStopping] = useState(false);
   const [isMarkingReady, setIsMarkingReady] = useState(false);
@@ -84,8 +86,13 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
       setInputValue('');
     } catch (err) {
       console.error('Failed to send input:', err);
+      // Local state may be stale — backend might have transitioned
+      // the task without a WS event reaching us (redeploy, dropped
+      // socket, etc). Refetch so the input bar + buttons reflect
+      // reality on the next render.
+      api.tasks.get(task.id).then((fresh) => updateTask(task.id, fresh)).catch(() => {});
     }
-  }, [task.id, task.status, inputValue, sendTaskInput, continueTask, isResumable]);
+  }, [task.id, task.status, inputValue, sendTaskInput, continueTask, isResumable, updateTask]);
 
   const handleStopTask = useCallback(async () => {
     setIsStopping(true);
@@ -142,36 +149,48 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
           </Badge>
         </div>
         <div className="flex items-center gap-1">
-          <Button
-            variant="default"
-            size="sm"
-            className="h-8"
-            title="Mark work as ready for your review"
-            onClick={handleReadyForReview}
-            disabled={isMarkingReady || isStopping}
-          >
-            {isMarkingReady ? (
-              <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-            ) : (
-              <FileCheck className="w-4 h-4 mr-1" />
-            )}
-            Ready for Review
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8"
-            title="Stop Task (discard work)"
-            onClick={handleStopTask}
-            disabled={isStopping || isMarkingReady}
-          >
-            {isStopping ? (
-              <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-            ) : (
-              <Square className="w-4 h-4 mr-1" />
-            )}
-            Stop
-          </Button>
+          {/*
+            Header actions only make sense while the child is actually
+            alive (task.status === 'in_progress'). Once the child exits,
+            the task has already transitioned to `awaiting_review` (or
+            `failed` / `cancelled`) — "Stop" has nothing to stop and
+            "Ready for Review" is idempotent. Hide them to avoid the
+            400 the user reported.
+          */}
+          {task.status === 'in_progress' && (
+            <>
+              <Button
+                variant="default"
+                size="sm"
+                className="h-8"
+                title="Stop the agent now and move this task into your review queue"
+                onClick={handleReadyForReview}
+                disabled={isMarkingReady || isStopping}
+              >
+                {isMarkingReady ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <FileCheck className="w-4 h-4 mr-1" />
+                )}
+                Ready for Review
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8"
+                title="Kill the agent and mark the task failed"
+                onClick={handleStopTask}
+                disabled={isStopping || isMarkingReady}
+              >
+                {isStopping ? (
+                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                ) : (
+                  <Square className="w-4 h-4 mr-1" />
+                )}
+                Stop
+              </Button>
+            </>
+          )}
         </div>
       </div>
 

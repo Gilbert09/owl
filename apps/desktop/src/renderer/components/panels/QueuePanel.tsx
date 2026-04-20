@@ -72,9 +72,10 @@ export function QueuePanel() {
   const queuedTasks = tasks.filter((t) =>
     ['pending', 'queued'].includes(t.status)
   );
-  const inProgressTasks = tasks.filter((t) =>
-    ['in_progress', 'awaiting_review'].includes(t.status)
-  );
+  // In-flight: child process actually running.
+  const inProgressTasks = tasks.filter((t) => t.status === 'in_progress');
+  // Exited cleanly; waiting on a human decision (approve / reject).
+  const reviewTasks = tasks.filter((t) => t.status === 'awaiting_review');
   const completedTasks = tasks.filter((t) =>
     ['completed', 'failed', 'cancelled'].includes(t.status)
   );
@@ -89,7 +90,7 @@ export function QueuePanel() {
           <div>
             <h2 className="text-lg font-semibold">Task Queue</h2>
             <p className="text-sm text-muted-foreground">
-              {queuedTasks.length} queued, {inProgressTasks.length} in progress
+              {queuedTasks.length} queued · {inProgressTasks.length} running · {reviewTasks.length} awaiting review
             </p>
           </div>
           <Button size="sm" onClick={() => setIsCreateModalOpen(true)}>
@@ -113,10 +114,28 @@ export function QueuePanel() {
             </div>
           ) : (
             <div className="p-2">
+              {reviewTasks.length > 0 && (
+                <div className="mb-4">
+                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
+                    AWAITING REVIEW
+                  </h3>
+                  <div className="space-y-1">
+                    {reviewTasks.map((task) => (
+                      <TaskListItem
+                        key={task.id}
+                        task={task}
+                        isSelected={selectedTaskId === task.id}
+                        onSelect={() => selectTask(task.id)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {inProgressTasks.length > 0 && (
                 <div className="mb-4">
                   <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                    IN PROGRESS
+                    RUNNING
                   </h3>
                   <div className="space-y-1">
                     {inProgressTasks.map((task) => (
