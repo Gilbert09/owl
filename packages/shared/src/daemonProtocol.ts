@@ -57,7 +57,9 @@ export interface DaemonHelloAck {
 export type DaemonRequestPayload =
   | ExecRequest
   | SpawnInteractiveRequest
+  | StreamSpawnRequest
   | WriteSessionRequest
+  | CloseStreamInputRequest
   | KillSessionRequest
   | GitCommandRequest
   | PingRequest
@@ -98,6 +100,40 @@ export interface SpawnInteractiveRequest {
   cwd?: string;
   rows?: number;
   cols?: number;
+}
+
+/**
+ * Non-PTY spawn. The daemon runs `binary` with `args` via node's
+ * `child_process.spawn` (pipes, not pseudo-TTY) so structured
+ * stream-json output isn't contaminated by terminal control
+ * sequences. Mirrored event stream: `session.data` on stdout,
+ * `session.stderr` on stderr, `session.close` on exit.
+ *
+ * `keepStdinOpen: true` leaves stdin open after spawn so the backend
+ * can send follow-up turns via `write_session`. `false` closes stdin
+ * immediately (the daemon writes nothing to it).
+ */
+export interface StreamSpawnRequest {
+  op: 'stream_spawn';
+  sessionId: string;
+  binary: string;
+  args: string[];
+  cwd?: string;
+  /** Additional env vars merged over the daemon's own environment. */
+  env?: Record<string, string>;
+  keepStdinOpen: boolean;
+  /** Optional seed write — bytes to push to stdin immediately on spawn. */
+  initialStdinBase64?: string;
+}
+
+/**
+ * Half-close the child's stdin. The child finalises any current work
+ * and exits gracefully (code 0). Use this for "user ended the
+ * conversation" flows; use `kill_session` for hard abort.
+ */
+export interface CloseStreamInputRequest {
+  op: 'close_stream_input';
+  sessionId: string;
 }
 
 export interface WriteSessionRequest {
@@ -164,6 +200,7 @@ export interface ProxyHttpResult {
 
 export type DaemonEventPayload =
   | SessionDataEvent
+  | SessionStderrEvent
   | SessionCloseEvent
   | StatusChangeEvent;
 
@@ -175,7 +212,19 @@ export interface DaemonEvent {
 export interface SessionDataEvent {
   type: 'session.data';
   sessionId: string;
-  /** base64-encoded PTY output bytes. */
+  /** base64-encoded stdout bytes (PTY multiplex or non-PTY stdout). */
+  dataBase64: string;
+}
+
+/**
+ * Non-PTY stderr stream. Only emitted by `stream_spawn`-created
+ * sessions — PTY sessions multiplex stderr into `session.data`.
+ * Backend relays these to the structured renderer as synthetic
+ * `system/stderr` events.
+ */
+export interface SessionStderrEvent {
+  type: 'session.stderr';
+  sessionId: string;
   dataBase64: string;
 }
 

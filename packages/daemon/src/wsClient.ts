@@ -14,7 +14,15 @@ import {
   type ProxyHttpResult,
   DAEMON_CLOSE_UNAUTHORIZED,
 } from '@fastowl/shared';
-import { exec, spawnInteractive, writeSession, killSession, setChildEnv } from './executor.js';
+import {
+  exec,
+  spawnInteractive,
+  streamSpawn,
+  writeSession,
+  killSession,
+  closeStreamInput,
+  setChildEnv,
+} from './executor.js';
 import { gitDispatch } from './git.js';
 import { saveConfig, loadConfig, type ResolvedConfig } from './config.js';
 import { DaemonProxyServer } from './proxyServer.js';
@@ -236,22 +244,26 @@ export class DaemonWsClient {
           p.sessionId,
           p.command,
           { cwd: p.cwd, rows: p.rows, cols: p.cols },
-          {
-            onData: (sessionId, data) =>
-              this.emit({
-                type: 'session.data',
-                sessionId,
-                dataBase64: data.toString('base64'),
-              }),
-            onClose: (sessionId, exitCode) =>
-              this.emit({
-                type: 'session.close',
-                sessionId,
-                exitCode,
-              }),
-          }
+          this.sessionEvents()
         );
         return { started: true };
+      case 'stream_spawn':
+        streamSpawn(
+          p.sessionId,
+          p.binary,
+          p.args,
+          {
+            cwd: p.cwd,
+            env: p.env,
+            keepStdinOpen: p.keepStdinOpen,
+            initialStdinBase64: p.initialStdinBase64,
+          },
+          this.sessionEvents()
+        );
+        return { started: true };
+      case 'close_stream_input':
+        closeStreamInput(p.sessionId);
+        return { closed: true };
       case 'write_session':
         writeSession(p.sessionId, Buffer.from(p.dataBase64, 'base64'));
         return { written: true };
@@ -263,7 +275,34 @@ export class DaemonWsClient {
         if (!handler) throw new Error(`unknown git method: ${p.method}`);
         return handler(p.args, p.cwd);
       }
+      case 'proxy_http_request':
+        // Daemon → backend only. Shouldn't arrive here.
+        throw new Error('proxy_http_request is daemon→backend only');
     }
+  }
+
+  /** Shared event-emitter wiring for any spawned session on this daemon. */
+  private sessionEvents() {
+    return {
+      onData: (sessionId: string, data: Buffer) =>
+        this.emit({
+          type: 'session.data' as const,
+          sessionId,
+          dataBase64: data.toString('base64'),
+        }),
+      onStderr: (sessionId: string, data: Buffer) =>
+        this.emit({
+          type: 'session.stderr' as const,
+          sessionId,
+          dataBase64: data.toString('base64'),
+        }),
+      onClose: (sessionId: string, exitCode: number) =>
+        this.emit({
+          type: 'session.close' as const,
+          sessionId,
+          exitCode,
+        }),
+    };
   }
 
   private emit(payload: DaemonEventPayload): void {

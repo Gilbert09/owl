@@ -271,10 +271,12 @@ class AgentService extends EventEmitter {
     // --output-format stream-json`. Covers both autonomous (scheduler-
     // driven, one-shot, exits after the seed prompt) and interactive
     // (user-driven, stdin stays open, accepts follow-up messages via
-    // sendMessage). The env's `autonomousBypassPermissions` flag picks
-    // between bypass (no prompts) and strict (hook-driven per-tool
-    // approvals).
-    const useStructured = env?.renderer === 'structured' && env.type === 'local';
+    // sendMessage). Local envs spawn in-process; daemon envs tunnel
+    // through the stream_spawn wire op. SSH envs land in Slice 4b —
+    // for now `spawnStreaming` throws for them, and the PTY path
+    // below is used as fallback (renderer='pty' is still the default).
+    const useStructured =
+      env?.renderer === 'structured' && (env.type === 'local' || env.type === 'daemon');
     if (useStructured) {
       await this.startStructuredAgent({
         agentId,
@@ -459,9 +461,10 @@ class AgentService extends EventEmitter {
         .where(eq(tasksTable.id, taskId));
     }
 
-    const run = agentStructuredService.start({
+    const run = await agentStructuredService.start({
       sessionKey: sessionId,
       agentId,
+      environmentId,
       workspaceId,
       taskId,
       cwd,

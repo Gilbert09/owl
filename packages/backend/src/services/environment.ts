@@ -24,9 +24,20 @@ interface LocalPTY {
   pty: pty.IPty;
 }
 
+/**
+ * Non-PTY local child spawned for structured-renderer runs. Tracked
+ * separately from PTY sessions so `writeToSession` / `killSession` /
+ * `closeStreamInput` can pick the right pipe to talk to.
+ */
+interface LocalStreamProcess {
+  id: string;
+  process: ChildProcess;
+}
+
 class EnvironmentService extends EventEmitter {
   private localProcesses: Map<string, LocalProcess> = new Map();
   private localPTYs: Map<string, LocalPTY> = new Map();
+  private localStreams: Map<string, LocalStreamProcess> = new Map();
   private healthCheckInterval: NodeJS.Timeout | null = null;
 
   private get db(): Database {
@@ -55,6 +66,10 @@ class EnvironmentService extends EventEmitter {
     daemonRegistry.on('session.data', (_envId, event) => {
       const data = Buffer.from(event.dataBase64, 'base64');
       this.emit('session:data', event.sessionId, data);
+    });
+    daemonRegistry.on('session.stderr', (_envId, event) => {
+      const data = Buffer.from(event.dataBase64, 'base64');
+      this.emit('session:stderr', event.sessionId, data);
     });
     daemonRegistry.on('session.close', (_envId, event) => {
       this.emit('session:close', event.sessionId, event.exitCode);
@@ -93,6 +108,12 @@ class EnvironmentService extends EventEmitter {
     for (const [id, ptyProc] of this.localPTYs) {
       ptyProc.pty.kill();
       this.localPTYs.delete(id);
+    }
+    for (const [id, stream] of this.localStreams) {
+      try { stream.process.kill('SIGTERM'); } catch {
+        // Already dead.
+      }
+      this.localStreams.delete(id);
     }
   }
 
@@ -195,6 +216,83 @@ class EnvironmentService extends EventEmitter {
     }
   }
 
+  /**
+   * Non-PTY spawn for structured-renderer runs. Routes to local
+   * `child_process.spawn` or the daemon's `stream_spawn` wire op
+   * depending on env type. Emits `session:data` / `session:stderr` /
+   * `session:close` on this service.
+   *
+   * `writeToSession` / `killSession` / `closeStreamInput` know how to
+   * address streaming sessions by the same `sessionId`.
+   */
+  async spawnStreaming(
+    environmentId: string,
+    sessionId: string,
+    binary: string,
+    args: string[],
+    options: {
+      cwd?: string;
+      env?: Record<string, string>;
+      keepStdinOpen: boolean;
+      /** Bytes to write to stdin immediately on spawn. */
+      initialStdin?: Buffer | string;
+    }
+  ): Promise<void> {
+    const env = await this.getEnvironment(environmentId);
+    if (!env) throw new Error(`Environment ${environmentId} not found`);
+
+    switch (env.type) {
+      case 'local':
+        this.spawnLocalStreaming(sessionId, binary, args, options);
+        return;
+      case 'daemon': {
+        const initialStdinBase64 = options.initialStdin
+          ? Buffer.isBuffer(options.initialStdin)
+            ? options.initialStdin.toString('base64')
+            : Buffer.from(options.initialStdin, 'utf-8').toString('base64')
+          : undefined;
+        await daemonRegistry.request(environmentId, {
+          op: 'stream_spawn',
+          sessionId,
+          binary,
+          args,
+          cwd: options.cwd,
+          env: options.env,
+          keepStdinOpen: options.keepStdinOpen,
+          initialStdinBase64,
+        });
+        return;
+      }
+      case 'ssh':
+        // TODO(slice 4b): wrap ssh2 exec channel so SSH envs can run
+        // structured. For now, surface a clear error rather than
+        // silently falling back.
+        throw new Error('structured renderer not yet supported on ssh environments');
+      default:
+        throw new Error(`Cannot spawn streaming on environment type: ${env.type}`);
+    }
+  }
+
+  /**
+   * Gracefully half-close stdin on a structured session. Mirrors
+   * `killSession`'s "try local first, then broadcast to daemons"
+   * pattern — callers don't need to know which env owns the session.
+   */
+  async closeStreamInput(sessionId: string): Promise<void> {
+    const proc = this.localStreams.get(sessionId);
+    if (proc && !proc.process.stdin?.destroyed) {
+      proc.process.stdin?.end();
+      return;
+    }
+    await Promise.all(
+      daemonRegistry.listConnected().map((envId) =>
+        daemonRegistry
+          .request(envId, { op: 'close_stream_input', sessionId })
+          .catch(() => {})
+      )
+    );
+  }
+
   async spawnInteractive(
     environmentId: string,
     sessionId: string,
@@ -241,6 +339,11 @@ class EnvironmentService extends EventEmitter {
       localPty.pty.write(data);
       return;
     }
+    const localStream = this.localStreams.get(sessionId);
+    if (localStream) {
+      localStream.process.stdin?.write(data);
+      return;
+    }
     const localProc = this.localProcesses.get(sessionId);
     if (localProc) {
       localProc.process.stdin?.write(data);
@@ -269,6 +372,16 @@ class EnvironmentService extends EventEmitter {
     if (localPty) {
       localPty.pty.kill();
       this.localPTYs.delete(sessionId);
+      return;
+    }
+    const localStream = this.localStreams.get(sessionId);
+    if (localStream) {
+      try { localStream.process.kill('SIGTERM'); } catch {
+        // already dead
+      }
+      // Map entry cleared via the exit handler installed in
+      // `spawnLocalStreaming` so event listeners on session:close
+      // still fire.
       return;
     }
     const localProc = this.localProcesses.get(sessionId);
@@ -324,6 +437,58 @@ class EnvironmentService extends EventEmitter {
         resolve({ stdout, stderr, code: code || 0 });
       });
       proc.on('error', reject);
+    });
+  }
+
+  /**
+   * Local (in-backend) streaming spawn. No PTY — stdin / stdout /
+   * stderr are plain pipes. Emits via the service's event bus so the
+   * agent service + structured renderer code consume identically for
+   * local and daemon envs.
+   */
+  private spawnLocalStreaming(
+    sessionId: string,
+    binary: string,
+    args: string[],
+    options: {
+      cwd?: string;
+      env?: Record<string, string>;
+      keepStdinOpen: boolean;
+      initialStdin?: Buffer | string;
+    }
+  ): void {
+    const childEnv = { ...process.env, ...(options.env ?? {}) };
+    const child = spawn(binary, args, {
+      cwd: options.cwd,
+      env: childEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.localStreams.set(sessionId, { id: sessionId, process: child });
+
+    if (options.initialStdin && child.stdin) {
+      const buf = Buffer.isBuffer(options.initialStdin)
+        ? options.initialStdin
+        : Buffer.from(options.initialStdin, 'utf-8');
+      child.stdin.write(buf);
+    }
+    if (!options.keepStdinOpen && child.stdin) {
+      child.stdin.end();
+    }
+
+    child.stdout?.on('data', (b: Buffer) => {
+      this.emit('session:data', sessionId, b);
+    });
+    child.stderr?.on('data', (b: Buffer) => {
+      this.emit('session:stderr', sessionId, b);
+    });
+    child.on('exit', (code) => {
+      this.localStreams.delete(sessionId);
+      this.emit('session:close', sessionId, code ?? 0);
+    });
+    child.on('error', (err) => {
+      this.emit('session:stderr', sessionId, Buffer.from(err.message, 'utf-8'));
+      this.localStreams.delete(sessionId);
+      this.emit('session:close', sessionId, 1);
     });
   }
 

@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import * as pty from 'node-pty';
 import os from 'os';
 import type { ExecResult } from '@fastowl/shared';
@@ -14,6 +14,7 @@ import type { ExecResult } from '@fastowl/shared';
  */
 
 const ptySessions = new Map<string, pty.IPty>();
+const streamSessions = new Map<string, ChildProcessWithoutNullStreams>();
 
 /**
  * Extra env vars the WS client asks us to inject into every child we
@@ -46,6 +47,7 @@ function buildChildEnv(): Record<string, string> {
 
 export interface SessionEvents {
   onData: (sessionId: string, data: Buffer) => void;
+  onStderr?: (sessionId: string, data: Buffer) => void;
   onClose: (sessionId: string, exitCode: number) => void;
 }
 
@@ -127,32 +129,122 @@ export function spawnInteractive(
   });
 }
 
+/**
+ * Non-PTY streaming spawn. Used by the structured renderer to run
+ * `claude -p --output-format stream-json` without TTY-escape
+ * contamination in the output. stdin / stdout / stderr are plain
+ * pipes; the backend consumes stdout as JSONL and reads stderr as
+ * synthetic `system/stderr` events.
+ *
+ * `initialStdinBase64` (optional): bytes to push onto stdin
+ * immediately after spawn — e.g. the seed user message in
+ * interactive stream-json mode. `keepStdinOpen: false` closes stdin
+ * right after the seed write so the child exits after one turn.
+ */
+export function streamSpawn(
+  sessionId: string,
+  binary: string,
+  args: string[],
+  opts: {
+    cwd?: string;
+    env?: Record<string, string>;
+    keepStdinOpen: boolean;
+    initialStdinBase64?: string;
+  },
+  events: SessionEvents
+): void {
+  if (ptySessions.has(sessionId) || streamSessions.has(sessionId)) {
+    throw new Error(`session ${sessionId} already exists`);
+  }
+
+  const childEnv: NodeJS.ProcessEnv = buildChildEnv();
+  if (opts.env) {
+    for (const [k, v] of Object.entries(opts.env)) childEnv[k] = v;
+  }
+
+  const child = spawn(binary, args, {
+    cwd: opts.cwd,
+    env: childEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }) as ChildProcessWithoutNullStreams;
+  streamSessions.set(sessionId, child);
+
+  if (opts.initialStdinBase64) {
+    child.stdin.write(Buffer.from(opts.initialStdinBase64, 'base64'));
+  }
+  if (!opts.keepStdinOpen) {
+    child.stdin.end();
+  }
+
+  child.stdout.on('data', (b: Buffer) => events.onData(sessionId, b));
+  child.stderr.on('data', (b: Buffer) => events.onStderr?.(sessionId, b));
+  child.on('exit', (code) => {
+    streamSessions.delete(sessionId);
+    events.onClose(sessionId, code ?? 0);
+  });
+  child.on('error', (err) => {
+    // Surface spawn errors as an stderr chunk + exit, matching what
+    // the backend's in-process handler would see.
+    events.onStderr?.(sessionId, Buffer.from(err.message, 'utf-8'));
+    streamSessions.delete(sessionId);
+    events.onClose(sessionId, 1);
+  });
+}
+
+/**
+ * Half-close stdin for a streaming session. The child finalises in-
+ * flight work and exits cleanly (code 0). Use this for graceful end
+ * of an interactive conversation; use `killSession` for abort.
+ * No-op for PTY sessions — they don't have a separate stdin pipe.
+ */
+export function closeStreamInput(sessionId: string): void {
+  const child = streamSessions.get(sessionId);
+  if (!child || !child.stdin || child.stdin.destroyed) return;
+  child.stdin.end();
+}
+
 /** Write bytes to a session's stdin. No-op if the session was already killed. */
 export function writeSession(sessionId: string, data: Buffer): void {
   const pt = ptySessions.get(sessionId);
-  if (!pt) return;
-  pt.write(data.toString('utf-8'));
+  if (pt) {
+    pt.write(data.toString('utf-8'));
+    return;
+  }
+  const child = streamSessions.get(sessionId);
+  if (child && child.stdin && !child.stdin.destroyed) {
+    child.stdin.write(data);
+  }
 }
 
 /** Terminate a session. Emits the matching `session.close` event. */
 export function killSession(sessionId: string): void {
   const pt = ptySessions.get(sessionId);
-  if (!pt) return;
-  try {
-    pt.kill();
-  } catch {
-    // Already dead; onExit handler cleans up the map entry.
+  if (pt) {
+    try { pt.kill(); } catch {
+      // Already dead; onExit handler cleans up the map entry.
+    }
+    return;
+  }
+  const child = streamSessions.get(sessionId);
+  if (child) {
+    try { child.kill('SIGTERM'); } catch {
+      // Already dead.
+    }
   }
 }
 
 /** For tests + shutdown. */
 export function shutdownAllSessions(): void {
   for (const [, pt] of ptySessions) {
-    try {
-      pt.kill();
-    } catch {
+    try { pt.kill(); } catch {
       // ignore
     }
   }
   ptySessions.clear();
+  for (const [, child] of streamSessions) {
+    try { child.kill('SIGTERM'); } catch {
+      // ignore
+    }
+  }
+  streamSessions.clear();
 }

@@ -1,12 +1,16 @@
 import { EventEmitter } from 'events';
-import { spawn, type ChildProcess } from 'child_process';
 import { eq } from 'drizzle-orm';
 import type { AgentEvent } from '@fastowl/shared';
 import { getDbClient, type Database } from '../db/client.js';
 import { tasks as tasksTable } from '../db/schema.js';
-import { emitAgentEvent, emitTaskEvent } from './websocket.js';
+import { environmentService } from './environment.js';
+import {
+  emitAgentEvent,
+  emitTaskEvent,
+  emitAgentPermissionRequest,
+  emitAgentPermissionResponse,
+} from './websocket.js';
 import { permissionService, type PendingRequest } from './permissionService.js';
-import { emitAgentPermissionRequest, emitAgentPermissionResponse } from './websocket.js';
 
 /**
  * Per-task upper bound on the persisted transcript. Keeps a runaway
@@ -21,6 +25,7 @@ const TRANSCRIPT_PERSIST_EVERY = 25; // events
 export interface StructuredRunOptions {
   sessionKey: string;
   agentId: string;
+  environmentId: string;
   workspaceId: string;
   taskId?: string;
   cwd?: string;
@@ -57,29 +62,34 @@ export interface StructuredRunOptions {
 export interface ActiveStructuredRun {
   sessionKey: string;
   agentId: string;
+  environmentId: string;
   taskId?: string;
   workspaceId: string;
   /** True if stdin stays open after the seed prompt for follow-up turns. */
   interactive: boolean;
-  /** Bytes-since-last-persist; drives the sampled DB writes. */
+  /** In-memory transcript; persisted in batches to `tasks.transcript`. */
   transcript: AgentEvent[];
-  child: ChildProcess;
   startedAt: Date;
-  /** Resolves with the final exit code once the process exits. */
+  /** Resolves with the final exit code once the underlying child exits. */
   completion: Promise<number>;
   /** Per-run token presented by the child's PreToolUse hook. */
   permissionToken?: string;
   /** Cleanup for permissionService listeners scoped to this run. */
   detachPermissionListeners?: () => void;
+  /** Cleanup for environmentService listeners scoped to this session. */
+  detachTransportListeners?: () => void;
 }
 
 /**
  * Drives the `claude -p --output-format stream-json --verbose` pipeline.
- * Parses JSONL events off stdout, broadcasts them as structured WS
- * messages, and persists a bounded transcript on `tasks.transcript`.
+ * Parses JSONL events off the session's stdout, broadcasts them as
+ * structured WS messages, and persists a bounded transcript on
+ * `tasks.transcript`.
  *
- * Co-exists with the PTY-based `agentService`: one dispatches to the
- * other based on `environment.renderer`.
+ * Transport is pluggable via `environmentService.spawnStreaming` —
+ * local envs spawn in-process, daemon envs tunnel through the WS
+ * wire protocol, SSH envs (Slice 4b) go over an ssh2 exec channel.
+ * The service itself doesn't care which.
  */
 class AgentStructuredService extends EventEmitter {
   private runs: Map<string, ActiveStructuredRun> = new Map();
@@ -100,7 +110,7 @@ class AgentStructuredService extends EventEmitter {
   stop(sessionKey: string): void {
     const run = this.runs.get(sessionKey);
     if (!run) return;
-    run.child.kill('SIGTERM');
+    environmentService.killSession(sessionKey);
   }
 
   /**
@@ -117,14 +127,11 @@ class AgentStructuredService extends EventEmitter {
     if (!run.interactive) {
       throw new Error(`run ${sessionKey} is one-shot; sendMessage only works in interactive mode`);
     }
-    if (!run.child.stdin || run.child.stdin.destroyed) {
-      throw new Error(`run ${sessionKey} stdin is closed`);
-    }
     const envelope = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: text },
     });
-    run.child.stdin.write(envelope + '\n');
+    environmentService.writeToSession(sessionKey, envelope + '\n');
   }
 
   /**
@@ -135,19 +142,15 @@ class AgentStructuredService extends EventEmitter {
    * conversation" flows.
    */
   closeInput(sessionKey: string): void {
-    const run = this.runs.get(sessionKey);
-    if (!run) return;
-    if (run.child.stdin && !run.child.stdin.destroyed) {
-      run.child.stdin.end();
-    }
+    void environmentService.closeStreamInput(sessionKey).catch(() => {});
   }
 
   /**
-   * Spawn a non-PTY `claude -p …` with stream-json output and wire
-   * stdout → JSONL parser → event emitter. Returns once the child is
-   * live; callers can await `activeRun.completion` for the exit code.
+   * Spawn a structured run via the env service. Returns once the
+   * child is live; callers can await `run.completion` for the exit
+   * code.
    */
-  start(opts: StructuredRunOptions): ActiveStructuredRun {
+  async start(opts: StructuredRunOptions): Promise<ActiveStructuredRun> {
     if (this.runs.has(opts.sessionKey)) {
       throw new Error(`structured run already active for ${opts.sessionKey}`);
     }
@@ -159,11 +162,11 @@ class AgentStructuredService extends EventEmitter {
     // hook can authenticate itself back to the backend without a user
     // JWT. Token is in-process-only; never touches disk.
     let permissionToken: string | undefined;
-    const childEnv = { ...process.env, ...(opts.env ?? {}) };
+    const childEnv: Record<string, string> = { ...(opts.env ?? {}) };
     if (opts.permissionMode === 'strict') {
       permissionToken = permissionService.registerRun({
         agentId: opts.agentId,
-        environmentId: (opts.env?.FASTOWL_ENVIRONMENT_ID as string) ?? '',
+        environmentId: opts.environmentId,
         workspaceId: opts.workspaceId,
         taskId: opts.taskId,
       });
@@ -171,46 +174,72 @@ class AgentStructuredService extends EventEmitter {
       childEnv.FASTOWL_AGENT_ID = opts.agentId;
     }
 
-    const child = spawn(binary, args, {
-      cwd: opts.cwd,
-      env: childEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
+    // Seed-stdin bytes.
+    //   - Interactive: wrap as stream-json envelope; stdin stays open.
+    //   - One-shot: write raw text (CLI's text input mode); stdin
+    //     closes immediately so the child exits after the first turn.
+    let initialStdin: string | undefined;
+    if (opts.prompt) {
+      initialStdin = opts.interactive
+        ? JSON.stringify({ type: 'user', message: { role: 'user', content: opts.prompt } }) + '\n'
+        : opts.prompt;
+    }
+
+    // Wire transport listeners BEFORE spawning so we don't miss any
+    // early output. environmentService emits per-session events
+    // globally — we filter by sessionKey.
+    const parser = new JsonlLineParser();
+    let resolveCompletion!: (code: number) => void;
+    const completion = new Promise<number>((resolve) => {
+      resolveCompletion = resolve;
     });
 
-    // Seed message.
-    //   - Interactive: wrap as stream-json envelope; keep stdin open
-    //     so more messages can flow in via `sendMessage`.
-    //   - One-shot: write raw text (CLI's text input mode) and close
-    //     stdin so the child exits after the first turn.
-    if (child.stdin) {
-      if (opts.interactive) {
-        if (opts.prompt) {
-          const envelope = JSON.stringify({
-            type: 'user',
-            message: { role: 'user', content: opts.prompt },
-          });
-          child.stdin.write(envelope + '\n');
-        }
-        // Leave stdin open.
-      } else {
-        if (opts.prompt) child.stdin.write(opts.prompt);
-        child.stdin.end();
+    const onData = (sid: string, chunk: Buffer) => {
+      if (sid !== opts.sessionKey) return;
+      for (const rawEvent of parser.push(chunk.toString('utf-8'))) {
+        void this.onRawEvent(run, rawEvent).catch((err) =>
+          console.error(`[agentStructured ${opts.sessionKey}] onRawEvent failed:`, err)
+        );
       }
-    }
+    };
+    const onStderr = (sid: string, chunk: Buffer) => {
+      if (sid !== opts.sessionKey) return;
+      void this.onRawEvent(run, {
+        type: 'system',
+        subtype: 'stderr',
+        text: chunk.toString('utf-8'),
+      });
+    };
+    const onClose = (sid: string, code: number) => {
+      if (sid !== opts.sessionKey) return;
+      this.runs.delete(opts.sessionKey);
+      run.detachPermissionListeners?.();
+      run.detachTransportListeners?.();
+      if (permissionToken) permissionService.unregisterRun(permissionToken);
+      resolveCompletion(code);
+      this.emit('exit', run, code);
+    };
+    environmentService.on('session:data', onData);
+    environmentService.on('session:stderr', onStderr);
+    environmentService.on('session:close', onClose);
+    const detachTransportListeners = () => {
+      environmentService.off('session:data', onData);
+      environmentService.off('session:stderr', onStderr);
+      environmentService.off('session:close', onClose);
+    };
 
     const run: ActiveStructuredRun = {
       sessionKey: opts.sessionKey,
       agentId: opts.agentId,
+      environmentId: opts.environmentId,
       taskId: opts.taskId,
       workspaceId: opts.workspaceId,
       interactive: Boolean(opts.interactive),
       transcript: [],
-      child,
       startedAt: new Date(),
       permissionToken,
-      completion: new Promise<number>((resolve) => {
-        child.on('exit', (code) => resolve(code ?? 0));
-      }),
+      completion,
+      detachTransportListeners,
     };
     this.runs.set(opts.sessionKey, run);
 
@@ -292,39 +321,36 @@ class AgentStructuredService extends EventEmitter {
       permissionService.off('resolved', onResolved);
     };
 
-    const parser = new JsonlLineParser();
-    child.stdout?.on('data', (chunk: Buffer) => {
-      for (const rawEvent of parser.push(chunk.toString('utf-8'))) {
-        this.onRawEvent(run, rawEvent).catch((err) => {
-          console.error(`[agentStructured ${run.sessionKey}] onRawEvent failed:`, err);
-        });
-      }
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      // stderr usually means the CLI itself misbehaved (not the LLM).
-      // Surface it as a synthetic stderr event so the UI can show it.
-      const text = chunk.toString('utf-8');
-      void this.onRawEvent(run, {
-        type: 'system',
-        subtype: 'stderr',
-        text,
-      });
-    });
-    child.on('error', (err) => {
-      void this.onRawEvent(run, {
-        type: 'system',
-        subtype: 'spawn_error',
-        text: err.message,
-      });
-    });
-    child.on('exit', (code) => {
-      // Drain any trailing partial — if the CLI exited mid-line we
-      // drop that fragment rather than fabricate an event.
+    try {
+      await environmentService.spawnStreaming(
+        opts.environmentId,
+        opts.sessionKey,
+        binary,
+        args,
+        {
+          cwd: opts.cwd,
+          env: childEnv,
+          keepStdinOpen: Boolean(opts.interactive),
+          initialStdin,
+        }
+      );
+    } catch (err) {
+      // Spawn failed before the child ever existed — emit a synthetic
+      // error event, tear down listeners, and resolve completion with
+      // a non-zero code so the caller's handleStructuredExit marks
+      // the task `failed`.
       this.runs.delete(opts.sessionKey);
       run.detachPermissionListeners?.();
+      run.detachTransportListeners?.();
       if (permissionToken) permissionService.unregisterRun(permissionToken);
-      this.emit('exit', run, code ?? 0);
-    });
+      const message = err instanceof Error ? err.message : String(err);
+      await this.onRawEvent(run, {
+        type: 'system',
+        subtype: 'spawn_error',
+        text: message,
+      });
+      resolveCompletion(1);
+    }
 
     return run;
   }
