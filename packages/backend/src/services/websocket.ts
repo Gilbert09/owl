@@ -243,6 +243,26 @@ export function emitTaskEvent(
   });
 }
 
+export interface ChangedFileEntry {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+export function emitTaskFilesChanged(
+  workspaceId: string,
+  taskId: string,
+  files: ChangedFileEntry[]
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:files_changed',
+    payload: { taskId, files },
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function emitAgentPermissionRequest(
   workspaceId: string,
   req: PermissionRequest

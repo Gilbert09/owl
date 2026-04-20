@@ -2,6 +2,24 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 20 — Git-centric task flow (Phase 14.2–14.5)
+
+Closes the loop on Phase 14: tasks now own their branch end-to-end, from a synced base at start through commit + push on approve. Landed together so each piece makes sense alongside the next — a partial slice here would leave tasks in a worse state than before.
+
+- **`prepareTaskBranch` with base sync** (`gitService.ts`): one entry point for "start a task on this repo" — fetches the default branch, fast-forwards to origin, then creates `fastowl/<id>-<slug>` off it. Refuses to proceed if the tree is dirty (the slot guard should have prevented it) or if the base has diverged from origin (fails loud rather than branching off stale state). Wired into both `POST /tasks/:id/start` and `taskQueue.processQueue` — previously the scheduler's auto-pick path skipped branch setup entirely and edited whatever happened to be checked out.
+
+- **(env, repo) single-slot guard** (`findTaskHoldingEnvRepoSlot` in `taskQueue.ts`): an `in_progress` or `awaiting_review` task holds the working tree for its `(assignedEnvironmentId, repositoryId)` pair. Scheduler skips queued tasks whose pair is held; `/start` returns 409. Awaiting-review keeps the slot because the working tree is still dirty with its work — approve or reject frees it.
+
+- **`/approve` → commit + push** (`routes/tasks.ts`): new `gitService.commitAll` (staged via base64→stdin for arbitrary messages, no shell-escape concerns) + `pushBranch` + `getDiffStat`. Default commit message comes from `generateCommitMessage` in `services/ai.ts` — Claude Haiku 4.5, same pattern as `generateTaskTitle`, with the diff truncated to 6k chars. User can override via the approve modal's textarea or POST a `commitMessage` field. On push success, check out base and `git branch -D <task branch>` so the slot is free for the next task; remote branch stays.
+
+- **`ApproveTaskModal`** (`components/modals/`): opens on Approve click; fetches the proposed message from `GET /tasks/:id/proposed-commit-message`, shows it in an editable textarea, submits `commitMessage` with the approve call. Shift-click bypasses the modal for users who trust the LLM.
+
+- **`/reject` → stash to backup + reset tree**: new `gitService.stashToBackupRef` captures the current working tree (via `git stash create` + `update-ref`) into `refs/fastowl/rejected/<taskId>`, then `resetToBase` does `checkout -f` / `reset --hard origin/<base>` / `clean -fd`. The task goes back to `queued` with `branch` cleared so retry gets a fresh `prepareTaskBranch`. Rejected work is recoverable with `git checkout -b <name> refs/fastowl/rejected/<taskId>`.
+
+- **Live file-change view** (Files tab). New `taskFileWatcher` service subscribes to `agentStructuredService`'s `event` stream, watches for `tool_use` blocks in `{Edit, Write, MultiEdit, NotebookEdit, Bash}`, debounces 500ms, runs `git diff --numstat` + `ls-files --others` on the task's env, and broadcasts a new `task:files_changed` WS event. New endpoints `GET /:id/diff/files` and `/diff/file?path=...` back the desktop UI. Terminal/Files tabs in the running-task view; Files tab replaces the inline diff in awaiting_review. Per-file diff viewer includes an in-flight-write pulse dot derived from unmatched `tool_use` events, and caps rendering at 2k lines. Old `TaskDiff.tsx` removed — `TaskFilesPanel` supersedes it.
+
+Explicitly deferred: git worktrees (would drop the single-slot constraint but each worktree needs its own `node_modules` — monorepo pain), PR creation button, resume-task-on-different-env. See Phase 14.6/14.7 in ROADMAP.
+
 ## Session 19 — Daemon everywhere (Phase 18.5)
 
 One-session refactor that collapses `local`/`ssh`/`daemon`/`coder` env types into `local | remote` with a single transport: every environment is backed by a `@fastowl/daemon` process dialling the backend over WebSocket. The immediate trigger: backend restart was SIGPIPE-killing local tasks because the child's stdin was piped directly to the backend process. The daemon now owns those pipes, so backend deploys don't take down in-flight work.

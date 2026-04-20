@@ -475,25 +475,38 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [x] Auto-create branch when code-writing task starts (`fastowl/{id}-{slug}`)
   - [x] Track branch per task in database
   - [x] Auto-checkout branch when resuming task
-  - [ ] One active task per repo per environment (deferred)
+  - [x] One active task per repo per environment (DONE — `findTaskHoldingEnvRepoSlot` in `taskQueue.ts`; both scheduler and `/start` refuse to stomp)
 
-- [x] **14.2 Work State Preservation** (PARTIALLY COMPLETED)
-  - [ ] Before starting new task: commit/stash current work
+- [x] **14.2 Work State Preservation** (COMPLETED)
+  - [x] Before starting new task: base branch is fetched and fast-forwarded via `gitService.prepareTaskBranch`
   - [x] Detect uncommitted changes (gitService.hasUncommittedChanges)
-  - [ ] Prompt user or auto-stash with task reference
+  - [x] `prepareTaskBranch` refuses to start on a dirty tree — the (env, repo) slot should have prevented it; surface the inconsistency rather than branch off half-written state
   - [x] Stash utility available (gitService.stashChanges)
 
-- [ ] **14.3 Branch Lifecycle**
-  - [ ] Delete branch after task merged/completed
-  - [ ] Option to keep branches for reference
-  - [ ] List task branches in UI
-  - [ ] Push branch to remote for backup
+- [x] **14.3 Branch Lifecycle** (COMPLETED — core flow)
+  - [x] Delete local branch after approve — branch is pushed to origin then removed locally so the env+repo slot is free
+  - [x] Push branch to remote on approve (`gitService.pushBranch` called from `/approve`)
+  - [x] Rejected work preserved under `refs/fastowl/rejected/<taskId>` via `gitService.stashToBackupRef` (recoverable with `git checkout -b <name> <ref>`)
+  - [ ] List task branches in UI (deferred — not needed once approve→push→delete lands)
 
-- [ ] **14.4 PR Creation from Task**
-  - [ ] "Create PR" button on completed tasks
-  - [ ] Pre-fill PR title/description from task
-  - [ ] Select target branch (main/master)
-  - [ ] Link PR to task in UI
+- [x] **14.4 PR Creation from Task** (PARTIAL — commit+push landed; PR button deferred)
+  - [x] Approve commits the working tree with an LLM-generated message (Haiku via `generateCommitMessage`) and pushes to origin — remote branch is ready for a PR
+  - [x] Editable commit message modal in `ApproveTaskModal.tsx` — shift-click Approve to bypass
+  - [ ] "Create PR" button on completed tasks (deferred — `gh pr create` wrapper)
+  - [ ] Pre-fill PR title/description from task metadata (deferred)
+  - [ ] Link PR to task in UI (deferred)
+
+- [x] **14.5 Live file-change view** (COMPLETED)
+  - [x] Per-file diff endpoints (`GET /:id/diff/files`, `GET /:id/diff/file?path=...`)
+  - [x] `TaskFilesPanel` component — file list + per-file diff viewer; in-flight write pulse from `tool_use` events
+  - [x] Terminal/Files tabs in the running-task view; Files tab replaces the inline diff in awaiting_review
+  - [x] Live `task:files_changed` WS event driven by `taskFileWatcher` — debounces on `tool_use` for Edit/Write/MultiEdit/NotebookEdit/Bash
+
+- [ ] **14.6 Future: parallel tasks per repo via git worktrees** (DEFERRED)
+  - Reasoning: worktrees would drop the (env, repo) single-slot constraint and let multiple tasks work the same repo simultaneously. The blocker is per-worktree dependency state — each worktree needs its own `node_modules` / build artifacts, which is painful in monorepos (posthog/posthog, etc.). Keep single-slot for now; revisit if users hit the queue-behind-awaiting-review pain.
+
+- [ ] **14.7 Future: resume task from a different environment**
+  - Periodic `git push -f origin refs/fastowl/wip/<taskId>` from the env running the task; "Move to env X" action fetches + checks out on the target. Lightweight; tackle after users ask for it.
 
 ## Phase 15: Session Persistence & History
 
@@ -532,15 +545,16 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] Type-specific default prompts/templates (deferred — just placeholders for now)
   - [x] Migration 005 renames existing 'automated' → 'code_writing'
 
-- [x] **16.2 Approval Gates** (COMPLETED — basic)
+- [x] **16.2 Approval Gates** (COMPLETED)
   - [x] "Awaiting Review" status routed through (existing `awaiting_review` TaskStatus)
   - [x] Approve/Reject buttons in TaskDetail for awaiting_review tasks
   - [x] "Ready for Review" button in TaskTerminal stops agent + transitions to awaiting_review
   - [x] Agent session close (code === 0) now routes agent tasks to awaiting_review instead of completed
-  - [x] Reject sends task back to queued for another pass
-  - [x] Show diff of changes before approve (`gitService.getDiff` + `GET /tasks/:id/diff` + `TaskDiff` component with +/- colored lines)
+  - [x] Reject resets working tree to base, preserves rejected work under `refs/fastowl/rejected/<taskId>`, re-queues the task with `branch` cleared so the next attempt gets a fresh `prepareTaskBranch`
+  - [x] Show diff of changes before approve — replaced inline `TaskDiff` with `TaskFilesPanel` (per-file list + diff viewer) that updates live via `task:files_changed`
+  - [x] Commit message review modal with LLM-generated default (Haiku, see `generateCommitMessage`), shift-click to bypass
+  - [x] Push only after approval — `/approve` commits the working tree, pushes to origin, then cleans up the local branch
   - [ ] Comments on approval (deferred)
-  - [ ] Push only after approval (push automation deferred; currently user still handles push)
 
 - [ ] **16.3 PR Response Task Type**
   - [ ] Triggered by PR comment notifications

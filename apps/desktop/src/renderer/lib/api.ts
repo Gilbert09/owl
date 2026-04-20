@@ -141,8 +141,11 @@ export const tasks = {
   stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
   readyForReview: (id: string) =>
     request<Task>('POST', `/tasks/${id}/ready-for-review`),
-  approve: (id: string) => request<Task>('POST', `/tasks/${id}/approve`),
+  approve: (id: string, commitMessage?: string) =>
+    request<Task>('POST', `/tasks/${id}/approve`, commitMessage ? { commitMessage } : {}),
   reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
+  proposeCommitMessage: (id: string) =>
+    request<{ message: string }>('GET', `/tasks/${id}/proposed-commit-message`),
   getTerminal: (id: string) =>
     request<{
       terminalOutput: string;
@@ -167,6 +170,21 @@ export const tasks = {
     ),
   getDiff: (id: string) =>
     request<{ diff: string }>('GET', `/tasks/${id}/diff`),
+  getChangedFiles: (id: string) =>
+    request<{
+      files: Array<{
+        path: string;
+        status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+        added: number;
+        removed: number;
+        binary: boolean;
+      }>;
+    }>('GET', `/tasks/${id}/diff/files`),
+  getFileDiff: (id: string, path: string) =>
+    request<{ diff: string }>(
+      'GET',
+      `/tasks/${id}/diff/file?path=${encodeURIComponent(path)}`
+    ),
   // Generate task metadata from prompt using AI
   generateMetadata: (prompt: string) =>
     request<TaskMetadata>('POST', '/tasks/generate-metadata', { prompt }),

@@ -11,8 +11,10 @@ import {
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
+import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
+  generateCommitMessage,
   generateTaskMetadata,
   generateTaskTitle,
   isConfigured as isAIConfigured,
@@ -395,6 +397,23 @@ export function taskRoutes(): Router {
       return res.json({ success: true, data: task } as ApiResponse<Task>);
     }
 
+    // (env, repo) single-slot: refuse to start if a different task is
+    // already holding the working tree on this pair.
+    if (task.repositoryId) {
+      const holder = await findTaskHoldingEnvRepoSlot(
+        db,
+        environmentId,
+        task.repositoryId,
+        task.id
+      );
+      if (holder) {
+        return res.status(409).json({
+          success: false,
+          error: `Repository is busy on this environment — task "${holder.title}" is ${holder.status}. Approve or reject it before starting another.`,
+        });
+      }
+    }
+
     let workingDirectory: string | undefined;
     let taskBranch: string | undefined;
 
@@ -402,6 +421,7 @@ export function taskRoutes(): Router {
       const repoRows = await db
         .select({
           localPath: repositoriesTable.localPath,
+          defaultBranch: repositoriesTable.defaultBranch,
         })
         .from(repositoriesTable)
         .where(eq(repositoriesTable.id, task.repositoryId))
@@ -412,28 +432,28 @@ export function taskRoutes(): Router {
         workingDirectory = repoRow.localPath;
 
         if (task.branch) {
+          // Resume: checkout the existing task branch. Skip base sync —
+          // we don't want to rewrite history on work already in flight.
           try {
             await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
             taskBranch = task.branch;
           } catch (err) {
-            console.warn('Failed to checkout existing branch, creating new:', err);
-            taskBranch = await gitService.createTaskBranch(
-              environmentId,
-              task.id,
-              task.title,
-              workingDirectory
-            );
+            console.warn('Failed to checkout existing branch, will create fresh:', err);
           }
-        } else {
+        }
+
+        if (!taskBranch) {
           try {
-            taskBranch = await gitService.createTaskBranch(
+            taskBranch = await gitService.prepareTaskBranch({
               environmentId,
-              task.id,
-              task.title,
-              workingDirectory
-            );
+              taskId: task.id,
+              taskTitle: task.title,
+              workingDirectory,
+              baseBranch: repoRow.defaultBranch || 'main',
+            });
           } catch (err) {
-            console.warn('Failed to create task branch (continuing without):', err);
+            const msg = err instanceof Error ? err.message : String(err);
+            return res.status(400).json({ success: false, error: msg });
           }
         }
       }
@@ -618,7 +638,7 @@ export function taskRoutes(): Router {
     res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Approve an awaiting_review task → completed
+  // Approve an awaiting_review task → commit + push branch → completed
   router.post('/:id/approve', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -626,8 +646,12 @@ export function taskRoutes(): Router {
       return handleAccessError(err, res);
     }
     const db = getDbClient();
+    const { commitMessage: overrideMessage } = (req.body ?? {}) as {
+      commitMessage?: string;
+    };
+
     const rows = await db
-      .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
+      .select()
       .from(tasksTable)
       .where(eq(tasksTable.id, req.params.id))
       .limit(1);
@@ -638,13 +662,86 @@ export function taskRoutes(): Router {
       return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
     }
 
+    const task = rowToTask(rows[0]);
+
+    // Resolve repo + env so we can commit + push on the env that owns
+    // the working tree. If any of this is missing the task has no
+    // branch to push — just mark completed (manual tasks etc.).
+    let pushed = false;
+    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
+      const repoRows = await db
+        .select({
+          localPath: repositoriesTable.localPath,
+          defaultBranch: repositoriesTable.defaultBranch,
+        })
+        .from(repositoriesTable)
+        .where(eq(repositoriesTable.id, task.repositoryId))
+        .limit(1);
+      const repoRow = repoRows[0];
+
+      if (repoRow?.localPath) {
+        const workingDirectory = repoRow.localPath;
+        const envId = task.assignedEnvironmentId;
+        const baseBranch = repoRow.defaultBranch || 'main';
+
+        try {
+          // 1. Decide the commit message. User override wins; otherwise
+          //    ask Haiku, falling back to `<title>\n\n<prompt>`.
+          let message = overrideMessage?.trim();
+          if (!message) {
+            const [diffStat, diff] = await Promise.all([
+              gitService.getDiffStat(envId, task.branch, baseBranch, workingDirectory),
+              gitService.getDiff(envId, task.branch, baseBranch, workingDirectory),
+            ]);
+            message = await generateCommitMessage({
+              title: task.title,
+              prompt: task.prompt,
+              diffStat,
+              diff,
+            });
+          }
+
+          // 2. Commit any uncommitted tree changes.
+          await gitService.commitAll(envId, message, workingDirectory);
+
+          // 3. Push. Push errors (auth, rejected, conflicts) flow back
+          //    to the desktop — the task stays in awaiting_review so the
+          //    user can fix + re-approve.
+          await gitService.pushBranch(envId, task.branch, workingDirectory);
+          pushed = true;
+
+          // 4. Cleanup: return the working tree to the base branch and
+          //    delete the local branch so the (env, repo) slot is free
+          //    for the next task. Remote branch stays — it may be tied
+          //    to a PR the user wants to keep open.
+          try {
+            await gitService.checkoutBranch(envId, baseBranch, workingDirectory);
+            await gitService.forceDeleteBranch(envId, task.branch, workingDirectory);
+          } catch (cleanupErr) {
+            // Non-fatal: the push succeeded, the task is approved. Log
+            // so the user can clean up by hand if needed, but don't
+            // stall the approve flow.
+            console.warn('[tasks] approve: local branch cleanup failed:', cleanupErr);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error('[tasks] approve commit/push failed:', err);
+          return res.status(500).json({
+            success: false,
+            error: `Commit/push failed: ${msg}. Task left in awaiting_review.`,
+          });
+        }
+      }
+    }
+
     const now = new Date();
     await db
       .update(tasksTable)
       .set({ status: 'completed', completedAt: now, updatedAt: now })
       .where(eq(tasksTable.id, req.params.id));
 
-    emitTaskStatus(rows[0].workspaceId, req.params.id, 'completed');
+    emitTaskStatus(task.workspaceId, req.params.id, 'completed');
+    void pushed; // kept for future: expose on response so UI can link to the branch
 
     const updatedRows = await db
       .select()
@@ -654,7 +751,10 @@ export function taskRoutes(): Router {
     res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Reject an awaiting_review task → back to queued
+  // Reject an awaiting_review task → stash rejected work to a backup
+  // ref → reset working tree to base → re-queue so the env+repo slot
+  // is usable again. The backup ref lets the user recover rejected
+  // work with `git checkout -b <name> refs/fastowl/rejected/<taskId>`.
   router.post('/:id/reject', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -663,7 +763,7 @@ export function taskRoutes(): Router {
     }
     const db = getDbClient();
     const rows = await db
-      .select({ status: tasksTable.status, workspaceId: tasksTable.workspaceId })
+      .select()
       .from(tasksTable)
       .where(eq(tasksTable.id, req.params.id))
       .limit(1);
@@ -674,12 +774,59 @@ export function taskRoutes(): Router {
       return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
     }
 
+    const task = rowToTask(rows[0]);
+
+    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
+      const repoRows = await db
+        .select({
+          localPath: repositoriesTable.localPath,
+          defaultBranch: repositoriesTable.defaultBranch,
+        })
+        .from(repositoriesTable)
+        .where(eq(repositoriesTable.id, task.repositoryId))
+        .limit(1);
+      const repoRow = repoRows[0];
+
+      if (repoRow?.localPath) {
+        const envId = task.assignedEnvironmentId;
+        const workingDirectory = repoRow.localPath;
+        const baseBranch = repoRow.defaultBranch || 'main';
+
+        try {
+          await gitService.stashToBackupRef(envId, 'rejected', task.id, workingDirectory);
+          await gitService.resetToBase(envId, baseBranch, workingDirectory);
+          // Delete the branch so a re-queue + retry gets a fresh
+          // prepareTaskBranch off the synced base.
+          try {
+            await gitService.forceDeleteBranch(envId, task.branch, workingDirectory);
+          } catch (err) {
+            console.warn('[tasks] reject: failed to delete rejected branch (continuing):', err);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error('[tasks] reject: working-tree reset failed:', err);
+          return res.status(500).json({
+            success: false,
+            error: `Reset failed: ${msg}. Task left in awaiting_review.`,
+          });
+        }
+      }
+    }
+
     await db
       .update(tasksTable)
-      .set({ status: 'queued', assignedAgentId: null, updatedAt: new Date() })
+      .set({
+        status: 'queued',
+        assignedAgentId: null,
+        // Clear branch so the re-queued task gets a fresh
+        // prepareTaskBranch run. The rejected work lives under
+        // refs/fastowl/rejected/<taskId> if the user wants it back.
+        branch: null,
+        updatedAt: new Date(),
+      })
       .where(eq(tasksTable.id, req.params.id));
 
-    emitTaskStatus(rows[0].workspaceId, req.params.id, 'queued');
+    emitTaskStatus(task.workspaceId, req.params.id, 'queued');
 
     const updatedRows = await db
       .select()
@@ -736,6 +883,73 @@ export function taskRoutes(): Router {
       .where(eq(tasksTable.id, task.id))
       .limit(1);
     res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
+  });
+
+  // Propose a commit message for an awaiting_review task so the
+  // desktop approve modal can pre-fill the textarea. Calls the same
+  // helper `/approve` uses when no override is supplied.
+  router.get('/:id/proposed-commit-message', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    const task = rowToTask(rows[0]);
+
+    let diffStat: string | undefined;
+    let diff: string | undefined;
+    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
+      const repoRows = await db
+        .select({
+          localPath: repositoriesTable.localPath,
+          defaultBranch: repositoriesTable.defaultBranch,
+        })
+        .from(repositoriesTable)
+        .where(eq(repositoriesTable.id, task.repositoryId))
+        .limit(1);
+      const repoRow = repoRows[0];
+      if (repoRow?.localPath) {
+        const baseBranch = repoRow.defaultBranch || 'main';
+        try {
+          [diffStat, diff] = await Promise.all([
+            gitService.getDiffStat(
+              task.assignedEnvironmentId,
+              task.branch,
+              baseBranch,
+              repoRow.localPath
+            ),
+            gitService.getDiff(
+              task.assignedEnvironmentId,
+              task.branch,
+              baseBranch,
+              repoRow.localPath
+            ),
+          ]);
+        } catch (err) {
+          // If we can't read the diff, still return a reasonable
+          // message from title/prompt alone rather than erroring out.
+          console.warn('[tasks] proposed-commit-message: failed to read diff:', err);
+        }
+      }
+    }
+
+    const message = await generateCommitMessage({
+      title: task.title,
+      prompt: task.prompt,
+      diffStat,
+      diff,
+    });
+
+    res.json({ success: true, data: { message } } as ApiResponse<{ message: string }>);
   });
 
   // Get the diff of a task's work against the base branch
@@ -805,6 +1019,58 @@ export function taskRoutes(): Router {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to get diff';
       console.error('Failed to get diff:', err);
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  // List files changed on this task's branch vs base, one entry per path.
+  // Drives the desktop Files tab.
+  router.get('/:id/diff/files', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const context = await resolveTaskDiffContext(req);
+    if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
+    try {
+      const files = await gitService.getChangedFiles(
+        context.environmentId,
+        context.baseBranch,
+        context.workingDirectory
+      );
+      res.json({ success: true, data: { files } } as ApiResponse<{ files: typeof files }>);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to list changed files';
+      console.error('[tasks] diff/files failed:', err);
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  // Unified diff for a single file on this task's branch vs base.
+  router.get('/:id/diff/file', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const pathParam = req.query.path;
+    if (typeof pathParam !== 'string' || !pathParam) {
+      return res.status(400).json({ success: false, error: 'path query param is required' });
+    }
+    const context = await resolveTaskDiffContext(req);
+    if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
+    try {
+      const diff = await gitService.getFileDiff(
+        context.environmentId,
+        context.baseBranch,
+        pathParam,
+        context.workingDirectory
+      );
+      res.json({ success: true, data: { diff } } as ApiResponse<{ diff: string }>);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to get file diff';
+      console.error('[tasks] diff/file failed:', err);
       res.status(500).json({ success: false, error: msg });
     }
   });
@@ -906,6 +1172,69 @@ export function taskRoutes(): Router {
  * Kept here rather than on `environmentService` because the service is
  * stateless re: users and we want the scoping explicit at the call site.
  */
+/**
+ * Resolve the env + repo working directory + base branch for a task —
+ * the stuff every per-file diff route needs before it can shell out.
+ * Returns a discriminated union so call sites can surface the right
+ * HTTP status without duplicating the lookup dance.
+ */
+async function resolveTaskDiffContext(
+  req: import('express').Request
+): Promise<
+  | { ok: true; environmentId: string; workingDirectory: string; baseBranch: string }
+  | { ok: false; status: number; error: string }
+> {
+  const db = getDbClient();
+  const rows = await db
+    .select()
+    .from(tasksTable)
+    .where(eq(tasksTable.id, req.params.id))
+    .limit(1);
+  if (!rows[0]) return { ok: false, status: 404, error: 'Task not found' };
+  const task = rowToTask(rows[0]);
+  if (!task.branch || !task.repositoryId) {
+    return { ok: false, status: 400, error: 'Task has no branch or repository' };
+  }
+
+  const repoRows = await db
+    .select({
+      localPath: repositoriesTable.localPath,
+      defaultBranch: repositoriesTable.defaultBranch,
+    })
+    .from(repositoriesTable)
+    .where(eq(repositoriesTable.id, task.repositoryId))
+    .limit(1);
+  const repoRow = repoRows[0];
+  if (!repoRow?.localPath) {
+    return { ok: false, status: 400, error: 'Repository has no local path on this machine' };
+  }
+
+  let environmentId = task.assignedEnvironmentId;
+  if (!environmentId) {
+    const connected = await findConnectedEnvironmentForUser(req);
+    if (!connected) {
+      return { ok: false, status: 400, error: 'No connected environment to compute diff' };
+    }
+    environmentId = connected;
+  } else {
+    try {
+      await requireEnvironmentAccess(req, environmentId);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'Forbidden') {
+        return { ok: false, status: 403, error: 'Forbidden' };
+      }
+      return { ok: false, status: 500, error: err instanceof Error ? err.message : 'Access check failed' };
+    }
+  }
+
+  return {
+    ok: true,
+    environmentId,
+    workingDirectory: repoRow.localPath,
+    baseBranch: repoRow.defaultBranch || 'main',
+  };
+}
+
 async function findConnectedEnvironmentForUser(req: import('express').Request): Promise<string | null> {
   const user = assertUser(req);
   const db = getDbClient();

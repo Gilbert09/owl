@@ -19,6 +19,7 @@ import { prMonitorService } from './services/prMonitor.js';
 import { backlogService } from './services/backlog/service.js';
 import { continuousBuildScheduler } from './services/continuousBuild.js';
 import { permissionInboxService } from './services/permissionInbox.js';
+import { taskFileWatcher } from './services/taskFileWatcher.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -41,6 +42,7 @@ async function main() {
   await continuousBuildScheduler.init();
   daemonRegistry.init();
   permissionInboxService.init();
+  taskFileWatcher.init();
 
   const app = express();
   app.use(cors());

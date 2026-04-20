@@ -1,15 +1,17 @@
 import { EventEmitter } from 'events';
-import { and, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import type { Task, TaskPriority, Agent, TaskStatus, TaskType } from '@fastowl/shared';
 import { isAgentTask } from '@fastowl/shared';
 import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
+import { gitService } from './git.js';
 import { permissionService } from './permissionService.js';
 import { emitTaskStatus } from './websocket.js';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   tasks as tasksTable,
   agents as agentsTable,
+  repositories as repositoriesTable,
   workspaces as workspacesTable,
 } from '../db/schema.js';
 
@@ -259,13 +261,28 @@ class TaskQueueService extends EventEmitter {
         let agentToUse: Agent | null = null;
 
         for (const agent of idleAgents) {
-          if (agent.workspaceId === task.workspaceId) {
-            if (!targetEnvironmentId || agent.environmentId === targetEnvironmentId) {
-              agentToUse = agent;
-              console.log(`[TaskQueue] Found idle agent: ${agent.id}`);
-              break;
+          if (agent.workspaceId !== task.workspaceId) continue;
+          if (targetEnvironmentId && agent.environmentId !== targetEnvironmentId) continue;
+
+          // Same (env, repo) slot guard as the new-agent path below.
+          if (task.repositoryId) {
+            const holder = await findTaskHoldingEnvRepoSlot(
+              this.db,
+              agent.environmentId,
+              task.repositoryId,
+              task.id
+            );
+            if (holder) {
+              console.log(
+                `[TaskQueue] Idle agent ${agent.id} on env ${agent.environmentId} blocked: (env, repo) slot held by task "${holder.title}" (${holder.status})`
+              );
+              continue;
             }
           }
+
+          agentToUse = agent;
+          console.log(`[TaskQueue] Found idle agent: ${agent.id}`);
+          break;
         }
 
         if (!agentToUse) {
@@ -292,24 +309,66 @@ class TaskQueueService extends EventEmitter {
                 continue;
               }
 
+              // (env, repo) single-slot: an in_progress OR awaiting_review
+              // task already owns the working tree for this repo on this
+              // env. Starting a second one would stomp on its branch.
+              if (task.repositoryId) {
+                const holder = await findTaskHoldingEnvRepoSlot(
+                  this.db,
+                  env.id,
+                  task.repositoryId,
+                  task.id
+                );
+                if (holder) {
+                  console.log(
+                    `[TaskQueue] (env, repo) slot busy on ${env.name}: task "${holder.title}" is ${holder.status}; skipping`
+                  );
+                  continue;
+                }
+              }
+
               if (!targetEnvironmentId || env.id === targetEnvironmentId) {
                 console.log(`[TaskQueue] Starting new agent on ${env.name}...`);
+
+                // Prep the task branch on a synced base before the
+                // agent touches anything. Manual `/start` does the
+                // equivalent in routes/tasks.ts — but scheduler-picked
+                // tasks previously skipped this entirely and edited
+                // whatever branch happened to be checked out.
+                let workingDirectory: string | undefined;
+                let taskBranch: string | undefined = task.branch;
+                if (task.repositoryId) {
+                  const prep = await this.prepareRepoForTask(task, env.id);
+                  if (!prep.ok) {
+                    console.error(
+                      `[TaskQueue] Failed to prepare repo for task "${task.title}": ${prep.error}`
+                    );
+                    continue;
+                  }
+                  workingDirectory = prep.workingDirectory;
+                  if (prep.branch) taskBranch = prep.branch;
+                }
+
                 try {
                   const newAgent = await agentService.startAgent({
                     environmentId: env.id,
                     workspaceId: task.workspaceId,
                     taskId: task.id,
                     prompt: task.prompt || task.description,
+                    workingDirectory,
                   });
                   console.log(`[TaskQueue] Agent started: ${newAgent.id}`);
 
+                  const updateValues: Record<string, unknown> = {
+                    status: 'in_progress',
+                    assignedAgentId: newAgent.id,
+                    updatedAt: new Date(),
+                  };
+                  if (taskBranch) updateValues.branch = taskBranch;
+
                   await this.db
                     .update(tasksTable)
-                    .set({
-                      status: 'in_progress',
-                      assignedAgentId: newAgent.id,
-                      updatedAt: new Date(),
-                    })
+                    .set(updateValues)
                     .where(eq(tasksTable.id, task.id));
 
                   emitTaskStatus(task.workspaceId, task.id, 'in_progress');
@@ -383,6 +442,97 @@ class TaskQueueService extends EventEmitter {
       );
     return rows[0]?.count ?? 0;
   }
+
+  /**
+   * Resolve the repo's local path + sync the base branch + create the
+   * task branch — the scheduler's equivalent of the block in
+   * `routes/tasks.ts:/start`. Returns an error-typed result rather
+   * than throwing so the caller can log + skip without aborting the
+   * whole queue tick.
+   */
+  private async prepareRepoForTask(
+    task: Task,
+    environmentId: string
+  ): Promise<
+    | { ok: true; workingDirectory?: string; branch?: string }
+    | { ok: false; error: string }
+  > {
+    if (!task.repositoryId) return { ok: true };
+
+    const repoRows = await this.db
+      .select({
+        localPath: repositoriesTable.localPath,
+        defaultBranch: repositoriesTable.defaultBranch,
+      })
+      .from(repositoriesTable)
+      .where(eq(repositoriesTable.id, task.repositoryId))
+      .limit(1);
+    const repoRow = repoRows[0];
+    if (!repoRow?.localPath) return { ok: true };
+
+    const workingDirectory = repoRow.localPath;
+
+    if (task.branch) {
+      try {
+        await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
+        return { ok: true, workingDirectory, branch: task.branch };
+      } catch (err) {
+        console.warn(
+          `[TaskQueue] Failed to checkout existing branch ${task.branch}, will create fresh:`,
+          err
+        );
+      }
+    }
+
+    try {
+      const branch = await gitService.prepareTaskBranch({
+        environmentId,
+        taskId: task.id,
+        taskTitle: task.title,
+        workingDirectory,
+        baseBranch: repoRow.defaultBranch || 'main',
+      });
+      return { ok: true, workingDirectory, branch };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+}
+
+/**
+ * Find the task currently holding the (env, repo) single-slot, or null
+ * if the slot is free. `in_progress` holds it (agent is actively
+ * writing); `awaiting_review` holds it too because the working tree is
+ * still dirty with that task's work until approve/reject commits or
+ * resets it.
+ *
+ * Used by both the scheduler and `/start` to refuse to launch a second
+ * task that would stomp on the first's branch.
+ */
+export async function findTaskHoldingEnvRepoSlot(
+  db: Database,
+  envId: string,
+  repoId: string,
+  excludeTaskId?: string
+): Promise<{ id: string; title: string; status: string } | null> {
+  const conditions = [
+    eq(tasksTable.assignedEnvironmentId, envId),
+    eq(tasksTable.repositoryId, repoId),
+    inArray(tasksTable.status, ['in_progress', 'awaiting_review']),
+  ];
+  if (excludeTaskId) conditions.push(ne(tasksTable.id, excludeTaskId));
+
+  const rows = await db
+    .select({
+      id: tasksTable.id,
+      title: tasksTable.title,
+      status: tasksTable.status,
+    })
+    .from(tasksTable)
+    .where(and(...conditions))
+    .limit(1);
+
+  return rows[0] ?? null;
 }
 
 function rowToTask(row: typeof tasksTable.$inferSelect): Task {
@@ -395,6 +545,8 @@ function rowToTask(row: typeof tasksTable.$inferSelect): Task {
     title: row.title,
     description: row.description,
     prompt: row.prompt ?? undefined,
+    repositoryId: row.repositoryId ?? undefined,
+    branch: row.branch ?? undefined,
     assignedAgentId: row.assignedAgentId ?? undefined,
     assignedEnvironmentId: row.assignedEnvironmentId ?? undefined,
     result: (row.result as Task['result']) ?? undefined,

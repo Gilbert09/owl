@@ -425,6 +425,7 @@ export type WSEventType =
   | 'task:update'
   | 'task:deleted'
   | 'task:agent_status'
+  | 'task:files_changed'
   | 'inbox:new'
   | 'inbox:update'
   | 'inbox:remove'

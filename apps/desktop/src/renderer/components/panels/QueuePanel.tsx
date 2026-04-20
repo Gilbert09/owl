@@ -25,9 +25,10 @@ import { ScrollArea } from '../ui/scroll-area';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
+import { ApproveTaskModal } from '../modals/ApproveTaskModal';
 import { TaskTerminal } from './TaskTerminal';
 import { TerminalHistory } from './TerminalHistory';
-import { TaskDiff } from './TaskDiff';
+import { TaskFilesPanel } from './TaskFilesPanel';
 import { isAgentTask } from '@fastowl/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
 
@@ -398,10 +399,27 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     }
   };
 
-  const handleApproveTask = async () => {
+  const [approveModalOpen, setApproveModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'terminal' | 'files'>('terminal');
+
+  const handleApproveClick = (e: React.MouseEvent) => {
+    // Shift-click bypasses the modal — commits with the auto-generated
+    // message and pushes in one step. For users who trust the LLM.
+    if (e.shiftKey) {
+      void handleApproveTask();
+      return;
+    }
+    setApproveModalOpen(true);
+  };
+
+  const handleApproveTask = async (commitMessage?: string) => {
     setIsLoading(true);
+    setActionError(null);
     try {
-      await approveTask(taskId);
+      await approveTask(taskId, commitMessage);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Approve failed');
+      throw err;
     } finally {
       setIsLoading(false);
     }
@@ -491,9 +509,35 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           </div>
         </div>
 
-        {/* Terminal */}
-        <div className="flex-1 overflow-hidden">
-          <TaskTerminal task={task} />
+        {/* Tabs */}
+        <div className="border-b px-4 flex items-center gap-1">
+          <TabButton
+            active={activeTab === 'terminal'}
+            onClick={() => setActiveTab('terminal')}
+          >
+            <Terminal className="w-3.5 h-3.5 mr-1.5" />
+            Terminal
+          </TabButton>
+          <TabButton
+            active={activeTab === 'files'}
+            onClick={() => setActiveTab('files')}
+          >
+            <GitBranch className="w-3.5 h-3.5 mr-1.5" />
+            Files
+          </TabButton>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-hidden p-4">
+          {activeTab === 'terminal' ? (
+            <div className="h-full">
+              <TaskTerminal task={task} />
+            </div>
+          ) : (
+            <div className="h-full">
+              <TaskFilesPanel taskId={task.id} />
+            </div>
+          )}
         </div>
       </>
     );
@@ -535,7 +579,12 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           <div className="flex items-center gap-2">
             {task.status === 'awaiting_review' && (
               <>
-                <Button size="sm" onClick={handleApproveTask} disabled={isLoading}>
+                <Button
+                  size="sm"
+                  onClick={handleApproveClick}
+                  disabled={isLoading}
+                  title="Review commit message, then commit + push. Shift-click to skip the modal."
+                >
                   {isLoading ? (
                     <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                   ) : (
@@ -689,7 +738,9 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           </div>
 
           {task.status === 'awaiting_review' && task.branch && task.repositoryId && (
-            <TaskDiff taskId={task.id} />
+            <div className="h-[480px]">
+              <TaskFilesPanel taskId={task.id} />
+            </div>
           )}
 
           {['awaiting_review', 'completed', 'failed', 'cancelled'].includes(task.status) && (
@@ -697,6 +748,37 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           )}
         </div>
       </ScrollArea>
+      <ApproveTaskModal
+        taskId={taskId}
+        taskTitle={task.title}
+        open={approveModalOpen}
+        onClose={() => setApproveModalOpen(false)}
+        onApproved={() => setApproveModalOpen(false)}
+        onApprove={(commitMessage) => handleApproveTask(commitMessage)}
+      />
     </>
+  );
+}
+
+interface TabButtonProps {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}
+
+function TabButton({ active, onClick, children }: TabButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex items-center text-xs px-3 py-2 border-b-2 -mb-[1px] transition-colors',
+        active
+          ? 'border-primary text-foreground'
+          : 'border-transparent text-muted-foreground hover:text-foreground'
+      )}
+    >
+      {children}
+    </button>
   );
 }

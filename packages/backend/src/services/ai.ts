@@ -81,6 +81,69 @@ export function isConfigured(): boolean {
 }
 
 /**
+ * Generate a commit message for an approved task from its title +
+ * prompt + diff. Used by `POST /:id/approve` to fill in `git commit -m`
+ * without forcing the user to hand-write one.
+ *
+ * Diff is truncated to keep the prompt bounded — Haiku is fast and
+ * cheap but we'd still rather not send a 500k-line renames-only diff.
+ * We send the `--stat` header first (which always fits) plus the first
+ * N chars of the raw diff. Haiku gets enough signal to write a
+ * reasonable Conventional-Commits subject without seeing every hunk.
+ *
+ * Falls back to `"<title>\n\n<prompt>"` on any failure — better to
+ * commit something unglamorous than to block the approve flow.
+ */
+export async function generateCommitMessage(opts: {
+  title: string;
+  prompt?: string;
+  diffStat?: string;
+  diff?: string;
+}): Promise<string> {
+  const fallback = buildCommitFallback(opts.title, opts.prompt);
+  if (!process.env.ANTHROPIC_API_KEY) return fallback;
+
+  const diffBudget = 6000;
+  const truncatedDiff =
+    opts.diff && opts.diff.length > diffBudget
+      ? opts.diff.slice(0, diffBudget) + '\n\n[… diff truncated …]'
+      : opts.diff ?? '';
+
+  const sections: string[] = [`Task title: ${opts.title}`];
+  if (opts.prompt) sections.push(`Original prompt:\n${opts.prompt}`);
+  if (opts.diffStat) sections.push(`Diff stat:\n${opts.diffStat}`);
+  if (truncatedDiff) sections.push(`Diff:\n${truncatedDiff}`);
+
+  try {
+    const response = await getClient().messages.create({
+      model: TITLE_MODEL,
+      max_tokens: 300,
+      messages: [{ role: 'user', content: sections.join('\n\n') }],
+      system:
+        'You write git commit messages in the Conventional Commits style. ' +
+        'Respond with the commit message only — no commentary, no markdown fences, no quotes. ' +
+        'First line is a concise subject (≤ 72 chars, lowercase type prefix like feat:/fix:/chore: ' +
+        'when it fits). If the change is non-trivial, add a blank line and a short body explaining the ' +
+        'why, wrapped at ~72 chars. Never mention the AI, the tooling, or the task system.',
+    });
+
+    const text = response.content.find((b) => b.type === 'text');
+    if (!text || text.type !== 'text') return fallback;
+    const message = text.text.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+    return message || fallback;
+  } catch (err) {
+    console.error('[ai] generateCommitMessage failed:', err);
+    return fallback;
+  }
+}
+
+function buildCommitFallback(title: string, prompt?: string): string {
+  const subject = title.slice(0, 72);
+  const body = prompt && prompt.trim() && prompt.trim() !== title.trim() ? prompt.trim() : '';
+  return body ? `${subject}\n\n${body}` : subject;
+}
+
+/**
  * Generate just a concise title for a task given its prompt. Cheaper
  * + faster than `generateTaskMetadata` — only asks for one field,
  * used for the post-creation async title backfill. Falls back to the

@@ -74,6 +74,62 @@ describe('gitService', () => {
     });
   });
 
+  describe('prepareTaskBranch', () => {
+    it('fetches, fast-forwards the base, then creates the task branch off it', async () => {
+      fake = installFakeEnvironment({
+        outputs: {
+          'git status --porcelain': '', // clean tree
+          'git rev-parse --verify': 'not-exists\n',
+        },
+      });
+
+      const branch = await gitService.prepareTaskBranch({
+        environmentId: 'env1',
+        taskId: 'abcdef1234',
+        taskTitle: 'Add login',
+        workingDirectory: '/repo',
+        baseBranch: 'main',
+      });
+
+      expect(branch).toBe('fastowl/abcdef12-add-login');
+
+      const commands = fake.commands.map((c) => c.command);
+      // Must see fetch → checkout base → ff-only pull → checkout -b
+      const fetchIdx = commands.findIndex((c) => c === 'git fetch origin main');
+      const checkoutBaseIdx = commands.findIndex((c) => c === 'git checkout main');
+      const pullIdx = commands.findIndex((c) => c === 'git pull --ff-only origin main');
+      const createIdx = commands.findIndex((c) => c === `git checkout -b ${branch}`);
+
+      expect(fetchIdx).toBeGreaterThanOrEqual(0);
+      expect(checkoutBaseIdx).toBeGreaterThan(fetchIdx);
+      expect(pullIdx).toBeGreaterThan(checkoutBaseIdx);
+      expect(createIdx).toBeGreaterThan(pullIdx);
+    });
+
+    it('refuses to prepare when the working tree is dirty', async () => {
+      fake = installFakeEnvironment({
+        outputs: {
+          'git status --porcelain': ' M src/foo.ts\n',
+        },
+      });
+
+      await expect(
+        gitService.prepareTaskBranch({
+          environmentId: 'env1',
+          taskId: 'abcdef1234',
+          taskTitle: 'Add login',
+          workingDirectory: '/repo',
+          baseBranch: 'main',
+        })
+      ).rejects.toThrow(/uncommitted changes/i);
+
+      // Should not have attempted any fetch/checkout after failing the cleanliness check.
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands.some((c) => c.startsWith('git fetch'))).toBe(false);
+      expect(commands.some((c) => c.startsWith('git checkout'))).toBe(false);
+    });
+  });
+
   describe('getDiff', () => {
     it('runs both committed and uncommitted diff commands and concatenates when both present', async () => {
       fake = installFakeEnvironment({
