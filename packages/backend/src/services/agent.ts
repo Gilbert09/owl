@@ -66,6 +66,29 @@ class AgentService extends EventEmitter {
       }
     );
 
+    // Capture the CLI's session id on the task metadata the first
+    // time we see it. Powers `/tasks/:id/continue` — user types a
+    // follow-up prompt after the task has landed in awaiting_review,
+    // we spawn a fresh child with `--resume <id>` and that prompt.
+    agentStructuredService.on(
+      'session_id_captured',
+      (run: { taskId?: string }, sessionId: string) => {
+        if (!run.taskId) return;
+        this.db
+          .update(tasksTable)
+          .set({
+            metadata: sql`
+              COALESCE(${tasksTable.metadata}, '{}'::jsonb) ||
+              ${JSON.stringify({ claudeSessionId: sessionId })}::jsonb
+            `,
+          })
+          .where(eq(tasksTable.id, run.taskId))
+          .catch((err) =>
+            console.error('[agent] failed to persist claudeSessionId:', err)
+          );
+      }
+    );
+
     this.statusCheckInterval = setInterval(() => {
       this.checkStuckAgents();
     }, 60000);
@@ -123,6 +146,31 @@ class AgentService extends EventEmitter {
    */
   async startAgent(request: StartAgentRequest): Promise<Agent> {
     const { environmentId, workspaceId, taskId, prompt, workingDirectory } = request;
+    return this.spawnStructuredRun({
+      environmentId,
+      workspaceId,
+      taskId,
+      prompt,
+      workingDirectory,
+    });
+  }
+
+  /**
+   * Shared startup path used by both the initial spawn (`startAgent`)
+   * and the conversation-continue flow (`continueTask`). Handles the
+   * common lifecycle: env/agent/task row writes, hook setup,
+   * structured spawn, rollback on failure.
+   */
+  private async spawnStructuredRun(opts: {
+    environmentId: string;
+    workspaceId: string;
+    taskId?: string;
+    prompt?: string;
+    workingDirectory?: string;
+    /** If set, pass `--resume <id>` to the CLI — resumes a prior conversation. */
+    resumeSessionId?: string;
+  }): Promise<Agent> {
+    const { environmentId, workspaceId, taskId, prompt, workingDirectory, resumeSessionId } = opts;
 
     const status = await environmentService.getStatus(environmentId);
     if (status !== 'connected') {
@@ -144,14 +192,8 @@ class AgentService extends EventEmitter {
       ? 'bypass'
       : 'strict';
 
-    // Strict mode needs the PreToolUse hook script on disk for the
-    // child to exec. Writing it is idempotent — first call after
-    // backend boot writes the file, subsequent calls reuse it.
     const hookScriptPath = permissionMode === 'strict' ? await ensurePermissionHook() : undefined;
 
-    // FASTOWL_* context the child Claude uses to reach its parent.
-    // FASTOWL_ENVIRONMENT_ID is used by the permission service to
-    // scope pre-approvals per-env.
     const port = process.env.PORT || '4747';
     const envVars: Record<string, string> = {
       FASTOWL_API_URL: process.env.FASTOWL_API_URL || `http://localhost:${port}`,
@@ -160,8 +202,6 @@ class AgentService extends EventEmitter {
     };
     if (taskId) envVars.FASTOWL_TASK_ID = taskId;
 
-    // Initial status: `working` if we have a prompt to kick off the
-    // first turn, else `idle` (interactive, waiting for the user).
     const initialStatus: AgentStatus = prompt ? 'working' : 'idle';
     const activeAgent: ActiveAgent = {
       id: agentId,
@@ -198,20 +238,24 @@ class AgentService extends EventEmitter {
       agentRowInserted = true;
 
       if (taskId) {
+        // On resume, preserve the existing transcript (new events
+        // append). On fresh start, wipe it so retries don't show
+        // stale output. `metadata.runtime` is no longer load-bearing
+        // but downstream code + historical rows still look for it.
+        const taskUpdate: Record<string, unknown> = {
+          assignedAgentId: agentId,
+          status: 'in_progress',
+          updatedAt: now,
+          metadata: sql`
+            COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
+          `,
+        };
+        if (!resumeSessionId) {
+          taskUpdate.transcript = [] as unknown as object;
+        }
         await this.db
           .update(tasksTable)
-          .set({
-            assignedAgentId: agentId,
-            status: 'in_progress',
-            updatedAt: now,
-            // `metadata.runtime` is no longer load-bearing (structured
-            // is the only path), but downstream code + historical rows
-            // still look for it.
-            metadata: sql`
-              COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
-            `,
-            transcript: [] as unknown as object,
-          })
+          .set(taskUpdate)
           .where(eq(tasksTable.id, taskId));
         taskRowUpdated = true;
       }
@@ -228,6 +272,7 @@ class AgentService extends EventEmitter {
         hookScriptPath,
         env: envVars,
         interactive,
+        resumeSessionId,
       });
 
       emitAgentStatus(workspaceId, agentId, initialStatus, 'none');
@@ -243,7 +288,7 @@ class AgentService extends EventEmitter {
         }
       });
     } catch (err) {
-      console.error(`[agent] startAgent failed for task=${taskId}; rolling back:`, err);
+      console.error(`[agent] spawnStructuredRun failed for task=${taskId}; rolling back:`, err);
       this.activeAgents.delete(agentId);
       if (agentRowInserted) {
         await this.db
@@ -254,13 +299,15 @@ class AgentService extends EventEmitter {
           );
       }
       if (taskRowUpdated && taskId) {
-        // Reset the task to `queued` so the user can retry. Preserves
-        // whatever error context we have in `result`.
+        // On fresh start, reset to queued so the user can retry. On
+        // resume, put it back to the prior terminal state (awaiting
+        // review) since the conversation didn't actually continue.
+        const rollbackStatus = resumeSessionId ? 'awaiting_review' : 'queued';
         await this.db
           .update(tasksTable)
           .set({
             assignedAgentId: null,
-            status: 'queued',
+            status: rollbackStatus,
             updatedAt: new Date(),
             result: {
               success: false,
@@ -308,6 +355,53 @@ class AgentService extends EventEmitter {
     }
 
     await this.db.delete(agentsTable).where(eq(agentsTable.id, agentId));
+  }
+
+  /**
+   * Resume an exited structured task with a new user prompt.
+   * Mirrors `startAgent`'s lifecycle — inserts a fresh agent row,
+   * flips task back to `in_progress`, spawns a new child with
+   * `--resume <claudeSessionId>` + the prompt. Transcript already
+   * on the task row is preserved and extended with the new turn's
+   * events.
+   *
+   * Throws if the task has no stored `claudeSessionId` (pre-Slice 4c
+   * tasks, or tasks that exited before the first `system/init`).
+   */
+  async continueTask(request: {
+    taskId: string;
+    workspaceId: string;
+    prompt: string;
+  }): Promise<Agent> {
+    const { taskId, workspaceId, prompt } = request;
+
+    const taskRows = await this.db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, taskId))
+      .limit(1);
+    const taskRow = taskRows[0];
+    if (!taskRow) throw new Error(`Task ${taskId} not found`);
+
+    const meta = (taskRow.metadata ?? {}) as Record<string, unknown>;
+    const claudeSessionId = typeof meta.claudeSessionId === 'string' ? meta.claudeSessionId : undefined;
+    if (!claudeSessionId) {
+      throw new Error('Task has no saved Claude session to resume');
+    }
+
+    const environmentId = taskRow.assignedEnvironmentId;
+    if (!environmentId) {
+      throw new Error('Task has no assigned environment');
+    }
+
+    // Delegate to the shared spawn path, passing `resumeSessionId`.
+    return this.spawnStructuredRun({
+      environmentId,
+      workspaceId,
+      taskId,
+      prompt,
+      resumeSessionId: claudeSessionId,
+    });
   }
 
   /**

@@ -6,6 +6,7 @@ import type {
   AgentOutputEvent,
   TaskStatusEvent,
   TaskOutputEvent,
+  TaskUpdateEvent,
   TaskAgentStatusEvent,
   TaskEventBroadcast,
   InboxNewEvent,
@@ -117,6 +118,14 @@ export function useApiConnection() {
           agentStatus: payload.status,
           agentAttention: payload.attention,
         });
+      })
+    );
+
+    // Arbitrary task field updates — currently fires when the async
+    // title refiner completes, but the shape is general.
+    unsubscribers.push(
+      wsClient.on<TaskUpdateEvent>('task:update', (payload) => {
+        updateTask(payload.taskId, payload.updates);
       })
     );
 
@@ -356,6 +365,10 @@ export function useTaskActions() {
     await api.tasks.sendInput(taskId, input);
   }, []);
 
+  const continueTask = useCallback(async (taskId: string, prompt: string) => {
+    await api.tasks.continue(taskId, prompt);
+  }, []);
+
   const stopTask = useCallback(
     async (taskId: string) => {
       const task = await api.tasks.stop(taskId);
@@ -399,6 +412,7 @@ export function useTaskActions() {
     retryTask,
     startTask,
     sendTaskInput,
+    continueTask,
     stopTask,
     readyForReview,
     approveTask,

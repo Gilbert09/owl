@@ -5,6 +5,7 @@ import type {
   InboxItem,
   PermissionRequest,
   PermissionResponse,
+  Task,
   TaskStatus,
   WSEvent,
 } from '@fastowl/shared';
@@ -178,6 +179,18 @@ export function emitTaskStatus(workspaceId: string, taskId: string, status: stri
     workspaceId,
     taskId,
     status: status as TaskStatus,
+  });
+}
+
+export function emitTaskUpdate(
+  workspaceId: string,
+  taskId: string,
+  updates: Partial<Task>
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:update',
+    payload: { taskId, updates },
+    timestamp: new Date().toISOString(),
   });
 }
 

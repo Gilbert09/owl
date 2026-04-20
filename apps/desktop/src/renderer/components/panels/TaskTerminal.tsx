@@ -15,6 +15,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { AgentConversation } from '../terminal/AgentConversation';
 import { useTaskActions } from '../../hooks/useApi';
+import { useWorkspaceStore } from '../../stores/workspace';
 import type { Task, AgentStatus, AgentAttention } from '@fastowl/shared';
 
 interface TaskTerminalProps {
@@ -45,25 +46,46 @@ const attentionColors: Record<AgentAttention, string> = {
 };
 
 export function TaskTerminal({ task }: TaskTerminalProps) {
-  const { sendTaskInput, stopTask, readyForReview } = useTaskActions();
+  const { sendTaskInput, continueTask, stopTask, readyForReview } = useTaskActions();
+  const environments = useWorkspaceStore((s) => s.environments);
   const [inputValue, setInputValue] = useState('');
   const [isStopping, setIsStopping] = useState(false);
   const [isMarkingReady, setIsMarkingReady] = useState(false);
 
   const agentStatus = task.agentStatus || 'working';
   const agentAttention = task.agentAttention || 'none';
+  const envName =
+    environments.find((e) => e.id === task.assignedEnvironmentId)?.name;
+  // Tasks whose child already exited (awaiting_review / completed /
+  // failed) can still be resumed if we captured a `claudeSessionId`
+  // on their metadata. The input bar routes Send to /continue in that
+  // case, which spawns a fresh CLI child with `--resume <id>` + the
+  // prompt.
+  const claudeSessionId = (task.metadata as { claudeSessionId?: string } | undefined)
+    ?.claudeSessionId;
+  const isResumable =
+    task.status !== 'in_progress' &&
+    task.status !== 'cancelled' &&
+    typeof claudeSessionId === 'string';
 
   const StatusIcon = statusConfig[agentStatus].icon;
 
   const handleSendInput = useCallback(async () => {
-    if (!inputValue.trim()) return;
+    const trimmed = inputValue.trim();
+    if (!trimmed) return;
     try {
-      await sendTaskInput(task.id, inputValue);
+      if (task.status === 'in_progress') {
+        await sendTaskInput(task.id, inputValue);
+      } else if (isResumable) {
+        await continueTask(task.id, inputValue);
+      } else {
+        return;
+      }
       setInputValue('');
     } catch (err) {
       console.error('Failed to send input:', err);
     }
-  }, [task.id, inputValue, sendTaskInput]);
+  }, [task.id, task.status, inputValue, sendTaskInput, continueTask, isResumable]);
 
   const handleStopTask = useCallback(async () => {
     setIsStopping(true);
@@ -90,7 +112,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
   return (
     <div
       className={cn(
-        'flex flex-col h-full border-l-4',
+        'flex flex-col h-full min-w-0 border-l-4',
         attentionColors[agentAttention]
       )}
     >
@@ -155,13 +177,19 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
       {/* Terminal Content */}
       <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
-        <AgentConversation taskId={task.id} transcript={task.transcript} interactive />
+        <AgentConversation
+          taskId={task.id}
+          transcript={task.transcript}
+          envName={envName}
+          interactive
+        />
       </div>
 
       {/* Input Area — sends a message as the next stream-json turn. */}
       <TaskInputBar
         taskStatus={task.status}
         agentStatus={agentStatus}
+        resumable={isResumable}
         inputValue={inputValue}
         onChange={setInputValue}
         onSend={handleSendInput}
@@ -184,12 +212,15 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 function TaskInputBar({
   taskStatus,
   agentStatus,
+  resumable,
   inputValue,
   onChange,
   onSend,
 }: {
   taskStatus: Task['status'];
   agentStatus: AgentStatus;
+  /** True if an ended task can still accept input via `/continue`. */
+  resumable: boolean;
   inputValue: string;
   onChange: (v: string) => void;
   onSend: () => void;
@@ -217,10 +248,14 @@ function TaskInputBar({
 
   const ended = taskStatus !== 'in_progress';
   const busy = !ended && (agentStatus === 'working' || agentStatus === 'tool_use');
-  const disabled = ended || busy;
+  // Input stays enabled for resumable ended tasks (we'll POST
+  // /continue instead of /input). Only hard-disable for irretrievable
+  // states (cancelled, or any ended state where we never captured a
+  // claudeSessionId).
+  const disabled = busy || (ended && !resumable);
   const placeholder = ended
-    ? taskStatus === 'awaiting_review'
-      ? 'Conversation ended. Click Retry on the task to continue.'
+    ? resumable
+      ? 'Continue the conversation… (Shift+Enter for newline)'
       : `Task is ${taskStatus} — no active session.`
     : busy
       ? 'Claude is working…'

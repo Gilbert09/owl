@@ -154,6 +154,8 @@ export const tasks = {
   start: (id: string) => request<Task>('POST', `/tasks/${id}/start`),
   sendInput: (id: string, input: string) =>
     request<void>('POST', `/tasks/${id}/input`, { input }),
+  continue: (id: string, prompt: string) =>
+    request<Task>('POST', `/tasks/${id}/continue`, { prompt }),
   stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
   readyForReview: (id: string) =>
     request<Task>('POST', `/tasks/${id}/ready-for-review`),

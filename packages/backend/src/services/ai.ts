@@ -11,6 +11,8 @@ function getClient(): Anthropic {
   return client;
 }
 
+const TITLE_MODEL = 'claude-haiku-4-5-20251001';
+
 /**
  * Generate task title and description from a prompt using Claude Haiku
  */
@@ -27,7 +29,7 @@ Respond in JSON format only:
 
   try {
     const response = await anthropic.messages.create({
-      model: 'claude-3-haiku-20240307',
+      model: TITLE_MODEL,
       max_tokens: 256,
       messages: [
         {
@@ -76,4 +78,37 @@ function validatePriority(priority: unknown): TaskPriority {
  */
 export function isConfigured(): boolean {
   return !!process.env.ANTHROPIC_API_KEY;
+}
+
+/**
+ * Generate just a concise title for a task given its prompt. Cheaper
+ * + faster than `generateTaskMetadata` — only asks for one field,
+ * used for the post-creation async title backfill. Falls back to the
+ * first 60 chars of the prompt if the API call fails.
+ */
+export async function generateTaskTitle(prompt: string): Promise<string> {
+  const fallback = prompt.slice(0, 60).trim() || 'New Task';
+  if (!process.env.ANTHROPIC_API_KEY) return fallback;
+
+  try {
+    const response = await getClient().messages.create({
+      model: TITLE_MODEL,
+      max_tokens: 60,
+      messages: [
+        {
+          role: 'user',
+          content: `Generate a concise title (max 60 chars, no quotes, no trailing punctuation) for this task:\n\n${prompt}`,
+        },
+      ],
+      system:
+        'You produce concise task titles. Respond with the title only — no commentary, no quotes, no markdown.',
+    });
+    const text = response.content.find((b) => b.type === 'text');
+    if (!text || text.type !== 'text') return fallback;
+    const title = text.text.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    return title || fallback;
+  } catch (err) {
+    console.error('[ai] generateTaskTitle failed:', err);
+    return fallback;
+  }
 }

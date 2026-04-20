@@ -17,6 +17,8 @@ interface AgentConversationProps {
   transcript: AgentEvent[] | undefined;
   /** When false (completed task replays) permission buttons are hidden. */
   interactive?: boolean;
+  /** Display name of the env the task runs on. Surfaced in the auto-allowed indicator. */
+  envName?: string;
 }
 
 /**
@@ -34,6 +36,7 @@ export function AgentConversation({
   taskId,
   transcript,
   interactive = true,
+  envName,
 }: AgentConversationProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Track "was the user at the bottom before the latest re-render?" so
@@ -71,10 +74,16 @@ export function AgentConversation({
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2"
+      className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2 min-w-0"
     >
       {blocks.map((block) => (
-        <BlockView key={block.key} block={block} taskId={taskId} interactive={interactive} />
+        <BlockView
+          key={block.key}
+          block={block}
+          taskId={taskId}
+          interactive={interactive}
+          envName={envName}
+        />
       ))}
     </div>
   );
@@ -260,10 +269,12 @@ function BlockView({
   block,
   taskId,
   interactive,
+  envName,
 }: {
   block: Block;
   taskId: string;
   interactive: boolean;
+  envName?: string;
 }) {
   switch (block.kind) {
     case 'text':
@@ -284,6 +295,7 @@ function BlockView({
           status={block.status}
           persist={block.persist}
           interactive={interactive}
+          envName={envName}
         />
       );
     case 'system':
@@ -304,7 +316,7 @@ function BlockView({
 
 function TextBlock({ text }: { text: string }) {
   return (
-    <div className="whitespace-pre-wrap leading-relaxed break-words min-w-0">
+    <div className="whitespace-pre-wrap leading-relaxed min-w-0 [overflow-wrap:anywhere]">
       {renderMarkdownish(text)}
     </div>
   );
@@ -333,7 +345,7 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
       onToggle={() => setOpen((v) => !v)}
       icon={<Wrench className="w-3.5 h-3.5 text-blue-300" />}
       title={
-        <span>
+        <span className="block [overflow-wrap:anywhere]">
           <span className="text-blue-300">{name}</span>
           <span className="ml-2 text-zinc-400 font-normal">
             {summariseArgs(input)}
@@ -362,13 +374,13 @@ function ToolResultBlock({ content, isError }: { content: unknown; isError: bool
         )
       }
       title={
-        <span className={cn('font-normal', isError && 'text-red-300')}>
+        <span className={cn('block font-normal [overflow-wrap:anywhere]', isError && 'text-red-300')}>
           {preview || (isError ? 'error' : 'ok')}
         </span>
       }
       dim
     >
-      <pre className="text-xs font-mono whitespace-pre-wrap text-zinc-200 bg-black/30 rounded p-2 overflow-x-auto">
+      <pre className="text-xs font-mono whitespace-pre-wrap [overflow-wrap:anywhere] text-zinc-200 bg-black/30 rounded p-2 overflow-x-auto">
         {text}
       </pre>
     </Collapsible>
@@ -383,6 +395,7 @@ function PermissionBlock({
   status,
   persist,
   interactive,
+  envName,
 }: {
   taskId: string;
   requestId: string;
@@ -391,6 +404,7 @@ function PermissionBlock({
   status: 'pending' | 'allowed' | 'denied' | 'auto_allowed';
   persist?: boolean;
   interactive: boolean;
+  envName?: string;
 }) {
   const [busy, setBusy] = useState<null | 'allow' | 'deny' | 'allow-always'>(null);
   const [error, setError] = useState<string | null>(null);
@@ -413,7 +427,9 @@ function PermissionBlock({
       <div className="rounded border border-green-500/20 bg-green-500/5 px-3 py-2 text-xs text-green-300 flex items-center gap-2">
         <Shield className="w-3.5 h-3.5" />
         <span className="font-medium">{toolName}</span>
-        <span className="text-green-200/60">auto-allowed (pre-approved for this env)</span>
+        <span className="text-green-200/60">
+          auto-allowed (pre-approved for {envName ?? 'this env'})
+        </span>
       </div>
     );
   }
@@ -496,7 +512,6 @@ function SystemBlock({ text, subtype }: { text: string; subtype?: string }) {
 }
 
 function ResultBlock({
-  summary,
   costUsd,
   inputTokens,
   outputTokens,
@@ -510,6 +525,10 @@ function ResultBlock({
   isError: boolean;
   denials: number;
 }) {
+  // Intentionally no echo of the final assistant text here — it's
+  // already the last block above this footer, rendered in full.
+  // Repeating it as a truncated one-liner next to the cost/tokens
+  // was noisy.
   return (
     <div
       className={cn(
@@ -520,9 +539,7 @@ function ResultBlock({
       <span className={isError ? 'font-medium' : ''}>
         {isError ? 'Ended with error' : 'Run complete'}
       </span>
-      {typeof costUsd === 'number' && (
-        <span>${costUsd.toFixed(4)}</span>
-      )}
+      {typeof costUsd === 'number' && <span>${costUsd.toFixed(4)}</span>}
       {(inputTokens ?? outputTokens) !== undefined && (
         <span>
           {inputTokens ?? 0}→{outputTokens ?? 0} tok
@@ -533,7 +550,6 @@ function ResultBlock({
           {denials} permission den{denials === 1 ? 'ial' : 'ials'}
         </span>
       )}
-      {summary && <span className="italic truncate">{summary}</span>}
     </div>
   );
 }
@@ -790,7 +806,10 @@ function renderMarkdownish(text: string): React.ReactNode {
     const para = paragraphBuf.join('\n');
     paragraphBuf = [];
     parts.push(
-      <p key={`p-${parts.length}`} className="whitespace-pre-wrap">
+      <p
+        key={`p-${parts.length}`}
+        className="whitespace-pre-wrap [overflow-wrap:anywhere]"
+      >
         {renderInlineCode(para)}
       </p>
     );
@@ -811,7 +830,7 @@ function renderMarkdownish(text: string): React.ReactNode {
       parts.push(
         <pre
           key={`c-${parts.length}`}
-          className="text-xs font-mono whitespace-pre-wrap bg-black/40 rounded p-2 overflow-x-auto my-1"
+          className="text-xs font-mono whitespace-pre-wrap [overflow-wrap:anywhere] bg-black/40 rounded p-2 overflow-x-auto my-1 max-w-full"
         >
           {lang && (
             <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
@@ -836,7 +855,10 @@ function renderInlineCode(text: string): React.ReactNode {
   return pieces.map((p, i) => {
     if (p.startsWith('`') && p.endsWith('`') && p.length >= 2) {
       return (
-        <code key={i} className="font-mono text-xs bg-white/10 rounded px-1">
+        <code
+          key={i}
+          className="font-mono text-xs bg-white/10 rounded px-1 [overflow-wrap:anywhere]"
+        >
           {p.slice(1, -1)}
         </code>
       );

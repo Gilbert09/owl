@@ -429,6 +429,7 @@ export type WSEventType =
   | 'task:status'
   | 'task:output'
   | 'task:event'
+  | 'task:update'
   | 'task:agent_status'
   | 'inbox:new'
   | 'inbox:update'
@@ -458,6 +459,11 @@ export interface TaskStatusEvent {
   taskId: string;
   status: TaskStatus;
   result?: TaskResult;
+}
+
+export interface TaskUpdateEvent {
+  taskId: string;
+  updates: Partial<Task>;
 }
 
 export interface TaskOutputEvent {

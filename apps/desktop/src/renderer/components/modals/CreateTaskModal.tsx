@@ -83,7 +83,6 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
   const [repositoryId, setRepositoryId] = useState('');
   const [environmentId, setEnvironmentId] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [repositories, setRepositories] = useState<WatchedRepo[]>([]);
@@ -109,30 +108,13 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
     }
   }, [open, currentWorkspaceId, repositoryId]);
 
-  // Auto-generate metadata when prompt changes (debounced)
-  useEffect(() => {
-    if (!prompt || prompt.length < 10 || !isAgent) return;
-    if (title && description) return; // Don't override if user has already entered values
-
-    const timer = setTimeout(async () => {
-      setIsGenerating(true);
-      try {
-        const metadata = await api.tasks.generateMetadata(prompt);
-        if (!title) setTitle(metadata.title);
-        if (!description) setDescription(metadata.description);
-        setPriority(metadata.suggestedPriority);
-      } catch (err) {
-        console.error('Failed to generate metadata:', err);
-      } finally {
-        setIsGenerating(false);
-      }
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [prompt, isAgent, title, description]);
+  // No client-side metadata pre-generation. We fire a placeholder
+  // title on create; the backend swaps in an LLM-generated title
+  // asynchronously (via `task:update` WS event) — no user-visible
+  // "Auto-generated" dance in the modal.
 
   const handleSubmit = useCallback(async () => {
-    const effectiveTitle = title || (prompt ? prompt.slice(0, 60) : '');
+    const effectiveTitle = title || (prompt ? prompt.slice(0, 60).trim() : '');
     const effectiveDescription = description || prompt || '';
 
     if (!effectiveTitle || !effectiveDescription || !currentWorkspaceId) return;
@@ -238,43 +220,6 @@ export function CreateTaskModal({ open, onOpenChange }: CreateTaskModalProps) {
                     </option>
                   ))}
                 </Select>
-              )}
-
-              {(title || description || isGenerating) && (
-                <div className="p-3 rounded-md bg-secondary/50 space-y-2">
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    {isGenerating ? (
-                      <>
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Generating title & description...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-3 h-3" />
-                        Auto-generated (click to edit)
-                      </>
-                    )}
-                  </div>
-                  {title && (
-                    <Input
-                      label="Title"
-                      value={title}
-                      onChange={(e) => setTitle(e.target.value)}
-                      disabled={isLoading}
-                      className="text-sm"
-                    />
-                  )}
-                  {description && (
-                    <Textarea
-                      label="Description"
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      disabled={isLoading}
-                      rows={2}
-                      className="text-sm"
-                    />
-                  )}
-                </div>
               )}
 
               <Button

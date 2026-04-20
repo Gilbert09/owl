@@ -11,8 +11,12 @@ import {
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
-import { emitTaskStatus } from '../services/websocket.js';
-import { generateTaskMetadata, isConfigured as isAIConfigured } from '../services/ai.js';
+import { emitTaskStatus, emitTaskUpdate } from '../services/websocket.js';
+import {
+  generateTaskMetadata,
+  generateTaskTitle,
+  isConfigured as isAIConfigured,
+} from '../services/ai.js';
 import {
   assertUser,
   handleAccessError,
@@ -182,6 +186,31 @@ export function taskRoutes(): Router {
       .where(eq(tasksTable.id, id))
       .limit(1);
     res.status(201).json({ success: true, data: rowToTask(rows[0]) } as ApiResponse<Task>);
+
+    // Fire-and-forget title refinement. The modal sends a placeholder
+    // title (typically the prompt's first 60 chars); the fast Haiku
+    // model produces something friendlier in ~500ms. Result is
+    // patched into the task row and pushed to every client via
+    // `task:update` so the desktop replaces the placeholder without
+    // a manual refresh.
+    if (body.prompt && isAIConfigured()) {
+      void generateTaskTitle(body.prompt)
+        .then(async (generatedTitle) => {
+          if (!generatedTitle || generatedTitle === body.title) return;
+          const updatedAt = new Date();
+          await db
+            .update(tasksTable)
+            .set({ title: generatedTitle, updatedAt })
+            .where(eq(tasksTable.id, id));
+          emitTaskUpdate(body.workspaceId, id, {
+            title: generatedTitle,
+            updatedAt: updatedAt.toISOString(),
+          });
+        })
+        .catch((err) => {
+          console.error('[tasks] async title generation failed:', err);
+        });
+    }
   });
 
   // Update task
@@ -450,6 +479,56 @@ export function taskRoutes(): Router {
       const msg = err instanceof Error ? err.message : 'Failed to start task';
       console.error('Failed to start task:', err);
       res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  // Continue an exited conversation with a new prompt. Spawns a
+  // fresh CLI child with `--resume <claudeSessionId>` and the prompt.
+  // Task flips back from awaiting_review/completed/failed → in_progress.
+  router.post('/:id/continue', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const { prompt } = req.body as { prompt?: string };
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ success: false, error: 'prompt is required' });
+    }
+
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    const task = rowToTask(rows[0]);
+
+    // Idempotent: if the task has come back to in_progress (e.g. the
+    // scheduler beat us), treat the call as accepted — the user's
+    // next input action will go through the live input pipe.
+    if (task.status === 'in_progress') {
+      return res.json({ success: true, data: task } as ApiResponse<Task>);
+    }
+
+    try {
+      await agentService.continueTask({
+        taskId: task.id,
+        workspaceId: task.workspaceId,
+        prompt,
+      });
+      const updatedRows = await db
+        .select()
+        .from(tasksTable)
+        .where(eq(tasksTable.id, task.id))
+        .limit(1);
+      res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to continue task';
+      res.status(400).json({ success: false, error: msg });
     }
   });
 

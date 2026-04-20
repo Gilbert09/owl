@@ -53,6 +53,14 @@ export interface StructuredRunOptions {
    * behaviour for autonomous backlog runs.
    */
   interactive?: boolean;
+  /**
+   * When set, resume the CLI's saved session (`--resume <id>`) and
+   * deliver `prompt` as the next user turn. Session files live under
+   * `~/.claude/projects/<encoded-cwd>/<id>.jsonl` on whichever host
+   * the CLI originally ran on. If unset, the CLI creates a fresh
+   * session and we capture its id from the `system/init` event.
+   */
+  resumeSessionId?: string;
   /** Forward these env vars to the child. */
   env?: Record<string, string>;
   /** Allow callers to override the binary (tests). */
@@ -74,6 +82,13 @@ export interface ActiveStructuredRun {
   completion: Promise<number>;
   /** Per-run token presented by the child's PreToolUse hook. */
   permissionToken?: string;
+  /**
+   * CLI-assigned session id (from the `system/init` event), captured
+   * once per run. Persisted on `task.metadata.claudeSessionId` so a
+   * later `/continue` can `--resume` this conversation with a new
+   * prompt after the child has exited.
+   */
+  claudeSessionId?: string;
   /** Cleanup for permissionService listeners scoped to this run. */
   detachPermissionListeners?: () => void;
   /** Cleanup for environmentService listeners scoped to this session. */
@@ -380,6 +395,20 @@ class AgentStructuredService extends EventEmitter {
     // its status back to idle and re-enable the input box.
     if (event.type === 'result') this.emit('turn_complete', run, event);
 
+    // Capture the CLI's session_id the first time we see one. Stored
+    // on `task.metadata.claudeSessionId` so `/tasks/:id/continue` can
+    // resume the conversation with `--resume <id>` + a new prompt.
+    const eventSessionId = (event as { session_id?: unknown }).session_id;
+    if (
+      typeof eventSessionId === 'string' &&
+      eventSessionId &&
+      run.taskId &&
+      run.claudeSessionId !== eventSessionId
+    ) {
+      run.claudeSessionId = eventSessionId;
+      this.emit('session_id_captured', run, eventSessionId);
+    }
+
     emitAgentEvent(run.workspaceId, run.agentId, run.taskId, event);
     if (run.taskId) emitTaskEvent(run.workspaceId, run.taskId, event);
 
@@ -445,8 +474,13 @@ export function buildClaudeArgs(opts: StructuredRunOptions): string[] {
     'stream-json',
     '--verbose',
     '--include-partial-messages',
-    '--no-session-persistence',
   ];
+  // Session persistence left enabled (CLI default) so exited tasks
+  // can be resumed with `--resume <id>` + a follow-up prompt. Session
+  // files live under `~/.claude/projects/<cwd>/<id>.jsonl`.
+  if (opts.resumeSessionId) {
+    args.push('--resume', opts.resumeSessionId);
+  }
   if (opts.interactive) {
     // Streaming input: stdin carries JSONL user messages, one per
     // turn. We keep the pipe open for `sendMessage` follow-ups.

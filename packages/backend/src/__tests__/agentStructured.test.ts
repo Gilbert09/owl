@@ -70,9 +70,24 @@ describe('buildClaudeArgs', () => {
     expect(args[args.indexOf('--permission-mode') + 1]).toBe('bypassPermissions');
   });
 
-  it('disables on-disk session persistence (we store transcripts server-side)', () => {
+  it('leaves CLI session persistence enabled so `/continue` can --resume', () => {
     const args = buildClaudeArgs({ ...base, permissionMode: 'bypass' });
-    expect(args).toContain('--no-session-persistence');
+    expect(args).not.toContain('--no-session-persistence');
+  });
+
+  it('adds --resume when resumeSessionId is set', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      permissionMode: 'bypass',
+      resumeSessionId: 'abc-123',
+    });
+    expect(args).toContain('--resume');
+    expect(args[args.indexOf('--resume') + 1]).toBe('abc-123');
+  });
+
+  it('does NOT add --resume for fresh runs', () => {
+    const args = buildClaudeArgs({ ...base, permissionMode: 'bypass' });
+    expect(args).not.toContain('--resume');
   });
 
   it('interactive runs add --input-format stream-json so stdin stays a JSONL pipe', () => {
