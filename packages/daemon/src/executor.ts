@@ -1,11 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
-import * as pty from 'node-pty';
-import os from 'os';
 import type { ExecResult } from '@fastowl/shared';
 
 /**
  * Local execution primitives. The daemon is always "on" the machine it
- * serves, so local == native child_process + node-pty. No ssh2 here —
+ * serves, so local == native child_process. No ssh2 here —
  * if a user wants a remote machine, they install a daemon there.
  *
  * Sessions are tracked in-memory. On daemon restart, sessions are
@@ -13,7 +11,6 @@ import type { ExecResult } from '@fastowl/shared';
  * reconnect-is-a-fresh-state contract.
  */
 
-const ptySessions = new Map<string, pty.IPty>();
 const streamSessions = new Map<string, ChildProcessWithoutNullStreams>();
 
 /**
@@ -86,50 +83,6 @@ export async function exec(
 }
 
 /**
- * Spawn an interactive PTY that survives across requests. `sessionId`
- * is chosen by the backend (usually the agent id) — subsequent writes
- * and kills address the session by that id. Output flows as async
- * `session.data` events.
- */
-export function spawnInteractive(
-  sessionId: string,
-  command: string,
-  opts: { cwd?: string; rows?: number; cols?: number } = {},
-  events: SessionEvents
-): void {
-  if (ptySessions.has(sessionId)) {
-    throw new Error(`session ${sessionId} already exists`);
-  }
-
-  const shell =
-    os.platform() === 'win32' ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/bash';
-  // Wrap the command so users see the same behaviour as the old backend
-  // path: start a login shell, run the command, keep the shell open so
-  // the user can continue typing after the command exits.
-  const args =
-    os.platform() === 'win32'
-      ? ['/c', command]
-      : ['-c', `${command}; exec bash`];
-
-  const pt = pty.spawn(shell, args, {
-    name: 'xterm-color',
-    cols: opts.cols ?? 80,
-    rows: opts.rows ?? 24,
-    cwd: opts.cwd,
-    env: buildChildEnv(),
-  });
-  ptySessions.set(sessionId, pt);
-
-  pt.onData((d) => {
-    events.onData(sessionId, Buffer.from(d, 'utf-8'));
-  });
-  pt.onExit(({ exitCode }) => {
-    ptySessions.delete(sessionId);
-    events.onClose(sessionId, exitCode ?? 0);
-  });
-}
-
-/**
  * Non-PTY streaming spawn. Used by the structured renderer to run
  * `claude -p --output-format stream-json` without TTY-escape
  * contamination in the output. stdin / stdout / stderr are plain
@@ -153,7 +106,7 @@ export function streamSpawn(
   },
   events: SessionEvents
 ): void {
-  if (ptySessions.has(sessionId) || streamSessions.has(sessionId)) {
+  if (streamSessions.has(sessionId)) {
     throw new Error(`session ${sessionId} already exists`);
   }
 
@@ -193,9 +146,8 @@ export function streamSpawn(
 
 /**
  * Half-close stdin for a streaming session. The child finalises in-
- * flight work and exits cleanly (code 0). Use this for graceful end
- * of an interactive conversation; use `killSession` for abort.
- * No-op for PTY sessions — they don't have a separate stdin pipe.
+ * flight work and exits cleanly (code 0). Use for graceful end of
+ * an interactive conversation; use `killSession` for abort.
  */
 export function closeStreamInput(sessionId: string): void {
   const child = streamSessions.get(sessionId);
@@ -205,11 +157,6 @@ export function closeStreamInput(sessionId: string): void {
 
 /** Write bytes to a session's stdin. No-op if the session was already killed. */
 export function writeSession(sessionId: string, data: Buffer): void {
-  const pt = ptySessions.get(sessionId);
-  if (pt) {
-    pt.write(data.toString('utf-8'));
-    return;
-  }
   const child = streamSessions.get(sessionId);
   if (child && child.stdin && !child.stdin.destroyed) {
     child.stdin.write(data);
@@ -218,29 +165,15 @@ export function writeSession(sessionId: string, data: Buffer): void {
 
 /** Terminate a session. Emits the matching `session.close` event. */
 export function killSession(sessionId: string): void {
-  const pt = ptySessions.get(sessionId);
-  if (pt) {
-    try { pt.kill(); } catch {
-      // Already dead; onExit handler cleans up the map entry.
-    }
-    return;
-  }
   const child = streamSessions.get(sessionId);
-  if (child) {
-    try { child.kill('SIGTERM'); } catch {
-      // Already dead.
-    }
+  if (!child) return;
+  try { child.kill('SIGTERM'); } catch {
+    // Already dead.
   }
 }
 
 /** For tests + shutdown. */
 export function shutdownAllSessions(): void {
-  for (const [, pt] of ptySessions) {
-    try { pt.kill(); } catch {
-      // ignore
-    }
-  }
-  ptySessions.clear();
   for (const [, child] of streamSessions) {
     try { child.kill('SIGTERM'); } catch {
       // ignore

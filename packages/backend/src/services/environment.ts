@@ -11,7 +11,6 @@ import { daemonRegistry } from './daemonRegistry.js';
 import { getDbClient, type Database } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { spawn, ChildProcess } from 'child_process';
-import * as pty from 'node-pty';
 import { emitEnvironmentStatus } from './websocket.js';
 
 interface LocalProcess {
@@ -19,15 +18,10 @@ interface LocalProcess {
   process: ChildProcess;
 }
 
-interface LocalPTY {
-  id: string;
-  pty: pty.IPty;
-}
-
 /**
  * Non-PTY local child spawned for structured-renderer runs. Tracked
- * separately from PTY sessions so `writeToSession` / `killSession` /
- * `closeStreamInput` can pick the right pipe to talk to.
+ * in a map so `writeToSession` / `killSession` / `closeStreamInput`
+ * can address it by sessionId.
  */
 interface LocalStreamProcess {
   id: string;
@@ -36,7 +30,6 @@ interface LocalStreamProcess {
 
 class EnvironmentService extends EventEmitter {
   private localProcesses: Map<string, LocalProcess> = new Map();
-  private localPTYs: Map<string, LocalPTY> = new Map();
   private localStreams: Map<string, LocalStreamProcess> = new Map();
   private healthCheckInterval: NodeJS.Timeout | null = null;
 
@@ -118,10 +111,6 @@ class EnvironmentService extends EventEmitter {
       proc.process.kill();
       this.localProcesses.delete(id);
     }
-    for (const [id, ptyProc] of this.localPTYs) {
-      ptyProc.pty.kill();
-      this.localPTYs.delete(id);
-    }
     for (const [id, stream] of this.localStreams) {
       try { stream.process.kill('SIGTERM'); } catch {
         // Already dead.
@@ -192,10 +181,12 @@ class EnvironmentService extends EventEmitter {
             this.localProcesses.delete(id);
           }
         }
-        for (const [id, ptyProc] of this.localPTYs) {
+        for (const [id, stream] of this.localStreams) {
           if (id.startsWith(`${environmentId}:`)) {
-            ptyProc.pty.kill();
-            this.localPTYs.delete(id);
+            try { stream.process.kill('SIGTERM'); } catch {
+              // Already dead.
+            }
+            this.localStreams.delete(id);
           }
         }
         await this.updateEnvironmentStatus(environmentId, 'disconnected');
@@ -314,52 +305,7 @@ class EnvironmentService extends EventEmitter {
     );
   }
 
-  async spawnInteractive(
-    environmentId: string,
-    sessionId: string,
-    command: string,
-    options: { cwd?: string; rows?: number; cols?: number } = {}
-  ): Promise<void> {
-    const env = await this.getEnvironment(environmentId);
-    if (!env) throw new Error(`Environment ${environmentId} not found`);
-
-    switch (env.type) {
-      case 'local':
-        await this.spawnLocalInteractive(environmentId, sessionId, command, options);
-        break;
-      case 'ssh': {
-        await sshService.createPTY(
-          environmentId,
-          sessionId,
-          options.rows || 24,
-          options.cols || 80
-        );
-        if (options.cwd) sshService.writeToPTY(sessionId, `cd ${options.cwd}\n`);
-        sshService.writeToPTY(sessionId, `${command}\n`);
-        break;
-      }
-      case 'daemon': {
-        await daemonRegistry.request(environmentId, {
-          op: 'spawn_interactive',
-          sessionId,
-          command,
-          cwd: options.cwd,
-          rows: options.rows,
-          cols: options.cols,
-        });
-        break;
-      }
-      default:
-        throw new Error(`Cannot spawn interactive on environment type: ${env.type}`);
-    }
-  }
-
   writeToSession(sessionId: string, data: string): void {
-    const localPty = this.localPTYs.get(sessionId);
-    if (localPty) {
-      localPty.pty.write(data);
-      return;
-    }
     const localStream = this.localStreams.get(sessionId);
     if (localStream) {
       localStream.process.stdin?.write(data);
@@ -387,18 +333,9 @@ class EnvironmentService extends EventEmitter {
           // Session belongs to a different daemon; ignore.
         });
     }
-    // Fall back to SSH PTY if no daemon claimed it. Idempotent: ssh
-    // will no-op for unknown session ids.
-    sshService.writeToPTY(sessionId, data);
   }
 
   killSession(sessionId: string): void {
-    const localPty = this.localPTYs.get(sessionId);
-    if (localPty) {
-      localPty.pty.kill();
-      this.localPTYs.delete(sessionId);
-      return;
-    }
     const localStream = this.localStreams.get(sessionId);
     if (localStream) {
       try { localStream.process.kill('SIGTERM'); } catch {
@@ -424,7 +361,6 @@ class EnvironmentService extends EventEmitter {
         .request(envId, { op: 'kill_session', sessionId })
         .catch(() => {});
     }
-    sshService.closePTY(sessionId);
   }
 
   async testConnection(config: EnvironmentConfig): Promise<{ success: boolean; error?: string }> {
@@ -518,48 +454,6 @@ class EnvironmentService extends EventEmitter {
       this.emit('session:stderr', sessionId, Buffer.from(err.message, 'utf-8'));
       this.localStreams.delete(sessionId);
       this.emit('session:close', sessionId, 1);
-    });
-  }
-
-  private async spawnLocalInteractive(
-    _environmentId: string,
-    sessionId: string,
-    command: string,
-    options: { cwd?: string; rows?: number; cols?: number }
-  ): Promise<void> {
-    const isNonInteractive = command.startsWith('claude --print') || command.startsWith('claude -p');
-    let ptyProcess: pty.IPty;
-
-    if (isNonInteractive) {
-      console.log(`Spawning local PTY (non-interactive): bash -c "${command}"`);
-      ptyProcess = pty.spawn('/bin/bash', ['-c', command], {
-        name: 'xterm-256color',
-        cols: options.cols || 120,
-        rows: options.rows || 40,
-        cwd: options.cwd || process.cwd(),
-        env: { ...process.env, TERM: 'xterm-256color' } as { [key: string]: string },
-      });
-    } else {
-      const shell = process.platform === 'win32' ? 'powershell.exe' : '/bin/bash';
-      console.log(`Spawning local PTY (interactive): ${shell} (will run: ${command})`);
-      ptyProcess = pty.spawn(shell, [], {
-        name: 'xterm-256color',
-        cols: options.cols || 120,
-        rows: options.rows || 40,
-        cwd: options.cwd || process.cwd(),
-        env: { ...process.env, TERM: 'xterm-256color' } as { [key: string]: string },
-      });
-      setTimeout(() => { ptyProcess.write(command + '\n'); }, 100);
-    }
-
-    this.localPTYs.set(sessionId, { id: sessionId, pty: ptyProcess });
-    ptyProcess.onData((data) => {
-      this.emit('session:data', sessionId, Buffer.from(data));
-    });
-    ptyProcess.onExit(({ exitCode }) => {
-      console.log(`PTY exited with code ${exitCode}`);
-      this.localPTYs.delete(sessionId);
-      this.emit('session:close', sessionId, exitCode);
     });
   }
 

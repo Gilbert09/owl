@@ -2,6 +2,36 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 18 (structured-renderer Slice 4 — daemon/SSH support + PTY deletion)
+The big cleanup pass. Structured renderer now covers every env type — local (in-process spawn), daemon (new `stream_spawn` wire op), SSH (ssh2 exec channel with `pty: false`) — and the PTY path is gone. Landed as three commits (4a daemon, 4b SSH, 4c deletion) so each step was revertable on its own.
+
+- **Slice 4a — daemon streaming** (`22a4759`): new `stream_spawn` + `close_stream_input` ops + `session.stderr` event in the daemon wire protocol. `packages/daemon/src/executor.ts` gains a non-PTY `streamSpawn` that `child_process.spawn`s the binary with plain pipes; stdout flows back as `session.data`, stderr as `session.stderr`, exit as `session.close`. `environmentService` grows `spawnStreaming` + `closeStreamInput` that route to local (in-process) or daemon (wire op) based on env type. `agentStructured` refactored to go through env service as the transport — no more direct `child_process.spawn`; start() is now async and takes `environmentId`. Dispatcher drops the local-only gate.
+
+- **Slice 4b — SSH streaming** (`7161994`): `sshService` gains `execStream` / `writeToStream` / `closeStreamInput` / `killStream` / `hasStream`. Uses ssh2's exec channel with `pty: false` so stream-json output isn't wrapped in TTY escapes. Env service forwards `stream:*` events under the same `session:*` names. Dispatcher drops the env-type gate entirely — structured now works on `local`, `daemon`, and `ssh`. Environment routes drop the "local only" guard.
+
+- **Slice 4c — PTY deletion**:
+  - **agent.ts** collapsed to a single structured path. Removed: `STATUS_PATTERNS`, `detectStatusFromOutput`, `analyzeOutput` (regex-based PTY output scanning), `handleSessionData` + `handleSessionClose` (PTY-only DB writers for `agents.terminal_output` / `tasks.terminal_output`), `buildFastOwlEnvPrefix` + `shellQuote` (PTY-only shell-quote helpers), the whole PTY dispatcher branch in `startAgent`. `startAgent` is now a thin wrapper over the structured path; no more `startStructuredAgent` split.
+  - **environment.ts**: removed `spawnInteractive` + `spawnLocalInteractive` + `localPTYs` map + `node-pty` import. Only `localStreams` + `localProcesses` survive.
+  - **ssh.ts**: removed `createPTY` / `writeToPTY` / `closePTY` / `resizePTY` / `PTYSession` / `ptySessions` / `pty:data` + `pty:close` events. Streaming-exec is the only path.
+  - **daemon/executor.ts**: removed `spawnInteractive`, `ptySessions`, and the `node-pty` dep.
+  - **daemon/wsClient.ts**: dropped the `spawn_interactive` case from dispatch.
+  - **shared/daemonProtocol.ts**: removed `SpawnInteractiveRequest` from the request union.
+  - **Desktop**: removed `XTerm.tsx`, `@xterm/xterm` + `@xterm/addon-fit` + `@xterm/addon-web-links` deps, `.erb/mocks/xtermMock.js` + matching Jest moduleNameMapper. `TaskTerminal.tsx` always renders `AgentConversation`; the `isStructuredTask` check is gone. `TerminalHistory.tsx` still falls back to a plain `<pre>` for historical `terminal_output` rows that pre-date the structured renderer — those can't be back-filled, so they stay readable as legacy data.
+  - **Tests**: deleted `agent.envPrefix.test.ts` + `agent.statusDetection.test.ts` (tested functions that no longer exist). `fakeEnvironment.ts` rewritten to patch `spawnStreaming` + `closeStreamInput` instead of `spawnInteractive`. `gitService` refactored from the PTY-session-event-listener pattern to `environmentService.exec()` (one-shot). Full suite: **94 tests** passing in ~40s.
+  - **git.ts**: `executeGitCommand` simplified — dropped the `spawnInteractive` + session-event-listener + 5s timeout dance, now just calls `environmentService.exec()` and returns stdout.
+  - **Schema / migration**: `0008_default_structured_renderer.sql` flips the default + back-fills existing rows from `'pty'` to `'structured'`. The column is kept (not dropped) so rollback stays possible — but no code path reads `'pty'` anymore.
+  - **Infra**: Dockerfile + `scripts/install-daemon.sh` no longer install `build-essential` / `python3` for node-pty's native build. `ssh2` is the last remaining native dep; its prebuilds cover linux-x64 cleanly.
+
+- **What this buys us**:
+  - Single code path for every env type. No more "does this task use PTY or structured?" branches scattered across agent.ts, environment.ts, tasks routes, desktop components.
+  - One storage format going forward (`tasks.transcript`). `tasks.terminal_output` is kept read-only for historical rows.
+  - Lighter Electron bundle — one fewer native dep (node-pty) + ~3 xterm.js packages gone. Notable on Windows where node-pty was a recurring build-nightmare.
+  - Any new agent feature touches one surface (structured) — no parity-between-paths work.
+
+- **Deferred follow-ups**: backend-restart reliability (task #6 — designing keep-alive-across-restarts; not in Slice 4's scope). Optionally dropping `tasks.terminal_output` + `agents.terminal_output` + the `environments.renderer` column once we're confident no rollback is needed.
+
+- **Files**: `packages/shared/src/daemonProtocol.ts`, `packages/backend/src/services/agent.ts`, `agentStructured.ts`, `environment.ts`, `ssh.ts`, `git.ts`, `packages/backend/src/routes/tasks.ts`, `routes/environments.ts`, `packages/backend/src/__tests__/helpers/fakeEnvironment.ts`, `packages/backend/src/__tests__/agent.envPrefix.test.ts` (deleted), `agent.statusDetection.test.ts` (deleted), `packages/backend/src/db/migrations/0008_default_structured_renderer.sql` (new), `packages/backend/src/db/migrations/meta/0008_snapshot.json` (new), `packages/backend/src/db/schema.ts`, `packages/backend/package.json`, `packages/daemon/src/executor.ts`, `wsClient.ts`, `packages/daemon/package.json`, `apps/desktop/package.json`, `apps/desktop/src/renderer/components/panels/TaskTerminal.tsx`, `TerminalHistory.tsx`, `apps/desktop/src/renderer/components/terminal/XTerm.tsx` (deleted), `apps/desktop/.erb/mocks/xtermMock.js` (deleted), `Dockerfile`, `scripts/install-daemon.sh`, `package-lock.json`.
+
 ## Session 18 (structured-renderer Slice 3 — interactive multi-turn + reliability polish)
 Interactive structured tasks: user-initiated tasks on a structured local env now run against a long-lived `claude -p --input-format stream-json --output-format stream-json` child. User types, child processes a turn, emits a `result` event, we flip status to `idle`, user can type again. Same strict-permission machinery as Slice 2 still applies — hook fires on every tool, UI shows Approve/Deny inline. Plus a batch of reliability / UX polish:
 

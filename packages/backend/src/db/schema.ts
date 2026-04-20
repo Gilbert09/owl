@@ -144,13 +144,11 @@ export const environments = pgTable(
       .notNull()
       .default(false),
     /**
-     * How tasks on this env are driven:
-     *   'pty'        (default) spawn `claude` in a PTY; raw bytes.
-     *   'structured' spawn `claude -p --output-format stream-json`;
-     *                JSONL events. See services/agentStructured.ts.
-     * Slice 1 only supports 'structured' on `local` envs.
+     * Historically toggled between PTY and structured rendering.
+     * Slice 4c collapsed the two paths — structured is now the only
+     * runtime. Column is kept for rollback safety; always `'structured'`.
      */
-    renderer: text('renderer').notNull().default('pty'),
+    renderer: text('renderer').notNull().default('structured'),
     /**
      * Tool names the user has pre-approved for this env — hook checks
      * this list before surfacing a permission prompt. Scoped per-env

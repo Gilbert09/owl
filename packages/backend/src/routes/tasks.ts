@@ -135,7 +135,6 @@ export function taskRoutes(): Router {
       if (activeAgent) {
         task.agentStatus = activeAgent.status;
         task.agentAttention = activeAgent.attention;
-        task.terminalOutput = activeAgent.outputBuffer;
       }
     }
 
@@ -730,11 +729,10 @@ export function taskRoutes(): Router {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
 
-    let terminalOutput = rows[0].terminalOutput || '';
-    if (rows[0].status === 'in_progress') {
-      const activeAgent = agentService.getAgentByTaskId(req.params.id);
-      if (activeAgent) terminalOutput = activeAgent.outputBuffer;
-    }
+    // Slice 4c: legacy terminal_output column kept for historical PTY
+    // rows only. Live tasks write to `transcript` via the structured
+    // renderer; nothing updates terminal_output anymore.
+    const terminalOutput = rows[0].terminalOutput || '';
 
     res.json({
       success: true,

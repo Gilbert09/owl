@@ -9,14 +9,11 @@ import type {
   StartAgentRequest,
 } from '@fastowl/shared';
 import { environmentService } from './environment.js';
-import { sshService } from './ssh.js';
 import { agentStructuredService } from './agentStructured.js';
 import { ensurePermissionHook } from './permissionHook.js';
 import {
   emitAgentStatus,
-  emitAgentOutput,
   emitInboxNew,
-  emitTaskOutput,
   emitTaskAgentStatus,
   emitTaskStatus,
 } from './websocket.js';
@@ -27,116 +24,6 @@ import {
   inboxItems as inboxItemsTable,
 } from '../db/schema.js';
 
-// Patterns to detect Claude CLI status
-export const STATUS_PATTERNS = {
-  working: [
-    /^\s*\d+\s*│/,
-    /Thinking\.\.\./i,
-    /Working on/i,
-    /Let me/i,
-    /I'll/i,
-    /I will/i,
-  ],
-  awaitingInput: [
-    /\?\s*$/,
-    /What would you/i,
-    /Would you like/i,
-    /Should I/i,
-    /Do you want/i,
-    /Please (provide|specify|confirm|choose)/i,
-    /Which (one|option)/i,
-    /Enter your/i,
-    /Type your/i,
-    /\(y\/n\)/i,
-    /\[Y\/n\]/i,
-  ],
-  completed: [
-    /Done\.?\s*$/i,
-    /Complete\.?\s*$/i,
-    /Finished\.?\s*$/i,
-    /Successfully/i,
-    /I've (completed|finished|done)/i,
-    /The (task|work) (is|has been) (complete|done|finished)/i,
-  ],
-  error: [
-    /Error:/i,
-    /Failed:/i,
-    /Exception:/i,
-    /Cannot/i,
-    /Unable to/i,
-    /Permission denied/i,
-    /command not found/i,
-  ],
-  toolUse: [
-    /^> Running/i,
-    /^> Reading/i,
-    /^> Writing/i,
-    /^> Editing/i,
-    /^> Executing/i,
-    /^> Searching/i,
-  ],
-};
-
-/**
- * Pure status detection from Claude CLI output. Extracted so it can be
- * unit-tested independently of the live agent service.
- */
-export function detectStatusFromOutput(
-  recentOutput: string,
-  current: { status: AgentStatus; attention: AgentAttention }
-): { status: AgentStatus; attention: AgentAttention } {
-  let newStatus: AgentStatus = current.status;
-  let newAttention: AgentAttention = current.attention;
-
-  for (const pattern of STATUS_PATTERNS.toolUse) {
-    if (pattern.test(recentOutput)) {
-      newStatus = 'tool_use';
-      newAttention = 'none';
-      break;
-    }
-  }
-
-  for (const pattern of STATUS_PATTERNS.error) {
-    if (pattern.test(recentOutput)) {
-      newStatus = 'error';
-      newAttention = 'high';
-      break;
-    }
-  }
-
-  if (newStatus !== 'error') {
-    for (const pattern of STATUS_PATTERNS.awaitingInput) {
-      if (pattern.test(recentOutput)) {
-        newStatus = 'awaiting_input';
-        newAttention = 'high';
-        break;
-      }
-    }
-  }
-
-  if (newStatus !== 'error' && newStatus !== 'awaiting_input') {
-    for (const pattern of STATUS_PATTERNS.completed) {
-      if (pattern.test(recentOutput)) {
-        newStatus = 'completed';
-        newAttention = 'low';
-        break;
-      }
-    }
-  }
-
-  if (newStatus !== 'error' && newStatus !== 'awaiting_input' && newStatus !== 'completed') {
-    for (const pattern of STATUS_PATTERNS.working) {
-      if (pattern.test(recentOutput)) {
-        newStatus = 'working';
-        newAttention = 'none';
-        break;
-      }
-    }
-  }
-
-  return { status: newStatus, attention: newAttention };
-}
-
 export interface ActiveAgent {
   id: string;
   environmentId: string;
@@ -144,11 +31,16 @@ export interface ActiveAgent {
   sessionId: string;
   status: AgentStatus;
   attention: AgentAttention;
-  outputBuffer: string;
   lastActivityTime: Date;
   currentTaskId?: string;
 }
 
+/**
+ * Agent lifecycle on top of the structured (stream-json) runtime.
+ * PTY was removed in Slice 4c — every run goes through
+ * `agentStructuredService`, which spawns `claude -p` non-PTY and
+ * emits JSONL events to the desktop.
+ */
 class AgentService extends EventEmitter {
   private activeAgents: Map<string, ActiveAgent> = new Map();
   private statusCheckInterval: NodeJS.Timeout | null = null;
@@ -158,33 +50,7 @@ class AgentService extends EventEmitter {
   }
 
   async init(): Promise<void> {
-    // Clean up any stale agent records from previous runs. Statuses that
-    // imply a running process are fiction after a restart.
     await this.cleanupStaleAgents();
-
-    environmentService.on('session:data', (sessionId, data) => {
-      this.handleSessionData(sessionId, data).catch((err) =>
-        console.error('handleSessionData error:', err)
-      );
-    });
-
-    environmentService.on('session:close', (sessionId, code) => {
-      this.handleSessionClose(sessionId, code).catch((err) =>
-        console.error('handleSessionClose error:', err)
-      );
-    });
-
-    sshService.on('pty:data', (sessionId, data) => {
-      this.handleSessionData(sessionId, data).catch((err) =>
-        console.error('handleSessionData error:', err)
-      );
-    });
-
-    sshService.on('pty:close', (sessionId, code?: number) => {
-      this.handleSessionClose(sessionId, code ?? 0).catch((err) =>
-        console.error('handleSessionClose error:', err)
-      );
-    });
 
     // Structured runs fire `turn_complete` after each `result` event.
     // For interactive runs that means "child is idling on stdin,
@@ -249,6 +115,12 @@ class AgentService extends EventEmitter {
     }
   }
 
+  /**
+   * Spin up a structured agent for a task. Scheduler-kicked tasks
+   * (metadata.backlogItemId set) run one-shot; user-initiated tasks
+   * run interactively with stdin kept open for follow-up messages.
+   * Permission mode follows `env.autonomousBypassPermissions`.
+   */
   async startAgent(request: StartAgentRequest): Promise<Agent> {
     const { environmentId, workspaceId, taskId, prompt, workingDirectory } = request;
 
@@ -262,140 +134,24 @@ class AgentService extends EventEmitter {
     const now = new Date();
 
     const env = await environmentService.getEnvironment(environmentId);
+    if (!env) throw new Error(`Environment ${environmentId} not found`);
     const autonomous = taskId ? await this.isAutonomousTask(taskId) : false;
-    const cwd = workingDirectory || (env?.config.type === 'ssh'
-      ? (env.config as { workingDirectory?: string }).workingDirectory
-      : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
+    const cwd =
+      workingDirectory ||
+      (env.config as { workingDirectory?: string } | undefined)?.workingDirectory;
+    const interactive = !autonomous;
+    const permissionMode: 'bypass' | 'strict' = env.autonomousBypassPermissions
+      ? 'bypass'
+      : 'strict';
 
-    // Structured renderer path: non-PTY spawn of `claude -p
-    // --output-format stream-json`. Covers autonomous (scheduler-
-    // driven, one-shot) and interactive (user-driven, multi-turn).
-    // Transport is abstracted by `environmentService.spawnStreaming`
-    // — local uses in-process child_process, daemon tunnels through
-    // the stream_spawn wire op, SSH goes over an ssh2 exec channel.
-    const useStructured = env?.renderer === 'structured';
-    if (useStructured) {
-      await this.startStructuredAgent({
-        agentId,
-        sessionId,
-        environmentId,
-        workspaceId,
-        taskId,
-        prompt,
-        cwd,
-        now,
-        permissionMode: env!.autonomousBypassPermissions ? 'bypass' : 'strict',
-        interactive: !autonomous,
-      });
-      const agent = await this.getAgent(agentId);
-      if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
-      return agent;
-    }
+    // Strict mode needs the PreToolUse hook script on disk for the
+    // child to exec. Writing it is idempotent — first call after
+    // backend boot writes the file, subsequent calls reuse it.
+    const hookScriptPath = permissionMode === 'strict' ? await ensurePermissionHook() : undefined;
 
-    const includeApiUrl = env?.type === 'local';
-    const envPrefix = buildFastOwlEnvPrefix(workspaceId, taskId, { includeApiUrl });
-
-    let claudeCommand: string;
-    if (autonomous && prompt) {
-      // Autonomous tasks are scheduler-gated; there's nobody to answer
-      // permission prompts in real time. Two modes, decided by the env:
-      //
-      //   env.autonomousBypassPermissions === true
-      //     → `--dangerously-skip-permissions`. Bypasses every prompt
-      //       (bash / edits / MCP trust). Trust surface = whoever the
-      //       env runs as. Appropriate for daemon VMs (throwaway) and
-      //       explicitly opted-in local envs.
-      //
-      //   env.autonomousBypassPermissions === false
-      //     → `--permission-mode acceptEdits`. Silent for file edits
-      //       but WILL pause on bash prompts / unknown MCP trust. User
-      //       can still type into the task terminal's input field to
-      //       approve / select an option; session's not dead.
-      //
-      // `--verbose` in both paths so the terminal shows tool use, not
-      // just the final assistant message.
-      const permFlag = env?.autonomousBypassPermissions
-        ? '--dangerously-skip-permissions'
-        : '--permission-mode acceptEdits';
-      claudeCommand =
-        `${envPrefix}claude --print --verbose ${permFlag} ${shellQuote(prompt)}`;
-    } else {
-      claudeCommand = `${envPrefix}claude`;
-    }
-
-    await environmentService.spawnInteractive(environmentId, sessionId, claudeCommand, {
-      cwd,
-      rows: 40,
-      cols: 120,
-    });
-
-    if (prompt && !autonomous) {
-      setTimeout(() => {
-        environmentService.writeToSession(sessionId, prompt + '\n');
-      }, 500);
-    }
-
-    const activeAgent: ActiveAgent = {
-      id: agentId,
-      environmentId,
-      workspaceId,
-      sessionId,
-      status: 'idle',
-      attention: 'none',
-      outputBuffer: '',
-      lastActivityTime: now,
-      currentTaskId: taskId,
-    };
-    this.activeAgents.set(agentId, activeAgent);
-
-    await this.db.insert(agentsTable).values({
-      id: agentId,
-      environmentId,
-      workspaceId,
-      status: 'idle',
-      attention: 'none',
-      currentTaskId: taskId ?? null,
-      terminalOutput: '',
-      lastActivity: now,
-      createdAt: now,
-    });
-
-    if (taskId) {
-      await this.db
-        .update(tasksTable)
-        .set({ assignedAgentId: agentId, status: 'in_progress', updatedAt: now })
-        .where(eq(tasksTable.id, taskId));
-    }
-
-    const agent = await this.getAgent(agentId);
-    if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
-    return agent;
-  }
-
-  /**
-   * Kick off a structured-renderer agent. Shares agent/task rows with the
-   * PTY path (so the rest of the app — inbox, task list, etc. — doesn't
-   * care which path drove the run), but uses `agentStructuredService`
-   * for I/O and completion.
-   */
-  private async startStructuredAgent(opts: {
-    agentId: string;
-    sessionId: string;
-    environmentId: string;
-    workspaceId: string;
-    taskId?: string;
-    prompt?: string;
-    cwd?: string;
-    now: Date;
-    permissionMode: 'bypass' | 'strict';
-    interactive: boolean;
-  }): Promise<void> {
-    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now, permissionMode, interactive } = opts;
-
-    // Same FASTOWL_* context the CLI path uses, just passed through the
-    // child_process env rather than an inline shell prefix — no quoting
-    // concerns. FASTOWL_ENVIRONMENT_ID is used by the permission service
-    // to scope pre-approvals per-env.
+    // FASTOWL_* context the child Claude uses to reach its parent.
+    // FASTOWL_ENVIRONMENT_ID is used by the permission service to
+    // scope pre-approvals per-env.
     const port = process.env.PORT || '4747';
     const envVars: Record<string, string> = {
       FASTOWL_API_URL: process.env.FASTOWL_API_URL || `http://localhost:${port}`,
@@ -404,15 +160,6 @@ class AgentService extends EventEmitter {
     };
     if (taskId) envVars.FASTOWL_TASK_ID = taskId;
 
-    // Strict mode needs the PreToolUse hook script on disk for the
-    // child to exec. Writing it is idempotent — first call after
-    // backend boot writes the file, subsequent calls reuse it.
-    const hookScriptPath = permissionMode === 'strict' ? await ensurePermissionHook() : undefined;
-
-    // Track as an active agent so the rest of the status plumbing (task
-    // GET, agent GET, stop endpoint) works uniformly. `outputBuffer` is
-    // unused for this path — transcript lives on `tasks.transcript`.
-    //
     // Initial status: `working` if we have a prompt to kick off the
     // first turn, else `idle` (interactive, waiting for the user).
     const initialStatus: AgentStatus = prompt ? 'working' : 'idle';
@@ -423,7 +170,6 @@ class AgentService extends EventEmitter {
       sessionId,
       status: initialStatus,
       attention: 'none',
-      outputBuffer: '',
       lastActivityTime: now,
       currentTaskId: taskId,
     };
@@ -448,8 +194,9 @@ class AgentService extends EventEmitter {
           assignedAgentId: agentId,
           status: 'in_progress',
           updatedAt: now,
-          // Record which runtime drove this task so the UI can pick the
-          // right renderer and reads from the right DB column.
+          // `metadata.runtime` is no longer load-bearing (structured
+          // is the only path), but downstream code + historical rows
+          // still look for it.
           metadata: sql`
             COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
           `,
@@ -472,15 +219,10 @@ class AgentService extends EventEmitter {
       interactive,
     });
 
-    emitAgentStatus(workspaceId, agentId, 'working', 'none');
-    if (taskId) {
-      emitTaskAgentStatus(workspaceId, taskId, 'working', 'none');
-    }
+    emitAgentStatus(workspaceId, agentId, initialStatus, 'none');
+    if (taskId) emitTaskAgentStatus(workspaceId, taskId, initialStatus, 'none');
 
-    // Fire-and-forget the completion handler. The structured service
-    // owns the child process; we just wait for the exit code and map
-    // it onto the same "clean exit → awaiting_review, error → failed"
-    // rules the PTY path uses.
+    // Wait for exit and map onto the usual task lifecycle.
     void run.completion.then(async (code) => {
       try {
         await agentStructuredService.flush(sessionId);
@@ -489,6 +231,10 @@ class AgentService extends EventEmitter {
         console.error('[agent] structured-exit handler threw:', err);
       }
     });
+
+    const agent = await this.getAgent(agentId);
+    if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
+    return agent;
   }
 
   private async handleStructuredExit(agentId: string, code: number): Promise<void> {
@@ -521,16 +267,15 @@ class AgentService extends EventEmitter {
     await this.db.delete(agentsTable).where(eq(agentsTable.id, agentId));
   }
 
+  /**
+   * Send a user message to an interactive agent. Only valid while the
+   * agent's child is running — for one-shot autonomous runs, the
+   * child has already exited by the time anything could call this.
+   */
   sendInput(agentId: string, input: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
-    // Structured interactive runs take the message as a stream-json
-    // envelope on the child's stdin; PTY runs take raw bytes.
-    if (agentStructuredService.has(agent.sessionId)) {
-      agentStructuredService.sendMessage(agent.sessionId, input);
-    } else {
-      environmentService.writeToSession(agent.sessionId, input + '\n');
-    }
+    agentStructuredService.sendMessage(agent.sessionId, input);
     this.updateAgentStatus(agentId, 'working', 'none').catch((err) =>
       console.error('updateAgentStatus error:', err)
     );
@@ -539,13 +284,7 @@ class AgentService extends EventEmitter {
   stopAgent(agentId: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) return;
-    // Structured runs own their own child process; PTY runs go through
-    // environmentService. Both calls are safe no-ops for the other path.
-    if (agentStructuredService.has(agent.sessionId)) {
-      agentStructuredService.stop(agent.sessionId);
-    } else {
-      environmentService.killSession(agent.sessionId);
-    }
+    agentStructuredService.stop(agent.sessionId);
     this.activeAgents.delete(agentId);
 
     this.db
@@ -599,8 +338,8 @@ class AgentService extends EventEmitter {
 
   /**
    * True if a task was spawned by the Continuous Build scheduler (has a
-   * backlog item in its metadata). Those tasks run `claude --print` and
-   * derive completion from process exit.
+   * backlog item in its metadata). Autonomous tasks run one-shot;
+   * interactive tasks (no backlog item) keep their child's stdin open.
    */
   private async isAutonomousTask(taskId: string): Promise<boolean> {
     const rows = await this.db
@@ -617,106 +356,6 @@ class AgentService extends EventEmitter {
       if (agent.currentTaskId === taskId) return agent;
     }
     return null;
-  }
-
-  getTerminalOutput(agentId: string): string {
-    return this.activeAgents.get(agentId)?.outputBuffer ?? '';
-  }
-
-  private async handleSessionData(sessionId: string, data: Buffer): Promise<void> {
-    let agent: ActiveAgent | undefined;
-    for (const [, a] of this.activeAgents) {
-      if (a.sessionId === sessionId) {
-        agent = a;
-        break;
-      }
-    }
-    if (!agent) return;
-
-    const output = data.toString();
-    agent.outputBuffer += output;
-    agent.lastActivityTime = new Date();
-
-    const truncatedOutput = agent.outputBuffer.slice(-10000);
-    await this.db
-      .update(agentsTable)
-      .set({ terminalOutput: truncatedOutput, lastActivity: agent.lastActivityTime })
-      .where(eq(agentsTable.id, agent.id));
-
-    // Append to task's persistent terminal output so history survives the
-    // agent session. Raw `||` concat keeps write cost proportional to each
-    // chunk rather than the full buffer.
-    if (agent.currentTaskId) {
-      await this.db
-        .update(tasksTable)
-        .set({
-          terminalOutput: sql`${tasksTable.terminalOutput} || ${output}`,
-          updatedAt: agent.lastActivityTime,
-        })
-        .where(eq(tasksTable.id, agent.currentTaskId));
-    }
-
-    emitAgentOutput(agent.workspaceId, agent.id, output, true);
-    if (agent.currentTaskId) {
-      emitTaskOutput(agent.workspaceId, agent.currentTaskId, output, true);
-    }
-
-    await this.analyzeOutput(agent);
-  }
-
-  private async handleSessionClose(sessionId: string, code: number | null): Promise<void> {
-    let agentId: string | undefined;
-    for (const [id, a] of this.activeAgents) {
-      if (a.sessionId === sessionId) {
-        agentId = id;
-        break;
-      }
-    }
-    if (!agentId) return;
-
-    const agent = this.activeAgents.get(agentId)!;
-    const finalStatus: AgentStatus = code === 0 ? 'completed' : 'error';
-    await this.updateAgentStatus(agentId, finalStatus, 'none');
-    this.activeAgents.delete(agentId);
-
-    await this.createInboxItemForAgent(agent, finalStatus);
-
-    // Update task. Clean agent exits go through the approval gate
-    // (awaiting_review) so the user can accept/reject the work.
-    if (agent.currentTaskId) {
-      const now = new Date();
-      if (code === 0) {
-        await this.db
-          .update(tasksTable)
-          .set({ status: 'awaiting_review', updatedAt: now })
-          .where(eq(tasksTable.id, agent.currentTaskId));
-        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
-      } else {
-        await this.db
-          .update(tasksTable)
-          .set({ status: 'failed', completedAt: now, updatedAt: now })
-          .where(eq(tasksTable.id, agent.currentTaskId));
-        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed');
-      }
-    }
-
-    await this.db.delete(agentsTable).where(eq(agentsTable.id, agentId));
-  }
-
-  private async analyzeOutput(agent: ActiveAgent): Promise<void> {
-    const recentOutput = agent.outputBuffer.split('\n').slice(-10).join('\n');
-    const { status: newStatus, attention: newAttention } = detectStatusFromOutput(
-      recentOutput,
-      { status: agent.status, attention: agent.attention }
-    );
-
-    if (newStatus !== agent.status || newAttention !== agent.attention) {
-      const prevAttention = agent.attention;
-      await this.updateAgentStatus(agent.id, newStatus, newAttention);
-      if (newAttention === 'high' && prevAttention !== 'high') {
-        await this.createInboxItemForAgent(agent, newStatus);
-      }
-    }
   }
 
   private async updateAgentStatus(
@@ -843,32 +482,3 @@ function rowToAgent(row: typeof agentsTable.$inferSelect): Agent {
 }
 
 export const agentService = new AgentService();
-
-/**
- * Build an inline `KEY=val ` prefix for a shell command so child Claudes
- * can find their parent FastOwl via the CLI. Values are single-quoted and
- * safely escaped for bash.
- *
- * Pass `includeApiUrl: false` for SSH environments — "localhost" on the
- * VM isn't this process. The remote shell sets FASTOWL_API_URL via
- * .bashrc (see docs/SSH_VM_SETUP.md).
- */
-export function buildFastOwlEnvPrefix(
-  workspaceId: string,
-  taskId?: string,
-  opts: { includeApiUrl?: boolean } = {}
-): string {
-  const parts: string[] = [];
-  if (opts.includeApiUrl !== false) {
-    const port = process.env.PORT || '4747';
-    const apiUrl = process.env.FASTOWL_API_URL || `http://localhost:${port}`;
-    parts.push(`FASTOWL_API_URL=${shellQuote(apiUrl)}`);
-  }
-  parts.push(`FASTOWL_WORKSPACE_ID=${shellQuote(workspaceId)}`);
-  if (taskId) parts.push(`FASTOWL_TASK_ID=${shellQuote(taskId)}`);
-  return parts.join(' ') + ' ';
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}

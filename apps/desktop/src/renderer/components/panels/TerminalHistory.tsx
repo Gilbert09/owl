@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2, Terminal as TerminalIcon } from 'lucide-react';
 import { Button } from '../ui/button';
-import { XTerm } from '../terminal/XTerm';
 import { AgentConversation } from '../terminal/AgentConversation';
 import { api } from '../../lib/api';
 import type { AgentEvent } from '@fastowl/shared';
@@ -10,13 +9,19 @@ interface TerminalHistoryProps {
   taskId: string;
 }
 
-
 interface Snapshot {
-  terminalOutput: string;
+  /** Legacy PTY byte dump for tasks that pre-date the structured renderer. */
+  legacyOutput: string;
   transcript?: AgentEvent[];
-  runtime: 'pty' | 'structured';
 }
 
+/**
+ * Shows a completed task's transcript below the task detail view.
+ * Structured tasks (everything since Slice 4) render via
+ * `AgentConversation` in read-only mode; pre-structured tasks fall
+ * back to a plain `<pre>` dump of the old `terminal_output` column
+ * so historical work stays inspectable.
+ */
 export function TerminalHistory({ taskId }: TerminalHistoryProps) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
@@ -32,14 +37,13 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
       .then((data) => {
         if (cancelled) return;
         setSnapshot({
-          terminalOutput: data.terminalOutput || '',
+          legacyOutput: data.terminalOutput || '',
           transcript: data.transcript,
-          runtime: (data.runtime as 'pty' | 'structured') ?? 'pty',
         });
       })
       .catch((err) => {
         console.error('Failed to load terminal history:', err);
-        if (!cancelled) setSnapshot({ terminalOutput: '', runtime: 'pty' });
+        if (!cancelled) setSnapshot({ legacyOutput: '' });
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -67,16 +71,13 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
 
   if (!snapshot) return null;
 
-  const hasContent =
-    snapshot.runtime === 'structured'
-      ? (snapshot.transcript?.length ?? 0) > 0
-      : snapshot.terminalOutput.length > 0;
-  if (!hasContent) return null;
+  const hasTranscript = (snapshot.transcript?.length ?? 0) > 0;
+  const hasLegacy = snapshot.legacyOutput.length > 0;
+  if (!hasTranscript && !hasLegacy) return null;
 
-  const summary =
-    snapshot.runtime === 'structured'
-      ? `${snapshot.transcript?.length ?? 0} events`
-      : `${snapshot.terminalOutput.length.toLocaleString()} chars`;
+  const summary = hasTranscript
+    ? `${snapshot.transcript?.length ?? 0} events`
+    : `${snapshot.legacyOutput.length.toLocaleString()} chars`;
 
   return (
     <div>
@@ -97,14 +98,16 @@ export function TerminalHistory({ taskId }: TerminalHistoryProps) {
       </Button>
       {expanded && (
         <div className="h-96 bg-[#1e1e1e] rounded-lg overflow-hidden border">
-          {snapshot.runtime === 'structured' ? (
+          {hasTranscript ? (
             <AgentConversation
               taskId={taskId}
               transcript={snapshot.transcript}
               interactive={false}
             />
           ) : (
-            <XTerm output={snapshot.terminalOutput} inputEnabled={false} />
+            <pre className="h-full overflow-auto p-3 text-xs font-mono text-foreground/80 whitespace-pre-wrap">
+              {snapshot.legacyOutput}
+            </pre>
           )}
         </div>
       )}

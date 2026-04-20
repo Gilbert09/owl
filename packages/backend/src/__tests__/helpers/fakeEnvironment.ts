@@ -24,18 +24,12 @@ export interface FakeEnvironmentHandle {
 }
 
 /**
- * Replace environmentService.spawnInteractive (and related session lifecycle
- * methods) with in-memory fakes. Records every command the subject under
- * test issues, and lets you feed fixture output back.
+ * Replaces `environmentService.exec` / `spawnStreaming` / `killSession`
+ * with in-memory fakes. Records every command the subject under test
+ * issues and lets you feed canned stdout back.
  *
- * Usage:
- *   const fake = installFakeEnvironment({ outputs: { 'git rev-parse': 'exists\n' } });
- *   try {
- *     await gitService.createTaskBranch('env1', 'task1', 'title');
- *     expect(fake.commands.map(c => c.command)).toContain('git checkout ...');
- *   } finally {
- *     fake.restore();
- *   }
+ * Used by tests that drive the agent lifecycle or the git service
+ * without actually spawning processes.
  */
 export function installFakeEnvironment(
   opts: FakeEnvironmentOptions = {}
@@ -50,8 +44,11 @@ export function installFakeEnvironment(
     return '';
   }
 
-  const originalSpawn = environmentService.spawnInteractive.bind(environmentService);
+  const originalSpawnStreaming =
+    environmentService.spawnStreaming.bind(environmentService);
   const originalKill = environmentService.killSession.bind(environmentService);
+  const originalCloseInput =
+    environmentService.closeStreamInput.bind(environmentService);
   const originalExec = environmentService.exec.bind(environmentService);
 
   const execSpy = vi.fn(
@@ -69,13 +66,22 @@ export function installFakeEnvironment(
     }
   );
 
-  const spawnSpy = vi.fn(
+  const spawnStreamingSpy = vi.fn(
     async (
       environmentId: string,
       sessionId: string,
-      command: string,
-      options: { cwd?: string; rows?: number; cols?: number } = {}
+      binary: string,
+      args: string[],
+      options: {
+        cwd?: string;
+        env?: Record<string, string>;
+        keepStdinOpen: boolean;
+        initialStdin?: Buffer | string;
+      }
     ) => {
+      // Record a readable command string so test assertions can
+      // pattern-match on the intended argv.
+      const command = `${binary} ${args.join(' ')}`;
       commands.push({
         environmentId,
         sessionId,
@@ -83,8 +89,8 @@ export function installFakeEnvironment(
         cwd: options.cwd,
       });
 
-      // Fire output + close events asynchronously so the subject can
-      // register listeners before they arrive (mirrors real PTY timing).
+      // Fire output + close asynchronously so subjects register
+      // listeners first (mirrors real subprocess timing).
       queueMicrotask(() => {
         const output = resolveOutput(command);
         if (output) {
@@ -99,23 +105,31 @@ export function installFakeEnvironment(
     // no-op for fake
   });
 
+  const closeInputSpy = vi.fn(async (_sessionId: string) => {
+    // no-op for fake
+  });
+
   // Cast the service to a mutable shape so we can swap bound methods in tests.
   const svc = environmentService as unknown as {
-    spawnInteractive: typeof environmentService.spawnInteractive;
+    spawnStreaming: typeof environmentService.spawnStreaming;
     killSession: typeof environmentService.killSession;
+    closeStreamInput: typeof environmentService.closeStreamInput;
     exec: typeof environmentService.exec;
   };
-  svc.spawnInteractive = spawnSpy;
+  svc.spawnStreaming = spawnStreamingSpy;
   svc.killSession = killSpy;
+  svc.closeStreamInput = closeInputSpy;
   svc.exec = execSpy;
 
   return {
     commands,
     restore: () => {
-      svc.spawnInteractive = originalSpawn;
+      svc.spawnStreaming = originalSpawnStreaming;
       svc.killSession = originalKill;
+      svc.closeStreamInput = originalCloseInput;
       svc.exec = originalExec;
       environmentService.removeAllListeners('session:data');
+      environmentService.removeAllListeners('session:stderr');
       environmentService.removeAllListeners('session:close');
     },
   };

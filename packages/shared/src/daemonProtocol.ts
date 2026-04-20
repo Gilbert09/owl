@@ -56,7 +56,6 @@ export interface DaemonHelloAck {
 
 export type DaemonRequestPayload =
   | ExecRequest
-  | SpawnInteractiveRequest
   | StreamSpawnRequest
   | WriteSessionRequest
   | CloseStreamInputRequest
@@ -91,15 +90,6 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   code: number;
-}
-
-export interface SpawnInteractiveRequest {
-  op: 'spawn_interactive';
-  sessionId: string;
-  command: string;
-  cwd?: string;
-  rows?: number;
-  cols?: number;
 }
 
 /**

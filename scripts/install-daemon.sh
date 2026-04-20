@@ -169,12 +169,13 @@ else
   fi
 fi
 
-# Ensure build tools for node-pty (Linux). macOS ships Xcode CLT; if not
-# present, the brew install of node pulled them in.
+# Ensure `git` is on the Linux path (needed for the clone step below).
+# node-pty's build toolchain was dropped in Slice 4c; the daemon now
+# only needs stock Node + git.
 if [[ "$OS_KIND" == "linux" ]] && have apt-get; then
-  if ! dpkg -s build-essential >/dev/null 2>&1; then
-    log "Installing build-essential + python3 (needed for node-pty native build)..."
-    run "$SUDO apt-get install -y build-essential python3 git"
+  if ! have git; then
+    log "Installing git..."
+    run "$SUDO apt-get install -y git"
   fi
 fi
 

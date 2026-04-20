@@ -1,7 +1,7 @@
 {
   "name": "@fastowl/daemon",
   "version": "0.1.0",
-  "description": "FastOwl execution daemon — dials into the hosted backend and runs PTY/exec/git commands on the host it's installed on.",
+  "description": "FastOwl execution daemon — dials into the hosted backend and runs stream/exec/git commands on the host it's installed on.",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@fastowl/shared": "*",
-    "node-pty": "^1.1.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {

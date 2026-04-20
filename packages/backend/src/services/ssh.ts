@@ -14,14 +14,6 @@ export interface SSHConnection {
   lastActivity: Date;
 }
 
-export interface PTYSession {
-  id: string;
-  connectionId: string;
-  stream: ClientChannel;
-  rows: number;
-  cols: number;
-}
-
 /**
  * Non-PTY streaming session over SSH. Used by the structured
  * renderer to run `claude -p --output-format stream-json` over an
@@ -35,7 +27,6 @@ interface StreamingSession {
 
 class SSHService extends EventEmitter {
   private connections: Map<string, SSHConnection> = new Map();
-  private ptySessions: Map<string, PTYSession> = new Map();
   private streamSessions: Map<string, StreamingSession> = new Map();
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
 
@@ -165,93 +156,6 @@ class SSHService extends EventEmitter {
   }
 
   /**
-   * Create a PTY session for interactive terminal
-   */
-  async createPTY(
-    environmentId: string,
-    sessionId: string,
-    rows: number = 24,
-    cols: number = 80
-  ): Promise<PTYSession> {
-    const connection = this.connections.get(environmentId);
-    if (!connection || connection.status !== 'connected') {
-      throw new Error(`Not connected to environment ${environmentId}`);
-    }
-
-    return new Promise((resolve, reject) => {
-      connection.client.shell(
-        {
-          rows,
-          cols,
-          term: 'xterm-256color',
-        },
-        (err, stream) => {
-          if (err) {
-            reject(err);
-            return;
-          }
-
-          const session: PTYSession = {
-            id: sessionId,
-            connectionId: environmentId,
-            stream,
-            rows,
-            cols,
-          };
-
-          this.ptySessions.set(sessionId, session);
-
-          stream.on('close', (code: number | null, _signal: string | null) => {
-            this.ptySessions.delete(sessionId);
-            // ssh2 reports code=null when the remote closed without an explicit
-            // exit code — treat as 0 (normal close) unless we have a signal.
-            this.emit('pty:close', sessionId, code ?? 0);
-          });
-
-          stream.on('data', (data: Buffer) => {
-            this.emit('pty:data', sessionId, data);
-          });
-
-          resolve(session);
-        }
-      );
-    });
-  }
-
-  /**
-   * Write to a PTY session
-   */
-  writeToPTY(sessionId: string, data: string): void {
-    const session = this.ptySessions.get(sessionId);
-    if (session) {
-      session.stream.write(data);
-    }
-  }
-
-  /**
-   * Resize a PTY session
-   */
-  resizePTY(sessionId: string, rows: number, cols: number): void {
-    const session = this.ptySessions.get(sessionId);
-    if (session) {
-      session.rows = rows;
-      session.cols = cols;
-      session.stream.setWindow(rows, cols, 0, 0);
-    }
-  }
-
-  /**
-   * Close a PTY session
-   */
-  closePTY(sessionId: string): void {
-    const session = this.ptySessions.get(sessionId);
-    if (session) {
-      session.stream.end();
-      this.ptySessions.delete(sessionId);
-    }
-  }
-
-  /**
    * Non-PTY streaming exec — runs `binary args…` over an ssh2 exec
    * channel with plain pipes. Used by structured-renderer runs on
    * SSH envs. Emits `stream:data`, `stream:stderr`, `stream:close`
@@ -277,7 +181,7 @@ class SSHService extends EventEmitter {
     if (!connection || connection.status !== 'connected') {
       throw new Error(`Not connected to environment ${environmentId}`);
     }
-    if (this.streamSessions.has(sessionId) || this.ptySessions.has(sessionId)) {
+    if (this.streamSessions.has(sessionId)) {
       throw new Error(`session ${sessionId} already exists`);
     }
 

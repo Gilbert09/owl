@@ -185,63 +185,23 @@ class GitService {
   }
 
   /**
-   * Execute a git command and return the output
+   * Execute a git command and return stdout. Uses the one-shot
+   * `exec` path on environmentService (no PTY) — we don't need
+   * an interactive shell for plumbing.
    */
   private async executeGitCommand(
     environmentId: string,
-    sessionId: string,
+    _sessionId: string,
     command: string,
     workingDirectory?: string
   ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      let output = '';
-      const errorOutput = '';
-
-      // Listen for data
-      const dataHandler = (sid: string, data: Buffer) => {
-        if (sid === sessionId) {
-          output += data.toString();
-        }
-      };
-
-      // Listen for errors
-      const closeHandler = (sid: string, code: number | null) => {
-        if (sid === sessionId) {
-          environmentService.removeListener('session:data', dataHandler);
-          environmentService.removeListener('session:close', closeHandler);
-
-          if (code === 0 || code === null) {
-            resolve(output);
-          } else {
-            reject(new Error(`Git command failed: ${errorOutput || output}`));
-          }
-        }
-      };
-
-      environmentService.on('session:data', dataHandler);
-      environmentService.on('session:close', closeHandler);
-
-      // Execute command
-      environmentService
-        .spawnInteractive(environmentId, sessionId, command, {
-          cwd: workingDirectory,
-          rows: 10,
-          cols: 80,
-        })
-        .catch((err) => {
-          environmentService.removeListener('session:data', dataHandler);
-          environmentService.removeListener('session:close', closeHandler);
-          reject(err);
-        });
-
-      // Set a timeout
-      setTimeout(() => {
-        environmentService.removeListener('session:data', dataHandler);
-        environmentService.removeListener('session:close', closeHandler);
-        environmentService.killSession(sessionId);
-        resolve(output); // Return whatever we got
-      }, 5000);
+    const { stdout, stderr, code } = await environmentService.exec(environmentId, command, {
+      cwd: workingDirectory,
     });
+    if (code !== 0) {
+      throw new Error(`Git command failed: ${stderr || stdout}`);
+    }
+    return stdout;
   }
 }
 

@@ -13,21 +13,9 @@ import {
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
-import { XTerm } from '../terminal/XTerm';
 import { AgentConversation } from '../terminal/AgentConversation';
 import { useTaskActions } from '../../hooks/useApi';
 import type { Task, AgentStatus, AgentAttention } from '@fastowl/shared';
-
-/**
- * A task is using the structured renderer if its metadata records
- * `runtime: 'structured'` (set by `startStructuredAgent` on the
- * backend). All rendering decisions branch off this one check so we
- * don't have to plumb a separate prop through the tree.
- */
-function isStructuredTask(task: Task): boolean {
-  const runtime = (task.metadata as { runtime?: string } | undefined)?.runtime;
-  return runtime === 'structured';
-}
 
 interface TaskTerminalProps {
   task: Task;
@@ -64,7 +52,6 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
   const agentStatus = task.agentStatus || 'working';
   const agentAttention = task.agentAttention || 'none';
-  const terminalOutput = task.terminalOutput || '$ Waiting for output...';
 
   const StatusIcon = statusConfig[agentStatus].icon;
 
@@ -168,19 +155,11 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
       {/* Terminal Content */}
       <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
-        {isStructuredTask(task) ? (
-          <AgentConversation taskId={task.id} transcript={task.transcript} interactive />
-        ) : (
-          <XTerm
-            output={terminalOutput}
-            inputEnabled={agentStatus === 'awaiting_input'}
-          />
-        )}
+        <AgentConversation taskId={task.id} transcript={task.transcript} interactive />
       </div>
 
-      {/* Input Area - always visible for interactive terminal */}
+      {/* Input Area — sends a message as the next stream-json turn. */}
       <TaskInputBar
-        structured={isStructuredTask(task)}
         agentStatus={agentStatus}
         inputValue={inputValue}
         onChange={setInputValue}
@@ -191,25 +170,16 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 }
 
 /**
- * Bottom-of-panel input. Shared between PTY and structured tasks.
- *
- * - Upgraded from the old single-line `<input>` to an auto-growing
- *   textarea. Enter sends; Shift+Enter inserts a newline.
- * - For structured tasks: send is disabled while the agent is mid-turn
- *   (working / tool_use) so the user doesn't queue a message that they
- *   think interrupts.
- * - For PTY tasks: preserves the old "always enabled" behaviour —
- *   typing into the PTY while the agent is running has legitimate uses
- *   (answering a TUI prompt, etc.).
+ * Bottom-of-panel input. Auto-growing textarea; Enter sends,
+ * Shift+Enter inserts a newline. Send is disabled while the agent is
+ * mid-turn so the user doesn't queue a message thinking it interrupts.
  */
 function TaskInputBar({
-  structured,
   agentStatus,
   inputValue,
   onChange,
   onSend,
 }: {
-  structured: boolean;
   agentStatus: AgentStatus;
   inputValue: string;
   onChange: (v: string) => void;
@@ -236,7 +206,7 @@ function TaskInputBar({
     [onSend]
   );
 
-  const busy = structured && (agentStatus === 'working' || agentStatus === 'tool_use');
+  const busy = agentStatus === 'working' || agentStatus === 'tool_use';
   const placeholder = busy
     ? 'Claude is working…'
     : agentStatus === 'awaiting_input'

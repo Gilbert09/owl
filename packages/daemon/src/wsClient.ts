@@ -16,7 +16,6 @@ import {
 } from '@fastowl/shared';
 import {
   exec,
-  spawnInteractive,
   streamSpawn,
   writeSession,
   killSession,
@@ -239,14 +238,6 @@ export class DaemonWsClient {
         return { pong: true };
       case 'exec':
         return exec(p.command, p.cwd);
-      case 'spawn_interactive':
-        spawnInteractive(
-          p.sessionId,
-          p.command,
-          { cwd: p.cwd, rows: p.rows, cols: p.cols },
-          this.sessionEvents()
-        );
-        return { started: true };
       case 'stream_spawn':
         streamSpawn(
           p.sessionId,

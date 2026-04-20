@@ -57,6 +57,13 @@
       "when": 1776678452806,
       "tag": "0007_env_tool_allowlist",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1776685320956,
+      "tag": "0008_default_structured_renderer",
+      "breakpoints": true
     }
   ]
 }
