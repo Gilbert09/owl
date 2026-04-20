@@ -9,7 +9,6 @@ import {
   AlertCircle,
   Loader2,
   RotateCw,
-  Square,
   MessageSquare,
   Terminal,
   GitBranch,
@@ -334,7 +333,7 @@ interface TaskDetailProps {
 
 function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
-  const { updateTaskStatus, cancelTask, retryTask, startTask, stopTask, approveTask, rejectTask } = useTaskActions();
+  const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask } = useTaskActions();
   const [isLoading, setIsLoading] = useState(false);
   const task = tasks.find((t) => t.id === taskId);
   const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
@@ -383,15 +382,6 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     setIsLoading(true);
     try {
       await cancelTask(taskId);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleStopTask = async () => {
-    setIsLoading(true);
-    try {
-      await stopTask(taskId);
     } finally {
       setIsLoading(false);
     }
@@ -476,21 +466,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 </div>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={handleStopTask}
-                disabled={isLoading}
-              >
-                {isLoading ? (
-                  <Loader2 className="w-4 h-4 mr-1 animate-spin" />
-                ) : (
-                  <Square className="w-4 h-4 mr-1" />
-                )}
-                Stop
-              </Button>
-            </div>
+            {/*
+              Intentionally no action buttons here — TaskTerminal's
+              header renders the per-task controls (Finish / Stop)
+              contextually beside the terminal it manages.
+            */}
           </div>
         </div>
 

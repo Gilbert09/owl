@@ -163,7 +163,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
                 variant="default"
                 size="sm"
                 className="h-8"
-                title="Stop the agent now and move this task into your review queue"
+                title="End the session and move this task to Awaiting Review — transcript + any branch changes preserved for you to approve."
                 onClick={handleReadyForReview}
                 disabled={isMarkingReady || isStopping}
               >
@@ -172,13 +172,13 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
                 ) : (
                   <FileCheck className="w-4 h-4 mr-1" />
                 )}
-                Ready for Review
+                Finish
               </Button>
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-8"
-                title="Kill the agent and mark the task failed"
+                className="h-8 text-destructive hover:text-destructive"
+                title="Abort the session and mark the task Failed. Use when the agent went off-track."
                 onClick={handleStopTask}
                 disabled={isStopping || isMarkingReady}
               >
@@ -187,7 +187,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
                 ) : (
                   <Square className="w-4 h-4 mr-1" />
                 )}
-                Stop
+                Abort
               </Button>
             </>
           )}
