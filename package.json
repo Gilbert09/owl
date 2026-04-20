@@ -14,7 +14,7 @@
     "build": "npm run build -w @fastowl/shared && npm run build -w @fastowl/backend && npm run build -w @fastowl/desktop",
     "build:desktop": "npm run build -w @fastowl/desktop",
     "build:backend": "npm run build -w @fastowl/backend",
-    "package": "npm run package -w @fastowl/desktop",
+    "package": "npm run build:binary:all -w @fastowl/daemon && npm run package -w @fastowl/desktop",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run build -w @fastowl/shared && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json && tsc --noEmit -p packages/mcp-server/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json"

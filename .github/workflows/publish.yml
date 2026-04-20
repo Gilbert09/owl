@@ -23,6 +23,11 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Setup Bun (for daemon binary compilation)
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
       - name: Install dependencies
         run: |
           npm install
@@ -30,6 +35,10 @@ jobs:
       - name: Build shared package
         run: |
           npm run build -w @fastowl/shared
+
+      - name: Build daemon binaries (all targets — electron-builder picks the one it needs)
+        run: |
+          npm run build:binary:all -w @fastowl/daemon
 
       - name: Build desktop app
         run: |

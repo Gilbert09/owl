@@ -178,7 +178,13 @@
       "hardenedRuntime": true,
       "entitlements": "assets/entitlements.mac.plist",
       "entitlementsInherit": "assets/entitlements.mac.plist",
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "extraResources": [
+        {
+          "from": "../../packages/daemon/dist/fastowl-daemon-darwin-${arch}",
+          "to": "daemon/fastowl-daemon"
+        }
+      ]
     },
     "dmg": {
       "contents": [
@@ -197,13 +203,25 @@
     "win": {
       "target": [
         "nsis"
+      ],
+      "extraResources": [
+        {
+          "from": "../../packages/daemon/dist/fastowl-daemon-windows-${arch}.exe",
+          "to": "daemon/fastowl-daemon.exe"
+        }
       ]
     },
     "linux": {
       "target": [
         "AppImage"
       ],
-      "category": "Development"
+      "category": "Development",
+      "extraResources": [
+        {
+          "from": "../../packages/daemon/dist/fastowl-daemon-linux-${arch}",
+          "to": "daemon/fastowl-daemon"
+        }
+      ]
     },
     "directories": {
       "app": "release/app",
