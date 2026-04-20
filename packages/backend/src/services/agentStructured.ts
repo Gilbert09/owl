@@ -24,7 +24,8 @@ export interface StructuredRunOptions {
   workspaceId: string;
   taskId?: string;
   cwd?: string;
-  prompt: string;
+  /** Seed message (optional for interactive mode — user can type it instead). */
+  prompt?: string;
   /**
    * `bypass` => `--permission-mode bypassPermissions` (no prompts at all).
    * `strict` => `--permission-mode default` with our PreToolUse hook
@@ -36,6 +37,17 @@ export interface StructuredRunOptions {
    * `permissionMode === 'strict'`; ignored otherwise.
    */
   hookScriptPath?: string;
+  /**
+   * `true` ⇒ open-ended conversation. Uses `--input-format stream-json`
+   * and keeps stdin open after the seed prompt so the user can `sendMessage`
+   * more turns. The child exits when stdin is closed (via `closeInput`)
+   * or killed (via `stop`).
+   *
+   * `false` ⇒ one-shot. Seed prompt goes in on stdin, stdin closes
+   * immediately, child exits after the first turn. Matches Slice 1/2
+   * behaviour for autonomous backlog runs.
+   */
+  interactive?: boolean;
   /** Forward these env vars to the child. */
   env?: Record<string, string>;
   /** Allow callers to override the binary (tests). */
@@ -47,6 +59,8 @@ export interface ActiveStructuredRun {
   agentId: string;
   taskId?: string;
   workspaceId: string;
+  /** True if stdin stays open after the seed prompt for follow-up turns. */
+  interactive: boolean;
   /** Bytes-since-last-persist; drives the sampled DB writes. */
   transcript: AgentEvent[];
   child: ChildProcess;
@@ -90,6 +104,45 @@ class AgentStructuredService extends EventEmitter {
   }
 
   /**
+   * Send a user message to a live interactive run. Appends a
+   * stream-json `{type: "user", ...}` envelope to the child's stdin;
+   * the CLI processes it as the next turn.
+   *
+   * Throws if the run isn't interactive (one-shot runs close stdin
+   * immediately after the seed prompt).
+   */
+  sendMessage(sessionKey: string, text: string): void {
+    const run = this.runs.get(sessionKey);
+    if (!run) throw new Error(`no active structured run for ${sessionKey}`);
+    if (!run.interactive) {
+      throw new Error(`run ${sessionKey} is one-shot; sendMessage only works in interactive mode`);
+    }
+    if (!run.child.stdin || run.child.stdin.destroyed) {
+      throw new Error(`run ${sessionKey} stdin is closed`);
+    }
+    const envelope = JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: text },
+    });
+    run.child.stdin.write(envelope + '\n');
+  }
+
+  /**
+   * Gracefully end an interactive session by closing the child's
+   * stdin. The CLI finalises the current turn (if any) and exits with
+   * code 0 — so the task transitions to `awaiting_review`, not
+   * `failed`. Prefer this over `stop()` for "user clicked end
+   * conversation" flows.
+   */
+  closeInput(sessionKey: string): void {
+    const run = this.runs.get(sessionKey);
+    if (!run) return;
+    if (run.child.stdin && !run.child.stdin.destroyed) {
+      run.child.stdin.end();
+    }
+  }
+
+  /**
    * Spawn a non-PTY `claude -p …` with stream-json output and wire
    * stdout → JSONL parser → event emitter. Returns once the child is
    * live; callers can await `activeRun.completion` for the exit code.
@@ -124,10 +177,25 @@ class AgentStructuredService extends EventEmitter {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // Prompt arrives on stdin so shell-quoting can't mangle it.
+    // Seed message.
+    //   - Interactive: wrap as stream-json envelope; keep stdin open
+    //     so more messages can flow in via `sendMessage`.
+    //   - One-shot: write raw text (CLI's text input mode) and close
+    //     stdin so the child exits after the first turn.
     if (child.stdin) {
-      child.stdin.write(opts.prompt);
-      child.stdin.end();
+      if (opts.interactive) {
+        if (opts.prompt) {
+          const envelope = JSON.stringify({
+            type: 'user',
+            message: { role: 'user', content: opts.prompt },
+          });
+          child.stdin.write(envelope + '\n');
+        }
+        // Leave stdin open.
+      } else {
+        if (opts.prompt) child.stdin.write(opts.prompt);
+        child.stdin.end();
+      }
     }
 
     const run: ActiveStructuredRun = {
@@ -135,6 +203,7 @@ class AgentStructuredService extends EventEmitter {
       agentId: opts.agentId,
       taskId: opts.taskId,
       workspaceId: opts.workspaceId,
+      interactive: Boolean(opts.interactive),
       transcript: [],
       child,
       startedAt: new Date(),
@@ -279,6 +348,11 @@ class AgentStructuredService extends EventEmitter {
 
     run.transcript.push(event);
     this.emit('event', run, event);
+    // `result` means the current turn finished. For interactive runs
+    // the child is now waiting on stdin for the next user message —
+    // emit a discrete `turn_complete` so the agent service can flip
+    // its status back to idle and re-enable the input box.
+    if (event.type === 'result') this.emit('turn_complete', run, event);
 
     emitAgentEvent(run.workspaceId, run.agentId, run.taskId, event);
     if (run.taskId) emitTaskEvent(run.workspaceId, run.taskId, event);
@@ -347,6 +421,11 @@ export function buildClaudeArgs(opts: StructuredRunOptions): string[] {
     '--include-partial-messages',
     '--no-session-persistence',
   ];
+  if (opts.interactive) {
+    // Streaming input: stdin carries JSONL user messages, one per
+    // turn. We keep the pipe open for `sendMessage` follow-ups.
+    args.push('--input-format', 'stream-json');
+  }
   if (opts.permissionMode === 'bypass') {
     args.push('--permission-mode', 'bypassPermissions');
   } else if (opts.permissionMode === 'strict') {

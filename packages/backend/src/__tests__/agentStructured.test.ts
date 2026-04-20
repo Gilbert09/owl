@@ -74,4 +74,29 @@ describe('buildClaudeArgs', () => {
     const args = buildClaudeArgs({ ...base, permissionMode: 'bypass' });
     expect(args).toContain('--no-session-persistence');
   });
+
+  it('interactive runs add --input-format stream-json so stdin stays a JSONL pipe', () => {
+    const args = buildClaudeArgs({ ...base, permissionMode: 'bypass', interactive: true });
+    expect(args).toContain('--input-format');
+    expect(args[args.indexOf('--input-format') + 1]).toBe('stream-json');
+  });
+
+  it('one-shot (autonomous) runs do NOT include --input-format', () => {
+    const args = buildClaudeArgs({ ...base, permissionMode: 'bypass', interactive: false });
+    expect(args).not.toContain('--input-format');
+  });
+
+  it('strict + interactive wires both the hook settings and the input flag', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      permissionMode: 'strict',
+      hookScriptPath: '/tmp/permission.cjs',
+      interactive: true,
+    });
+    expect(args).toContain('--input-format');
+    expect(args).toContain('--settings');
+    const settings = args[args.indexOf('--settings') + 1];
+    expect(settings).toContain('PreToolUse');
+    expect(settings).toContain('/tmp/permission.cjs');
+  });
 });

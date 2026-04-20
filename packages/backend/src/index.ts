@@ -18,6 +18,7 @@ import { githubService } from './services/github.js';
 import { prMonitorService } from './services/prMonitor.js';
 import { backlogService } from './services/backlog/service.js';
 import { continuousBuildScheduler } from './services/continuousBuild.js';
+import { permissionInboxService } from './services/permissionInbox.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -39,6 +40,7 @@ async function main() {
   await backlogService.init();
   await continuousBuildScheduler.init();
   daemonRegistry.init();
+  permissionInboxService.init();
 
   const app = express();
   app.use(cors());

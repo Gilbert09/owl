@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import { v4 as uuid } from 'uuid';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type {
   Agent,
   AgentStatus,
@@ -186,19 +186,57 @@ class AgentService extends EventEmitter {
       );
     });
 
+    // Structured runs fire `turn_complete` after each `result` event.
+    // For interactive runs that means "child is idling on stdin,
+    // waiting for the next user message" — flip the agent status
+    // back to idle so the desktop re-enables the input box.
+    agentStructuredService.on(
+      'turn_complete',
+      (run: { interactive: boolean; agentId: string }) => {
+        if (!run.interactive) return;
+        this.updateAgentStatus(run.agentId, 'idle', 'none').catch((err) =>
+          console.error('turn_complete status update failed:', err)
+        );
+      }
+    );
+
     this.statusCheckInterval = setInterval(() => {
       this.checkStuckAgents();
     }, 60000);
   }
 
   private async cleanupStaleAgents(): Promise<void> {
+    // Agents are in-memory state — any row still present after a
+    // backend restart describes a dead child (SIGPIPE killed it the
+    // moment our stdout pipe closed). Scrub them.
     const result = await this.db
       .delete(agentsTable)
       .where(inArray(agentsTable.status, ['idle', 'working', 'tool_use', 'awaiting_input']))
-      .returning({ id: agentsTable.id });
-    if (result.length > 0) {
-      console.log(`Cleaned up ${result.length} stale agent records`);
-    }
+      .returning({ id: agentsTable.id, currentTaskId: agentsTable.currentTaskId });
+    if (result.length === 0) return;
+
+    console.log(`Cleaned up ${result.length} stale agent records`);
+
+    // Flip the orphaned tasks from in_progress → failed immediately.
+    // `recoverStuckTasks` would eventually catch these via its 20min
+    // staleness sweep, but that window is terrible UX after a deploy —
+    // a user watching the task would see it "running" for 20 minutes
+    // with no real agent. Fail them now so the scheduler can retry
+    // straight away (Continuous Build backoff still applies).
+    const taskIds = result.map((r) => r.currentTaskId).filter((id): id is string => !!id);
+    if (taskIds.length === 0) return;
+
+    const now = new Date();
+    await this.db
+      .update(tasksTable)
+      .set({
+        status: 'failed',
+        completedAt: now,
+        updatedAt: now,
+        result: { success: false, error: 'backend restart orphaned the agent' },
+      })
+      .where(and(inArray(tasksTable.id, taskIds), eq(tasksTable.status, 'in_progress')));
+    console.log(`Marked ${taskIds.length} orphaned tasks as failed (backend restart)`);
   }
 
   shutdown(): void {
@@ -230,11 +268,13 @@ class AgentService extends EventEmitter {
       : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
 
     // Structured renderer path: non-PTY spawn of `claude -p
-    // --output-format stream-json`. Supports autonomous tasks only for
-    // now (interactive multi-turn lands in Slice 3). The env's
-    // `autonomousBypassPermissions` flag picks between bypass (no
-    // prompts) and strict (hook-driven per-tool approvals).
-    const useStructured = env?.renderer === 'structured' && env.type === 'local' && autonomous && !!prompt;
+    // --output-format stream-json`. Covers both autonomous (scheduler-
+    // driven, one-shot, exits after the seed prompt) and interactive
+    // (user-driven, stdin stays open, accepts follow-up messages via
+    // sendMessage). The env's `autonomousBypassPermissions` flag picks
+    // between bypass (no prompts) and strict (hook-driven per-tool
+    // approvals).
+    const useStructured = env?.renderer === 'structured' && env.type === 'local';
     if (useStructured) {
       await this.startStructuredAgent({
         agentId,
@@ -242,10 +282,11 @@ class AgentService extends EventEmitter {
         environmentId,
         workspaceId,
         taskId,
-        prompt: prompt!,
+        prompt,
         cwd,
         now,
         permissionMode: env!.autonomousBypassPermissions ? 'bypass' : 'strict',
+        interactive: !autonomous,
       });
       const agent = await this.getAgent(agentId);
       if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
@@ -344,12 +385,13 @@ class AgentService extends EventEmitter {
     environmentId: string;
     workspaceId: string;
     taskId?: string;
-    prompt: string;
+    prompt?: string;
     cwd?: string;
     now: Date;
     permissionMode: 'bypass' | 'strict';
+    interactive: boolean;
   }): Promise<void> {
-    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now, permissionMode } = opts;
+    const { agentId, sessionId, environmentId, workspaceId, taskId, prompt, cwd, now, permissionMode, interactive } = opts;
 
     // Same FASTOWL_* context the CLI path uses, just passed through the
     // child_process env rather than an inline shell prefix — no quoting
@@ -371,12 +413,16 @@ class AgentService extends EventEmitter {
     // Track as an active agent so the rest of the status plumbing (task
     // GET, agent GET, stop endpoint) works uniformly. `outputBuffer` is
     // unused for this path — transcript lives on `tasks.transcript`.
+    //
+    // Initial status: `working` if we have a prompt to kick off the
+    // first turn, else `idle` (interactive, waiting for the user).
+    const initialStatus: AgentStatus = prompt ? 'working' : 'idle';
     const activeAgent: ActiveAgent = {
       id: agentId,
       environmentId,
       workspaceId,
       sessionId,
-      status: 'working',
+      status: initialStatus,
       attention: 'none',
       outputBuffer: '',
       lastActivityTime: now,
@@ -388,7 +434,7 @@ class AgentService extends EventEmitter {
       id: agentId,
       environmentId,
       workspaceId,
-      status: 'working',
+      status: initialStatus,
       attention: 'none',
       currentTaskId: taskId ?? null,
       terminalOutput: '',
@@ -423,6 +469,7 @@ class AgentService extends EventEmitter {
       permissionMode,
       hookScriptPath,
       env: envVars,
+      interactive,
     });
 
     emitAgentStatus(workspaceId, agentId, 'working', 'none');
@@ -477,7 +524,13 @@ class AgentService extends EventEmitter {
   sendInput(agentId: string, input: string): void {
     const agent = this.activeAgents.get(agentId);
     if (!agent) throw new Error(`Agent ${agentId} not found`);
-    environmentService.writeToSession(agent.sessionId, input + '\n');
+    // Structured interactive runs take the message as a stream-json
+    // envelope on the child's stdin; PTY runs take raw bytes.
+    if (agentStructuredService.has(agent.sessionId)) {
+      agentStructuredService.sendMessage(agent.sessionId, input);
+    } else {
+      environmentService.writeToSession(agent.sessionId, input + '\n');
+    }
     this.updateAgentStatus(agentId, 'working', 'none').catch((err) =>
       console.error('updateAgentStatus error:', err)
     );

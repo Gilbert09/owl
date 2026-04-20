@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Square,
   Send,
@@ -100,16 +100,6 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
     }
   }, [task.id, readyForReview]);
 
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        handleSendInput();
-      }
-    },
-    [handleSendInput]
-  );
-
   return (
     <div
       className={cn(
@@ -189,37 +179,108 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
       </div>
 
       {/* Input Area - always visible for interactive terminal */}
-      <div
-        className={cn(
-          'p-3 border-t',
-          agentStatus === 'awaiting_input' ? 'bg-yellow-500/10 border-yellow-500/20' : 'bg-card'
-        )}
-      >
-        <div className="flex gap-2">
-          <input
-            type="text"
-            placeholder={
-              agentStatus === 'awaiting_input'
-                ? 'Type your response...'
-                : 'Send a message to Claude...'
-            }
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            className="flex-1 px-3 py-2 text-sm rounded-md border bg-background focus:outline-none focus:ring-2 focus:ring-ring"
-            autoFocus={agentStatus === 'awaiting_input'}
-          />
-          <Button size="sm" onClick={handleSendInput} disabled={!inputValue.trim()}>
-            <Send className="w-4 h-4 mr-1" />
-            Send
-          </Button>
-        </div>
-        {agentStatus === 'awaiting_input' && (
-          <p className="text-xs text-yellow-500 mt-2">
-            Claude is waiting for your input
-          </p>
-        )}
+      <TaskInputBar
+        structured={isStructuredTask(task)}
+        agentStatus={agentStatus}
+        inputValue={inputValue}
+        onChange={setInputValue}
+        onSend={handleSendInput}
+      />
+    </div>
+  );
+}
+
+/**
+ * Bottom-of-panel input. Shared between PTY and structured tasks.
+ *
+ * - Upgraded from the old single-line `<input>` to an auto-growing
+ *   textarea. Enter sends; Shift+Enter inserts a newline.
+ * - For structured tasks: send is disabled while the agent is mid-turn
+ *   (working / tool_use) so the user doesn't queue a message that they
+ *   think interrupts.
+ * - For PTY tasks: preserves the old "always enabled" behaviour —
+ *   typing into the PTY while the agent is running has legitimate uses
+ *   (answering a TUI prompt, etc.).
+ */
+function TaskInputBar({
+  structured,
+  agentStatus,
+  inputValue,
+  onChange,
+  onSend,
+}: {
+  structured: boolean;
+  agentStatus: AgentStatus;
+  inputValue: string;
+  onChange: (v: string) => void;
+  onSend: () => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow: scale with content, cap at ~8 lines so the input can't
+  // eat the whole panel.
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }, [inputValue]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        onSend();
+      }
+    },
+    [onSend]
+  );
+
+  const busy = structured && (agentStatus === 'working' || agentStatus === 'tool_use');
+  const placeholder = busy
+    ? 'Claude is working…'
+    : agentStatus === 'awaiting_input'
+      ? 'Type your response…'
+      : 'Send a message to Claude… (Shift+Enter for newline)';
+
+  return (
+    <div
+      className={cn(
+        'p-3 border-t',
+        agentStatus === 'awaiting_input' ? 'bg-yellow-500/10 border-yellow-500/20' : 'bg-card'
+      )}
+    >
+      <div className="flex gap-2 items-end">
+        <textarea
+          ref={textareaRef}
+          placeholder={placeholder}
+          value={inputValue}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          rows={1}
+          className={cn(
+            'flex-1 px-3 py-2 text-sm rounded-md border bg-background resize-none',
+            'focus:outline-none focus:ring-2 focus:ring-ring',
+            'min-h-[38px] max-h-[200px]'
+          )}
+          disabled={busy}
+          autoFocus={agentStatus === 'awaiting_input'}
+        />
+        <Button
+          size="sm"
+          onClick={onSend}
+          disabled={!inputValue.trim() || busy}
+          className="h-[38px]"
+        >
+          <Send className="w-4 h-4 mr-1" />
+          Send
+        </Button>
       </div>
+      {agentStatus === 'awaiting_input' && (
+        <p className="text-xs text-yellow-500 mt-2">
+          Claude is waiting for your input
+        </p>
+      )}
     </div>
   );
 }

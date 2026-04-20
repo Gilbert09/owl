@@ -1,17 +1,10 @@
 import { EventEmitter } from 'events';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { v4 as uuid } from 'uuid';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { PermissionDecision, PermissionRequest } from '@fastowl/shared';
 import { getDbClient, type Database } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
-
-/**
- * If the user doesn't respond in this long, the hook auto-denies. The
- * CLI itself can handle longer-running prompts, but we'd rather fail
- * fast than leave a subshell wedged forever waiting for a click.
- */
-const DECISION_TIMEOUT_MS = 10 * 60 * 1000;
 
 export interface PermissionContext {
   agentId: string;
@@ -26,8 +19,6 @@ export interface PendingRequest extends PermissionRequest {
   runToken: string;
   environmentId: string;
   resolve: (value: { decision: PermissionDecision; reason?: string }) => void;
-  expiresAt: number;
-  timer: NodeJS.Timeout;
 }
 
 /**
@@ -74,7 +65,6 @@ class PermissionService extends EventEmitter {
     // the CLI doesn't hang if it was waiting when we got killed.
     for (const [id, req] of this.pending) {
       if (req.runToken === token) {
-        clearTimeout(req.timer);
         req.resolve({ decision: 'deny', reason: 'agent terminated before decision' });
         this.pending.delete(id);
       }
@@ -139,14 +129,16 @@ class PermissionService extends EventEmitter {
       return { requestId, decision: 'allow', reason: 'pre-approved for this environment' };
     }
 
+    // Pending requests wait indefinitely for the user. The CLI's hook
+    // is blocked on a fetch() — Node's fetch has no default timeout.
+    // Real-world resolve triggers:
+    //   - User clicks Approve/Deny → `respond()` resolves.
+    //   - Agent exits (stopAgent, child crash) → `unregisterRun()` denies.
+    //   - Backend shutdown → child gets SIGPIPE on next stdout write +
+    //     hook fetch fails → client-side deny regardless.
+    // No arbitrary timeout — a prompt can sit in the inbox all day.
     return new Promise((resolve) => {
       const requestedAt = new Date().toISOString();
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        resolve({ requestId, decision: 'deny', reason: 'approval timed out' });
-        this.emit('expired', { requestId, ...ctx, toolName });
-      }, DECISION_TIMEOUT_MS);
-
       const pending: PendingRequest = {
         requestId,
         agentId: ctx.agentId,
@@ -159,12 +151,9 @@ class PermissionService extends EventEmitter {
         runToken,
         requestedAt,
         resolve: (value) => {
-          clearTimeout(pending.timer);
           this.pending.delete(requestId);
           resolve({ requestId, ...value });
         },
-        expiresAt: Date.now() + DECISION_TIMEOUT_MS,
-        timer,
       };
       this.pending.set(requestId, pending);
       this.emit('request', pending);

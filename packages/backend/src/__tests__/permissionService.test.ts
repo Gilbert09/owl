@@ -183,29 +183,33 @@ describe('permissionService', () => {
       expect(result.reason).toMatch(/invalid run token/);
     });
 
-    it('times out to deny when no response arrives in time', async () => {
-      vi.useFakeTimers();
-      try {
-        const td = await createTestDb();
-        cleanup = td.cleanup;
-        await seedEnv(td.db);
+    it('stays pending indefinitely until explicit resolution (no timeout)', async () => {
+      const td = await createTestDb();
+      cleanup = td.cleanup;
+      await seedEnv(td.db);
 
-        const token = permissionService.registerRun({
-          agentId: 'a',
-          environmentId: 'env-test',
-          workspaceId: 'ws-test',
-          taskId: 't',
-        });
+      const token = permissionService.registerRun({
+        agentId: 'a',
+        environmentId: 'env-test',
+        workspaceId: 'ws-test',
+        taskId: 't',
+      });
 
-        const p = permissionService.requestDecision(token, 'Bash', {}, undefined, undefined);
-        // Advance past the 10 min timeout.
-        await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
-        const result = await p;
-        expect(result.decision).toBe('deny');
-        expect(result.reason).toMatch(/timed out/);
-      } finally {
-        vi.useRealTimers();
-      }
+      const onRequest = vi.fn();
+      permissionService.on('request', onRequest);
+      const p = permissionService.requestDecision(token, 'Bash', {}, undefined, undefined);
+      await new Promise((r) => setImmediate(r));
+
+      // Even after a "long" wait the request is still pending — infinite
+      // patience is the point; only user clicks or agent death resolves.
+      await new Promise((r) => setTimeout(r, 100));
+      const req = onRequest.mock.calls[0][0] as { requestId: string };
+      expect(permissionService.listPendingForTask('t')).toHaveLength(1);
+
+      // Clean up so the promise doesn't hang.
+      await permissionService.respond(req.requestId, 'deny');
+      const resolved = await p;
+      expect(resolved.decision).toBe('deny');
     });
   });
 

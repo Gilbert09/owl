@@ -40,8 +40,9 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 13. **Phase 13.2 — Structured renderer + native UI overlays** (IN PROGRESS)
     - Slice 1 DONE (Session 18): backend plumbing via `claude -p --output-format stream-json`. `environments.renderer: 'pty' | 'structured'`, `tasks.transcript` jsonb, new `agentStructured` service, interim desktop renderer.
     - Slice 2 DONE (Session 18): `AgentConversation.tsx` (markdown-ish, collapsible tool_use/tool_result/thinking, cost/token footer) + per-tool Approve/Deny UX via a `PreToolUse` hook (`permissionHook.ts` / `permissionService.ts`). "Allow always" persists onto `environments.tool_allowlist`.
-    - Slice 3 (NEXT): interactive multi-turn (`--input-format stream-json`) + session resume + slash-command passthrough.
-    - Slice 4 (follow-up): migrate daemon + SSH envs to structured (needs a streaming-exec op on those backends), then delete PTY code + node-pty + XTerm + `tasks.terminal_output`.
+    - Slice 3 DONE (Session 18): interactive multi-turn via `--input-format stream-json`; long-lived child per task; `sendMessage` appends user JSONL turns on stdin; `closeInput` for graceful end. Also: removed permission timeout (infinite wait), coalesced inbox items for pending prompts (one per task), boot-time orphan cleanup extended to mark tasks `failed` immediately. Slash-command palette deferred — passes through to the child's own parser.
+    - Slice 4 (NEXT): migrate daemon + SSH envs to structured (needs a streaming-exec op on those backends), then delete PTY code + node-pty + XTerm + `tasks.terminal_output`.
+    - Follow-up: deeper backend-restart reliability — keeping in-flight children alive across backend redeploys (currently orphaned children die via SIGPIPE, tasks flip to `failed` on boot). Candidates: co-local daemon, PID reattach, or accept + buy time via graceful SIGTERM-and-wait on shutdown.
 14. **Phase 16.3 — Automated PR Response** — hook PR monitor → auto-create `pr_response` tasks on new review comments
 15. **Phase 12.5 — Testing framework** — see `docs/TESTING.md`. 66 backend + 7 MCP + 3 CLI + 1 desktop tests now landed
 16. **Phase 18 (rest) — Deployment hardening** — after 18.1/18.3/18.4 land
