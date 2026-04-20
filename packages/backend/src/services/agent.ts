@@ -173,64 +173,107 @@ class AgentService extends EventEmitter {
       lastActivityTime: now,
       currentTaskId: taskId,
     };
+
+    // Everything past this point is "partially-committed startup":
+    // if any step throws after we've populated `activeAgents` or
+    // written the agent/task rows, we MUST unwind. Otherwise the
+    // in-memory map ends up with a phantom agent and subsequent
+    // `/start` calls fail with "task already has an active agent"
+    // forever. Wrap and clean up aggressively.
     this.activeAgents.set(agentId, activeAgent);
+    let agentRowInserted = false;
+    let taskRowUpdated = false;
+    try {
+      await this.db.insert(agentsTable).values({
+        id: agentId,
+        environmentId,
+        workspaceId,
+        status: initialStatus,
+        attention: 'none',
+        currentTaskId: taskId ?? null,
+        terminalOutput: '',
+        lastActivity: now,
+        createdAt: now,
+      });
+      agentRowInserted = true;
 
-    await this.db.insert(agentsTable).values({
-      id: agentId,
-      environmentId,
-      workspaceId,
-      status: initialStatus,
-      attention: 'none',
-      currentTaskId: taskId ?? null,
-      terminalOutput: '',
-      lastActivity: now,
-      createdAt: now,
-    });
-
-    if (taskId) {
-      await this.db
-        .update(tasksTable)
-        .set({
-          assignedAgentId: agentId,
-          status: 'in_progress',
-          updatedAt: now,
-          // `metadata.runtime` is no longer load-bearing (structured
-          // is the only path), but downstream code + historical rows
-          // still look for it.
-          metadata: sql`
-            COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
-          `,
-          transcript: [] as unknown as object,
-        })
-        .where(eq(tasksTable.id, taskId));
-    }
-
-    const run = await agentStructuredService.start({
-      sessionKey: sessionId,
-      agentId,
-      environmentId,
-      workspaceId,
-      taskId,
-      cwd,
-      prompt,
-      permissionMode,
-      hookScriptPath,
-      env: envVars,
-      interactive,
-    });
-
-    emitAgentStatus(workspaceId, agentId, initialStatus, 'none');
-    if (taskId) emitTaskAgentStatus(workspaceId, taskId, initialStatus, 'none');
-
-    // Wait for exit and map onto the usual task lifecycle.
-    void run.completion.then(async (code) => {
-      try {
-        await agentStructuredService.flush(sessionId);
-        await this.handleStructuredExit(agentId, code);
-      } catch (err) {
-        console.error('[agent] structured-exit handler threw:', err);
+      if (taskId) {
+        await this.db
+          .update(tasksTable)
+          .set({
+            assignedAgentId: agentId,
+            status: 'in_progress',
+            updatedAt: now,
+            // `metadata.runtime` is no longer load-bearing (structured
+            // is the only path), but downstream code + historical rows
+            // still look for it.
+            metadata: sql`
+              COALESCE(${tasksTable.metadata}, '{}'::jsonb) || '{"runtime":"structured"}'::jsonb
+            `,
+            transcript: [] as unknown as object,
+          })
+          .where(eq(tasksTable.id, taskId));
+        taskRowUpdated = true;
       }
-    });
+
+      const run = await agentStructuredService.start({
+        sessionKey: sessionId,
+        agentId,
+        environmentId,
+        workspaceId,
+        taskId,
+        cwd,
+        prompt,
+        permissionMode,
+        hookScriptPath,
+        env: envVars,
+        interactive,
+      });
+
+      emitAgentStatus(workspaceId, agentId, initialStatus, 'none');
+      if (taskId) emitTaskAgentStatus(workspaceId, taskId, initialStatus, 'none');
+
+      // Wait for exit and map onto the usual task lifecycle.
+      void run.completion.then(async (code) => {
+        try {
+          await agentStructuredService.flush(sessionId);
+          await this.handleStructuredExit(agentId, code);
+        } catch (err) {
+          console.error('[agent] structured-exit handler threw:', err);
+        }
+      });
+    } catch (err) {
+      console.error(`[agent] startAgent failed for task=${taskId}; rolling back:`, err);
+      this.activeAgents.delete(agentId);
+      if (agentRowInserted) {
+        await this.db
+          .delete(agentsTable)
+          .where(eq(agentsTable.id, agentId))
+          .catch((dbErr) =>
+            console.error('[agent] rollback: delete agent row failed:', dbErr)
+          );
+      }
+      if (taskRowUpdated && taskId) {
+        // Reset the task to `queued` so the user can retry. Preserves
+        // whatever error context we have in `result`.
+        await this.db
+          .update(tasksTable)
+          .set({
+            assignedAgentId: null,
+            status: 'queued',
+            updatedAt: new Date(),
+            result: {
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          })
+          .where(eq(tasksTable.id, taskId))
+          .catch((dbErr) =>
+            console.error('[agent] rollback: reset task row failed:', dbErr)
+          );
+      }
+      throw err;
+    }
 
     const agent = await this.getAgent(agentId);
     if (!agent) throw new Error(`Agent ${agentId} vanished immediately after insert`);
@@ -352,8 +395,29 @@ class AgentService extends EventEmitter {
   }
 
   getAgentByTaskId(taskId: string): ActiveAgent | null {
-    for (const [, agent] of this.activeAgents) {
-      if (agent.currentTaskId === taskId) return agent;
+    for (const [id, agent] of this.activeAgents) {
+      if (agent.currentTaskId !== taskId) continue;
+      // Self-heal: if we think an agent is active but the underlying
+      // structured run is gone AND the entry has aged past the
+      // startup grace window, it's a ghost — drop it. Happens when
+      // startAgent partially succeeded (spawn failed after we
+      // inserted activeAgent) or when handleStructuredExit ran but
+      // something leaked.
+      //
+      // The grace window exists because during startAgent there's a
+      // brief moment where activeAgent is populated but
+      // agentStructuredService hasn't registered its run yet.
+      if (!agentStructuredService.has(agent.sessionId)) {
+        const ageMs = Date.now() - agent.lastActivityTime.getTime();
+        const GHOST_GRACE_MS = 5000;
+        if (ageMs < GHOST_GRACE_MS) return agent; // still starting up
+        console.warn(
+          `[agent] dropping ghost activeAgent ${id} (task=${taskId}, session=${agent.sessionId}, age=${ageMs}ms)`
+        );
+        this.activeAgents.delete(id);
+        continue;
+      }
+      return agent;
     }
     return null;
   }
