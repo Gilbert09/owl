@@ -15,6 +15,63 @@ function shellQuote(s: string): string {
  */
 class GitService {
   /**
+   * True if `workingDirectory` on the env is inside a git working tree.
+   * Used when a task has no registered repo — we still want branch-per-
+   * task behaviour if the env's CWD happens to be a checkout.
+   */
+  async isGitRepo(environmentId: string, workingDirectory: string): Promise<boolean> {
+    const { stdout, code } = await environmentService.exec(
+      environmentId,
+      'git rev-parse --is-inside-work-tree',
+      { cwd: workingDirectory }
+    );
+    return code === 0 && stdout.trim() === 'true';
+  }
+
+  /**
+   * Best-effort guess at the base branch for a repo we don't have a DB
+   * row for. Prefers `origin/HEAD` (the remote's canonical default),
+   * falls back to a local `main`/`master`, and finally to whatever is
+   * currently checked out. Returns null if the directory isn't a git
+   * repo at all.
+   */
+  async detectDefaultBranch(
+    environmentId: string,
+    workingDirectory: string
+  ): Promise<string | null> {
+    const originHead = await environmentService.exec(
+      environmentId,
+      'git symbolic-ref --short refs/remotes/origin/HEAD',
+      { cwd: workingDirectory }
+    );
+    if (originHead.code === 0) {
+      const trimmed = originHead.stdout.trim();
+      const slash = trimmed.lastIndexOf('/');
+      if (slash !== -1) return trimmed.slice(slash + 1);
+      if (trimmed) return trimmed;
+    }
+
+    for (const candidate of ['main', 'master']) {
+      const check = await environmentService.exec(
+        environmentId,
+        `git rev-parse --verify ${candidate}`,
+        { cwd: workingDirectory }
+      );
+      if (check.code === 0) return candidate;
+    }
+
+    const current = await environmentService.exec(
+      environmentId,
+      'git rev-parse --abbrev-ref HEAD',
+      { cwd: workingDirectory }
+    );
+    if (current.code === 0 && current.stdout.trim() && current.stdout.trim() !== 'HEAD') {
+      return current.stdout.trim();
+    }
+    return null;
+  }
+
+  /**
    * Prepare a fresh task branch on a synced base.
    *
    * The high-level entry point for "start a task on this repo". Fetches

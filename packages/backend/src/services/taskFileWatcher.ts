@@ -2,12 +2,10 @@ import { eq } from 'drizzle-orm';
 import type { AgentEvent } from '@fastowl/shared';
 import { agentStructuredService } from './agentStructured.js';
 import { gitService } from './git.js';
+import { resolveTaskGitContext } from './gitContext.js';
 import { emitTaskFilesChanged } from './websocket.js';
 import { getDbClient } from '../db/client.js';
-import {
-  tasks as tasksTable,
-  repositories as repositoriesTable,
-} from '../db/schema.js';
+import { tasks as tasksTable } from '../db/schema.js';
 
 /**
  * Tool names that can mutate the working tree. Bash is included
@@ -96,24 +94,19 @@ class TaskFileWatcher {
       .where(eq(tasksTable.id, taskId))
       .limit(1);
     const task = rows[0];
-    if (!task?.repositoryId || !task?.environmentId) return;
+    if (!task?.environmentId) return;
 
-    const repoRows = await db
-      .select({
-        localPath: repositoriesTable.localPath,
-        defaultBranch: repositoriesTable.defaultBranch,
-      })
-      .from(repositoriesTable)
-      .where(eq(repositoriesTable.id, task.repositoryId))
-      .limit(1);
-    const repoRow = repoRows[0];
-    if (!repoRow?.localPath) return;
+    const gitContext = await resolveTaskGitContext(
+      { repositoryId: task.repositoryId ?? undefined, assignedEnvironmentId: task.environmentId },
+      task.environmentId
+    );
+    if (!gitContext) return;
 
     try {
       const files = await gitService.getChangedFiles(
         task.environmentId,
-        repoRow.defaultBranch || 'main',
-        repoRow.localPath
+        gitContext.baseBranch,
+        gitContext.workingDirectory
       );
       emitTaskFilesChanged(workspaceId, taskId, files);
     } catch (err) {

@@ -4,13 +4,13 @@ import { and, desc, eq, SQL, sql } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import {
   tasks as tasksTable,
-  repositories as repositoriesTable,
   workspaces as workspacesTable,
   environments as environmentsTableRef,
 } from '../db/schema.js';
 import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
+import { resolveTaskGitContext } from '../services/gitContext.js';
 import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
@@ -417,44 +417,33 @@ export function taskRoutes(): Router {
     let workingDirectory: string | undefined;
     let taskBranch: string | undefined;
 
-    if (task.repositoryId) {
-      const repoRows = await db
-        .select({
-          localPath: repositoriesTable.localPath,
-          defaultBranch: repositoriesTable.defaultBranch,
-        })
-        .from(repositoriesTable)
-        .where(eq(repositoriesTable.id, task.repositoryId))
-        .limit(1);
-      const repoRow = repoRows[0];
+    const gitContext = await resolveTaskGitContext(task, environmentId);
+    if (gitContext) {
+      workingDirectory = gitContext.workingDirectory;
 
-      if (repoRow?.localPath) {
-        workingDirectory = repoRow.localPath;
-
-        if (task.branch) {
-          // Resume: checkout the existing task branch. Skip base sync —
-          // we don't want to rewrite history on work already in flight.
-          try {
-            await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
-            taskBranch = task.branch;
-          } catch (err) {
-            console.warn('Failed to checkout existing branch, will create fresh:', err);
-          }
+      if (task.branch) {
+        // Resume: checkout the existing task branch. Skip base sync —
+        // we don't want to rewrite history on work already in flight.
+        try {
+          await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
+          taskBranch = task.branch;
+        } catch (err) {
+          console.warn('Failed to checkout existing branch, will create fresh:', err);
         }
+      }
 
-        if (!taskBranch) {
-          try {
-            taskBranch = await gitService.prepareTaskBranch({
-              environmentId,
-              taskId: task.id,
-              taskTitle: task.title,
-              workingDirectory,
-              baseBranch: repoRow.defaultBranch || 'main',
-            });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            return res.status(400).json({ success: false, error: msg });
-          }
+      if (!taskBranch) {
+        try {
+          taskBranch = await gitService.prepareTaskBranch({
+            environmentId,
+            taskId: task.id,
+            taskTitle: task.title,
+            workingDirectory,
+            baseBranch: gitContext.baseBranch,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return res.status(400).json({ success: false, error: msg });
         }
       }
     }
@@ -664,25 +653,17 @@ export function taskRoutes(): Router {
 
     const task = rowToTask(rows[0]);
 
-    // Resolve repo + env so we can commit + push on the env that owns
-    // the working tree. If any of this is missing the task has no
-    // branch to push — just mark completed (manual tasks etc.).
+    // Resolve the git context (repo row OR env CWD) so we can commit +
+    // push on the env that owns the working tree. If there's no
+    // branch or no resolvable context the task has nothing to push —
+    // just mark completed (manual tasks etc.).
     let pushed = false;
-    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
-      const repoRows = await db
-        .select({
-          localPath: repositoriesTable.localPath,
-          defaultBranch: repositoriesTable.defaultBranch,
-        })
-        .from(repositoriesTable)
-        .where(eq(repositoriesTable.id, task.repositoryId))
-        .limit(1);
-      const repoRow = repoRows[0];
-
-      if (repoRow?.localPath) {
-        const workingDirectory = repoRow.localPath;
+    if (task.branch && task.assignedEnvironmentId) {
+      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
+      if (gitContext) {
+        const workingDirectory = gitContext.workingDirectory;
         const envId = task.assignedEnvironmentId;
-        const baseBranch = repoRow.defaultBranch || 'main';
+        const baseBranch = gitContext.baseBranch;
 
         try {
           // 1. Decide the commit message. User override wins; otherwise
@@ -776,21 +757,12 @@ export function taskRoutes(): Router {
 
     const task = rowToTask(rows[0]);
 
-    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
-      const repoRows = await db
-        .select({
-          localPath: repositoriesTable.localPath,
-          defaultBranch: repositoriesTable.defaultBranch,
-        })
-        .from(repositoriesTable)
-        .where(eq(repositoriesTable.id, task.repositoryId))
-        .limit(1);
-      const repoRow = repoRows[0];
-
-      if (repoRow?.localPath) {
+    if (task.branch && task.assignedEnvironmentId) {
+      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
+      if (gitContext) {
         const envId = task.assignedEnvironmentId;
-        const workingDirectory = repoRow.localPath;
-        const baseBranch = repoRow.defaultBranch || 'main';
+        const workingDirectory = gitContext.workingDirectory;
+        const baseBranch = gitContext.baseBranch;
 
         try {
           await gitService.stashToBackupRef(envId, 'rejected', task.id, workingDirectory);
@@ -907,31 +879,22 @@ export function taskRoutes(): Router {
 
     let diffStat: string | undefined;
     let diff: string | undefined;
-    if (task.repositoryId && task.branch && task.assignedEnvironmentId) {
-      const repoRows = await db
-        .select({
-          localPath: repositoriesTable.localPath,
-          defaultBranch: repositoriesTable.defaultBranch,
-        })
-        .from(repositoriesTable)
-        .where(eq(repositoriesTable.id, task.repositoryId))
-        .limit(1);
-      const repoRow = repoRows[0];
-      if (repoRow?.localPath) {
-        const baseBranch = repoRow.defaultBranch || 'main';
+    if (task.branch && task.assignedEnvironmentId) {
+      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
+      if (gitContext) {
         try {
           [diffStat, diff] = await Promise.all([
             gitService.getDiffStat(
               task.assignedEnvironmentId,
               task.branch,
-              baseBranch,
-              repoRow.localPath
+              gitContext.baseBranch,
+              gitContext.workingDirectory
             ),
             gitService.getDiff(
               task.assignedEnvironmentId,
               task.branch,
-              baseBranch,
-              repoRow.localPath
+              gitContext.baseBranch,
+              gitContext.workingDirectory
             ),
           ]);
         } catch (err) {
@@ -961,59 +924,29 @@ export function taskRoutes(): Router {
     }
     const db = getDbClient();
     const rows = await db
-      .select()
+      .select({ branch: tasksTable.branch })
       .from(tasksTable)
       .where(eq(tasksTable.id, req.params.id))
       .limit(1);
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
-
-    const task = rowToTask(rows[0]);
-    if (!task.branch || !task.repositoryId) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Task has no branch or repository' });
+    const branch = rows[0].branch;
+    if (!branch) {
+      return res.status(400).json({ success: false, error: 'Task has no branch to diff' });
     }
 
-    const repoRows = await db
-      .select({
-        localPath: repositoriesTable.localPath,
-        defaultBranch: repositoriesTable.defaultBranch,
-      })
-      .from(repositoriesTable)
-      .where(eq(repositoriesTable.id, task.repositoryId))
-      .limit(1);
-    const repoRow = repoRows[0];
-    if (!repoRow?.localPath) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Repository has no local path on this machine' });
-    }
-
-    let environmentId = task.assignedEnvironmentId;
-    if (!environmentId) {
-      const connected = await findConnectedEnvironmentForUser(req);
-      if (!connected) {
-        return res
-          .status(400)
-          .json({ success: false, error: 'No connected environment to compute diff' });
-      }
-      environmentId = connected;
-    } else {
-      try {
-        await requireEnvironmentAccess(req, environmentId);
-      } catch (err) {
-        return handleAccessError(err, res);
-      }
+    const context = await resolveTaskDiffContext(req);
+    if (!context.ok) {
+      return res.status(context.status).json({ success: false, error: context.error });
     }
 
     try {
       const diff = await gitService.getDiff(
-        environmentId,
-        task.branch,
-        repoRow.defaultBranch || 'main',
-        repoRow.localPath
+        context.environmentId,
+        branch,
+        context.baseBranch,
+        context.workingDirectory
       );
       res.json({ success: true, data: { diff } } as ApiResponse<{ diff: string }>);
     } catch (err: unknown) {
@@ -1192,21 +1125,8 @@ async function resolveTaskDiffContext(
     .limit(1);
   if (!rows[0]) return { ok: false, status: 404, error: 'Task not found' };
   const task = rowToTask(rows[0]);
-  if (!task.branch || !task.repositoryId) {
-    return { ok: false, status: 400, error: 'Task has no branch or repository' };
-  }
-
-  const repoRows = await db
-    .select({
-      localPath: repositoriesTable.localPath,
-      defaultBranch: repositoriesTable.defaultBranch,
-    })
-    .from(repositoriesTable)
-    .where(eq(repositoriesTable.id, task.repositoryId))
-    .limit(1);
-  const repoRow = repoRows[0];
-  if (!repoRow?.localPath) {
-    return { ok: false, status: 400, error: 'Repository has no local path on this machine' };
+  if (!task.branch) {
+    return { ok: false, status: 400, error: 'Task has no branch to diff' };
   }
 
   let environmentId = task.assignedEnvironmentId;
@@ -1227,11 +1147,22 @@ async function resolveTaskDiffContext(
     }
   }
 
+  const gitContext = await resolveTaskGitContext(task, environmentId);
+  if (!gitContext) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        'Could not resolve a git working directory for this task. ' +
+        'Either register a repository with a local path, or configure the environment with a workingDirectory that points at a git checkout.',
+    };
+  }
+
   return {
     ok: true,
     environmentId,
-    workingDirectory: repoRow.localPath,
-    baseBranch: repoRow.defaultBranch || 'main',
+    workingDirectory: gitContext.workingDirectory,
+    baseBranch: gitContext.baseBranch,
   };
 }
 

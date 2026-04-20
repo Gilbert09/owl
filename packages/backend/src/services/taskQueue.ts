@@ -5,13 +5,13 @@ import { isAgentTask } from '@fastowl/shared';
 import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
 import { gitService } from './git.js';
+import { resolveTaskGitContext } from './gitContext.js';
 import { permissionService } from './permissionService.js';
 import { emitTaskStatus } from './websocket.js';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   tasks as tasksTable,
   agents as agentsTable,
-  repositories as repositoriesTable,
   workspaces as workspacesTable,
 } from '../db/schema.js';
 
@@ -457,20 +457,10 @@ class TaskQueueService extends EventEmitter {
     | { ok: true; workingDirectory?: string; branch?: string }
     | { ok: false; error: string }
   > {
-    if (!task.repositoryId) return { ok: true };
+    const gitContext = await resolveTaskGitContext(task, environmentId);
+    if (!gitContext) return { ok: true };
 
-    const repoRows = await this.db
-      .select({
-        localPath: repositoriesTable.localPath,
-        defaultBranch: repositoriesTable.defaultBranch,
-      })
-      .from(repositoriesTable)
-      .where(eq(repositoriesTable.id, task.repositoryId))
-      .limit(1);
-    const repoRow = repoRows[0];
-    if (!repoRow?.localPath) return { ok: true };
-
-    const workingDirectory = repoRow.localPath;
+    const { workingDirectory, baseBranch } = gitContext;
 
     if (task.branch) {
       try {
@@ -490,7 +480,7 @@ class TaskQueueService extends EventEmitter {
         taskId: task.id,
         taskTitle: task.title,
         workingDirectory,
-        baseBranch: repoRow.defaultBranch || 'main',
+        baseBranch,
       });
       return { ok: true, workingDirectory, branch };
     } catch (err) {
