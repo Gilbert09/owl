@@ -158,6 +158,19 @@ export function taskRoutes(): Router {
     } catch (err) {
       return handleAccessError(err, res);
     }
+
+    // Agent tasks must declare a repository — tasks branch + commit
+    // against it, and a task without a repo has nowhere for
+    // prepareTaskBranch / /approve / /reject to operate. Manual tasks
+    // don't need one.
+    if (isAgentTask(body.type) && !body.repositoryId) {
+      return res.status(400).json({
+        success: false,
+        error:
+          'repositoryId is required for agent tasks. Add a repository (with a local path) in Settings first.',
+      });
+    }
+
     const db = getDbClient();
     const id = uuid();
     const now = new Date();
@@ -418,6 +431,16 @@ export function taskRoutes(): Router {
     let taskBranch: string | undefined;
 
     const gitContext = await resolveTaskGitContext(task, environmentId);
+    if (!gitContext && isAgentTask(task.type) && task.repositoryId) {
+      // Agent task tied to a repo, but the repo has no localPath.
+      // Refuse rather than silently running on whatever branch is
+      // checked out in the env's default working directory.
+      return res.status(400).json({
+        success: false,
+        error:
+          "This task's repository has no local path configured. Set a local path for the repository in Settings before starting the task.",
+      });
+    }
     if (gitContext) {
       workingDirectory = gitContext.workingDirectory;
 

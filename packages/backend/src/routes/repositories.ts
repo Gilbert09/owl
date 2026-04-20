@@ -24,7 +24,7 @@ export function repositoryRoutes(): Router {
   });
 
   router.post('/', async (req, res) => {
-    const { workspaceId, owner, repo, url } = req.body;
+    const { workspaceId, owner, repo, url, localPath } = req.body;
     if (!workspaceId || !owner || !repo) {
       return res.status(400).json({
         success: false,
@@ -37,8 +37,37 @@ export function repositoryRoutes(): Router {
       return handleAccessError(err, res);
     }
     try {
-      const watched = await prMonitorService.addWatchedRepo(workspaceId, owner, repo, url);
+      const watched = await prMonitorService.addWatchedRepo(
+        workspaceId,
+        owner,
+        repo,
+        url,
+        typeof localPath === 'string' ? localPath : undefined
+      );
       res.json({ success: true, data: watched });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'unknown error';
+      res.status(500).json({ success: false, error: msg });
+    }
+  });
+
+  router.patch('/:id', async (req, res) => {
+    try {
+      await requireRepositoryAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const { localPath } = req.body as { localPath?: string | null };
+    // `null` explicitly clears; missing leaves as-is. Empty string
+    // collapses to null so the repo reverts to "no local path".
+    const normalised = localPath === undefined
+      ? undefined
+      : typeof localPath === 'string' && localPath.trim().length > 0
+        ? localPath.trim()
+        : null;
+    try {
+      await prMonitorService.updateWatchedRepo(req.params.id, { localPath: normalised });
+      res.json({ success: true, data: null });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'unknown error';
       res.status(500).json({ success: false, error: msg });

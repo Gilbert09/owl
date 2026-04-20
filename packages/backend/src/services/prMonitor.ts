@@ -15,6 +15,13 @@ interface WatchedRepo {
   owner: string;
   repo: string;
   fullName: string;
+  /**
+   * Absolute path where this repo is cloned on the environment's host.
+   * Required before any agent task can run against the repo — the
+   * create-task modal filters out repos without one.
+   */
+  localPath?: string;
+  defaultBranch: string;
 }
 
 interface PRState {
@@ -74,21 +81,26 @@ class PRMonitorService extends EventEmitter {
         workspaceId: repositoriesTable.workspaceId,
         name: repositoriesTable.name,
         url: repositoriesTable.url,
+        localPath: repositoriesTable.localPath,
+        defaultBranch: repositoriesTable.defaultBranch,
       })
       .from(repositoriesTable)
       .where(eq(repositoriesTable.workspaceId, workspaceId));
 
     return rows
-      .map((row) => {
+      .map((row): WatchedRepo | null => {
         const match = row.url.match(/github\.com[/:]([\w-]+)\/([\w.-]+)/);
         if (!match) return null;
-        return {
+        const entry: WatchedRepo = {
           id: row.id,
           workspaceId: row.workspaceId,
           owner: match[1],
           repo: match[2].replace(/\.git$/, ''),
           fullName: `${match[1]}/${match[2].replace(/\.git$/, '')}`,
+          defaultBranch: row.defaultBranch,
         };
+        if (row.localPath) entry.localPath = row.localPath;
+        return entry;
       })
       .filter((r): r is WatchedRepo => r !== null);
   }
@@ -97,24 +109,53 @@ class PRMonitorService extends EventEmitter {
     workspaceId: string,
     owner: string,
     repo: string,
-    url?: string
+    url?: string,
+    localPath?: string
   ): Promise<WatchedRepo> {
     const id = uuid();
     const fullName = `${owner}/${repo}`;
     const repoUrl = url || `https://github.com/${fullName}`;
+    const defaultBranch = 'main';
 
     await this.db.insert(repositoriesTable).values({
       id,
       workspaceId,
       name: fullName,
       url: repoUrl,
-      defaultBranch: 'main',
+      localPath: localPath ?? null,
+      defaultBranch,
       createdAt: new Date(),
     });
 
-    const watched: WatchedRepo = { id, workspaceId, owner, repo, fullName };
+    const watched: WatchedRepo = {
+      id,
+      workspaceId,
+      owner,
+      repo,
+      fullName,
+      localPath,
+      defaultBranch,
+    };
     this.state.repos.set(fullName, new Map());
     return watched;
+  }
+
+  /**
+   * Patch a watched repo's editable fields. Currently just `localPath`
+   * — the user sets this after clicking Add so the repo has somewhere
+   * to run tasks against.
+   */
+  async updateWatchedRepo(
+    id: string,
+    updates: { localPath?: string | null }
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {};
+    if (updates.localPath !== undefined) patch.localPath = updates.localPath;
+    if (Object.keys(patch).length === 0) return;
+    await this.db
+      .update(repositoriesTable)
+      .set(patch)
+      .where(eq(repositoriesTable.id, id));
   }
 
   async removeWatchedRepo(repoId: string): Promise<void> {
