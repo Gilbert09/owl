@@ -69,6 +69,20 @@ const electronHandler = {
     }): Promise<{ started: boolean; reason?: string }> {
       return ipcRenderer.invoke('daemon:ensure-running', args);
     },
+    /** Status of the local daemon on this machine — PID, installed, running. */
+    localInfo(): Promise<{
+      mode: 'dev' | 'prod';
+      installed: boolean;
+      running: boolean;
+      pid?: number;
+      platform: NodeJS.Platform;
+    }> {
+      return ipcRenderer.invoke('daemon:local-info');
+    },
+    /** Restart the daemon in place (debug utility; rarely needed). */
+    restart(args?: { backendUrl?: string }): Promise<{ restarted: boolean; reason?: string }> {
+      return ipcRenderer.invoke('daemon:restart', args);
+    },
   },
 };
 

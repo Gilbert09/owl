@@ -120,7 +120,16 @@ export async function installDaemon(options: { backendUrl: string }): Promise<vo
   }
 }
 
-export function uninstallDaemon(): void {
+export interface UninstallOptions {
+  /**
+   * Also remove the installed binary, the on-disk config, and the
+   * log directory. Use this when the user wants a complete wipe —
+   * usually right before deleting the desktop app itself.
+   */
+  fullWipe?: boolean;
+}
+
+export function uninstallDaemon(options: UninstallOptions = {}): void {
   if (process.platform === 'darwin') {
     booutLaunchd();
     rmSafe(launchdPlistPath());
@@ -129,8 +138,33 @@ export function uninstallDaemon(): void {
     rmSafe(systemdUnitPath());
     spawnSync('systemctl', ['--user', 'daemon-reload']);
   }
-  // We deliberately leave the binary + config on disk. A full wipe is
-  // the user's call (documented in the .app's Scripts/fastowl-uninstall.sh).
+  if (options.fullWipe) {
+    const binary = installedBinaryPath();
+    rmSafe(binary);
+    const binaryDir = path.dirname(binary);
+    rmDirSafe(binaryDir);
+    rmSafe(path.join(os.homedir(), '.fastowl/daemon.json'));
+  }
+}
+
+/**
+ * Restart the daemon in place. On prod: `launchctl kickstart -k`
+ * / `systemctl --user restart`. On dev: recycle the Electron-child.
+ * Used by the "Restart FastOwl daemon" menu item + settings button.
+ */
+export function restartDaemon(): void {
+  if (process.platform === 'darwin') {
+    const uid = process.getuid?.();
+    if (uid !== undefined) {
+      spawnSync('launchctl', ['kickstart', '-k', `gui/${uid}/${LABEL}`], {
+        stdio: 'ignore',
+      });
+    }
+    return;
+  }
+  if (process.platform === 'linux') {
+    spawnSync('systemctl', ['--user', 'restart', UNIT_NAME], { stdio: 'ignore' });
+  }
 }
 
 // --------------------------------------------------------------------
@@ -366,5 +400,14 @@ function rmSafe(p: string): void {
     fs.unlinkSync(p);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+function rmDirSafe(p: string): void {
+  try {
+    fs.rmSync(p, { recursive: true, force: true });
+  } catch {
+    // Best-effort — if we can't clean up the dir, the user can do it
+    // manually. Not worth surfacing an error for.
   }
 }

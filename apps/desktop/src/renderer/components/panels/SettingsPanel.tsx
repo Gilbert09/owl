@@ -658,6 +658,44 @@ function EnvironmentsSettings() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [togglingBypass, setTogglingBypass] = useState<string | null>(null);
+  const [localInfo, setLocalInfo] = useState<{
+    mode: 'dev' | 'prod';
+    installed: boolean;
+    running: boolean;
+    pid?: number;
+    platform: string;
+  } | null>(null);
+  const [restartingDaemon, setRestartingDaemon] = useState(false);
+
+  // Local-daemon info refresh. Fetch once on mount + every 5s so the
+  // UI reflects launchd state changes (install, crashes, PID rotation)
+  // without the user having to reload.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const info = await window.electron?.daemon?.localInfo();
+        if (!cancelled && info) setLocalInfo(info);
+      } catch {
+        // Bridge unavailable (tests); ignore.
+      }
+    };
+    void refresh();
+    const interval = setInterval(refresh, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const handleRestartDaemon = useCallback(async () => {
+    setRestartingDaemon(true);
+    try {
+      await window.electron?.daemon?.restart({});
+    } finally {
+      setTimeout(() => setRestartingDaemon(false), 800);
+    }
+  }, []);
 
   const handleTest = async (envId: string) => {
     setTesting(envId);
@@ -769,9 +807,29 @@ function EnvironmentsSettings() {
                     </Badge>
                   </div>
                   {env.type === 'local' && (
-                    <p className="text-sm text-muted-foreground mt-1">
-                      This machine (bundled daemon)
-                    </p>
+                    <div className="text-sm text-muted-foreground mt-1 space-y-1">
+                      <p>This machine (bundled daemon)</p>
+                      {localInfo && (
+                        <p className="text-xs font-mono">
+                          {localInfo.mode === 'dev'
+                            ? 'dev: daemon runs as an Electron child'
+                            : localInfo.installed
+                              ? localInfo.running
+                                ? `launchd: running · pid ${localInfo.pid ?? '?'}`
+                                : 'launchd: installed but stopped'
+                              : 'launchd: not installed'}
+                        </p>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mt-1 h-7 text-xs"
+                        onClick={handleRestartDaemon}
+                        disabled={restartingDaemon}
+                      >
+                        {restartingDaemon ? 'Restarting…' : 'Restart daemon'}
+                      </Button>
+                    </div>
                   )}
                   {env.type === 'remote' && env.config.hostname && (
                     <p className="text-sm text-muted-foreground mt-1">

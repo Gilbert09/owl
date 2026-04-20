@@ -1,10 +1,13 @@
 import {
   app,
+  dialog,
   Menu,
   shell,
   BrowserWindow,
   MenuItemConstructorOptions,
 } from 'electron';
+import log from 'electron-log';
+import { restartDaemon, stopDevDaemon, uninstallDaemon } from './localDaemon';
 
 interface DarwinMenuItemConstructorOptions extends MenuItemConstructorOptions {
   selector?: string;
@@ -35,6 +38,62 @@ export default class MenuBuilder {
     Menu.setApplicationMenu(menu);
 
     return menu;
+  }
+
+  /**
+   * The FastOwl daemon submenu — a bundled background service that
+   * survives app quit. These actions are here because the daemon
+   * lives outside the Electron process group: restart and uninstall
+   * can't happen via "quit the app" alone.
+   */
+  private daemonSubmenu(): DarwinMenuItemConstructorOptions {
+    return {
+      label: 'Daemon',
+      submenu: [
+        {
+          label: 'Restart FastOwl daemon',
+          click: () => {
+            if (app.isPackaged) {
+              restartDaemon();
+            } else {
+              // Dev: the renderer owns the dev-child lifecycle via
+              // useLocalDaemon + ensure-running. The simplest path is
+              // to drop the dev child; the next ensure-running call
+              // (on the next renderer mount / login cycle) will bring
+              // it back.
+              stopDevDaemon();
+            }
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Uninstall FastOwl daemon and quit…',
+          click: () => {
+            const choice = dialog.showMessageBoxSync(this.mainWindow, {
+              type: 'warning',
+              buttons: ['Cancel', 'Uninstall and quit'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Uninstall the FastOwl daemon',
+              message:
+                'Stop the FastOwl background service and remove it from this machine.',
+              detail:
+                'The daemon (launchd / systemd user service), its binary, and ' +
+                '~/.fastowl/daemon.json will be removed. The app will then quit. ' +
+                'Run this before deleting the app itself to avoid a zombie service.',
+            });
+            if (choice !== 1) return;
+            try {
+              stopDevDaemon();
+              uninstallDaemon({ fullWipe: true });
+            } catch (err) {
+              log.error('[menu] uninstall failed:', err);
+            }
+            app.quit();
+          },
+        },
+      ],
+    };
   }
 
   setupDevelopmentEnvironment(): void {
@@ -189,11 +248,18 @@ export default class MenuBuilder {
         ? subMenuViewDev
         : subMenuViewProd;
 
-    return [subMenuAbout, subMenuEdit, subMenuView, subMenuWindow, subMenuHelp];
+    return [
+      subMenuAbout,
+      subMenuEdit,
+      subMenuView,
+      this.daemonSubmenu(),
+      subMenuWindow,
+      subMenuHelp,
+    ];
   }
 
-  buildDefaultTemplate() {
-    const templateDefault = [
+  buildDefaultTemplate(): MenuItemConstructorOptions[] {
+    const templateDefault: MenuItemConstructorOptions[] = [
       {
         label: '&File',
         submenu: [
@@ -285,6 +351,7 @@ export default class MenuBuilder {
       },
     ];
 
+    templateDefault.splice(2, 0, this.daemonSubmenu() as MenuItemConstructorOptions);
     return templateDefault;
   }
 }

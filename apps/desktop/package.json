@@ -229,7 +229,11 @@
       "output": "release/build"
     },
     "extraResources": [
-      "./assets/**"
+      "./assets/**",
+      {
+        "from": "../../scripts/fastowl-uninstall.sh",
+        "to": "scripts/fastowl-uninstall.sh"
+      }
     ]
   },
   "electronmon": {

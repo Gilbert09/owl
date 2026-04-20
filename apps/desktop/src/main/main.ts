@@ -20,6 +20,9 @@ import {
   startDevDaemon,
   stopDevDaemon,
   writeDaemonConfig,
+  daemonStatus,
+  restartDaemon,
+  uninstallDaemon,
 } from './localDaemon';
 
 class AppUpdater {
@@ -173,6 +176,51 @@ ipcMain.handle('daemon:ensure-running', async (_event, args: { backendUrl: strin
     startDevDaemon(args.backendUrl);
   }
   return { started: true };
+});
+
+// Settings panel uses this to surface PID + install status on the
+// "This Mac" env card. Dev mode returns a synthetic status since
+// there's no OS service in dev.
+ipcMain.handle('daemon:local-info', async () => {
+  if (!app.isPackaged) {
+    return {
+      mode: 'dev' as const,
+      installed: false,
+      running: true, // Electron child; alive by construction.
+      platform: process.platform,
+    };
+  }
+  return {
+    mode: 'prod' as const,
+    ...daemonStatus(),
+    platform: process.platform,
+  };
+});
+
+ipcMain.handle('daemon:restart', async (_event, args?: { backendUrl?: string }) => {
+  if (app.isPackaged) {
+    restartDaemon();
+    return { restarted: true };
+  }
+  stopDevDaemon();
+  const cfg = readDaemonConfig();
+  const backendUrl = args?.backendUrl ?? cfg?.backendUrl;
+  if (!backendUrl) return { restarted: false, reason: 'no-backend-url' };
+  startDevDaemon(backendUrl);
+  return { restarted: true };
+});
+
+// Full wipe + quit. Used from the "Uninstall FastOwl daemon and
+// quit" menu item — gives the user a clean path to delete the app
+// afterward without leaving a zombie launchd agent behind.
+ipcMain.handle('daemon:uninstall-and-quit', async () => {
+  try {
+    stopDevDaemon();
+    uninstallDaemon({ fullWipe: true });
+  } catch (err) {
+    log.error('[daemon:uninstall-and-quit] failed:', err);
+  }
+  app.quit();
 });
 
 app.on('before-quit', () => {
