@@ -36,7 +36,6 @@ export function Sidebar({ className }: SidebarProps) {
     currentWorkspaceId,
     tasks,
     environments,
-    inboxItems,
   } = useWorkspaceStore();
 
   const [showAddEnvModal, setShowAddEnvModal] = useState(false);
@@ -51,7 +50,9 @@ export function Sidebar({ className }: SidebarProps) {
   // Count running tasks
   const runningTasksCount = tasks.filter((t) => t.status === 'in_progress').length;
 
-  const inboxActiveCount = inboxItems.filter((i) => i.status !== 'actioned').length;
+  // Both badges (parent 'Inbox' + 'Active' sub-item) count unread items
+  // so the numbers match. Read-but-not-actioned items remain visible in
+  // the Active pane but don't inflate the attention-count.
 
   const navItems = [
     {
@@ -148,9 +149,9 @@ export function Sidebar({ className }: SidebarProps) {
                   >
                     <CircleDot className="w-3.5 h-3.5 flex-shrink-0" />
                     <span className="flex-1 text-left">Active</span>
-                    {inboxActiveCount > 0 && (
+                    {unreadCount > 0 && (
                       <Badge variant="default" className="ml-auto h-5">
-                        {inboxActiveCount}
+                        {unreadCount}
                       </Badge>
                     )}
                   </Button>
