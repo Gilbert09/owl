@@ -106,7 +106,16 @@ type Block =
   | { kind: 'text'; key: string; text: string }
   | { kind: 'thinking'; key: string; text: string }
   | { kind: 'tool_use'; key: string; toolId: string; name: string; input: unknown }
-  | { kind: 'tool_result'; key: string; toolId: string; content: unknown; isError: boolean }
+  | {
+      kind: 'tool_result';
+      key: string;
+      toolId: string;
+      content: unknown;
+      isError: boolean;
+      /** Filled in at buildBlocks time by pairing with the preceding tool_use. */
+      toolName?: string;
+      toolInput?: unknown;
+    }
   | {
       kind: 'permission';
       key: string;
@@ -131,6 +140,9 @@ type Block =
 function buildBlocks(events: AgentEvent[]): Block[] {
   const blocks: Block[] = [];
   const permissionByRequestId = new Map<string, number>(); // requestId → blocks index
+  // Pair tool_result → tool_use by tool_use_id so the collapsed result
+  // row can say "Read 40 lines from <file>" instead of dumping bytes.
+  const toolUseById = new Map<string, { name: string; input: unknown }>();
   // Live-stream accumulator. The CLI emits `stream_event`s with
   // incremental `content_block_delta`s as Claude writes; the full
   // `assistant` event only lands when the turn is DONE. Until Slice 4c
@@ -214,12 +226,16 @@ function buildBlocks(events: AgentEvent[]): Block[] {
         } else if (b.type === 'thinking' && b.thinking) {
           blocks.push({ kind: 'thinking', key: `${seqKey}.${i}`, text: b.thinking });
         } else if (b.type === 'tool_use') {
+          const id = String(b.id ?? '');
+          const name = String(b.name ?? 'unknown');
+          const inp = b.input ?? {};
+          if (id) toolUseById.set(id, { name, input: inp });
           blocks.push({
             kind: 'tool_use',
             key: `${seqKey}.${i}`,
-            toolId: String(b.id ?? ''),
-            name: String(b.name ?? 'unknown'),
-            input: b.input ?? {},
+            toolId: id,
+            name,
+            input: inp,
           });
         }
       }
@@ -237,12 +253,16 @@ function buildBlocks(events: AgentEvent[]): Block[] {
           is_error?: boolean;
         };
         if (b.type === 'tool_result') {
+          const toolId = String(b.tool_use_id ?? '');
+          const paired = toolId ? toolUseById.get(toolId) : undefined;
           blocks.push({
             kind: 'tool_result',
             key: `${seqKey}.${i}`,
-            toolId: String(b.tool_use_id ?? ''),
+            toolId,
             content: b.content ?? '',
             isError: Boolean(b.is_error),
+            toolName: paired?.name,
+            toolInput: paired?.input,
           });
         }
       }
@@ -348,7 +368,14 @@ function BlockView({
     case 'tool_use':
       return <ToolUseBlock name={block.name} input={block.input} />;
     case 'tool_result':
-      return <ToolResultBlock content={block.content} isError={block.isError} />;
+      return (
+        <ToolResultBlock
+          content={block.content}
+          isError={block.isError}
+          toolName={block.toolName}
+          toolInput={block.toolInput}
+        />
+      );
     case 'permission':
       return (
         <PermissionBlock
@@ -403,6 +430,7 @@ function ThinkingBlock({ text }: { text: string }) {
 
 function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
   const [open, setOpen] = useState(false);
+  const summary = summariseToolUse(name, input);
   return (
     <Collapsible
       open={open}
@@ -411,9 +439,11 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
       title={
         <span className="block [overflow-wrap:anywhere]">
           <span className="text-blue-300">{name}</span>
-          <span className="ml-2 text-zinc-400 font-normal">
-            {summariseArgs(input)}
-          </span>
+          {summary && (
+            <span className="ml-2 text-zinc-400 font-normal font-mono">
+              {summary}
+            </span>
+          )}
         </span>
       }
     >
@@ -422,10 +452,70 @@ function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
   );
 }
 
-function ToolResultBlock({ content, isError }: { content: unknown; isError: boolean }) {
+function ToolResultBlock({
+  content,
+  isError,
+  toolName,
+  toolInput,
+}: {
+  content: unknown;
+  isError: boolean;
+  toolName?: string;
+  toolInput?: unknown;
+}) {
   const [open, setOpen] = useState(false);
-  const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-  const preview = text.split('\n').slice(0, 1).join('').slice(0, 160);
+  const extracted = extractTextContent(content);
+  const text = extracted ?? JSON.stringify(content, null, 2);
+  const lineCount = text ? text.split('\n').length : 0;
+
+  // Result-aware collapsed row. For known tools we can say *what*
+  // landed ("Read N lines from <file>") instead of dumping the first
+  // line of output as a mystery preview.
+  const title = ((): React.ReactNode => {
+    if (isError) {
+      const preview = text.split('\n')[0]?.slice(0, 160) || 'error';
+      return <span className="text-red-300 font-normal">{preview}</span>;
+    }
+    if (toolName === 'Read' && toolInput && typeof toolInput === 'object') {
+      const p = (toolInput as { file_path?: unknown }).file_path;
+      if (typeof p === 'string') {
+        return (
+          <span className="font-normal text-zinc-300">
+            Read {lineCount} lines from{' '}
+            <span className="font-mono text-zinc-200">{shortenPath(p)}</span>
+          </span>
+        );
+      }
+    }
+    if (toolName === 'Grep' && toolInput && typeof toolInput === 'object') {
+      const matches = text.match(/^Found (\d+)/)?.[1];
+      if (matches) {
+        return (
+          <span className="font-normal text-zinc-300">
+            Grep · {matches} matches
+          </span>
+        );
+      }
+    }
+    if (toolName === 'Glob') {
+      return (
+        <span className="font-normal text-zinc-300">
+          Glob · {lineCount} {lineCount === 1 ? 'path' : 'paths'}
+        </span>
+      );
+    }
+    if (toolName === 'Bash') {
+      const preview = text.split('\n')[0]?.slice(0, 160) ?? '';
+      return (
+        <span className="font-normal text-zinc-300 font-mono">
+          {preview || `${lineCount} lines`}
+        </span>
+      );
+    }
+    const preview = text.split('\n')[0]?.slice(0, 160) || 'ok';
+    return <span className="font-normal">{preview}</span>;
+  })();
+
   return (
     <Collapsible
       open={open}
@@ -438,8 +528,8 @@ function ToolResultBlock({ content, isError }: { content: unknown; isError: bool
         )
       }
       title={
-        <span className={cn('block font-normal [overflow-wrap:anywhere]', isError && 'text-red-300')}>
-          {preview || (isError ? 'error' : 'ok')}
+        <span className={cn('block [overflow-wrap:anywhere]', isError && 'text-red-300')}>
+          {title}
         </span>
       }
       dim
@@ -675,6 +765,7 @@ function AutoAllowedPermission({
   envName?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const summary = summariseToolUse(toolName, toolInput);
   return (
     <div className="rounded border border-green-500/20 bg-green-500/5 overflow-hidden">
       <button
@@ -690,13 +781,18 @@ function AutoAllowedPermission({
         <Shield className="w-3.5 h-3.5 flex-none text-green-400 mt-0.5" />
         <span className="min-w-0 flex-1 [overflow-wrap:anywhere] text-green-300">
           <span className="font-medium">{toolName}</span>
-          <span className="ml-2 text-green-200/60">
-            auto-allowed (pre-approved for {envName ?? 'this env'})
-          </span>
+          {summary && (
+            <span className="ml-2 text-green-200/80 font-mono font-normal">
+              {summary}
+            </span>
+          )}
         </span>
       </button>
       {open && (
-        <div className="px-3 pb-3">
+        <div className="px-3 pb-3 space-y-2">
+          <div className="text-[11px] text-green-200/60 italic">
+            Auto-allowed — pre-approved for {envName ?? 'this environment'}.
+          </div>
           <ToolInputPreview toolName={toolName} toolInput={toolInput} />
         </div>
       )}
@@ -976,6 +1072,95 @@ function renderInlineCode(text: string): React.ReactNode {
   });
 }
 
+/**
+ * Tool-aware one-liner for the collapsed tool_use / auto-allowed row.
+ * Goal: answer "what did Claude just do?" at a glance without forcing
+ * a click. Unknown tools fall back to the old generic arg dump.
+ */
+function summariseToolUse(toolName: string, input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const i = input as Record<string, unknown>;
+
+  const asString = (v: unknown): string | null =>
+    typeof v === 'string' && v.length > 0 ? v : null;
+
+  switch (toolName) {
+    case 'Read': {
+      const p = asString(i.file_path);
+      if (!p) break;
+      return shortenPath(p);
+    }
+    case 'Edit':
+    case 'Write':
+    case 'NotebookEdit': {
+      const p = asString(i.file_path);
+      if (!p) break;
+      return shortenPath(p);
+    }
+    case 'Bash': {
+      const cmd = asString(i.command);
+      if (!cmd) break;
+      return truncateInline(cmd, 120);
+    }
+    case 'Grep': {
+      const pattern = asString(i.pattern);
+      const path = asString(i.path);
+      if (!pattern) break;
+      return path ? `${pattern}  in  ${shortenPath(path)}` : pattern;
+    }
+    case 'Glob': {
+      const pattern = asString(i.pattern);
+      const path = asString(i.path);
+      if (!pattern) break;
+      return path ? `${pattern}  in  ${shortenPath(path)}` : pattern;
+    }
+    case 'WebFetch': {
+      return asString(i.url) ?? '';
+    }
+    case 'WebSearch': {
+      return asString(i.query) ?? '';
+    }
+    case 'Task':
+    case 'Agent': {
+      return asString(i.description) ?? '';
+    }
+    case 'TodoWrite':
+      return '';
+  }
+
+  return summariseArgs(input);
+}
+
+/**
+ * Strip the absolute prefix off a path so the user sees the
+ * repo-relative bit. We don't know the repo root from the renderer,
+ * so we slice from the first monorepo-looking segment (packages/apps/
+ * src) and otherwise tilde the user's home. Not perfect, but kills
+ * the noisy /Users/<me>/dev/<org>/<repo>/ prefix 99% of the time.
+ */
+function shortenPath(p: string): string {
+  for (const marker of ['/packages/', '/apps/']) {
+    const idx = p.indexOf(marker);
+    if (idx !== -1) return p.slice(idx + 1);
+  }
+  const srcIdx = p.indexOf('/src/');
+  if (srcIdx !== -1) {
+    // Include the dir before /src/ for context (often the repo name).
+    const before = p.lastIndexOf('/', srcIdx - 1);
+    if (before !== -1) return p.slice(before + 1);
+  }
+  if (p.startsWith('/Users/') || p.startsWith('/home/')) {
+    const after = p.indexOf('/', p.indexOf('/', 1) + 1);
+    if (after !== -1) return '~' + p.slice(after);
+  }
+  return p;
+}
+
+function truncateInline(s: string, max: number): string {
+  const single = s.replace(/\s+/g, ' ').trim();
+  return single.length <= max ? single : single.slice(0, max - 1) + '…';
+}
+
 function summariseArgs(input: unknown): string {
   if (!input || typeof input !== 'object') return '';
   const entries = Object.entries(input as Record<string, unknown>).slice(0, 2);
@@ -985,4 +1170,31 @@ function summariseArgs(input: unknown): string {
       return `${k}=${(s ?? '').toString().slice(0, 48)}`;
     })
     .join(', ');
+}
+
+/**
+ * Unwrap a `[{type: 'text', text: '…'}]`-shaped content array into a
+ * plain string. Anthropic's message content is always that shape when
+ * a subagent (Task/Agent tool) returns its answer — today we JSON.stringify
+ * the whole array, which makes the transcript unreadable. If the array
+ * is heterogeneous (has non-text items) we bail and let the caller
+ * dump raw JSON as a safe fallback.
+ */
+function extractTextContent(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const texts: string[] = [];
+  for (const item of content) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      (item as { type?: unknown }).type === 'text' &&
+      typeof (item as { text?: unknown }).text === 'string'
+    ) {
+      texts.push((item as { text: string }).text);
+    } else {
+      return null;
+    }
+  }
+  return texts.join('\n\n');
 }
