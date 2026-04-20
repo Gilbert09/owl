@@ -108,6 +108,41 @@ export function inboxRoutes(): Router {
     res.status(201).json({ success: true, data: rowToInboxItem(rows[0]) } as ApiResponse<InboxItem>);
   });
 
+  // Bulk routes MUST be declared before `/:id/...` — Express matches in
+  // registration order, and `/bulk/read` would otherwise be captured by
+  // `/:id/read` as id="bulk", 404'ing with "inbox item not found".
+  router.post('/bulk/read', async (req, res) => {
+    const user = assertUser(req);
+    const db = getDbClient();
+    const { ids } = req.body as { ids: string[] };
+    const now = new Date();
+
+    const ownedIds = await filterToOwnedIds(db, ids, user.id);
+    if (ownedIds.length > 0) {
+      await db
+        .update(inboxItemsTable)
+        .set({ status: 'read', readAt: now })
+        .where(inArray(inboxItemsTable.id, ownedIds));
+    }
+    res.json({ success: true, data: { updated: ownedIds.length } });
+  });
+
+  router.post('/bulk/action', async (req, res) => {
+    const user = assertUser(req);
+    const db = getDbClient();
+    const { ids } = req.body as { ids: string[] };
+    const now = new Date();
+
+    const ownedIds = await filterToOwnedIds(db, ids, user.id);
+    if (ownedIds.length > 0) {
+      await db
+        .update(inboxItemsTable)
+        .set({ status: 'actioned', actionedAt: now })
+        .where(inArray(inboxItemsTable.id, ownedIds));
+    }
+    res.json({ success: true, data: { updated: ownedIds.length } });
+  });
+
   router.post('/:id/read', async (req, res) => {
     try {
       await requireInboxAccess(req, req.params.id);
@@ -185,38 +220,6 @@ export function inboxRoutes(): Router {
       return res.status(404).json({ success: false, error: 'Inbox item not found' });
     }
     res.json({ success: true } as ApiResponse<void>);
-  });
-
-  router.post('/bulk/read', async (req, res) => {
-    const user = assertUser(req);
-    const db = getDbClient();
-    const { ids } = req.body as { ids: string[] };
-    const now = new Date();
-
-    const ownedIds = await filterToOwnedIds(db, ids, user.id);
-    if (ownedIds.length > 0) {
-      await db
-        .update(inboxItemsTable)
-        .set({ status: 'read', readAt: now })
-        .where(inArray(inboxItemsTable.id, ownedIds));
-    }
-    res.json({ success: true, data: { updated: ownedIds.length } });
-  });
-
-  router.post('/bulk/action', async (req, res) => {
-    const user = assertUser(req);
-    const db = getDbClient();
-    const { ids } = req.body as { ids: string[] };
-    const now = new Date();
-
-    const ownedIds = await filterToOwnedIds(db, ids, user.id);
-    if (ownedIds.length > 0) {
-      await db
-        .update(inboxItemsTable)
-        .set({ status: 'actioned', actionedAt: now })
-        .where(inArray(inboxItemsTable.id, ownedIds));
-    }
-    res.json({ success: true, data: { updated: ownedIds.length } });
   });
 
   return router;

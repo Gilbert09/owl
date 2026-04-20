@@ -118,7 +118,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   inboxItems: [],
   unreadCount: 0,
   sidebarCollapsed: false,
-  activePanel: 'queue',
+  activePanel: 'inbox',
   inboxView: 'active',
   selectedTaskId: null,
   theme: getInitialTheme(),
