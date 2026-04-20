@@ -582,6 +582,13 @@ export interface CreateEnvironmentRequest {
   type: EnvironmentType;
   config: Omit<EnvironmentConfig, 'type'> & { type: EnvironmentType };
   renderer?: EnvironmentRenderer;
+  /**
+   * Override the backend's per-type default. Leave unset to accept
+   * the default (local/ssh = strict, daemon = bypass). The local
+   * daemon auto-pair flow passes `false` explicitly because "This
+   * Mac" is user hardware, not a throwaway VM.
+   */
+  autonomousBypassPermissions?: boolean;
 }
 
 export interface TestEnvironmentRequest {

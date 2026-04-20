@@ -45,6 +45,11 @@ export function useLocalDaemon(): void {
                 name: envName,
                 type: 'daemon',
                 config: { type: 'daemon' },
+                // "This Mac" is the user's own hardware — strict
+                // permissions by default, same as the old `local`
+                // env type. Override the backend's "daemon => bypass"
+                // default (which exists for throwaway VMs).
+                autonomousBypassPermissions: false,
               })
             ).id;
 
