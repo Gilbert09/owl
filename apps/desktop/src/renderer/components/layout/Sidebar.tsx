@@ -10,6 +10,8 @@ import {
   Server,
   WifiOff,
   Github,
+  Archive,
+  CircleDot,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -28,10 +30,13 @@ export function Sidebar({ className }: SidebarProps) {
     activePanel,
     setActivePanel,
     unreadCount,
+    inboxView,
+    setInboxView,
     workspaces,
     currentWorkspaceId,
     tasks,
     environments,
+    inboxItems,
   } = useWorkspaceStore();
 
   const [showAddEnvModal, setShowAddEnvModal] = useState(false);
@@ -45,6 +50,8 @@ export function Sidebar({ className }: SidebarProps) {
 
   // Count running tasks
   const runningTasksCount = tasks.filter((t) => t.status === 'in_progress').length;
+
+  const inboxActiveCount = inboxItems.filter((i) => i.status !== 'actioned').length;
 
   const navItems = [
     {
@@ -98,32 +105,69 @@ export function Sidebar({ className }: SidebarProps) {
 
       {/* Navigation */}
       <nav className="flex-1 p-2 space-y-1">
-        {navItems.map((item) => (
-          <Button
-            key={item.id}
-            variant={activePanel === item.id ? 'secondary' : 'ghost'}
-            className={cn(
-              'w-full justify-start gap-3',
-              sidebarCollapsed && 'justify-center px-2'
-            )}
-            onClick={() => setActivePanel(item.id)}
-          >
-            <item.icon className="w-4 h-4 flex-shrink-0" />
-            {!sidebarCollapsed && (
-              <>
-                <span className="flex-1 text-left">{item.label}</span>
-                {item.badge && (
-                  <Badge
-                    variant={item.id === 'inbox' ? 'default' : (item.badgeVariant as 'warning' | 'secondary') || 'warning'}
-                    className="ml-auto"
-                  >
-                    {item.badge}
-                  </Badge>
+        {navItems.map((item) => {
+          const isInbox = item.id === 'inbox';
+          const showInboxChildren = isInbox && activePanel === 'inbox' && !sidebarCollapsed;
+          return (
+            <React.Fragment key={item.id}>
+              <Button
+                variant={activePanel === item.id ? 'secondary' : 'ghost'}
+                className={cn(
+                  'w-full justify-start gap-3',
+                  sidebarCollapsed && 'justify-center px-2'
                 )}
-              </>
-            )}
-          </Button>
-        ))}
+                onClick={() => {
+                  setActivePanel(item.id);
+                  // Default sub-view: clicking Inbox always lands on
+                  // "Active" so the user sees what needs attention.
+                  if (isInbox) setInboxView('active');
+                }}
+              >
+                <item.icon className="w-4 h-4 flex-shrink-0" />
+                {!sidebarCollapsed && (
+                  <>
+                    <span className="flex-1 text-left">{item.label}</span>
+                    {item.badge && (
+                      <Badge
+                        variant={isInbox ? 'default' : (item.badgeVariant as 'warning' | 'secondary') || 'warning'}
+                        className="ml-auto"
+                      >
+                        {item.badge}
+                      </Badge>
+                    )}
+                  </>
+                )}
+              </Button>
+              {showInboxChildren && (
+                <div className="ml-3 border-l pl-2 space-y-1">
+                  <Button
+                    variant={inboxView === 'active' ? 'secondary' : 'ghost'}
+                    size="sm"
+                    className="w-full justify-start gap-2 h-8 text-xs"
+                    onClick={() => setInboxView('active')}
+                  >
+                    <CircleDot className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span className="flex-1 text-left">Active</span>
+                    {inboxActiveCount > 0 && (
+                      <Badge variant="default" className="ml-auto h-5">
+                        {inboxActiveCount}
+                      </Badge>
+                    )}
+                  </Button>
+                  <Button
+                    variant={inboxView === 'archive' ? 'secondary' : 'ghost'}
+                    size="sm"
+                    className="w-full justify-start gap-2 h-8 text-xs"
+                    onClick={() => setInboxView('archive')}
+                  >
+                    <Archive className="w-3.5 h-3.5 flex-shrink-0" />
+                    <span className="flex-1 text-left">Archive</span>
+                  </Button>
+                </div>
+              )}
+            </React.Fragment>
+          );
+        })}
       </nav>
 
       {/* Environments Status */}

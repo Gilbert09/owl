@@ -65,6 +65,10 @@ interface WorkspaceState {
   // UI State
   sidebarCollapsed: boolean;
   activePanel: 'inbox' | 'queue' | 'github' | 'settings';
+  // Which bucket of the inbox is visible when activePanel === 'inbox'.
+  // 'active' = items that still want attention (unread + read-but-not-actioned);
+  // 'archive' = actioned items, kept around for history/audit.
+  inboxView: 'active' | 'archive';
   selectedTaskId: string | null;
   theme: Theme;
 
@@ -93,9 +97,12 @@ interface WorkspaceState {
   updateInboxItem: (id: string, updates: Partial<InboxItem>) => void;
   markInboxRead: (id: string) => void;
   markInboxActioned: (id: string) => void;
+  removeInboxItem: (id: string) => void;
+  markAllInboxRead: () => void;
 
   toggleSidebar: () => void;
   setActivePanel: (panel: 'inbox' | 'queue' | 'github' | 'settings') => void;
+  setInboxView: (view: 'active' | 'archive') => void;
   selectTask: (id: string | null) => void;
   setTheme: (theme: Theme) => void;
 }
@@ -112,6 +119,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   unreadCount: 0,
   sidebarCollapsed: false,
   activePanel: 'queue',
+  inboxView: 'active',
   selectedTaskId: null,
   theme: getInitialTheme(),
 
@@ -219,10 +227,32 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       };
     }),
 
+  removeInboxItem: (id) =>
+    set((state) => {
+      const existing = state.inboxItems.find((i) => i.id === id);
+      const wasUnread = existing?.status === 'unread';
+      return {
+        inboxItems: state.inboxItems.filter((i) => i.id !== id),
+        unreadCount: wasUnread
+          ? Math.max(0, state.unreadCount - 1)
+          : state.unreadCount,
+      };
+    }),
+
+  markAllInboxRead: () =>
+    set((state) => ({
+      inboxItems: state.inboxItems.map((i) =>
+        i.status === 'unread' ? { ...i, status: 'read' as const } : i
+      ),
+      unreadCount: 0,
+    })),
+
   toggleSidebar: () =>
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
   setActivePanel: (panel) => set({ activePanel: panel }),
+
+  setInboxView: (view) => set({ inboxView: view }),
 
   selectTask: (id) => set({ selectedTaskId: id }),
 

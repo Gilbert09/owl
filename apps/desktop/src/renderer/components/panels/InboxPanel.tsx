@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   MessageSquare,
   GitPullRequest,
@@ -7,6 +7,9 @@ import {
   Clock,
   MoreHorizontal,
   Shield,
+  Archive,
+  Trash2,
+  MailOpen,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -39,13 +42,58 @@ const priorityColors = {
 export function InboxPanel() {
   const {
     inboxItems,
+    inboxView,
     markInboxRead,
     markInboxActioned,
+    markAllInboxRead,
+    removeInboxItem,
     selectTask,
     setActivePanel,
   } = useWorkspaceStore();
 
   const unreadCount = inboxItems.filter((i) => i.status === 'unread').length;
+
+  // Active = anything the user might still act on (unread + read).
+  // Archive = actioned items, kept around so users can audit what
+  // they've resolved without filtering forever.
+  const visibleItems = inboxItems.filter((i) =>
+    inboxView === 'archive' ? i.status === 'actioned' : i.status !== 'actioned',
+  );
+  const unreadIdsInActive = visibleItems
+    .filter((i) => i.status === 'unread')
+    .map((i) => i.id);
+
+  const handleMarkAllRead = async () => {
+    if (unreadIdsInActive.length === 0) return;
+    // Optimistic local update + bulk API call. Each item gets an
+    // inbox:update broadcast from the backend; the ws handler
+    // dedups so ours won't double-count.
+    markAllInboxRead();
+    try {
+      await api.inbox.bulkRead(unreadIdsInActive);
+    } catch (err) {
+      console.error('[inbox] bulkRead failed:', err);
+    }
+  };
+
+  const handleArchive = async (item: InboxItem) => {
+    markInboxActioned(item.id);
+    try {
+      await api.inbox.markActioned(item.id);
+    } catch (err) {
+      console.error('[inbox] archive failed:', err);
+    }
+  };
+
+  const handleDelete = async (item: InboxItem) => {
+    if (!window.confirm('Delete this inbox item permanently?')) return;
+    removeInboxItem(item.id);
+    try {
+      await api.inbox.delete(item.id);
+    } catch (err) {
+      console.error('[inbox] delete failed:', err);
+    }
+  };
 
   /**
    * Dispatch an inbox action. `view_task` + `view_agent` just
@@ -82,43 +130,67 @@ export function InboxPanel() {
     );
   };
 
+  const isArchive = inboxView === 'archive';
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b">
         <div>
-          <h2 className="text-lg font-semibold">Inbox</h2>
+          <h2 className="text-lg font-semibold">
+            {isArchive ? 'Inbox · Archive' : 'Inbox'}
+          </h2>
           <p className="text-sm text-muted-foreground">
-            {unreadCount} {unreadCount === 1 ? 'item needs' : 'items need'} attention
+            {isArchive
+              ? `${visibleItems.length} archived ${visibleItems.length === 1 ? 'item' : 'items'}`
+              : `${unreadCount} ${unreadCount === 1 ? 'item needs' : 'items need'} attention`}
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm">
-            Mark all read
-          </Button>
-        </div>
+        {!isArchive && (
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleMarkAllRead}
+              disabled={unreadIdsInActive.length === 0}
+            >
+              Mark all read
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Content — single ordered list. Read/actioned items stay
-          visible (dimmed) so clicking an unread item doesn't feel
-          like the card vanished. */}
+      {/* Content — archive hides the clutter; Active keeps read
+          items visible (dimmed) so clicking doesn't feel like the
+          card vanished on you. */}
       <ScrollArea className="flex-1">
-        {inboxItems.length === 0 ? (
+        {visibleItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center p-4">
-            <CheckCircle className="w-12 h-12 text-muted-foreground/50 mb-4" />
-            <h3 className="font-medium mb-1">All caught up!</h3>
+            {isArchive ? (
+              <Archive className="w-12 h-12 text-muted-foreground/50 mb-4" />
+            ) : (
+              <CheckCircle className="w-12 h-12 text-muted-foreground/50 mb-4" />
+            )}
+            <h3 className="font-medium mb-1">
+              {isArchive ? 'Nothing archived yet' : 'All caught up!'}
+            </h3>
             <p className="text-sm text-muted-foreground">
-              No items need your attention right now.
+              {isArchive
+                ? 'Items you archive or complete will show up here.'
+                : 'No items need your attention right now.'}
             </p>
           </div>
         ) : (
           <div className="p-4 space-y-2">
-            {inboxItems.map((item) => (
+            {visibleItems.map((item) => (
               <InboxItemCard
                 key={item.id}
                 item={item}
+                isArchive={isArchive}
                 onRead={() => handleRead(item)}
                 onAction={(action) => handleAction(item, action)}
+                onArchive={() => handleArchive(item)}
+                onDelete={() => handleDelete(item)}
               />
             ))}
           </div>
@@ -130,15 +202,48 @@ export function InboxPanel() {
 
 interface InboxItemCardProps {
   item: InboxItem;
+  isArchive: boolean;
   onRead: () => void;
   onAction: (action: InboxAction) => void;
+  onArchive: () => void;
+  onDelete: () => void;
 }
 
-function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
+function InboxItemCard({
+  item,
+  isArchive,
+  onRead,
+  onAction,
+  onArchive,
+  onDelete,
+}: InboxItemCardProps) {
   const Icon = typeIcons[item.type] || Clock;
   const isUnread = item.status === 'unread';
   const isActioned = item.status === 'actioned';
   const permission = extractPermissionContext(item);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // Click-outside + Escape to close. Scoped to this card so multiple
+  // open menus don't fight each other — the outside-click handler
+  // self-unregisters on every toggle.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [menuOpen]);
 
   return (
     <Card
@@ -194,16 +299,55 @@ function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
             </span>
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 flex-shrink-0"
-          onClick={(e) => {
-            e.stopPropagation();
-          }}
-        >
-          <MoreHorizontal className="w-4 h-4" />
-        </Button>
+        <div ref={menuRef} className="relative flex-shrink-0">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={(e) => {
+              e.stopPropagation();
+              setMenuOpen((v) => !v);
+            }}
+          >
+            <MoreHorizontal className="w-4 h-4" />
+          </Button>
+          {menuOpen && (
+            <div
+              className="absolute right-0 top-9 z-10 min-w-[160px] rounded-md border bg-popover shadow-md p-1 text-sm"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {!isArchive && isUnread && (
+                <MenuRow
+                  icon={<MailOpen className="w-3.5 h-3.5" />}
+                  label="Mark as read"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onRead();
+                  }}
+                />
+              )}
+              {!isArchive && !isActioned && (
+                <MenuRow
+                  icon={<Archive className="w-3.5 h-3.5" />}
+                  label="Archive"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    onArchive();
+                  }}
+                />
+              )}
+              <MenuRow
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                label="Delete"
+                variant="destructive"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDelete();
+                }}
+              />
+            </div>
+          )}
+        </div>
       </div>
       {permission && !isActioned && (
         <div
@@ -429,6 +573,32 @@ function PermissionInputPreview({
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '…';
+}
+
+function MenuRow({
+  icon,
+  label,
+  onClick,
+  variant,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  variant?: 'destructive';
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex items-center gap-2 w-full text-left px-2 py-1.5 rounded hover:bg-accent',
+        variant === 'destructive' && 'text-red-500 hover:bg-red-500/10',
+      )}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
 }
 
 function formatTime(dateString: string): string {
