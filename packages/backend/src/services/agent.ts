@@ -11,6 +11,7 @@ import type {
 import { environmentService } from './environment.js';
 import { agentStructuredService } from './agentStructured.js';
 import { daemonRegistry } from './daemonRegistry.js';
+import { permissionService } from './permissionService.js';
 import { ensurePermissionHook } from './permissionHook.js';
 import {
   emitAgentStatus,
@@ -127,6 +128,7 @@ class AgentService extends EventEmitter {
         environmentId: agentsTable.environmentId,
         workspaceId: agentsTable.workspaceId,
         currentTaskId: agentsTable.currentTaskId,
+        permissionToken: agentsTable.permissionToken,
       })
       .from(agentsTable)
       .where(inArray(agentsTable.status, ['idle', 'working', 'tool_use', 'awaiting_input']));
@@ -362,6 +364,16 @@ class AgentService extends EventEmitter {
         resumeSessionId,
       });
 
+      // Persist the permission token (strict mode only) so surviving
+      // agents after a backend restart can re-register it in
+      // permissionService. Row-level UPDATE — agent row already exists.
+      if (run.permissionToken) {
+        await this.db
+          .update(agentsTable)
+          .set({ permissionToken: run.permissionToken })
+          .where(eq(agentsTable.id, agentId));
+      }
+
       emitAgentStatus(workspaceId, agentId, initialStatus, 'none');
       if (taskId) emitTaskAgentStatus(workspaceId, taskId, initialStatus, 'none');
 
@@ -582,6 +594,7 @@ class AgentService extends EventEmitter {
     environmentId: string;
     workspaceId: string;
     currentTaskId: string | null;
+    permissionToken: string | null;
   }): Promise<void> {
     const sessionId = `agent:${row.id}`;
     const taskId = row.currentTaskId ?? undefined;
@@ -602,6 +615,18 @@ class AgentService extends EventEmitter {
       currentTaskId: taskId,
     });
 
+    // Re-register the permission token the child was given at spawn
+    // so its in-flight PreToolUse hooks authenticate against the new
+    // backend process. Only present for strict-mode envs.
+    if (row.permissionToken) {
+      permissionService.rehydrateRun(row.permissionToken, {
+        environmentId: row.environmentId,
+        agentId: row.id,
+        workspaceId: row.workspaceId,
+        taskId,
+      });
+    }
+
     try {
       const run = await agentStructuredService.resumeRun({
         sessionKey: sessionId,
@@ -610,6 +635,7 @@ class AgentService extends EventEmitter {
         workspaceId: row.workspaceId,
         taskId,
         interactive,
+        permissionToken: row.permissionToken ?? undefined,
       });
       void run.completion.then(async (code) => {
         try {

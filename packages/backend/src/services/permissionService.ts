@@ -58,6 +58,21 @@ class PermissionService extends EventEmitter {
     return token;
   }
 
+  /**
+   * Re-register a token the backend previously minted (and persisted
+   * on the agent row) so a child that survived a backend restart can
+   * keep using its existing FASTOWL_PERMISSION_TOKEN env var. Called
+   * from agent.resumeStaleAgent after cleanupStaleAgents adopts a
+   * still-alive run. Idempotent.
+   */
+  rehydrateRun(token: string, ctx: PermissionContext): void {
+    this.runTokens.set(token, {
+      environmentId: ctx.environmentId,
+      agentId: ctx.agentId,
+      taskId: ctx.taskId,
+    });
+  }
+
   /** Call when the run ends so the token can't be reused. */
   unregisterRun(token: string): void {
     this.runTokens.delete(token);

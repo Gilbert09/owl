@@ -228,6 +228,14 @@ export const agents = pgTable(
     currentTaskId: text('current_task_id').references(() => tasks.id, {
       onDelete: 'set null',
     }),
+    /**
+     * Per-run token handed to the child via FASTOWL_PERMISSION_TOKEN
+     * (strict mode only). Persisted so agents surviving a backend
+     * restart can re-register the same token in permissionService on
+     * resume — otherwise the child's in-flight PreToolUse hooks would
+     * 401 with a "token not recognised" error.
+     */
+    permissionToken: text('permission_token'),
     terminalOutput: text('terminal_output').notNull().default(''),
     lastActivity: timestamp('last_activity', { withTimezone: true })
       .notNull()

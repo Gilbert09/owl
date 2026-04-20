@@ -395,6 +395,13 @@ class AgentStructuredService extends EventEmitter {
     workspaceId: string;
     taskId?: string;
     interactive: boolean;
+    /**
+     * Permission token the child was originally spawned with (strict
+     * mode only). The caller is expected to have already called
+     * `permissionService.rehydrateRun(token, ctx)` so mid-flight hook
+     * requests authenticate against this new backend process.
+     */
+    permissionToken?: string;
   }): Promise<ActiveStructuredRun> {
     if (this.runs.has(opts.sessionKey)) {
       throw new Error(`structured run already active for ${opts.sessionKey}`);
@@ -440,6 +447,7 @@ class AgentStructuredService extends EventEmitter {
       this.runs.delete(opts.sessionKey);
       run.detachPermissionListeners?.();
       run.detachTransportListeners?.();
+      if (opts.permissionToken) permissionService.unregisterRun(opts.permissionToken);
       resolveCompletion(code);
       this.emit('exit', run, code);
     };
@@ -463,6 +471,7 @@ class AgentStructuredService extends EventEmitter {
       // Best-effort — we don't know when the real spawn happened, but
       // this is only surfaced in UI timing displays.
       startedAt: new Date(),
+      permissionToken: opts.permissionToken,
       completion,
       detachTransportListeners,
     };

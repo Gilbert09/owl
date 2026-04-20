@@ -71,6 +71,13 @@
       "when": 1778352000000,
       "tag": "0009_daemon_everywhere",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1778355000000,
+      "tag": "0010_agents_permission_token",
+      "breakpoints": true
     }
   ]
 }
