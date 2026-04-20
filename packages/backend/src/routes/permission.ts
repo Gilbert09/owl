@@ -3,8 +3,36 @@ import type { PermissionDecision } from '@fastowl/shared';
 import { permissionService } from '../services/permissionService.js';
 import { assertUser } from '../middleware/auth.js';
 import { getDbClient } from '../db/client.js';
-import { tasks as tasksTable, environments as environmentsTable } from '../db/schema.js';
+import {
+  tasks as tasksTable,
+  workspaces as workspacesTable,
+} from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+
+/**
+ * Task ownership check — routes through `tasks.workspace_id →
+ * workspaces.owner_id`. Mirrors the rest of the route layer.
+ *
+ * Previously this used `tasks.assigned_environment_id → environments.
+ * owner_id`, but tasks created without an explicit env (the common
+ * case — the scheduler picks one at start-time and doesn't
+ * backfill) don't have that column set, so the check 404'd a
+ * perfectly-real task.
+ */
+async function loadOwnedTask(
+  taskId: string,
+  userId: string
+): Promise<{ exists: boolean; ownedByUser: boolean }> {
+  const db = getDbClient();
+  const rows = await db
+    .select({ ownerId: workspacesTable.ownerId })
+    .from(tasksTable)
+    .innerJoin(workspacesTable, eq(tasksTable.workspaceId, workspacesTable.id))
+    .where(eq(tasksTable.id, taskId))
+    .limit(1);
+  if (!rows[0]) return { exists: false, ownedByUser: false };
+  return { exists: true, ownedByUser: rows[0].ownerId === userId };
+}
 
 /**
  * Public (unauthenticated-by-JWT) endpoint the CLI's PreToolUse hook
@@ -57,24 +85,11 @@ export function permissionDesktopRoutes(): Router {
 
   router.post('/tasks/:taskId/permission', async (req, res) => {
     const user = assertUser(req);
-    const db = getDbClient();
-
-    // Owner check — join task → environment → owner. The env id on the
-    // task is the authoritative scope.
-    const rows = await db
-      .select({ envId: tasksTable.assignedEnvironmentId })
-      .from(tasksTable)
-      .where(eq(tasksTable.id, req.params.taskId))
-      .limit(1);
-    if (!rows[0]?.envId) {
+    const { exists, ownedByUser } = await loadOwnedTask(req.params.taskId, user.id);
+    if (!exists) {
       return res.status(404).json({ success: false, error: 'task not found' });
     }
-    const envRows = await db
-      .select({ ownerId: environmentsTable.ownerId })
-      .from(environmentsTable)
-      .where(eq(environmentsTable.id, rows[0].envId))
-      .limit(1);
-    if (envRows[0]?.ownerId !== user.id) {
+    if (!ownedByUser) {
       return res.status(403).json({ success: false, error: 'not your task' });
     }
 
@@ -103,21 +118,11 @@ export function permissionDesktopRoutes(): Router {
   // permission cards that fired during the disconnect window.
   router.get('/tasks/:taskId/permission/pending', async (req, res) => {
     const user = assertUser(req);
-    const db = getDbClient();
-    const rows = await db
-      .select({ envId: tasksTable.assignedEnvironmentId })
-      .from(tasksTable)
-      .where(eq(tasksTable.id, req.params.taskId))
-      .limit(1);
-    if (!rows[0]?.envId) {
+    const { exists, ownedByUser } = await loadOwnedTask(req.params.taskId, user.id);
+    if (!exists) {
       return res.status(404).json({ success: false, error: 'task not found' });
     }
-    const envRows = await db
-      .select({ ownerId: environmentsTable.ownerId })
-      .from(environmentsTable)
-      .where(eq(environmentsTable.id, rows[0].envId))
-      .limit(1);
-    if (envRows[0]?.ownerId !== user.id) {
+    if (!ownedByUser) {
       return res.status(403).json({ success: false, error: 'not your task' });
     }
     const pending = permissionService.listPendingForTask(req.params.taskId).map((p) => ({
