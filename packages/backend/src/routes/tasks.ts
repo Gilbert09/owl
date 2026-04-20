@@ -299,8 +299,26 @@ export function taskRoutes(): Router {
 
     const task = rowToTask(rows[0]);
 
+    // Idempotent: if the task is already running (e.g. the scheduler
+    // picked it up in the ~5s window between user's "retry" and
+    // their "start now" click), return the current task state rather
+    // than an error. Users don't care whether *they* started it —
+    // only that it's running.
     if (task.status === 'in_progress') {
-      return res.status(400).json({ success: false, error: 'Task is already running' });
+      const existing = agentService.getAgentByTaskId(task.id);
+      if (existing) {
+        return res.json({ success: true, data: task } as ApiResponse<Task>);
+      }
+      // Status says in_progress but no live agent — the agent died
+      // and something missed the cleanup. Let the flow below reset +
+      // re-spawn. We'll reset status to `queued` on the way through
+      // so the agent insert's task update is clean.
+      await db
+        .update(tasksTable)
+        .set({ status: 'queued', assignedAgentId: null, updatedAt: new Date() })
+        .where(eq(tasksTable.id, task.id));
+      task.status = 'queued';
+      task.assignedAgentId = undefined;
     }
     if (!isAgentTask(task.type)) {
       return res.status(400).json({ success: false, error: 'Only agent tasks can be started' });
@@ -334,11 +352,12 @@ export function taskRoutes(): Router {
       }
     }
 
+    // Same idempotency guard as above, but covering the narrow window
+    // where the scheduler populated activeAgents but hasn't yet
+    // flipped the task row to `in_progress`.
     const existingAgent = agentService.getAgentByTaskId(task.id);
     if (existingAgent) {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Task already has an active agent' });
+      return res.json({ success: true, data: task } as ApiResponse<Task>);
     }
 
     let workingDirectory: string | undefined;
