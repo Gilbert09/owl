@@ -63,22 +63,31 @@ async function main() {
   setupRoutes(app);
 
   const server = createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws' });
+
+  // Two separate WS servers sharing one HTTP listener, dispatched by
+  // path in a single `upgrade` handler. We used to let the user-facing
+  // `wss` auto-attach to the server via `{server, path: '/ws'}`, but
+  // that installs an upgrade listener that aborts *every* non-`/ws`
+  // upgrade with 400 before the `/daemon-ws` handler gets a chance —
+  // and because ws calls `abortHandshake` synchronously, our custom
+  // listener then tries to upgrade an already-destroyed socket. Using
+  // `noServer: true` on both sides and routing ourselves is the only
+  // reliable way to serve two paths on one server.
+  const wss = new WebSocketServer({ noServer: true });
   setupWebSocket(wss);
 
-  // Separate WSS for the daemon channel so the user-facing WS and the
-  // daemon WS don't have to share handlers. `noServer: true` means we
-  // dispatch by path on `upgrade` ourselves.
   const daemonWss = new WebSocketServer({ noServer: true });
   daemonWss.on('connection', (ws) => { void handleDaemonWsConnection(ws); });
+
   server.on('upgrade', (req, socket, head) => {
     const { pathname } = new URL(req.url ?? '/', 'http://localhost');
-    if (pathname === '/daemon-ws') {
-      daemonWss.handleUpgrade(req, socket, head, (ws) => {
-        daemonWss.emit('connection', ws, req);
-      });
+    if (pathname === '/ws') {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    } else if (pathname === '/daemon-ws') {
+      daemonWss.handleUpgrade(req, socket, head, (ws) => daemonWss.emit('connection', ws, req));
+    } else {
+      socket.destroy();
     }
-    // `/ws` is handled automatically by the `wss` server's own `path` option.
   });
 
   server.listen(PORT, () => {

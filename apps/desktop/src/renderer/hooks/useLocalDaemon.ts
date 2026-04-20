@@ -30,13 +30,25 @@ export function useLocalDaemon(): void {
           return;
         }
 
+        // Not paired on disk — could be first-ever launch OR a prior
+        // pairing attempt that failed midway. Either way, look for an
+        // existing "This Mac (<hostname>)" env before creating a new
+        // one, so retries don't leave a trail of orphan envs.
         const label = await bridge.getHostLabel();
-        const env = await environments.create({
-          name: `This Mac (${label})`,
-          type: 'daemon',
-          config: { type: 'daemon' },
-        });
-        const { pairingToken } = await environments.pairingToken(env.id);
+        const envName = `This Mac (${label})`;
+        const existing = await environments.list();
+        const match = existing.find((e) => e.name === envName && e.type === 'daemon');
+        const envId = match
+          ? match.id
+          : (
+              await environments.create({
+                name: envName,
+                type: 'daemon',
+                config: { type: 'daemon' },
+              })
+            ).id;
+
+        const { pairingToken } = await environments.pairingToken(envId);
         await bridge.configureAndStart({ backendUrl, pairingToken });
       } catch (err) {
         // Pairing failures shouldn't crash the app — user can retry
