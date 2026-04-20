@@ -125,6 +125,7 @@ class AgentService extends EventEmitter {
       .select({
         id: agentsTable.id,
         environmentId: agentsTable.environmentId,
+        workspaceId: agentsTable.workspaceId,
         currentTaskId: agentsTable.currentTaskId,
       })
       .from(agentsTable)
@@ -160,8 +161,9 @@ class AgentService extends EventEmitter {
 
       if (survivors.length > 0) {
         console.log(
-          `[agent] ${survivors.length} agent(s) survived the restart — their daemons claim the sessions.`,
+          `[agent] ${survivors.length} agent(s) survived the restart — resuming runs.`,
         );
+        await Promise.all(survivors.map((row) => this.resumeStaleAgent(row)));
       }
       if (toFail.length === 0) return;
 
@@ -563,6 +565,85 @@ class AgentService extends EventEmitter {
    * backlog item in its metadata). Autonomous tasks run one-shot;
    * interactive tasks (no backlog item) keep their child's stdin open.
    */
+  /**
+   * Adopt a surviving agent row + its still-running child after a
+   * backend restart. Called from cleanupStaleAgents's sweep for every
+   * agent whose env's daemon claimed the session as live.
+   *
+   * Rebuilds:
+   *   - `activeAgents` map entry (so stopAgent/continueTask work).
+   *   - `agentStructuredService` listener set (so new session events
+   *     resume flowing into the transcript + desktop).
+   *   - `run.completion` → handleStructuredExit wiring (so the task
+   *     lifecycle still fires when the child finally exits).
+   */
+  private async resumeStaleAgent(row: {
+    id: string;
+    environmentId: string;
+    workspaceId: string;
+    currentTaskId: string | null;
+  }): Promise<void> {
+    const sessionId = `agent:${row.id}`;
+    const taskId = row.currentTaskId ?? undefined;
+    const interactive = taskId ? !(await this.isAutonomousTask(taskId)) : true;
+
+    this.activeAgents.set(row.id, {
+      id: row.id,
+      environmentId: row.environmentId,
+      workspaceId: row.workspaceId,
+      sessionId,
+      // Best-effort status — we don't know what the child is actually
+      // doing right now. `working` is the safe default; the next event
+      // we receive (via onRawEvent → turn_complete → updateAgentStatus)
+      // will correct it.
+      status: 'working',
+      attention: 'none',
+      lastActivityTime: new Date(),
+      currentTaskId: taskId,
+    });
+
+    try {
+      const run = await agentStructuredService.resumeRun({
+        sessionKey: sessionId,
+        agentId: row.id,
+        environmentId: row.environmentId,
+        workspaceId: row.workspaceId,
+        taskId,
+        interactive,
+      });
+      void run.completion.then(async (code) => {
+        try {
+          await agentStructuredService.flush(sessionId);
+          await this.handleStructuredExit(row.id, code);
+        } catch (err) {
+          console.error('[agent] resumed-run exit handler threw:', err);
+        }
+      });
+    } catch (err) {
+      console.error(
+        `[agent] failed to resume agent ${row.id}; falling back to fail:`,
+        err,
+      );
+      this.activeAgents.delete(row.id);
+      await this.db.delete(agentsTable).where(eq(agentsTable.id, row.id));
+      if (taskId) {
+        const now = new Date();
+        await this.db
+          .update(tasksTable)
+          .set({
+            status: 'failed',
+            completedAt: now,
+            updatedAt: now,
+            result: {
+              success: false,
+              error: 'agent resume failed after backend restart',
+            },
+          })
+          .where(and(eq(tasksTable.id, taskId), eq(tasksTable.status, 'in_progress')));
+      }
+    }
+  }
+
   private async isAutonomousTask(taskId: string): Promise<boolean> {
     const rows = await this.db
       .select({ metadata: tasksTable.metadata })

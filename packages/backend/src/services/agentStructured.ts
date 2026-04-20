@@ -371,6 +371,169 @@ class AgentStructuredService extends EventEmitter {
   }
 
   /**
+   * Adopt a structured run whose child was spawned by a *prior* backend
+   * process and is still alive under the daemon. Used by
+   * `agent.cleanupStaleAgents` after a backend restart: the child's
+   * `session:data`/`session:close` events are already flowing from the
+   * daemon — we just need to resubscribe, parse into transcript events,
+   * and map exit onto the usual task lifecycle.
+   *
+   * Differences from `start()`:
+   *   - No spawn. The child exists; we only listen.
+   *   - No `permissionToken`: the child was seeded with a token
+   *     registered in the previous backend's permissionService, which
+   *     is gone. Permission prompts from this run will fail if they
+   *     fire (rare — the child has to be mid-PreToolUse at restart).
+   *     The prompt on the daemon side will timeout.
+   *   - Transcript is pre-loaded from `tasks.transcript` so new events
+   *     stamp correctly-ordered `seq` values.
+   */
+  async resumeRun(opts: {
+    sessionKey: string;
+    agentId: string;
+    environmentId: string;
+    workspaceId: string;
+    taskId?: string;
+    interactive: boolean;
+  }): Promise<ActiveStructuredRun> {
+    if (this.runs.has(opts.sessionKey)) {
+      throw new Error(`structured run already active for ${opts.sessionKey}`);
+    }
+
+    // Preload transcript from DB so new events pick up the right seq.
+    let transcript: AgentEvent[] = [];
+    if (opts.taskId) {
+      const rows = await this.db
+        .select({ transcript: tasksTable.transcript })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, opts.taskId))
+        .limit(1);
+      if (rows[0]?.transcript) {
+        transcript = rows[0].transcript as AgentEvent[];
+      }
+    }
+
+    const parser = new JsonlLineParser();
+    let resolveCompletion!: (code: number) => void;
+    const completion = new Promise<number>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const onData = (sid: string, chunk: Buffer) => {
+      if (sid !== opts.sessionKey) return;
+      for (const rawEvent of parser.push(chunk.toString('utf-8'))) {
+        void this.onRawEvent(run, rawEvent).catch((err) =>
+          console.error(`[agentStructured ${opts.sessionKey}] onRawEvent failed:`, err)
+        );
+      }
+    };
+    const onStderr = (sid: string, chunk: Buffer) => {
+      if (sid !== opts.sessionKey) return;
+      void this.onRawEvent(run, {
+        type: 'system',
+        subtype: 'stderr',
+        text: chunk.toString('utf-8'),
+      });
+    };
+    const onClose = (sid: string, code: number) => {
+      if (sid !== opts.sessionKey) return;
+      this.runs.delete(opts.sessionKey);
+      run.detachPermissionListeners?.();
+      run.detachTransportListeners?.();
+      resolveCompletion(code);
+      this.emit('exit', run, code);
+    };
+    environmentService.on('session:data', onData);
+    environmentService.on('session:stderr', onStderr);
+    environmentService.on('session:close', onClose);
+    const detachTransportListeners = () => {
+      environmentService.off('session:data', onData);
+      environmentService.off('session:stderr', onStderr);
+      environmentService.off('session:close', onClose);
+    };
+
+    const run: ActiveStructuredRun = {
+      sessionKey: opts.sessionKey,
+      agentId: opts.agentId,
+      environmentId: opts.environmentId,
+      taskId: opts.taskId,
+      workspaceId: opts.workspaceId,
+      interactive: opts.interactive,
+      transcript,
+      // Best-effort — we don't know when the real spawn happened, but
+      // this is only surfaced in UI timing displays.
+      startedAt: new Date(),
+      completion,
+      detachTransportListeners,
+    };
+    this.runs.set(opts.sessionKey, run);
+
+    // Permission bridge is a pure UI-layer broadcast; it works even
+    // though we can't mint a new token for the child. If the child's
+    // old token fires a hook request, permissionService rejects it
+    // silently — users see no permission prompt, the daemon side times
+    // out and the child gets a "deny" back. Acceptable for the
+    // narrow "restart mid-PreToolUse" case.
+    const onRequest = (pending: PendingRequest) => {
+      if (pending.agentId !== run.agentId) return;
+      emitAgentPermissionRequest(run.workspaceId, {
+        requestId: pending.requestId,
+        agentId: pending.agentId,
+        taskId: pending.taskId,
+        toolName: pending.toolName,
+        toolInput: pending.toolInput,
+        toolUseId: pending.toolUseId,
+        sessionId: pending.sessionId,
+        requestedAt: pending.requestedAt,
+      });
+      void this.onRawEvent(run, {
+        type: 'fastowl_permission_request',
+        requestId: pending.requestId,
+        tool_name: pending.toolName,
+        tool_input: pending.toolInput,
+        tool_use_id: pending.toolUseId,
+        session_id: pending.sessionId,
+        requested_at: pending.requestedAt,
+      });
+    };
+    const onResolved = (ev: {
+      requestId: string;
+      decision: 'allow' | 'deny';
+      persist: boolean;
+      agentId: string;
+      taskId?: string;
+      toolName: string;
+    }) => {
+      if (ev.agentId !== run.agentId) return;
+      emitAgentPermissionResponse(run.workspaceId, {
+        requestId: ev.requestId,
+        decision: ev.decision,
+        persist: ev.persist,
+        agentId: ev.agentId,
+        taskId: ev.taskId,
+      });
+      void this.onRawEvent(run, {
+        type: 'fastowl_permission_response',
+        requestId: ev.requestId,
+        decision: ev.decision,
+        persist: ev.persist,
+        tool_name: ev.toolName,
+      });
+    };
+    permissionService.on('request', onRequest);
+    permissionService.on('resolved', onResolved);
+    run.detachPermissionListeners = () => {
+      permissionService.off('request', onRequest);
+      permissionService.off('resolved', onResolved);
+    };
+
+    console.log(
+      `[agentStructured] resumed run for session ${opts.sessionKey} (task=${opts.taskId ?? 'none'}, transcript=${transcript.length} events)`,
+    );
+    return run;
+  }
+
+  /**
    * Process a single JSON event: stamp `seq`, append to in-memory
    * transcript, broadcast, persist on a schedule.
    */
