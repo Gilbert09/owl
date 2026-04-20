@@ -268,15 +268,12 @@ class AgentService extends EventEmitter {
       : (env?.config as { workingDirectory?: string } | undefined)?.workingDirectory);
 
     // Structured renderer path: non-PTY spawn of `claude -p
-    // --output-format stream-json`. Covers both autonomous (scheduler-
-    // driven, one-shot, exits after the seed prompt) and interactive
-    // (user-driven, stdin stays open, accepts follow-up messages via
-    // sendMessage). Local envs spawn in-process; daemon envs tunnel
-    // through the stream_spawn wire op. SSH envs land in Slice 4b —
-    // for now `spawnStreaming` throws for them, and the PTY path
-    // below is used as fallback (renderer='pty' is still the default).
-    const useStructured =
-      env?.renderer === 'structured' && (env.type === 'local' || env.type === 'daemon');
+    // --output-format stream-json`. Covers autonomous (scheduler-
+    // driven, one-shot) and interactive (user-driven, multi-turn).
+    // Transport is abstracted by `environmentService.spawnStreaming`
+    // — local uses in-process child_process, daemon tunnels through
+    // the stream_spawn wire op, SSH goes over an ssh2 exec channel.
+    const useStructured = env?.renderer === 'structured';
     if (useStructured) {
       await this.startStructuredAgent({
         agentId,

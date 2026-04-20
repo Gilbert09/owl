@@ -67,12 +67,11 @@ export function environmentRoutes(): Router {
     const autonomousBypass =
       body.autonomousBypassPermissions ?? body.type === 'daemon';
 
-    // Slice 1: `structured` renderer only supported on local envs. SSH
-    // and daemon fall back to `pty` until we plumb streaming exec
-    // through those backends.
-    const requestedRenderer: EnvironmentRenderer = body.renderer ?? 'pty';
-    const renderer: EnvironmentRenderer =
-      requestedRenderer === 'structured' && body.type !== 'local' ? 'pty' : requestedRenderer;
+    // Slice 4: structured renderer supported on every env type
+    // (local = in-process spawn, daemon = stream_spawn wire op,
+    // ssh = ssh2 exec channel). Still gated by an explicit opt-in
+    // until Slice 4c flips the default.
+    const renderer: EnvironmentRenderer = body.renderer ?? 'pty';
 
     await db.insert(environmentsTable).values({
       id,
@@ -123,13 +122,6 @@ export function environmentRoutes(): Router {
       updates.autonomousBypassPermissions = body.autonomousBypassPermissions;
     }
     if (body.renderer !== undefined) {
-      // Same guard as POST: only local envs can run structured for now.
-      if (body.renderer === 'structured' && existing[0].type !== 'local') {
-        return res.status(400).json({
-          success: false,
-          error: 'structured renderer is only supported on local environments (Slice 1)',
-        });
-      }
       updates.renderer = body.renderer;
     }
     if (body.toolAllowlist !== undefined) {

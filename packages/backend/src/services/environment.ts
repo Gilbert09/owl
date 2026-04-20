@@ -74,6 +74,19 @@ class EnvironmentService extends EventEmitter {
     daemonRegistry.on('session.close', (_envId, event) => {
       this.emit('session:close', event.sessionId, event.exitCode);
     });
+
+    // Forward SSH streaming-exec events under the same session:*
+    // names so the structured renderer sees one unified stream
+    // regardless of transport.
+    sshService.on('stream:data', (sessionId: string, data: Buffer) => {
+      this.emit('session:data', sessionId, data);
+    });
+    sshService.on('stream:stderr', (sessionId: string, data: Buffer) => {
+      this.emit('session:stderr', sessionId, data);
+    });
+    sshService.on('stream:close', (sessionId: string, exitCode: number) => {
+      this.emit('session:close', sessionId, exitCode);
+    });
   }
 
   private async fixLocalEnvironmentStatus(): Promise<void> {
@@ -263,11 +276,15 @@ class EnvironmentService extends EventEmitter {
         });
         return;
       }
-      case 'ssh':
-        // TODO(slice 4b): wrap ssh2 exec channel so SSH envs can run
-        // structured. For now, surface a clear error rather than
-        // silently falling back.
-        throw new Error('structured renderer not yet supported on ssh environments');
+      case 'ssh': {
+        await sshService.execStream(environmentId, sessionId, binary, args, {
+          cwd: options.cwd,
+          env: options.env,
+          keepStdinOpen: options.keepStdinOpen,
+          initialStdin: options.initialStdin,
+        });
+        return;
+      }
       default:
         throw new Error(`Cannot spawn streaming on environment type: ${env.type}`);
     }
@@ -282,6 +299,10 @@ class EnvironmentService extends EventEmitter {
     const proc = this.localStreams.get(sessionId);
     if (proc && !proc.process.stdin?.destroyed) {
       proc.process.stdin?.end();
+      return;
+    }
+    if (sshService.hasStream(sessionId)) {
+      sshService.closeStreamInput(sessionId);
       return;
     }
     await Promise.all(
@@ -349,6 +370,10 @@ class EnvironmentService extends EventEmitter {
       localProc.process.stdin?.write(data);
       return;
     }
+    if (sshService.hasStream(sessionId)) {
+      sshService.writeToStream(sessionId, data);
+      return;
+    }
     // Try any connected daemon — sessions are keyed globally, so we
     // look for the one that actually owns this session id.
     for (const envId of daemonRegistry.listConnected()) {
@@ -362,8 +387,8 @@ class EnvironmentService extends EventEmitter {
           // Session belongs to a different daemon; ignore.
         });
     }
-    // Fall back to SSH if no daemon claimed it. Idempotent: ssh will
-    // no-op for unknown session ids.
+    // Fall back to SSH PTY if no daemon claimed it. Idempotent: ssh
+    // will no-op for unknown session ids.
     sshService.writeToPTY(sessionId, data);
   }
 
@@ -388,6 +413,10 @@ class EnvironmentService extends EventEmitter {
     if (localProc) {
       localProc.process.kill('SIGTERM');
       this.localProcesses.delete(sessionId);
+      return;
+    }
+    if (sshService.hasStream(sessionId)) {
+      sshService.killStream(sessionId);
       return;
     }
     for (const envId of daemonRegistry.listConnected()) {

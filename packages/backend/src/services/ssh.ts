@@ -22,9 +22,21 @@ export interface PTYSession {
   cols: number;
 }
 
+/**
+ * Non-PTY streaming session over SSH. Used by the structured
+ * renderer to run `claude -p --output-format stream-json` over an
+ * ssh2 exec channel (plain pipes, no terminal emulation).
+ */
+interface StreamingSession {
+  id: string;
+  connectionId: string;
+  stream: ClientChannel;
+}
+
 class SSHService extends EventEmitter {
   private connections: Map<string, SSHConnection> = new Map();
   private ptySessions: Map<string, PTYSession> = new Map();
+  private streamSessions: Map<string, StreamingSession> = new Map();
   private reconnectTimers: Map<string, NodeJS.Timeout> = new Map();
 
   /**
@@ -240,6 +252,115 @@ class SSHService extends EventEmitter {
   }
 
   /**
+   * Non-PTY streaming exec — runs `binary args…` over an ssh2 exec
+   * channel with plain pipes. Used by structured-renderer runs on
+   * SSH envs. Emits `stream:data`, `stream:stderr`, `stream:close`
+   * events (scoped by sessionId).
+   *
+   * `envOverrides` is turned into a `KEY=value` prefix; the CLI-
+   * side env-var forwarding semantics match the daemon's
+   * `stream_spawn` payload.
+   */
+  async execStream(
+    environmentId: string,
+    sessionId: string,
+    binary: string,
+    args: string[],
+    opts: {
+      cwd?: string;
+      env?: Record<string, string>;
+      keepStdinOpen: boolean;
+      initialStdin?: Buffer | string;
+    }
+  ): Promise<void> {
+    const connection = this.connections.get(environmentId);
+    if (!connection || connection.status !== 'connected') {
+      throw new Error(`Not connected to environment ${environmentId}`);
+    }
+    if (this.streamSessions.has(sessionId) || this.ptySessions.has(sessionId)) {
+      throw new Error(`session ${sessionId} already exists`);
+    }
+
+    const envPrefix = Object.entries(opts.env ?? {})
+      .map(([k, v]) => `${k}=${shellQuote(v)}`)
+      .join(' ');
+    const cdPrefix = opts.cwd ? `cd ${shellQuote(opts.cwd)} && ` : '';
+    const argStr = args.map(shellQuote).join(' ');
+    const command = `${cdPrefix}${envPrefix ? envPrefix + ' ' : ''}${binary} ${argStr}`;
+
+    connection.lastActivity = new Date();
+
+    const stream: ClientChannel = await new Promise((resolve, reject) => {
+      // `pty: false` is the default; being explicit keeps TTY detection
+      // off so `claude -p --output-format stream-json` emits raw JSONL.
+      connection.client.exec(command, { pty: false }, (err, stream) => {
+        if (err) reject(err);
+        else resolve(stream);
+      });
+    });
+
+    this.streamSessions.set(sessionId, {
+      id: sessionId,
+      connectionId: environmentId,
+      stream,
+    });
+
+    if (opts.initialStdin) {
+      const buf = Buffer.isBuffer(opts.initialStdin)
+        ? opts.initialStdin
+        : Buffer.from(opts.initialStdin, 'utf-8');
+      stream.write(buf);
+    }
+    if (!opts.keepStdinOpen) {
+      stream.end();
+    }
+
+    stream.on('data', (data: Buffer) => this.emit('stream:data', sessionId, data));
+    stream.stderr.on('data', (data: Buffer) =>
+      this.emit('stream:stderr', sessionId, data)
+    );
+    stream.on('close', (code: number | null) => {
+      this.streamSessions.delete(sessionId);
+      this.emit('stream:close', sessionId, code ?? 0);
+    });
+    stream.on('error', (err: Error) => {
+      this.emit('stream:stderr', sessionId, Buffer.from(err.message, 'utf-8'));
+    });
+  }
+
+  /** Write to an SSH streaming session's stdin. No-op if unknown. */
+  writeToStream(sessionId: string, data: string | Buffer): void {
+    const session = this.streamSessions.get(sessionId);
+    if (!session) return;
+    session.stream.write(data);
+  }
+
+  /** Half-close stdin on a streaming session — graceful end. */
+  closeStreamInput(sessionId: string): void {
+    const session = this.streamSessions.get(sessionId);
+    if (!session) return;
+    session.stream.end();
+  }
+
+  /** SIGTERM equivalent for a streaming session — hard abort. */
+  killStream(sessionId: string): void {
+    const session = this.streamSessions.get(sessionId);
+    if (!session) return;
+    try {
+      session.stream.signal('TERM');
+    } catch {
+      // ssh2 may not support signal() on all server versions — fall
+      // back to destroying the channel.
+    }
+    session.stream.destroy();
+  }
+
+  /** For tests + shutdown. */
+  hasStream(sessionId: string): boolean {
+    return this.streamSessions.has(sessionId);
+  }
+
+  /**
    * Get connection status
    */
   getStatus(environmentId: string): EnvironmentStatus {
@@ -340,3 +461,7 @@ class SSHService extends EventEmitter {
 
 // Singleton instance
 export const sshService = new SSHService();
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
