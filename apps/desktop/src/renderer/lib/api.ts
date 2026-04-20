@@ -90,24 +90,6 @@ export const environments = {
       'POST',
       `/environments/${id}/pairing-token`
     ),
-  installDaemon: (
-    id: string,
-    data: {
-      host: string;
-      port?: number;
-      username: string;
-      authMethod: 'password' | 'privateKey';
-      password?: string;
-      privateKey?: string;
-      passphrase?: string;
-      backendUrl?: string;
-    }
-  ) =>
-    request<{ log: string; exitCode: number; backendUrl: string }>(
-      'POST',
-      `/environments/${id}/install-daemon`,
-      data
-    ),
 };
 
 // Agents

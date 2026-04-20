@@ -68,7 +68,19 @@ export interface ContinuousBuildSettings {
 // Environment
 // ============================================================================
 
-export type EnvironmentType = 'local' | 'ssh' | 'coder' | 'daemon';
+/**
+ * Environment type. Both types transport exec/stream/git over the
+ * daemon WS protocol; they only differ in where the daemon is running:
+ *   - `local`  — the daemon bundled with the desktop app, running on
+ *               the user's own machine (installed as a launchd/systemd
+ *               user service by the desktop app).
+ *   - `remote` — a daemon the user installed on a separate machine
+ *               (VM, workstation, etc.) via the pairing flow.
+ *
+ * Legacy types ('ssh', 'coder', 'daemon') were removed in the "daemon
+ * everywhere" refactor (docs/DAEMON_EVERYWHERE.md).
+ */
+export type EnvironmentType = 'local' | 'remote';
 
 export type EnvironmentStatus =
   | 'connected'
@@ -116,38 +128,19 @@ export interface Environment {
 
 export type EnvironmentRenderer = 'pty' | 'structured';
 
-export type EnvironmentConfig =
-  | LocalEnvironmentConfig
-  | SSHEnvironmentConfig
-  | CoderEnvironmentConfig
-  | DaemonEnvironmentConfig;
+export type EnvironmentConfig = LocalEnvironmentConfig | RemoteEnvironmentConfig;
 
 export interface LocalEnvironmentConfig {
   type: 'local';
-  workingDirectory?: string;
-}
-
-export interface SSHEnvironmentConfig {
-  type: 'ssh';
-  host: string;
-  port: number;
-  username: string;
-  authMethod: 'key' | 'password' | 'agent';
-  privateKeyPath?: string;
-  workingDirectory?: string;
-}
-
-export interface CoderEnvironmentConfig {
-  type: 'coder';
-  workspaceName: string;
-  coderUrl: string;
-}
-
-export interface DaemonEnvironmentConfig {
-  type: 'daemon';
-  /** Where the daemon was provisioned, for UI display. */
+  /** Where the daemon runs — usually the user's hostname, for display. */
   hostname?: string;
-  /** Working directory override for tasks running on this daemon. */
+  workingDirectory?: string;
+}
+
+export interface RemoteEnvironmentConfig {
+  type: 'remote';
+  /** Where the daemon runs, for UI display. */
+  hostname?: string;
   workingDirectory?: string;
 }
 

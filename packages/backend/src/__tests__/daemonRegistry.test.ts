@@ -25,9 +25,9 @@ async function seedDaemonEnv(db: Database, id: string): Promise<void> {
     id,
     ownerId: TEST_USER_ID,
     name: 'daemon-test',
-    type: 'daemon',
+    type: 'remote',
     status: 'disconnected',
-    config: {},
+    config: { type: 'remote' },
   });
 }
 

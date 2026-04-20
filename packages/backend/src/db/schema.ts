@@ -112,11 +112,12 @@ export const environments = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     name: text('name').notNull(),
-    // 'local' and 'ssh' are legacy (execution happens inside the backend
-    // process — only useful when the backend runs on the user's laptop).
-    // 'daemon' is the forward-looking type: execution happens in a
-    // `@fastowl/daemon` process that dials into the backend.
-    type: text('type').notNull(), // 'local' | 'ssh' | 'coder' | 'daemon'
+    // Execution always happens inside a `@fastowl/daemon` process that
+    // dials into the backend. 'local' means the daemon runs on the
+    // user's own desktop machine (bundled with the Electron app);
+    // 'remote' means the daemon runs on a separate machine paired via
+    // an explicit token. See docs/DAEMON_EVERYWHERE.md.
+    type: text('type').notNull(), // 'local' | 'remote'
     status: text('status').notNull().default('disconnected'),
     config: jsonb('config').notNull(),
     // Long-lived token the daemon presents on every reconnect. We store

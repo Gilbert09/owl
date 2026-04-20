@@ -377,15 +377,16 @@ function parseSourceContent(
 
 /**
  * Pick a sensible default environment for ad-hoc work (e.g. syncing a
- * backlog source that didn't specify one). Prefers local; falls back
- * to any connected daemon. Returns null if nothing executable exists.
+ * backlog source that didn't specify one). Prefers the local daemon
+ * ("This Mac") — most developer work is done there — and falls back to
+ * any connected remote env. Returns null if nothing is connected.
  */
 async function firstAvailableEnvironmentId(): Promise<string | null> {
   const envs = await environmentService.getAllEnvironments();
-  const local = envs.find((e) => e.type === 'local');
+  const local = envs.find((e) => e.type === 'local' && e.status === 'connected');
   if (local) return local.id;
-  const daemon = envs.find((e) => e.type === 'daemon' && e.status === 'connected');
-  return daemon?.id ?? null;
+  const remote = envs.find((e) => e.type === 'remote' && e.status === 'connected');
+  return remote?.id ?? null;
 }
 
 function escapeShell(value: string): string {

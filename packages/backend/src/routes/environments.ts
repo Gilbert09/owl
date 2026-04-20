@@ -5,7 +5,6 @@ import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { assertUser } from '../middleware/auth.js';
 import { daemonRegistry } from '../services/daemonRegistry.js';
-import { installDaemonOverSsh } from '../services/daemonInstaller.js';
 import type {
   Environment,
   EnvironmentConfig,
@@ -14,14 +13,6 @@ import type {
   CreateEnvironmentRequest,
   ApiResponse,
 } from '@fastowl/shared';
-
-/**
- * Default backend URL the daemon should dial. Used when the caller of
- * `POST /:id/install-daemon` doesn't override it. Prefer the explicit
- * env var; fall back to the request origin at handler time (we don't
- * know the host at module load).
- */
-const DEFAULT_BACKEND_URL = process.env.FASTOWL_PUBLIC_BACKEND_URL;
 
 export function environmentRoutes(): Router {
   const router = Router();
@@ -57,15 +48,17 @@ export function environmentRoutes(): Router {
     const body = req.body as CreateEnvironmentRequest & { autonomousBypassPermissions?: boolean };
     const id = uuid();
     const now = new Date();
-    const initialStatus = body.type === 'local' ? 'connected' : 'disconnected';
+    // Both local and remote envs are now daemon-backed. Status starts
+    // at 'disconnected' until the daemon dials in and pairs; the
+    // registry flips it to 'connected' on register().
+    const initialStatus = 'disconnected';
 
-    // Daemon envs are throwaway VMs, so default them to "bypass
-    // permissions" for autonomous tasks. Local / ssh are the user's own
-    // hardware — defaults to strict; users opt in from Settings if they
-    // know what they're doing. Either default is overridable via an
-    // explicit request body flag.
+    // Remote envs are typically throwaway VMs — default them to
+    // bypass permissions so autonomous tasks run without prompts.
+    // Local envs ("This Mac") are the user's own hardware — default
+    // to strict. Either default is overridable via the body flag.
     const autonomousBypass =
-      body.autonomousBypassPermissions ?? body.type === 'daemon';
+      body.autonomousBypassPermissions ?? body.type === 'remote';
 
     // Slice 4: structured renderer supported on every env type
     // (local = in-process spawn, daemon = stream_spawn wire op,
@@ -180,24 +173,21 @@ export function environmentRoutes(): Router {
     res.json({ success: true, data: { connected: true } });
   });
 
-  // Mint a one-time pairing token for a daemon env. The UI shows the
-  // token + backend URL; user runs `fastowl-daemon --pairing-token X
-  // --backend-url Y` on the target machine. Tokens expire in 10m.
+  // Mint a one-time pairing token for an env. The UI shows the token +
+  // backend URL; user runs `fastowl-daemon --pairing-token X
+  // --backend-url Y` on the target machine (or the desktop app's
+  // useLocalDaemon hook hands it to the bundled daemon). Tokens expire
+  // in 10m.
   router.post('/:id/pairing-token', async (req, res) => {
     const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
-      .select({ type: environmentsTable.type })
+      .select({ id: environmentsTable.id })
       .from(environmentsTable)
       .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
       .limit(1);
     if (!rows[0]) {
       return res.status(404).json({ success: false, error: 'Environment not found' });
-    }
-    if (rows[0].type !== 'daemon') {
-      return res
-        .status(400)
-        .json({ success: false, error: 'Pairing tokens are only valid for daemon environments' });
     }
 
     const token = daemonRegistry.createPairingToken(req.params.id, user.id);
@@ -205,94 +195,6 @@ export function environmentRoutes(): Router {
       success: true,
       data: { pairingToken: token, expiresInSeconds: 600 },
     });
-  });
-
-  // Provision the daemon on a remote host over SSH. The backend dials
-  // the target, pipes the install script, and waits for the daemon to
-  // dial back (the actual `connected` transition is driven by
-  // `daemonRegistry.register`, not this handler — this endpoint just
-  // runs the installer and returns its log).
-  //
-  // Credentials are accepted in the body, used once, and never stored.
-  router.post('/:id/install-daemon', async (req, res) => {
-    const user = assertUser(req);
-    const db = getDbClient();
-    const rows = await db
-      .select({ type: environmentsTable.type })
-      .from(environmentsTable)
-      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
-      .limit(1);
-    if (!rows[0]) {
-      return res.status(404).json({ success: false, error: 'Environment not found' });
-    }
-    if (rows[0].type !== 'daemon') {
-      return res.status(400).json({
-        success: false,
-        error: 'install-daemon can only target daemon environments',
-      });
-    }
-
-    const body = req.body as {
-      host?: string;
-      port?: number;
-      username?: string;
-      authMethod?: 'password' | 'privateKey';
-      password?: string;
-      privateKey?: string;
-      passphrase?: string;
-      backendUrl?: string;
-    };
-
-    if (!body.host || !body.username || !body.authMethod) {
-      return res.status(400).json({
-        success: false,
-        error: 'host, username, and authMethod are required',
-      });
-    }
-
-    const pairingToken = daemonRegistry.createPairingToken(req.params.id, user.id);
-    const backendUrl =
-      body.backendUrl ??
-      DEFAULT_BACKEND_URL ??
-      // Reconstruct from the request headers as a last resort. Railway
-      // sets `x-forwarded-proto` + `host` correctly.
-      `${req.protocol}://${req.get('host')}`;
-
-    try {
-      const result = await installDaemonOverSsh({
-        host: body.host,
-        port: body.port,
-        username: body.username,
-        authMethod: body.authMethod,
-        password: body.password,
-        privateKey: body.privateKey,
-        passphrase: body.passphrase,
-        backendUrl,
-        pairingToken,
-      });
-
-      if (!result.success) {
-        return res.status(502).json({
-          success: false,
-          error: result.error ?? 'install script failed',
-          log: result.log,
-          exitCode: result.exitCode,
-        });
-      }
-
-      res.json({
-        success: true,
-        data: {
-          log: result.log,
-          exitCode: result.exitCode,
-          backendUrl,
-        },
-      });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error('install-daemon failed:', msg);
-      res.status(500).json({ success: false, error: msg });
-    }
   });
 
   return router;

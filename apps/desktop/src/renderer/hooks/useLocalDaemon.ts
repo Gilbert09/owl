@@ -37,18 +37,16 @@ export function useLocalDaemon(): void {
         const label = await bridge.getHostLabel();
         const envName = `This Mac (${label})`;
         const existing = await environments.list();
-        const match = existing.find((e) => e.name === envName && e.type === 'daemon');
+        const match = existing.find((e) => e.name === envName && e.type === 'local');
         const envId = match
           ? match.id
           : (
               await environments.create({
                 name: envName,
-                type: 'daemon',
-                config: { type: 'daemon' },
-                // "This Mac" is the user's own hardware — strict
-                // permissions by default, same as the old `local`
-                // env type. Override the backend's "daemon => bypass"
-                // default (which exists for throwaway VMs).
+                type: 'local',
+                config: { type: 'local', hostname: label },
+                // Local envs default to strict permissions — this is
+                // the user's own hardware, not a throwaway VM.
                 autonomousBypassPermissions: false,
               })
             ).id;

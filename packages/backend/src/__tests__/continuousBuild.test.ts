@@ -43,6 +43,10 @@ async function seedLocalEnv(db: Database, id = 'env-local') {
     ownerId: TEST_USER_ID,
     name: 'Local',
     type: 'local',
+    // Post-"daemon everywhere", a local env only serves tasks when its
+    // daemon is actually dialled in. Tests pretend the daemon is up so
+    // `firstAvailableEnvironmentId` picks this env as eligible.
+    status: 'connected',
     config: { type: 'local' },
   });
 }
@@ -241,22 +245,22 @@ describe('continuousBuildScheduler', () => {
     expect(await countQueuedTasks(db, 'ws1')).toBe(0);
   });
 
-  it('skips sources whose SSH environment is not connected', async () => {
+  it('skips sources whose remote environment is not connected', async () => {
     await seedWorkspace(db, 'ws1', { enabled: true });
-    // Disconnected SSH env
+    // Disconnected remote env (daemon hasn't dialled in).
     await db.insert(environmentsTable).values({
-      id: 'env-ssh',
+      id: 'env-remote',
       ownerId: TEST_USER_ID,
       name: 'Remote',
-      type: 'ssh',
+      type: 'remote',
       status: 'disconnected',
-      config: { type: 'ssh', host: 'vm1', port: 22, username: 'me', authMethod: 'agent' },
+      config: { type: 'remote', hostname: 'vm1' },
     });
     fake = installFakeEnvironment({ outputs: { 'cat ': '- [ ] on the vm\n' } });
 
     const src = await backlogService.createSource({
       workspaceId: 'ws1',
-      environmentId: 'env-ssh',
+      environmentId: 'env-remote',
       type: 'markdown_file',
       config: { type: 'markdown_file', path: '/home/me/TODO.md' },
     });
@@ -273,7 +277,7 @@ describe('continuousBuildScheduler', () => {
     await db
       .update(environmentsTable)
       .set({ status: 'connected' })
-      .where(eq(environmentsTable.id, 'env-ssh'));
+      .where(eq(environmentsTable.id, 'env-remote'));
     await continuousBuildScheduler.scheduleNext('ws1');
     expect(await countQueuedTasks(db, 'ws1')).toBe(1);
   });

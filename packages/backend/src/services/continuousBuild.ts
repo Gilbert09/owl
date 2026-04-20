@@ -147,16 +147,13 @@ class ContinuousBuildScheduler {
   private async isSourceEnvironmentReady(source: BacklogSource): Promise<boolean> {
     const envId = source.environmentId;
     if (!envId) {
-      // No env specified — ready if we have *any* executable fallback:
-      // a local env (always ready) or a connected daemon.
+      // No env specified — ready if any env's daemon is currently
+      // connected (both local and remote envs are daemon-backed now).
       const envs = await environmentService.getAllEnvironments();
-      return envs.some(
-        (e) => e.type === 'local' || (e.type === 'daemon' && e.status === 'connected')
-      );
+      return envs.some((e) => e.status === 'connected');
     }
     const env = await environmentService.getEnvironment(envId);
     if (!env) return false;
-    if (env.type === 'local') return true;
     return env.status === 'connected';
   }
 

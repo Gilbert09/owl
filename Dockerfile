@@ -2,17 +2,14 @@
 # whole workspace and runs tsc, then a slim runtime that keeps only the
 # backend's compiled output plus the node_modules the builder prepared.
 #
-# Slice 4c dropped node-pty. ssh2 is the only remaining native dep —
-# it ships prebuilds for linux-x64 so we don't need build-essential at
-# runtime. Kept in the builder image just in case a transitive dep
-# grows a native binding later.
+# The backend has no native deps after the "daemon everywhere" refactor
+# (ssh2 + node-pty were dropped). build-essential is retained in the
+# builder image as cheap insurance in case a transitive dep grows a
+# native binding later.
 
 # ---------- Builder ----------
 FROM node:22-bookworm-slim AS builder
 
-# node-gyp needs python3 + build-essential for any native module whose
-# prebuilds don't cover linux-x64 + node 22. Retained for defense even
-# though ssh2's prebuild normally covers this case.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends python3 build-essential \
  && rm -rf /var/lib/apt/lists/*
@@ -28,10 +25,8 @@ COPY packages/cli/package.json ./packages/cli/
 COPY packages/mcp-server/package.json ./packages/mcp-server/
 COPY apps/desktop/package.json ./apps/desktop/
 
-# Install everything, including native modules. --ignore-scripts skips
-# apps/desktop's electron devtools postinstall (we don't ship the
-# desktop binary here) but ssh2 still gets its prebuild extracted
-# because those live in the tarball, not in scripts.
+# Install everything. --ignore-scripts skips apps/desktop's electron
+# devtools postinstall (we don't ship the desktop binary here).
 RUN npm ci --ignore-scripts
 
 # Now copy sources and build.
@@ -39,8 +34,7 @@ COPY packages/shared ./packages/shared
 COPY packages/backend ./packages/backend
 
 RUN npm run build --workspace=@fastowl/shared \
- && npm run build --workspace=@fastowl/backend \
- && npm rebuild --workspace=@fastowl/backend ssh2
+ && npm run build --workspace=@fastowl/backend
 
 # Prune to production-only node_modules before the runtime stage picks
 # them up. `--omit=dev` drops devDependencies across the workspace;

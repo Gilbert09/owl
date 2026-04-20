@@ -677,13 +677,13 @@ function EnvironmentsSettings() {
   const handleToggleBypass = async (env: Environment, next: boolean) => {
     // Extra friction for flipping a LOCAL env into "bypass everything"
     // mode — that's the your-whole-machine-is-at-stake branch.
-    if (next && env.type !== 'daemon') {
+    if (next && env.type === 'local') {
       const ok = confirm(
         `Allow unattended Claude runs on "${env.name}" to bypass all permission prompts?\n\n` +
-        `This environment is type "${env.type}" — autonomous tasks will be able to run any shell command, ` +
+        `This is your own machine — autonomous tasks will be able to run any shell command, ` +
         `edit any file, and call any MCP tool WITHOUT asking you first. Use only if you trust the tasks ` +
         `that will run here (e.g., your own backlog against your own repo).\n\n` +
-        `Recommended: keep this OFF for local / ssh envs; only enable for disposable daemon VMs.`
+        `Recommended: keep this OFF for local envs; only enable for disposable remote VMs.`
       );
       if (!ok) return;
     }
@@ -768,14 +768,15 @@ function EnvironmentsSettings() {
                       {env.status}
                     </Badge>
                   </div>
-                  {env.type === 'ssh' && env.config.type === 'ssh' && (
-                    <p className="text-sm text-muted-foreground mt-1">
-                      {env.config.username}@{env.config.host}:{env.config.port}
-                    </p>
-                  )}
                   {env.type === 'local' && (
                     <p className="text-sm text-muted-foreground mt-1">
-                      Local machine
+                      This machine (bundled daemon)
+                    </p>
+                  )}
+                  {env.type === 'remote' && env.config.hostname && (
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Remote daemon{' '}
+                      <span className="font-mono">{env.config.hostname}</span>
                     </p>
                   )}
                   {env.error && (
@@ -797,11 +798,11 @@ function EnvironmentsSettings() {
                         Allow unattended Claude runs to bypass permission prompts
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        {env.type === 'daemon'
-                          ? 'Recommended for throwaway daemon VMs — the blast radius is bounded to this machine.'
+                        {env.type === 'remote'
+                          ? 'Recommended for throwaway remote VMs — the blast radius is bounded to that machine.'
                           : env.autonomousBypassPermissions
-                            ? 'Enabled on a non-daemon env: Claude can run any shell command and edit any file on this machine during autonomous tasks.'
-                            : 'Off (recommended for non-daemon envs). Autonomous tasks use acceptEdits mode; they may pause on bash / MCP trust prompts — you can answer from the task terminal input below.'}
+                            ? 'Enabled on your local machine: Claude can run any shell command and edit any file on this machine during autonomous tasks.'
+                            : 'Off (recommended for local envs). Autonomous tasks use acceptEdits mode; they may pause on bash / MCP trust prompts — you can answer from the task terminal input below.'}
                       </p>
                     </div>
                   </label>

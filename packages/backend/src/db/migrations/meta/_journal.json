@@ -64,6 +64,13 @@
       "when": 1776685320956,
       "tag": "0008_default_structured_renderer",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1778352000000,
+      "tag": "0009_daemon_everywhere",
+      "breakpoints": true
     }
   ]
 }
