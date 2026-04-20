@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   MessageSquare,
   GitPullRequest,
@@ -6,6 +6,7 @@ import {
   CheckCircle,
   Clock,
   MoreHorizontal,
+  Shield,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -44,14 +45,7 @@ export function InboxPanel() {
     setActivePanel,
   } = useWorkspaceStore();
 
-  // Three buckets. "Actioned" items (user clicked an action button
-  // but didn't dismiss) stay visible under EARLIER so the history
-  // doesn't silently vanish — the 3-dots menu handles explicit
-  // dismissal (TODO).
-  const unreadItems = inboxItems.filter((i) => i.status === 'unread');
-  const earlierItems = inboxItems.filter(
-    (i) => i.status === 'read' || i.status === 'actioned'
-  );
+  const unreadCount = inboxItems.filter((i) => i.status === 'unread').length;
 
   /**
    * Dispatch an inbox action. `view_task` + `view_agent` just
@@ -74,7 +68,6 @@ export function InboxPanel() {
       }
       return;
     }
-    // Generic "dismiss-style" action.
     markInboxActioned(item.id);
     void api.inbox.markActioned(item.id).catch((err) =>
       console.error('[inbox] markActioned failed:', err)
@@ -96,7 +89,7 @@ export function InboxPanel() {
         <div>
           <h2 className="text-lg font-semibold">Inbox</h2>
           <p className="text-sm text-muted-foreground">
-            {unreadItems.length} items need attention
+            {unreadCount} {unreadCount === 1 ? 'item needs' : 'items need'} attention
           </p>
         </div>
         <div className="flex gap-2">
@@ -106,7 +99,9 @@ export function InboxPanel() {
         </div>
       </div>
 
-      {/* Content */}
+      {/* Content — single ordered list. Read/actioned items stay
+          visible (dimmed) so clicking an unread item doesn't feel
+          like the card vanished. */}
       <ScrollArea className="flex-1">
         {inboxItems.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64 text-center p-4">
@@ -118,40 +113,14 @@ export function InboxPanel() {
           </div>
         ) : (
           <div className="p-4 space-y-2">
-            {unreadItems.length > 0 && (
-              <div className="mb-4">
-                <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                  NEW
-                </h3>
-                <div className="space-y-2">
-                  {unreadItems.map((item) => (
-                    <InboxItemCard
-                      key={item.id}
-                      item={item}
-                      onRead={() => handleRead(item)}
-                      onAction={(action) => handleAction(item, action)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
-            {earlierItems.length > 0 && (
-              <div>
-                <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                  EARLIER
-                </h3>
-                <div className="space-y-2">
-                  {earlierItems.map((item) => (
-                    <InboxItemCard
-                      key={item.id}
-                      item={item}
-                      onRead={() => handleRead(item)}
-                      onAction={(action) => handleAction(item, action)}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
+            {inboxItems.map((item) => (
+              <InboxItemCard
+                key={item.id}
+                item={item}
+                onRead={() => handleRead(item)}
+                onAction={(action) => handleAction(item, action)}
+              />
+            ))}
           </div>
         )}
       </ScrollArea>
@@ -168,13 +137,16 @@ interface InboxItemCardProps {
 function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
   const Icon = typeIcons[item.type] || Clock;
   const isUnread = item.status === 'unread';
+  const isActioned = item.status === 'actioned';
+  const permission = extractPermissionContext(item);
 
   return (
     <Card
       className={cn(
         'p-3 border-l-4 cursor-pointer transition-colors hover:bg-accent/50',
         priorityColors[item.priority],
-        isUnread && 'bg-accent/30'
+        isUnread && 'bg-accent/30',
+        isActioned && 'opacity-60'
       )}
       onClick={onRead}
     >
@@ -204,6 +176,11 @@ function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
             {isUnread && (
               <div className="w-2 h-2 rounded-full bg-primary flex-shrink-0" />
             )}
+            {isActioned && (
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                Done
+              </Badge>
+            )}
           </div>
           <p className="text-xs text-muted-foreground truncate mt-0.5">
             {item.summary}
@@ -228,6 +205,19 @@ function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
           <MoreHorizontal className="w-4 h-4" />
         </Button>
       </div>
+      {permission && !isActioned && (
+        <div
+          className="mt-3 ml-11"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <InboxPermissionControls
+            taskId={String(item.source.id ?? '')}
+            requestId={permission.requestId}
+            toolName={permission.toolName}
+            toolInput={permission.toolInput}
+          />
+        </div>
+      )}
       {item.actions.length > 0 && (
         <div className="flex gap-2 mt-3 ml-11">
           {item.actions.slice(0, 2).map((action) => (
@@ -248,6 +238,197 @@ function InboxItemCard({ item, onRead, onAction }: InboxItemCardProps) {
       )}
     </Card>
   );
+}
+
+/**
+ * Shape of the `data` blob that `permissionInbox` stores on
+ * `agent_question` inbox items. Optional because other item types
+ * (agent_completed, pr_review, etc.) don't set it.
+ */
+interface InboxPermissionData {
+  latestRequestId?: string;
+  latestTool?: string;
+  latestToolInput?: unknown;
+  pendingRequestIds?: string[];
+}
+
+function extractPermissionContext(item: InboxItem): {
+  requestId: string;
+  toolName: string;
+  toolInput: unknown;
+} | null {
+  if (item.type !== 'agent_question') return null;
+  const data = item.data as InboxPermissionData | undefined;
+  if (!data) return null;
+  if (!data.latestRequestId || !data.latestTool) return null;
+  if (!data.pendingRequestIds || data.pendingRequestIds.length === 0) return null;
+  return {
+    requestId: data.latestRequestId,
+    toolName: data.latestTool,
+    toolInput: data.latestToolInput,
+  };
+}
+
+/**
+ * Inline Approve / Deny controls rendered directly on the inbox
+ * card. Same backend endpoint as the task-panel permission card —
+ * once the response lands, the permissionInbox service auto-marks
+ * the item `actioned` and emits `inbox:update`, so the card dims
+ * itself without a refresh.
+ */
+function InboxPermissionControls({
+  taskId,
+  requestId,
+  toolName,
+  toolInput,
+}: {
+  taskId: string;
+  requestId: string;
+  toolName: string;
+  toolInput: unknown;
+}) {
+  const [busy, setBusy] = useState<null | 'allow' | 'deny' | 'allow-always'>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const respond = async (decision: 'allow' | 'deny', persist: boolean) => {
+    const btn = decision === 'deny' ? 'deny' : persist ? 'allow-always' : 'allow';
+    setBusy(btn);
+    setError(null);
+    try {
+      await api.tasks.respondToPermission(taskId, requestId, decision, persist);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to respond');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="rounded border border-yellow-500/30 bg-yellow-500/5 p-2.5">
+      <div className="flex items-center gap-2 text-xs mb-2">
+        <Shield className="w-3.5 h-3.5 text-yellow-500" />
+        <span className="font-semibold">Approve {toolName}?</span>
+      </div>
+      <PermissionInputPreview toolName={toolName} toolInput={toolInput} />
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button size="sm" onClick={() => respond('allow', false)} disabled={busy !== null}>
+          {busy === 'allow' ? '…' : 'Allow once'}
+        </Button>
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => respond('allow', true)}
+          disabled={busy !== null}
+          title="Pre-approve this tool on this environment"
+        >
+          {busy === 'allow-always' ? '…' : `Allow always (${toolName})`}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="text-red-500 hover:text-red-600"
+          onClick={() => respond('deny', false)}
+          disabled={busy !== null}
+        >
+          {busy === 'deny' ? '…' : 'Deny'}
+        </Button>
+        {error && (
+          <span className="text-xs text-red-500 self-center">{error}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Light-weight version of AgentConversation's ToolInputPreview —
+ * same "pick the decision-relevant field per tool" idea but trimmed
+ * for the inbox's tighter density.
+ */
+function PermissionInputPreview({
+  toolName,
+  toolInput,
+}: {
+  toolName: string;
+  toolInput: unknown;
+}) {
+  if (!toolInput || typeof toolInput !== 'object') return null;
+  const input = toolInput as Record<string, unknown>;
+
+  const rows: Array<{ label: string; value: string; mono?: boolean }> = [];
+  const add = (label: string, value: unknown, mono = false) => {
+    if (value === undefined || value === null || value === '') return;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    rows.push({ label, value: truncate(text, 220), mono });
+  };
+
+  switch (toolName) {
+    case 'Bash':
+      add('command', input.command, true);
+      add('description', input.description);
+      break;
+    case 'Grep':
+      add('pattern', input.pattern, true);
+      add('path', input.path, true);
+      add('glob', input.glob, true);
+      break;
+    case 'Glob':
+      add('pattern', input.pattern, true);
+      add('path', input.path, true);
+      break;
+    case 'Read':
+      add('file', input.file_path, true);
+      break;
+    case 'Edit':
+    case 'Write':
+      add('file', input.file_path, true);
+      break;
+    case 'WebFetch':
+    case 'WebSearch':
+      add('url', input.url, true);
+      add('query', input.query);
+      break;
+    case 'Task':
+    case 'Agent':
+      add('description', input.description);
+      add('subagent', input.subagent_type);
+      break;
+    default: {
+      // Unknown tool — pick the first two string fields if nothing
+      // matched. Keeps the card useful without blowing out the JSON.
+      const entries = Object.entries(input).slice(0, 3);
+      for (const [k, v] of entries) {
+        add(k, v, typeof v === 'string');
+      }
+    }
+  }
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="bg-black/30 rounded p-2 space-y-1 text-xs">
+      {rows.map((row) => (
+        <div key={row.label} className="flex gap-2 items-baseline">
+          <span className="text-[10px] uppercase tracking-wide text-muted-foreground shrink-0">
+            {row.label}
+          </span>
+          <span
+            className={cn(
+              'break-all',
+              row.mono && 'font-mono'
+            )}
+          >
+            {row.value}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function truncate(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max) + '…';
 }
 
 function formatTime(dateString: string): string {

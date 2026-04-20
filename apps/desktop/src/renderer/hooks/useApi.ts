@@ -9,6 +9,7 @@ import type {
   TaskAgentStatusEvent,
   TaskEventBroadcast,
   InboxNewEvent,
+  InboxUpdateEvent,
   EnvironmentStatusEvent,
   WorkspaceSettings,
 } from '@fastowl/shared';
@@ -22,6 +23,7 @@ export function useApiConnection() {
     updateAgent,
     updateTask,
     addInboxItem,
+    updateInboxItem,
     updateEnvironment,
   } = useWorkspaceStore();
 
@@ -142,6 +144,14 @@ export function useApiConnection() {
       })
     );
 
+    // Inbox item updates (permissionInbox coalesces pending prompts
+    // into one `agent_question` row and patches it as prompts resolve).
+    unsubscribers.push(
+      wsClient.on<InboxUpdateEvent>('inbox:update', (payload) => {
+        updateInboxItem(payload.itemId, payload.updates);
+      })
+    );
+
     // Environment status updates
     unsubscribers.push(
       wsClient.on<EnvironmentStatusEvent>('environment:status', (payload) => {
@@ -155,7 +165,7 @@ export function useApiConnection() {
     return () => {
       unsubscribers.forEach((unsub) => unsub());
     };
-  }, [updateAgent, updateTask, addInboxItem, updateEnvironment]);
+  }, [updateAgent, updateTask, addInboxItem, updateInboxItem, updateEnvironment]);
 }
 
 /**

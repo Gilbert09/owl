@@ -89,6 +89,7 @@ interface WorkspaceState {
 
   setInboxItems: (items: InboxItem[]) => void;
   addInboxItem: (item: InboxItem) => void;
+  updateInboxItem: (id: string, updates: Partial<InboxItem>) => void;
   markInboxRead: (id: string) => void;
   markInboxActioned: (id: string) => void;
 
@@ -172,6 +173,22 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
       inboxItems: [item, ...state.inboxItems],
       unreadCount: state.unreadCount + (item.status === 'unread' ? 1 : 0),
     })),
+
+  updateInboxItem: (id, updates) =>
+    set((state) => {
+      const existing = state.inboxItems.find((i) => i.id === id);
+      if (!existing) return state;
+      const next = { ...existing, ...updates };
+      // Keep `unreadCount` honest when status transitions involve
+      // unread. Backend's permissionInbox coalesces these.
+      let unreadDelta = 0;
+      if (existing.status === 'unread' && next.status !== 'unread') unreadDelta = -1;
+      else if (existing.status !== 'unread' && next.status === 'unread') unreadDelta = 1;
+      return {
+        inboxItems: state.inboxItems.map((i) => (i.id === id ? next : i)),
+        unreadCount: Math.max(0, state.unreadCount + unreadDelta),
+      };
+    }),
 
   markInboxRead: (id) =>
     set((state) => ({

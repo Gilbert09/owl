@@ -432,6 +432,7 @@ export type WSEventType =
   | 'task:agent_status'
   | 'inbox:new'
   | 'inbox:update'
+  | 'inbox:remove'
   | 'environment:status'
   | 'connection:status';
 
@@ -473,6 +474,15 @@ export interface TaskAgentStatusEvent {
 
 export interface InboxNewEvent {
   item: InboxItem;
+}
+
+export interface InboxUpdateEvent {
+  itemId: string;
+  updates: Partial<InboxItem>;
+}
+
+export interface InboxRemoveEvent {
+  itemId: string;
 }
 
 export interface EnvironmentStatusEvent {

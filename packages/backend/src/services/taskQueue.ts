@@ -4,6 +4,7 @@ import type { Task, TaskPriority, Agent, TaskStatus, TaskType } from '@fastowl/s
 import { isAgentTask } from '@fastowl/shared';
 import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
+import { permissionService } from './permissionService.js';
 import { emitTaskStatus } from './websocket.js';
 import { getDbClient, type Database } from '../db/client.js';
 import {
@@ -119,9 +120,25 @@ class TaskQueueService extends EventEmitter {
 
     if (stuckTasks.length === 0) return;
 
-    console.log(`Found ${stuckTasks.length} stuck task(s), resetting to queued...`);
+    // Filter out tasks that LOOK stuck (no updated_at movement) but
+    // actually have a live permission prompt waiting on the user.
+    // The child is blocked on the hook → no stdout → no transcript
+    // persist → updated_at doesn't bump. But the agent is alive and
+    // waiting patiently. Don't flip those to failed.
+    const actionable = stuckTasks.filter((t) => {
+      if (permissionService.hasPendingForTask(t.id)) {
+        console.log(
+          `[TaskQueue] Task "${t.title}" looks stuck but has pending permission prompts — leaving alone`
+        );
+        return false;
+      }
+      return true;
+    });
+    if (actionable.length === 0) return;
+
+    console.log(`Found ${actionable.length} stuck task(s), resetting to queued...`);
     const now = new Date();
-    for (const task of stuckTasks) {
+    for (const task of actionable) {
       await this.db
         .update(tasksTable)
         .set({ status: 'queued', assignedAgentId: null, updatedAt: now })

@@ -200,6 +200,14 @@ class PermissionService extends EventEmitter {
     return out;
   }
 
+  /** True if the given task has at least one open permission prompt. */
+  hasPendingForTask(taskId: string): boolean {
+    for (const req of this.pending.values()) {
+      if (req.taskId === taskId) return true;
+    }
+    return false;
+  }
+
   private async isPreApproved(environmentId: string, toolName: string): Promise<boolean> {
     const rows = await this.db
       .select({ toolAllowlist: environmentsTable.toolAllowlist })

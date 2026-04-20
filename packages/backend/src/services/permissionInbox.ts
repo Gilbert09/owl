@@ -4,7 +4,7 @@ import type { InboxItem } from '@fastowl/shared';
 import { getDbClient, type Database } from '../db/client.js';
 import { inboxItems as inboxItemsTable, tasks as tasksTable } from '../db/schema.js';
 import { permissionService, type PendingRequest } from './permissionService.js';
-import { emitInboxNew } from './websocket.js';
+import { emitInboxNew, emitInboxUpdate } from './websocket.js';
 
 /**
  * Coalesces permission-prompt events into a single inbox item per task.
@@ -75,16 +75,21 @@ class PermissionInboxService {
       // Wait for the initial insert to land before updating — a row
       // that doesn't exist can't be updated.
       await existing.insertReady.catch(() => {});
+      const summary = `${pending.toolName} + ${count - 1} more tool${count > 2 ? 's' : ''} awaiting approval`;
+      const data = {
+        pendingRequestIds: Array.from(existing.pendingRequestIds),
+        latestTool: pending.toolName,
+        latestToolInput: pending.toolInput,
+        latestRequestId: pending.requestId,
+      };
       await this.db
         .update(inboxItemsTable)
-        .set({
-          summary: `${pending.toolName} + ${count - 1} more tool${count > 2 ? 's' : ''} awaiting approval`,
-          data: {
-            pendingRequestIds: Array.from(existing.pendingRequestIds),
-            latestTool: pending.toolName,
-          },
-        })
+        .set({ summary, data })
         .where(eq(inboxItemsTable.id, existing.inboxItemId));
+      emitInboxUpdate(existing.workspaceId, existing.inboxItemId, {
+        summary,
+        data,
+      });
       return;
     }
 
@@ -120,6 +125,17 @@ class PermissionInboxService {
     const { workspaceId, title } = taskRows[0];
     tracked.workspaceId = workspaceId;
 
+    const itemData = {
+      pendingRequestIds: Array.from(tracked.pendingRequestIds),
+      latestTool: pending.toolName,
+      // Carry the tool input into the inbox item so the desktop can
+      // render an approve/deny card without a round-trip back to the
+      // task panel. Renderer also uses `latestRequestId` to POST the
+      // decision on click.
+      latestToolInput: pending.toolInput,
+      latestRequestId: pending.requestId,
+    };
+
     const item: InboxItem = {
       id: inboxId,
       workspaceId,
@@ -132,10 +148,7 @@ class PermissionInboxService {
       actions: [
         { id: '1', label: 'Review', type: 'primary', action: 'view_task' },
       ],
-      data: {
-        pendingRequestIds: Array.from(tracked.pendingRequestIds),
-        latestTool: pending.toolName,
-      },
+      data: itemData,
       createdAt: new Date().toISOString(),
     };
 
@@ -150,7 +163,7 @@ class PermissionInboxService {
         summary: item.summary,
         source: item.source,
         actions: item.actions,
-        data: item.data,
+        data: itemData,
         createdAt: new Date(),
       });
       markInsertDone();
@@ -167,41 +180,48 @@ class PermissionInboxService {
     const tracked = this.byTask.get(ev.taskId);
     if (!tracked) return;
     tracked.pendingRequestIds.delete(ev.requestId);
+    const workspaceId = tracked.workspaceId;
+    const inboxItemId = tracked.inboxItemId;
 
     if (tracked.pendingRequestIds.size === 0) {
       // Last pending resolved — auto-action the item so it drops off
-      // the "needs attention" list.
+      // the "needs attention" list. Only if it's still unread, so we
+      // don't clobber a user who clicked through in the desktop.
       this.byTask.delete(ev.taskId);
-      await this.db
+      const now = new Date();
+      const data = { pendingRequestIds: [] as string[] };
+      const updated = await this.db
         .update(inboxItemsTable)
-        .set({
-          status: 'actioned',
-          actionedAt: new Date(),
-          data: { pendingRequestIds: [] },
-        })
+        .set({ status: 'actioned', actionedAt: now, data })
         .where(
           and(
-            eq(inboxItemsTable.id, tracked.inboxItemId),
-            // Only if it's still unread — respect a user who already
-            // clicked through and actioned it some other way.
+            eq(inboxItemsTable.id, inboxItemId),
             eq(inboxItemsTable.status, 'unread')
           )
-        );
+        )
+        .returning({ id: inboxItemsTable.id });
+      if (updated.length > 0) {
+        emitInboxUpdate(workspaceId, inboxItemId, {
+          status: 'actioned',
+          actionedAt: now.toISOString(),
+          data,
+        });
+      }
       return;
     }
 
     // Still open prompts — just patch the counter.
     const remaining = tracked.pendingRequestIds.size;
+    const summary =
+      remaining === 1
+        ? '1 tool awaiting approval'
+        : `${remaining} tools awaiting approval`;
+    const data = { pendingRequestIds: Array.from(tracked.pendingRequestIds) };
     await this.db
       .update(inboxItemsTable)
-      .set({
-        summary:
-          remaining === 1
-            ? '1 tool awaiting approval'
-            : `${remaining} tools awaiting approval`,
-        data: { pendingRequestIds: Array.from(tracked.pendingRequestIds) },
-      })
-      .where(eq(inboxItemsTable.id, tracked.inboxItemId));
+      .set({ summary, data })
+      .where(eq(inboxItemsTable.id, inboxItemId));
+    emitInboxUpdate(workspaceId, inboxItemId, { summary, data });
   }
 
   /** Test hook: reset in-memory state. */

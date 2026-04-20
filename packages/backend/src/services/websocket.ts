@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { eq } from 'drizzle-orm';
 import type {
   AgentEvent,
+  InboxItem,
   PermissionRequest,
   PermissionResponse,
   TaskStatus,
@@ -247,6 +248,18 @@ export function emitInboxNew(workspaceId: string, item: any): void {
   broadcastToWorkspace(workspaceId, {
     type: 'inbox:new',
     payload: { item },
+    timestamp: new Date().toISOString(),
+  });
+}
+
+export function emitInboxUpdate(
+  workspaceId: string,
+  itemId: string,
+  updates: Partial<InboxItem>
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'inbox:update',
+    payload: { itemId, updates },
     timestamp: new Date().toISOString(),
   });
 }
