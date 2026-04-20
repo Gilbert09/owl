@@ -160,6 +160,12 @@ export function taskRoutes(): Router {
       id,
       workspaceId: body.workspaceId,
       type: body.type,
+      // Auto-enqueue on create. The scheduler already treats `pending`
+      // and `queued` identically for picking work; going straight to
+      // `queued` makes the UI reflect the scheduler's intent without
+      // a 5s poll-lag. Users who want to create a task without queuing
+      // it can PATCH the status afterward.
+      status: 'queued',
       title: body.title,
       description: body.description,
       prompt: body.prompt ?? null,

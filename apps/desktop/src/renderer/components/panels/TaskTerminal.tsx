@@ -160,6 +160,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
       {/* Input Area — sends a message as the next stream-json turn. */}
       <TaskInputBar
+        taskStatus={task.status}
         agentStatus={agentStatus}
         inputValue={inputValue}
         onChange={setInputValue}
@@ -171,15 +172,23 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
 
 /**
  * Bottom-of-panel input. Auto-growing textarea; Enter sends,
- * Shift+Enter inserts a newline. Send is disabled while the agent is
- * mid-turn so the user doesn't queue a message thinking it interrupts.
+ * Shift+Enter inserts a newline.
+ *
+ * Disabled states:
+ *  - mid-turn (agent working / using a tool): user shouldn't queue
+ *    a message thinking it interrupts.
+ *  - task not in_progress (awaiting_review / completed / failed /
+ *    cancelled): the child process has exited, there's nothing to
+ *    send to. UI explains + suggests Retry.
  */
 function TaskInputBar({
+  taskStatus,
   agentStatus,
   inputValue,
   onChange,
   onSend,
 }: {
+  taskStatus: Task['status'];
   agentStatus: AgentStatus;
   inputValue: string;
   onChange: (v: string) => void;
@@ -206,12 +215,18 @@ function TaskInputBar({
     [onSend]
   );
 
-  const busy = agentStatus === 'working' || agentStatus === 'tool_use';
-  const placeholder = busy
-    ? 'Claude is working…'
-    : agentStatus === 'awaiting_input'
-      ? 'Type your response…'
-      : 'Send a message to Claude… (Shift+Enter for newline)';
+  const ended = taskStatus !== 'in_progress';
+  const busy = !ended && (agentStatus === 'working' || agentStatus === 'tool_use');
+  const disabled = ended || busy;
+  const placeholder = ended
+    ? taskStatus === 'awaiting_review'
+      ? 'Conversation ended. Click Retry on the task to continue.'
+      : `Task is ${taskStatus} — no active session.`
+    : busy
+      ? 'Claude is working…'
+      : agentStatus === 'awaiting_input'
+        ? 'Type your response…'
+        : 'Send a message to Claude… (Shift+Enter for newline)';
 
   return (
     <div
@@ -233,13 +248,13 @@ function TaskInputBar({
             'focus:outline-none focus:ring-2 focus:ring-ring',
             'min-h-[38px] max-h-[200px]'
           )}
-          disabled={busy}
-          autoFocus={agentStatus === 'awaiting_input'}
+          disabled={disabled}
+          autoFocus={!ended && agentStatus === 'awaiting_input'}
         />
         <Button
           size="sm"
           onClick={onSend}
-          disabled={!inputValue.trim() || busy}
+          disabled={!inputValue.trim() || disabled}
           className="h-[38px]"
         >
           <Send className="w-4 h-4 mr-1" />

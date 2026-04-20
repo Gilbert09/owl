@@ -1,4 +1,11 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ChevronDown, ChevronRight, Check, X, Shield, Wrench, Brain } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -29,12 +36,25 @@ export function AgentConversation({
   interactive = true,
 }: AgentConversationProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
+  // Track "was the user at the bottom before the latest re-render?" so
+  // we only auto-scroll on new events when they were following along.
+  // Reading scrollHeight/scrollTop inside the effect measures AFTER the
+  // new content has landed — by which point the old position is no
+  // longer the scroll bottom. Capturing on scroll + ref avoids that.
+  const wasAtBottomRef = useRef(true);
+  const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    // Be generous — a ~200px slop handles the permission card adding
+    // ~400px of content in a single tick without us ping-ponging.
+    wasAtBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+  }, []);
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (wasAtBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [transcript?.length]);
 
   const blocks = useMemo(() => buildBlocks(transcript ?? []), [transcript]);
@@ -50,6 +70,7 @@ export function AgentConversation({
   return (
     <div
       ref={scrollRef}
+      onScroll={handleScroll}
       className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2"
     >
       {blocks.map((block) => (
@@ -282,7 +303,11 @@ function BlockView({
 }
 
 function TextBlock({ text }: { text: string }) {
-  return <div className="whitespace-pre-wrap leading-relaxed">{renderMarkdownish(text)}</div>;
+  return (
+    <div className="whitespace-pre-wrap leading-relaxed break-words min-w-0">
+      {renderMarkdownish(text)}
+    </div>
+  );
 }
 
 function ThinkingBlock({ text }: { text: string }) {
@@ -533,19 +558,21 @@ function Collapsible({
   dim?: boolean;
 }) {
   return (
-    <div className={cn('rounded border border-white/5', dim && 'bg-black/20')}>
+    <div className={cn('rounded border border-white/5 overflow-hidden', dim && 'bg-black/20')}>
       <button
         type="button"
         onClick={onToggle}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs text-left hover:bg-white/5 rounded-t"
+        className="w-full flex items-start gap-2 px-2.5 py-1.5 text-xs text-left hover:bg-white/5 rounded-t"
       >
         {open ? (
-          <ChevronDown className="w-3 h-3 flex-none text-zinc-400" />
+          <ChevronDown className="w-3 h-3 flex-none text-zinc-400 mt-0.5" />
         ) : (
-          <ChevronRight className="w-3 h-3 flex-none text-zinc-400" />
+          <ChevronRight className="w-3 h-3 flex-none text-zinc-400 mt-0.5" />
         )}
-        {icon}
-        <span className="font-medium">{title}</span>
+        <span className="flex-none mt-0.5">{icon}</span>
+        <span className="font-medium min-w-0 flex-1 break-words">
+          {title}
+        </span>
       </button>
       {open && <div className="px-2.5 pb-2.5">{children}</div>}
     </div>
