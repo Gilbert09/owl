@@ -186,18 +186,28 @@ let devChild: ChildProcess | null = null;
  * Dev mode spawns `tsx packages/daemon/src/index.ts` under the desktop
  * app's lifetime. Restarting Electron restarts the daemon — which is
  * what you want when iterating on daemon code.
+ *
+ * __dirname in dev is `apps/desktop/.erb/dll/` (webpack main bundle
+ * lives there). Four levels up = repo root.
  */
 export function startDevDaemon(backendUrl: string): void {
   if (devChild) return;
-  const daemonEntry = path.join(__dirname, '../../../../packages/daemon/src/index.ts');
+  const repoRoot = path.resolve(__dirname, '../../../..');
+  const daemonEntry = path.join(repoRoot, 'packages/daemon/src/index.ts');
+  const tsxBin = path.join(repoRoot, 'node_modules/.bin/tsx');
   if (!fs.existsSync(daemonEntry)) {
     log.warn(`[localDaemon] dev daemon entry not found at ${daemonEntry}; skipping`);
     return;
   }
+  if (!fs.existsSync(tsxBin)) {
+    log.warn(`[localDaemon] tsx binary not found at ${tsxBin}; skipping`);
+    return;
+  }
   writeDaemonConfig({ backendUrl });
-  devChild = spawn('npx', ['tsx', daemonEntry, '--backend-url', backendUrl], {
+  devChild = spawn(tsxBin, [daemonEntry, '--backend-url', backendUrl], {
     stdio: 'pipe',
     env: { ...process.env },
+    cwd: repoRoot,
     detached: false,
   });
   devChild.stdout?.on('data', (d) => log.info(`[daemon] ${d.toString().trimEnd()}`));

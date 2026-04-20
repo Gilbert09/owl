@@ -4,6 +4,7 @@ import { MainLayout } from './components/layout/MainLayout';
 import { AuthProvider, useAuth } from './components/auth/AuthProvider';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { useApiConnection, useInitialDataLoad } from './hooks/useApi';
+import { useLocalDaemon } from './hooks/useLocalDaemon';
 import './App.css';
 
 const API_BASE = process.env.FASTOWL_API_URL || 'http://localhost:4747';
@@ -21,6 +22,7 @@ async function checkBackend(): Promise<boolean> {
 function AuthedApp() {
   useApiConnection();
   useInitialDataLoad();
+  useLocalDaemon();
   return <MainLayout />;
 }
 

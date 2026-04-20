@@ -6,12 +6,21 @@
  * When running `npm run build` or `npm run build:main`, this file is compiled to
  * `./src/main.js` using webpack. This gives us some performance wins.
  */
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { app, BrowserWindow, shell, ipcMain } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
+import {
+  installDaemon,
+  startDaemon,
+  startDevDaemon,
+  stopDevDaemon,
+  writeDaemonConfig,
+} from './localDaemon';
 
 class AppUpdater {
   constructor() {
@@ -106,6 +115,71 @@ ipcMain.handle('auth:drain-pending', async () => {
 });
 
 registerDeepLinkProtocol();
+
+// ============================================================================
+// Local daemon pairing + lifecycle
+// ============================================================================
+//
+// The renderer owns the Supabase JWT, so it creates the daemon env + mints
+// the pairing token via REST, then hands the token back to us so we can
+// write the daemon config and bring the daemon up. Works in both dev
+// (Electron-child tsx run) and prod (launchd/systemd user service).
+//
+// See docs/DAEMON_EVERYWHERE.md Slice 4.
+
+const daemonConfigPath = path.join(os.homedir(), '.fastowl/daemon.json');
+
+function readDaemonConfig(): { backendUrl?: string; deviceToken?: string } | null {
+  try {
+    const raw = fs.readFileSync(daemonConfigPath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('daemon:is-paired', async () => {
+  const cfg = readDaemonConfig();
+  return !!cfg?.deviceToken;
+});
+
+ipcMain.handle('daemon:host-label', async () => {
+  return os.hostname();
+});
+
+ipcMain.handle(
+  'daemon:configure-and-start',
+  async (_event, args: { backendUrl: string; pairingToken: string }) => {
+    writeDaemonConfig({ backendUrl: args.backendUrl, pairingToken: args.pairingToken });
+    if (app.isPackaged) {
+      await installDaemon({ backendUrl: args.backendUrl });
+      startDaemon();
+    } else {
+      startDevDaemon(args.backendUrl);
+    }
+    return { started: true };
+  },
+);
+
+// Already-paired path: renderer calls this after login if
+// `daemon:is-paired` returned true, so we don't start a fresh pairing.
+ipcMain.handle('daemon:ensure-running', async (_event, args: { backendUrl: string }) => {
+  const cfg = readDaemonConfig();
+  if (!cfg?.deviceToken) return { started: false, reason: 'not-paired' };
+  if (app.isPackaged) {
+    await installDaemon({ backendUrl: args.backendUrl });
+    startDaemon();
+  } else {
+    startDevDaemon(args.backendUrl);
+  }
+  return { started: true };
+});
+
+app.on('before-quit', () => {
+  // Dev daemon is a child of Electron — shut it down cleanly.
+  // The prod launchd/systemd daemon deliberately survives.
+  stopDevDaemon();
+});
 
 // ============================================================================
 
