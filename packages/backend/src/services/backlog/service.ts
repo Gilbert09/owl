@@ -352,10 +352,9 @@ async function readSourceContent(source: BacklogSource): Promise<string> {
   if (source.config.type === 'markdown_file') {
     const envId = source.environmentId ?? (await firstAvailableEnvironmentId());
     if (!envId) throw new Error('No environment available to read backlog source');
-    const { stdout, code } = await environmentService.exec(
-      envId,
-      `cat "${escapeShell(source.config.path)}"`
-    );
+    const { stdout, code } = await environmentService.run(envId, 'cat', [
+      source.config.path,
+    ]);
     if (code !== 0) {
       throw new Error(`Failed to read ${source.config.path} (exit ${code})`);
     }
@@ -387,10 +386,6 @@ async function firstAvailableEnvironmentId(): Promise<string | null> {
   if (local) return local.id;
   const remote = envs.find((e) => e.type === 'remote' && e.status === 'connected');
   return remote?.id ?? null;
-}
-
-function escapeShell(value: string): string {
-  return value.replace(/(["\\$`])/g, '\\$1');
 }
 
 function rowToSource(row: typeof backlogSourcesTable.$inferSelect): BacklogSource {

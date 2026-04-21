@@ -92,14 +92,24 @@ class EnvironmentService extends EventEmitter {
     await this.updateEnvironmentStatus(environmentId, 'disconnected');
   }
 
-  async exec(
+  /**
+   * Argv-based one-shot command on the env's daemon. `binary` must be
+   * in the daemon's `run` allowlist (`git`, `claude`, `cat` today).
+   * `stdinBase64` is optional bytes to feed on the child's stdin,
+   * which is closed after writing — needed for e.g. `git commit -F -`.
+   * Replaces the old shell-string `exec`; no shell is involved, so
+   * caller-supplied strings in `args` can never be interpreted as
+   * shell metacharacters.
+   */
+  async run(
     environmentId: string,
-    command: string,
-    options: { cwd?: string } = {},
+    binary: string,
+    args: string[],
+    options: { cwd?: string; stdinBase64?: string } = {},
   ): Promise<{ stdout: string; stderr: string; code: number }> {
     return daemonRegistry.request<{ stdout: string; stderr: string; code: number }>(
       environmentId,
-      { op: 'exec', command, cwd: options.cwd },
+      { op: 'run', binary, args, cwd: options.cwd, stdinBase64: options.stdinBase64 },
     );
   }
 

@@ -35,21 +35,19 @@ export function pickGenerationEnv(preferredEnvId?: string | null): string | null
  * Pro/Max subscription, API key, or whatever they've set up for normal
  * `claude` use. No backend secret required.
  *
- * The prompt is passed via base64 → shell var → quoted arg. Base64
- * payload contains only `[A-Za-z0-9+/=]` so it's safe inside single
- * quotes; the decoded content is then expanded as a single argv arg
- * via "$PROMPT" double-quotes, which preserves arbitrary content
- * (newlines, quotes, backticks, emoji) without any escaping concerns.
+ * The prompt is passed as a direct argv element — no shell, no
+ * escaping. Arbitrary bytes (newlines, quotes, backticks, emoji) flow
+ * through unchanged.
  *
  * Throws on non-zero exit so callers can fall back gracefully.
  */
 export async function runClaudeCli(envId: string, prompt: string): Promise<string> {
-  const promptB64 = Buffer.from(prompt, 'utf8').toString('base64');
-  const command =
-    `PROMPT=$(printf '%s' '${promptB64}' | base64 -d) && ` +
-    `claude --print --model ${HAIKU_MODEL} "$PROMPT"`;
-
-  const result = await environmentService.exec(envId, command);
+  const result = await environmentService.run(envId, 'claude', [
+    '--print',
+    '--model',
+    HAIKU_MODEL,
+    prompt,
+  ]);
   if (result.code !== 0) {
     throw new Error(
       `claude CLI failed (exit ${result.code}): ${result.stderr || result.stdout || '(no output)'}`

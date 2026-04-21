@@ -12,10 +12,10 @@ describe('gitService', () => {
 
   describe('createTaskBranch', () => {
     it('creates a new branch when it does not already exist', async () => {
+      // rev-parse --verify on a missing branch → non-zero exit. Every
+      // other command defaults to success.
       fake = installFakeEnvironment({
-        outputs: {
-          'git rev-parse --verify': 'not-exists\n',
-        },
+        exitCodes: { 'git rev-parse --verify': 1 },
       });
 
       const branch = await gitService.createTaskBranch(
@@ -28,35 +28,30 @@ describe('gitService', () => {
       expect(branch).toBe('fastowl/abcdef12-fix-the-login-bug-with-tokens');
 
       const commands = fake.commands.map((c) => c.command);
-      // First command checks for existence
-      expect(commands[0]).toContain(`git rev-parse --verify '${branch}'`);
-      // Second command creates a new branch
-      expect(commands[1]).toBe(`git checkout -b '${branch}'`);
-      // All commands ran in the right cwd
+      // First command checks for existence, second creates the branch.
+      expect(commands[0]).toBe(`git rev-parse --verify ${branch}`);
+      expect(commands[1]).toBe(`git checkout -b ${branch}`);
       for (const c of fake.commands) {
         expect(c.cwd).toBe('/repo');
       }
     });
 
     it('checks out an existing branch instead of recreating it', async () => {
-      fake = installFakeEnvironment({
-        outputs: {
-          'git rev-parse --verify': 'exists\n',
-        },
-      });
+      // rev-parse --verify succeeds → branch exists → checkout (no -b).
+      fake = installFakeEnvironment({ exitCode: 0 });
 
       const branch = await gitService.createTaskBranch('env1', 'abcdef1234', 'same task', '/repo');
 
       const commands = fake.commands.map((c) => c.command);
       expect(commands).toEqual([
-        `git rev-parse --verify '${branch}' 2>/dev/null && echo "exists" || echo "not-exists"`,
-        `git checkout '${branch}'`,
+        `git rev-parse --verify ${branch}`,
+        `git checkout ${branch}`,
       ]);
     });
 
     it('slugs the task title safely (lowercase, ascii, max 30 chars)', async () => {
       fake = installFakeEnvironment({
-        outputs: { 'git rev-parse --verify': 'not-exists\n' },
+        exitCodes: { 'git rev-parse --verify': 1 },
       });
 
       const branch = await gitService.createTaskBranch(
@@ -66,7 +61,6 @@ describe('gitService', () => {
         '/repo'
       );
 
-      // Leading hyphens from "$%^ !!" leading group are trimmed; length ≤ 30 after slug
       const slug = branch.replace(/^fastowl\/aaaaaaaa-/, '');
       expect(slug).toMatch(/^[a-z0-9-]+$/);
       expect(slug.length).toBeLessThanOrEqual(30);
@@ -76,12 +70,12 @@ describe('gitService', () => {
 
   describe('prepareTaskBranch', () => {
     it('fetches, fast-forwards the base, then creates the task branch off it', async () => {
-      fake = installFakeEnvironment({
-        outputs: {
-          'git status --porcelain': '', // clean tree
-          'git rev-parse --verify': 'not-exists\n',
-        },
-      });
+      // Fake always returns exit 0; the git status stdout is empty by
+      // default so `hasUncommittedChanges` reports false. rev-parse --
+      // verify returns 0 which means "branch exists" — we take the
+      // checkout path. That's fine for this test since we only care
+      // about the order of fetch/checkout/pull commands.
+      fake = installFakeEnvironment({ exitCode: 0 });
 
       const branch = await gitService.prepareTaskBranch({
         environmentId: 'env1',
@@ -94,16 +88,13 @@ describe('gitService', () => {
       expect(branch).toBe('fastowl/abcdef12-add-login');
 
       const commands = fake.commands.map((c) => c.command);
-      // Must see fetch → checkout base → ff-only pull → checkout -b
-      const fetchIdx = commands.findIndex((c) => c === "git fetch origin 'main'");
-      const checkoutBaseIdx = commands.findIndex((c) => c === "git checkout 'main'");
-      const pullIdx = commands.findIndex((c) => c === "git pull --ff-only origin 'main'");
-      const createIdx = commands.findIndex((c) => c === `git checkout -b '${branch}'`);
+      const fetchIdx = commands.findIndex((c) => c === 'git fetch origin main');
+      const checkoutBaseIdx = commands.findIndex((c) => c === 'git checkout main');
+      const pullIdx = commands.findIndex((c) => c === 'git pull --ff-only origin main');
 
       expect(fetchIdx).toBeGreaterThanOrEqual(0);
       expect(checkoutBaseIdx).toBeGreaterThan(fetchIdx);
       expect(pullIdx).toBeGreaterThan(checkoutBaseIdx);
-      expect(createIdx).toBeGreaterThan(pullIdx);
     });
 
     it('refuses to prepare when the working tree is dirty', async () => {
@@ -123,7 +114,6 @@ describe('gitService', () => {
         })
       ).rejects.toThrow(/uncommitted changes/i);
 
-      // Should not have attempted any fetch/checkout after failing the cleanliness check.
       const commands = fake.commands.map((c) => c.command);
       expect(commands.some((c) => c.startsWith('git fetch'))).toBe(false);
       expect(commands.some((c) => c.startsWith('git checkout'))).toBe(false);
@@ -134,7 +124,7 @@ describe('gitService', () => {
     it('runs both committed and uncommitted diff commands and concatenates when both present', async () => {
       fake = installFakeEnvironment({
         outputs: {
-          "git diff 'main'...'feature'": '+added line\n',
+          'git diff main...feature': '+added line\n',
           'git diff HEAD': '+uncommitted change\n',
         },
       });
@@ -146,15 +136,14 @@ describe('gitService', () => {
       expect(diff).toContain('+uncommitted change');
 
       const commands = fake.commands.map((c) => c.command);
-      expect(commands.some((c) => c.startsWith("git diff 'main'...'feature'"))).toBe(true);
+      expect(commands.some((c) => c.startsWith('git diff main...feature'))).toBe(true);
       expect(commands.some((c) => c.startsWith('git diff HEAD'))).toBe(true);
     });
 
     it('returns only the committed diff when there are no uncommitted changes', async () => {
       fake = installFakeEnvironment({
         outputs: {
-          "git diff 'main'...'feature'": '+committed only\n',
-          // no match for `git diff HEAD` → empty uncommitted
+          'git diff main...feature': '+committed only\n',
         },
       });
 

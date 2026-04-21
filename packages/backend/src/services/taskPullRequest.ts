@@ -151,11 +151,12 @@ async function findPrTemplate(
   ];
   for (const path of candidates) {
     try {
-      const result = await environmentService.exec(
-        envId,
-        `test -f ${path} && cat ${path}`,
-        { cwd: workingDirectory }
-      );
+      // `cat` returns exit 0 iff the file exists and was readable; we
+      // don't need a separate `test -f`. Missing files just fall
+      // through to the next candidate.
+      const result = await environmentService.run(envId, 'cat', [path], {
+        cwd: workingDirectory,
+      });
       if (result.code === 0 && result.stdout.trim().length > 0) {
         return result.stdout;
       }

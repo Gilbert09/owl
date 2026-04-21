@@ -15,7 +15,7 @@ import {
   DAEMON_CLOSE_UNAUTHORIZED,
 } from '@fastowl/shared';
 import {
-  exec,
+  run,
   streamSpawn,
   writeSession,
   killSession,
@@ -259,8 +259,12 @@ export class DaemonWsClient {
     switch (p.op) {
       case 'ping':
         return { pong: true };
-      case 'exec':
-        return exec(p.command, p.cwd);
+      case 'run':
+        return run(p.binary, p.args, {
+          cwd: p.cwd,
+          stdinBase64: p.stdinBase64,
+          external: true,
+        });
       case 'stream_spawn':
         streamSpawn(
           p.sessionId,

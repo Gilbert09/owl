@@ -2,17 +2,15 @@ import { environmentService } from './environment.js';
 import { recordGitCommand } from './gitLogService.js';
 
 /**
- * Single-quote a string for POSIX shell. Every embedded `'` is escaped
- * by closing the quote, writing a literal `'`, and reopening —
- * `'\''` inside single quotes. Safe for arbitrary filenames; no
- * interpolation happens inside single quotes.
- */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, `'\\''`)}'`;
-}
-
-/**
- * Git service for managing branches and git operations on environments
+ * Git service for managing branches and git operations on environments.
+ *
+ * Every method ultimately calls `environmentService.run()` — the daemon
+ * spawns git directly with an argv array, no shell in the loop. This
+ * means attacker-controlled branch/base/message strings can't inject
+ * shell metacharacters into any of these commands.
+ *
+ * Short-circuits that used to rely on shell `&&`/`||` are implemented
+ * as exit-code branches in this file.
  */
 class GitService {
   /**
@@ -62,37 +60,36 @@ class GitService {
     baseBranch: string,
     workingDirectory?: string
   ): Promise<void> {
-    const qBase = shellQuote(baseBranch);
-    try {
-      await this.executeGitCommand(
-        environmentId,
-        `git:fetch:${Date.now()}`,
-        `git fetch origin ${qBase}`,
-        workingDirectory
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`git fetch origin ${baseBranch} failed: ${msg}`);
-    }
-
-    await this.executeGitCommand(
+    const fetch = await this.runGit(
       environmentId,
-      `git:checkout-base:${Date.now()}`,
-      `git checkout ${qBase}`,
+      ['fetch', 'origin', baseBranch],
       workingDirectory
     );
-
-    try {
-      await this.executeGitCommand(
-        environmentId,
-        `git:pull:${Date.now()}`,
-        `git pull --ff-only origin ${qBase}`,
-        workingDirectory
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+    if (fetch.code !== 0) {
       throw new Error(
-        `'${baseBranch}' has diverged from origin; resolve manually before starting a task: ${msg}`
+        `git fetch origin ${baseBranch} failed: ${fetch.stderr || fetch.stdout}`
+      );
+    }
+
+    const checkout = await this.runGit(
+      environmentId,
+      ['checkout', baseBranch],
+      workingDirectory
+    );
+    if (checkout.code !== 0) {
+      throw new Error(
+        `git checkout ${baseBranch} failed: ${checkout.stderr || checkout.stdout}`
+      );
+    }
+
+    const pull = await this.runGit(
+      environmentId,
+      ['pull', '--ff-only', 'origin', baseBranch],
+      workingDirectory
+    );
+    if (pull.code !== 0) {
+      throw new Error(
+        `'${baseBranch}' has diverged from origin; resolve manually before starting a task: ${pull.stderr || pull.stdout}`
       );
     }
   }
@@ -107,44 +104,33 @@ class GitService {
     taskTitle: string,
     workingDirectory?: string
   ): Promise<string> {
-    // Create a URL-safe branch name from the task title
     const slug = taskTitle
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-|-$/g, '')
       .slice(0, 30);
 
-    // Short task ID for uniqueness
     const shortId = taskId.slice(0, 8);
     const branchName = `fastowl/${shortId}-${slug}`;
 
-    // Execute git commands to create and checkout the branch
-    const sessionId = `git:${taskId}`;
-
-    const qBranch = shellQuote(branchName);
     try {
-      // Check if branch already exists
-      const checkResult = await this.executeGitCommand(
+      // Existence check via exit code — no shell `&&`/`||` needed.
+      const exists = await this.runGit(
         environmentId,
-        sessionId,
-        `git rev-parse --verify ${qBranch} 2>/dev/null && echo "exists" || echo "not-exists"`,
+        ['rev-parse', '--verify', branchName],
         workingDirectory
       );
 
-      if (checkResult.trim() === 'exists') {
-        // Branch exists, just checkout
-        await this.executeGitCommand(
+      if (exists.code === 0) {
+        await this.runGitOrThrow(
           environmentId,
-          sessionId,
-          `git checkout ${qBranch}`,
+          ['checkout', branchName],
           workingDirectory
         );
       } else {
-        // Create and checkout new branch from current HEAD
-        await this.executeGitCommand(
+        await this.runGitOrThrow(
           environmentId,
-          sessionId,
-          `git checkout -b ${qBranch}`,
+          ['checkout', '-b', branchName],
           workingDirectory
         );
       }
@@ -152,7 +138,6 @@ class GitService {
       return branchName;
     } catch (err) {
       console.error('Failed to create task branch:', err);
-      // Don't fail the task start if git fails
       throw err;
     }
   }
@@ -165,11 +150,9 @@ class GitService {
     branchName: string,
     workingDirectory?: string
   ): Promise<void> {
-    const sessionId = `git:checkout:${Date.now()}`;
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      sessionId,
-      `git checkout ${shellQuote(branchName)}`,
+      ['checkout', branchName],
       workingDirectory
     );
   }
@@ -181,14 +164,12 @@ class GitService {
     environmentId: string,
     workingDirectory?: string
   ): Promise<string> {
-    const sessionId = `git:branch:${Date.now()}`;
-    const result = await this.executeGitCommand(
+    const res = await this.runGitOrThrow(
       environmentId,
-      sessionId,
-      'git rev-parse --abbrev-ref HEAD',
+      ['rev-parse', '--abbrev-ref', 'HEAD'],
       workingDirectory
     );
-    return result.trim();
+    return res.stdout.trim();
   }
 
   /**
@@ -198,40 +179,33 @@ class GitService {
     environmentId: string,
     workingDirectory?: string
   ): Promise<boolean> {
-    const sessionId = `git:status:${Date.now()}`;
-    const result = await this.executeGitCommand(
+    const res = await this.runGitOrThrow(
       environmentId,
-      sessionId,
-      'git status --porcelain',
+      ['status', '--porcelain'],
       workingDirectory
     );
-    return result.trim().length > 0;
+    return res.stdout.trim().length > 0;
   }
 
   /**
-   * Stash current changes with a message
+   * Stash current changes with a message. Message flows as a single
+   * argv element; arbitrary bytes (newlines, quotes, etc.) are safe.
    */
   async stashChanges(
     environmentId: string,
     message: string,
     workingDirectory?: string
   ): Promise<void> {
-    const sessionId = `git:stash:${Date.now()}`;
-    // Pass message via base64 → decoded into a shell var → single-arg
-    // expansion ("$msg"). No interpolation inside double-quoted var
-    // expansion, so arbitrary bytes (quotes, backticks, $()) are safe.
-    const b64 = Buffer.from(message, 'utf8').toString('base64');
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      sessionId,
-      `msg=$(printf '%s' '${b64}' | base64 -d) && git stash push -m "$msg"`,
+      ['stash', 'push', '-m', message],
       workingDirectory
     );
   }
 
   /**
    * Stage everything and commit with the given message. Message is
-   * passed via base64 → stdin (`git commit -F -`) so arbitrary content
+   * passed via stdin (`git commit -F -`) so arbitrary content
    * (newlines, quotes, emoji, backticks) survives without any shell
    * escaping concerns. Returns the new commit SHA, or null if there
    * was nothing to commit.
@@ -241,41 +215,31 @@ class GitService {
     message: string,
     workingDirectory?: string
   ): Promise<string | null> {
-    await this.executeGitCommand(
+    await this.runGitOrThrow(environmentId, ['add', '-A'], workingDirectory);
+
+    const staged = await this.runGit(
       environmentId,
-      `git:add:${Date.now()}`,
-      'git add -A',
+      ['diff', '--cached', '--quiet'],
       workingDirectory
     );
-
-    // Fast check: `git diff --cached --quiet` exits 1 if there are staged
-    // changes. We use the exec result's exit code rather than parsing
-    // output. executeGitCommand throws on non-zero, so wrap and inspect.
-    const staged = await environmentService.exec(
-      environmentId,
-      'git diff --cached --quiet',
-      { cwd: workingDirectory }
-    );
     if (staged.code === 0) {
-      // Nothing staged after `git add -A` — working tree was clean.
       return null;
     }
 
     const b64 = Buffer.from(message, 'utf8').toString('base64');
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:commit:${Date.now()}`,
-      `printf '%s' '${b64}' | base64 -d | git commit -F -`,
-      workingDirectory
+      ['commit', '-F', '-'],
+      workingDirectory,
+      b64
     );
 
-    const sha = await this.executeGitCommand(
+    const sha = await this.runGitOrThrow(
       environmentId,
-      `git:rev-parse:${Date.now()}`,
-      'git rev-parse HEAD',
+      ['rev-parse', 'HEAD'],
       workingDirectory
     );
-    return sha.trim();
+    return sha.stdout.trim();
   }
 
   /**
@@ -291,10 +255,9 @@ class GitService {
     if (!/^[a-zA-Z0-9/_.-]+$/.test(branch)) {
       throw new Error(`Refusing to push suspicious branch name: ${branch}`);
     }
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:push:${Date.now()}`,
-      `git push -u origin ${shellQuote(branch)}`,
+      ['push', '-u', 'origin', branch],
       workingDirectory
     );
   }
@@ -304,11 +267,6 @@ class GitService {
    * still-uncommitted working-tree changes AND not-yet-added untracked
    * files. One entry per path — the shape that drives the desktop
    * Files tab.
-   *
-   * Tracked changes come from `git diff --name-status/--numstat <base>`
-   * (working tree vs base, so both committed and uncommitted are
-   * included). Untracked files come from `ls-files --others` since
-   * `git diff` doesn't see them until they're added.
    */
   async getChangedFiles(
     environmentId: string,
@@ -323,27 +281,18 @@ class GitService {
       binary: boolean;
     }>
   > {
-    const safeExec = async (command: string): Promise<string> => {
-      try {
-        return await this.executeGitCommand(
-          environmentId,
-          `git:files:${Date.now()}`,
-          command,
-          workingDirectory
-        );
-      } catch {
-        // `git diff <base>` can fail if base doesn't resolve locally —
-        // return empty rather than bubbling; the Files tab should
-        // degrade to "untracked only" in that case.
-        return '';
-      }
+    const safeRun = async (args: string[]): Promise<string> => {
+      const res = await this.runGit(environmentId, args, workingDirectory);
+      // `git diff <base>` can fail if base doesn't resolve locally —
+      // return empty rather than bubbling; the Files tab should
+      // degrade to "untracked only" in that case.
+      return res.code === 0 ? res.stdout : '';
     };
 
-    const qBase = shellQuote(base);
     const [nameStatusOut, numStatOut, untrackedOut] = await Promise.all([
-      safeExec(`git diff -M --name-status ${qBase}`),
-      safeExec(`git diff -M --numstat ${qBase}`),
-      safeExec('git ls-files --others --exclude-standard'),
+      safeRun(['diff', '-M', '--name-status', base]),
+      safeRun(['diff', '-M', '--numstat', base]),
+      safeRun(['ls-files', '--others', '--exclude-standard']),
     ]);
 
     type Stat = { added: number; removed: number; binary: boolean };
@@ -354,7 +303,7 @@ class GitService {
       if (parts.length < 3) continue;
       const [aRaw, rRaw, ...rest] = parts;
       const binary = aRaw === '-' && rRaw === '-';
-      const path = rest[rest.length - 1]; // rename: "old => new" — take new
+      const path = rest[rest.length - 1];
       statMap.set(path, {
         added: binary ? 0 : Number.parseInt(aRaw, 10) || 0,
         removed: binary ? 0 : Number.parseInt(rRaw, 10) || 0,
@@ -409,29 +358,23 @@ class GitService {
     if (path.includes('\0') || path.startsWith('-')) {
       throw new Error(`Refusing suspicious path: ${path}`);
     }
-    // For untracked files `git diff <base> -- <path>` shows nothing;
-    // use `--no-index /dev/null <path>` to render them as new.
-    const tracked = await this.executeGitCommand(
+    const tracked = await this.runGit(
       environmentId,
-      `git:file-diff:${Date.now()}`,
-      `git diff ${base} -- ${shellQuote(path)}`,
+      ['diff', base, '--', path],
       workingDirectory
     );
-    if (tracked.trim().length > 0) return tracked;
-
-    try {
-      // `--no-index` returns exit code 1 when files differ (which is
-      // always, for a non-empty new file). executeGitCommand throws on
-      // non-zero, so we catch.
-      return await this.executeGitCommand(
-        environmentId,
-        `git:file-diff-untracked:${Date.now()}`,
-        `git --no-pager diff --no-index -- /dev/null ${shellQuote(path)} || true`,
-        workingDirectory
-      );
-    } catch {
-      return tracked; // fall back to the (empty) tracked result
+    if (tracked.code === 0 && tracked.stdout.trim().length > 0) {
+      return tracked.stdout;
     }
+
+    // `--no-index` returns exit code 1 when files differ (which is
+    // always, for a non-empty new file). Accept non-zero here.
+    const untracked = await this.runGit(
+      environmentId,
+      ['--no-pager', 'diff', '--no-index', '--', '/dev/null', path],
+      workingDirectory
+    );
+    return untracked.stdout;
   }
 
   /**
@@ -445,15 +388,19 @@ class GitService {
     base: string = 'main',
     workingDirectory?: string
   ): Promise<string> {
-    const qBase = shellQuote(base);
-    const qBranch = shellQuote(branch);
-    const out = await this.executeGitCommand(
+    const primary = await this.runGit(
       environmentId,
-      `git:diff-stat:${Date.now()}`,
-      `git diff --stat ${qBase}...${qBranch} 2>/dev/null || git diff --stat`,
+      ['diff', '--stat', `${base}...${branch}`],
       workingDirectory
     );
-    return out;
+    if (primary.code === 0) return primary.stdout;
+    // Base didn't resolve — fall back to "stat of whatever's staged".
+    const fallback = await this.runGit(
+      environmentId,
+      ['diff', '--stat'],
+      workingDirectory
+    );
+    return fallback.stdout;
   }
 
   /**
@@ -466,36 +413,32 @@ class GitService {
     base: string = 'main',
     workingDirectory?: string
   ): Promise<string> {
-    const sessionId = `git:diff:${Date.now()}`;
-    // git diff <base>...<branch> shows changes from base merge-base to branch tip
-    // Append working tree changes (uncommitted) with git diff HEAD
-    const qBase = shellQuote(base);
-    const qBranch = shellQuote(branch);
-    const committed = await this.executeGitCommand(
+    const committedPrimary = await this.runGit(
       environmentId,
-      `${sessionId}:committed`,
-      `git diff ${qBase}...${qBranch} 2>/dev/null || git diff ${qBranch}`,
+      ['diff', `${base}...${branch}`],
       workingDirectory
     );
-    const uncommitted = await this.executeGitCommand(
+    const committed =
+      committedPrimary.code === 0
+        ? committedPrimary.stdout
+        : (await this.runGit(environmentId, ['diff', branch], workingDirectory)).stdout;
+
+    const uncommittedRes = await this.runGit(
       environmentId,
-      `${sessionId}:uncommitted`,
-      'git diff HEAD 2>/dev/null',
+      ['diff', 'HEAD'],
       workingDirectory
     );
+    const uncommitted = uncommittedRes.code === 0 ? uncommittedRes.stdout : '';
+
     if (uncommitted.trim().length === 0) return committed;
     return committed + '\n\n--- Uncommitted changes ---\n' + uncommitted;
   }
 
   /**
    * Preserve the task's current state as a ref under
-   * `refs/fastowl/rejected/<taskId>`. If the working tree is dirty we
-   * use `git stash create` (a tree + index snapshot with HEAD as
-   * parent). If the tree is clean we still back up HEAD so the branch
-   * history is recoverable after we delete the branch.
-   *
-   * Returns the ref we wrote, or null if nothing could be backed up
-   * (shouldn't happen in practice — HEAD always exists).
+   * `refs/fastowl/<namespace>/<taskId>`. If the working tree is dirty
+   * we use `git stash create`; if clean we still back up HEAD so the
+   * branch history is recoverable after we delete the branch.
    */
   async stashToBackupRef(
     environmentId: string,
@@ -508,42 +451,37 @@ class GitService {
       throw new Error(`Refusing suspicious ref: ${ref}`);
     }
 
-    const createOut = await this.executeGitCommand(
+    const createOut = await this.runGitOrThrow(
       environmentId,
-      `git:stash-create:${Date.now()}`,
-      'git stash create',
+      ['stash', 'create'],
       workingDirectory
     );
-    const stashSha = createOut.trim();
+    const stashSha = createOut.stdout.trim();
     if (stashSha) {
       if (!/^[0-9a-f]{40}$/.test(stashSha)) {
         throw new Error(`stash create returned unexpected value: ${stashSha}`);
       }
-      await this.executeGitCommand(
+      await this.runGitOrThrow(
         environmentId,
-        `git:update-ref:${Date.now()}`,
-        `git update-ref ${shellQuote(ref)} ${stashSha}`,
+        ['update-ref', ref, stashSha],
         workingDirectory
       );
       return ref;
     }
 
-    // Clean tree — back up HEAD so branch history survives the delete.
-    const headOut = await this.executeGitCommand(
+    const headOut = await this.runGitOrThrow(
       environmentId,
-      `git:rev-parse-head:${Date.now()}`,
-      'git rev-parse HEAD',
+      ['rev-parse', 'HEAD'],
       workingDirectory
     );
-    const headSha = headOut.trim();
+    const headSha = headOut.stdout.trim();
     if (!headSha) return null;
     if (!/^[0-9a-f]{40}$/.test(headSha)) {
       throw new Error(`rev-parse HEAD returned unexpected value: ${headSha}`);
     }
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:update-ref-head:${Date.now()}`,
-      `git update-ref ${shellQuote(ref)} ${headSha}`,
+      ['update-ref', ref, headSha],
       workingDirectory
     );
     return ref;
@@ -551,52 +489,41 @@ class GitService {
 
   /**
    * Force-checkout the base branch and hard-reset to origin's tip,
-   * dropping any local commits or uncommitted tree state. Caller is
-   * responsible for having already preserved anything worth keeping
-   * (see `stashToBackupRef`). Untracked files are removed so the next
-   * task starts from a pristine tree.
+   * dropping any local commits or uncommitted tree state.
    */
   async resetToBase(
     environmentId: string,
     baseBranch: string,
     workingDirectory?: string
   ): Promise<void> {
-    const qBase = shellQuote(baseBranch);
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:checkout-base-f:${Date.now()}`,
-      `git checkout -f ${qBase}`,
+      ['checkout', '-f', baseBranch],
       workingDirectory
     );
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:reset-hard:${Date.now()}`,
-      `git reset --hard origin/${qBase}`,
+      ['reset', '--hard', `origin/${baseBranch}`],
       workingDirectory
     );
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:clean:${Date.now()}`,
-      'git clean -fd',
+      ['clean', '-fd'],
       workingDirectory
     );
   }
 
   /**
-   * Force-delete a branch without checking out default first. Assumes
-   * caller has already checked out somewhere else (e.g. via
-   * `resetToBase`). Uses `-D` so branches that never got pushed can be
-   * removed without git refusing to delete "unmerged" work.
+   * Force-delete a branch without checking out default first.
    */
   async forceDeleteBranch(
     environmentId: string,
     branchName: string,
     workingDirectory?: string
   ): Promise<void> {
-    await this.executeGitCommand(
+    await this.runGitOrThrow(
       environmentId,
-      `git:branch-D:${Date.now()}`,
-      `git branch -D ${shellQuote(branchName)}`,
+      ['branch', '-D', branchName],
       workingDirectory
     );
   }
@@ -609,55 +536,72 @@ class GitService {
     branchName: string,
     workingDirectory?: string
   ): Promise<void> {
-    const sessionId = `git:delete:${Date.now()}`;
-    // First checkout main/master to avoid "cannot delete checked out branch"
-    await this.executeGitCommand(
+    // Switch off the branch first to avoid "cannot delete checked out"
+    const tryMain = await this.runGit(
       environmentId,
-      sessionId,
-      'git checkout main 2>/dev/null || git checkout master',
+      ['checkout', 'main'],
       workingDirectory
     );
-    await this.executeGitCommand(
+    if (tryMain.code !== 0) {
+      await this.runGitOrThrow(
+        environmentId,
+        ['checkout', 'master'],
+        workingDirectory
+      );
+    }
+    await this.runGitOrThrow(
       environmentId,
-      sessionId,
-      `git branch -d ${shellQuote(branchName)}`,
+      ['branch', '-d', branchName],
       workingDirectory
     );
   }
 
   /**
-   * Execute a git command and return stdout. Uses the one-shot
-   * `exec` path on environmentService (no PTY) — we don't need
-   * an interactive shell for plumbing.
+   * Execute a git subcommand and return the raw result (no throw on
+   * non-zero exit). Callers inspect `code` themselves. Logs to the
+   * gitLogService for the desktop's Git tab.
    */
-  private async executeGitCommand(
+  private async runGit(
     environmentId: string,
-    _sessionId: string,
-    command: string,
-    workingDirectory?: string
-  ): Promise<string> {
+    args: string[],
+    workingDirectory?: string,
+    stdinBase64?: string
+  ): Promise<{ stdout: string; stderr: string; code: number }> {
     const start = Date.now();
-    const { stdout, stderr, code } = await environmentService.exec(environmentId, command, {
+    const result = await environmentService.run(environmentId, 'git', args, {
       cwd: workingDirectory,
+      stdinBase64,
     });
     const durationMs = Date.now() - start;
 
-    // Best-effort audit log so the desktop's Git tab can show what
-    // FastOwl actually did. No-op when no task context is active.
     void recordGitCommand({
       ts: new Date().toISOString(),
-      command,
+      command: `git ${args.join(' ')}`,
       cwd: workingDirectory,
-      exitCode: code,
-      stdoutPreview: stdout.slice(0, 500),
-      stderrPreview: stderr.slice(0, 500),
+      exitCode: result.code,
+      stdoutPreview: result.stdout.slice(0, 500),
+      stderrPreview: result.stderr.slice(0, 500),
       durationMs,
     });
 
-    if (code !== 0) {
-      throw new Error(`Git command failed: ${stderr || stdout}`);
+    return result;
+  }
+
+  /**
+   * Same as `runGit` but throws on non-zero exit. Use when callers
+   * would otherwise do `if (code !== 0) throw`.
+   */
+  private async runGitOrThrow(
+    environmentId: string,
+    args: string[],
+    workingDirectory?: string,
+    stdinBase64?: string
+  ): Promise<{ stdout: string; stderr: string; code: number }> {
+    const res = await this.runGit(environmentId, args, workingDirectory, stdinBase64);
+    if (res.code !== 0) {
+      throw new Error(`Git command failed: ${res.stderr || res.stdout}`);
     }
-    return stdout;
+    return res;
   }
 }
 

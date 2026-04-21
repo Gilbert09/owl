@@ -12,10 +12,20 @@ export interface FakeEnvironmentOptions {
   /**
    * Map from command substring → stdout the fake should emit before closing
    * the session. First match wins. Unmatched commands emit no output.
+   *
+   * For `run` (argv) calls the synthesized command string is
+   * `${binary} ${args.join(' ')}` — the pattern matches whichever part
+   * the test cares about.
    */
   outputs?: Record<string, string>;
   /** Exit code to send on session close. Defaults to 0. */
   exitCode?: number | null;
+  /**
+   * Optional per-command exit-code overrides. Substring match; first
+   * match wins. Useful for scripting branch flows like "rev-parse
+   * fails → create via -b" without juggling multiple fakes.
+   */
+  exitCodes?: Record<string, number>;
 }
 
 export interface FakeEnvironmentHandle {
@@ -35,7 +45,7 @@ export function installFakeEnvironment(
   opts: FakeEnvironmentOptions = {}
 ): FakeEnvironmentHandle {
   const commands: RecordedCommand[] = [];
-  const { outputs = {}, exitCode = 0 } = opts;
+  const { outputs = {}, exitCode = 0, exitCodes = {} } = opts;
 
   function resolveOutput(command: string): string {
     for (const [pattern, fixture] of Object.entries(outputs)) {
@@ -44,24 +54,33 @@ export function installFakeEnvironment(
     return '';
   }
 
+  function resolveExitCode(command: string): number {
+    for (const [pattern, code] of Object.entries(exitCodes)) {
+      if (command.includes(pattern)) return code;
+    }
+    return exitCode ?? 0;
+  }
+
   const originalSpawnStreaming =
     environmentService.spawnStreaming.bind(environmentService);
   const originalKill = environmentService.killSession.bind(environmentService);
   const originalCloseInput =
     environmentService.closeStreamInput.bind(environmentService);
-  const originalExec = environmentService.exec.bind(environmentService);
+  const originalRun = environmentService.run.bind(environmentService);
 
-  const execSpy = vi.fn(
+  const runSpy = vi.fn(
     async (
       environmentId: string,
-      command: string,
-      options: { cwd?: string } = {}
+      binary: string,
+      args: string[],
+      options: { cwd?: string; stdinBase64?: string } = {}
     ) => {
-      commands.push({ environmentId, sessionId: '(exec)', command, cwd: options.cwd });
+      const command = `${binary} ${args.join(' ')}`;
+      commands.push({ environmentId, sessionId: '(run)', command, cwd: options.cwd });
       return {
         stdout: resolveOutput(command),
         stderr: '',
-        code: exitCode ?? 0,
+        code: resolveExitCode(command),
       };
     }
   );
@@ -114,12 +133,12 @@ export function installFakeEnvironment(
     spawnStreaming: typeof environmentService.spawnStreaming;
     killSession: typeof environmentService.killSession;
     closeStreamInput: typeof environmentService.closeStreamInput;
-    exec: typeof environmentService.exec;
+    run: typeof environmentService.run;
   };
   svc.spawnStreaming = spawnStreamingSpy;
   svc.killSession = killSpy;
   svc.closeStreamInput = closeInputSpy;
-  svc.exec = execSpy;
+  svc.run = runSpy;
 
   return {
     commands,
@@ -127,7 +146,7 @@ export function installFakeEnvironment(
       svc.spawnStreaming = originalSpawnStreaming;
       svc.killSession = originalKill;
       svc.closeStreamInput = originalCloseInput;
-      svc.exec = originalExec;
+      svc.run = originalRun;
       environmentService.removeAllListeners('session:data');
       environmentService.removeAllListeners('session:stderr');
       environmentService.removeAllListeners('session:close');

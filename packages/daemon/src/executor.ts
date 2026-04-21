@@ -48,7 +48,16 @@ const ALLOWED_STREAM_BINARIES = new Set<string>([
   'fastowl',
 ]);
 
-function assertAllowedStreamBinary(binary: string): void {
+/**
+ * Binaries allowed by the `run` op — one-shot argv-based commands used
+ * for backend plumbing (git ops, reading files, one-shot claude CLI).
+ * Keep this smaller than the stream allowlist; `bash`/`sh` are
+ * intentionally excluded because callers that reach for them are
+ * effectively reopening the old shell-string exec surface.
+ */
+const ALLOWED_RUN_BINARIES = new Set<string>(['git', 'claude', 'cat']);
+
+function assertBareBinaryName(binary: string): void {
   if (typeof binary !== 'string' || binary.length === 0) {
     throw new Error('binary must be a non-empty string');
   }
@@ -58,8 +67,19 @@ function assertAllowedStreamBinary(binary: string): void {
   if (binary.includes('\0') || binary.includes('\n') || binary.includes('\r')) {
     throw new Error('binary must not contain control characters');
   }
+}
+
+function assertAllowedStreamBinary(binary: string): void {
+  assertBareBinaryName(binary);
   if (!ALLOWED_STREAM_BINARIES.has(binary)) {
-    throw new Error(`binary not in allowlist: ${binary}`);
+    throw new Error(`binary not in stream_spawn allowlist: ${binary}`);
+  }
+}
+
+function assertAllowedRunBinary(binary: string): void {
+  assertBareBinaryName(binary);
+  if (!ALLOWED_RUN_BINARIES.has(binary)) {
+    throw new Error(`binary not in run allowlist: ${binary}`);
   }
 }
 
@@ -137,71 +157,45 @@ export interface SessionEvents {
 }
 
 /**
- * Run a one-shot command and buffer its stdout/stderr. Used by
- * gitService and any non-interactive backend flow. `cwd` is optional;
- * missing means the daemon's working directory (usually $HOME).
- */
-export async function exec(
-  command: string,
-  cwd?: string
-): Promise<ExecResult> {
-  assertSafeCwd(cwd);
-  return new Promise((resolve) => {
-    const proc = spawn('bash', ['-c', command], {
-      cwd,
-      env: buildChildEnv(),
-    });
-
-    let stdout = '';
-    let stderr = '';
-    proc.stdout.on('data', (b: Buffer) => {
-      stdout += b.toString('utf-8');
-    });
-    proc.stderr.on('data', (b: Buffer) => {
-      stderr += b.toString('utf-8');
-    });
-
-    proc.on('close', (code) => {
-      resolve({ stdout, stderr, code: code ?? 0 });
-    });
-
-    proc.on('error', (err) => {
-      resolve({ stdout, stderr: stderr + (err.message ?? ''), code: -1 });
-    });
-  });
-}
-
-/**
  * Run a binary with a strict argv array — no shell, no interpolation.
- * Prefer this over `exec()` when the caller knows the binary and its
- * arguments ahead of time (e.g. daemon-local git plumbing). `binary` is
- * a bare name; stdin is closed. Stdout/stderr are buffered to UTF-8.
+ * Used by both the daemon's own git helpers and the backend's `run`
+ * op (via wsClient). `binary` is checked against the `run` allowlist
+ * when the caller is external (backend RPC); daemon-internal callers
+ * pass `{ external: false }` to reuse the helper for any binary.
+ * `stdinBase64` bytes, if present, are written to the child and stdin
+ * is closed. Stdout/stderr are buffered as UTF-8.
  */
 export async function run(
   binary: string,
   args: string[],
-  cwd?: string
+  opts: { cwd?: string; stdinBase64?: string; external?: boolean } = {}
 ): Promise<ExecResult> {
-  assertSafeCwd(cwd);
-  if (typeof binary !== 'string' || binary.length === 0) {
-    throw new Error('binary must be a non-empty string');
+  assertSafeCwd(opts.cwd);
+  if (opts.external) {
+    assertAllowedRunBinary(binary);
+  } else {
+    assertBareBinaryName(binary);
   }
-  if (binary.includes('\0')) {
-    throw new Error('binary must not contain control characters');
-  }
+  const stdio: ('ignore' | 'pipe')[] =
+    opts.stdinBase64 !== undefined ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'];
   return new Promise((resolve) => {
     const proc = spawn(binary, args, {
-      cwd,
+      cwd: opts.cwd,
       env: buildChildEnv(),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio,
     });
+
+    if (opts.stdinBase64 !== undefined && proc.stdin) {
+      proc.stdin.write(Buffer.from(opts.stdinBase64, 'base64'));
+      proc.stdin.end();
+    }
 
     let stdout = '';
     let stderr = '';
-    proc.stdout.on('data', (b: Buffer) => {
+    proc.stdout?.on('data', (b: Buffer) => {
       stdout += b.toString('utf-8');
     });
-    proc.stderr.on('data', (b: Buffer) => {
+    proc.stderr?.on('data', (b: Buffer) => {
       stderr += b.toString('utf-8');
     });
     proc.on('close', (code) => {

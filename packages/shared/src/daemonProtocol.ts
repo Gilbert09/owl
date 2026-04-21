@@ -71,7 +71,7 @@ export interface DaemonHelloAck {
 // `ProxyHttpRequest` below.
 
 export type DaemonRequestPayload =
-  | ExecRequest
+  | RunRequest
   | StreamSpawnRequest
   | WriteSessionRequest
   | CloseStreamInputRequest
@@ -97,10 +97,26 @@ export interface DaemonResponse {
 
 // ---------- Individual request payloads ----------
 
-export interface ExecRequest {
-  op: 'exec';
-  command: string;
+/**
+ * Argv-based one-shot execution. The daemon spawns `binary` directly
+ * (no shell), passing `args` as argv. `stdinBase64`, when present, is
+ * written to the child's stdin and the pipe is closed. Replaces the
+ * older shell-string `exec` op — backend side is responsible for any
+ * branching logic that used to rely on `&&`/`||`/pipes in the shell.
+ *
+ * Binary is checked against a daemon-side allowlist (see
+ * `executor.ts`). This is defense-in-depth against backend-side bugs
+ * leaking attacker bytes into a command, not a sandbox against a
+ * malicious backend — `git` itself is a capable RCE primitive via
+ * hooks and `-c` overrides.
+ */
+export interface RunRequest {
+  op: 'run';
+  binary: string;
+  args: string[];
   cwd?: string;
+  /** Optional stdin bytes. Base64. stdin is closed after writing. */
+  stdinBase64?: string;
 }
 
 export interface ExecResult {
