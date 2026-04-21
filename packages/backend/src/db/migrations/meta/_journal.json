@@ -78,6 +78,20 @@
       "when": 1778355000000,
       "tag": "0010_agents_permission_token",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1778800000000,
+      "tag": "0011_env_daemon_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1778810000000,
+      "tag": "0012_env_auto_update_daemon",
+      "breakpoints": true
     }
   ]
 }
