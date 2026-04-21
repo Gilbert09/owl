@@ -13,6 +13,7 @@ import { gitService } from '../services/git.js';
 import { resolveTaskGitContext } from '../services/gitContext.js';
 import { enterTaskGitLog, getGitLog } from '../services/gitLogService.js';
 import { prefetchCommitMessage } from '../services/commitMessagePrefetch.js';
+import { openPullRequestForTask } from '../services/taskPullRequest.js';
 import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
@@ -833,6 +834,12 @@ export function taskRoutes(): Router {
         console.log(`${tag}: pushing branch ${task.branch} to origin`);
         await gitService.pushBranch(envId, task.branch, workingDirectory);
         console.log(`${tag}: push done`);
+
+        // Auto-open a PR on the freshly-pushed branch. Fire-and-forget
+        // — any failure (no GH integration, existing PR, non-github
+        // remote) is captured onto task.metadata so the desktop can
+        // surface it without blocking the approve flow.
+        void openPullRequestForTask(task.id);
 
         // Final guard: working tree must be clean before we call this
         // task done. Catches anything subtle that left modifications

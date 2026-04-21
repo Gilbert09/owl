@@ -17,6 +17,7 @@ import {
   Hand,
   Trash2,
   GitCommit,
+  ExternalLink,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -717,6 +718,36 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             Completed {new Date(task.completedAt).toLocaleDateString()}
           </span>
         )}
+        {(() => {
+          const pr = (task.metadata as { pullRequest?: { number: number; url: string } } | undefined)
+            ?.pullRequest;
+          if (pr) {
+            return (
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 text-primary hover:underline"
+              >
+                <ExternalLink className="w-3 h-3" />
+                PR #{pr.number}
+              </a>
+            );
+          }
+          const prErr = (task.metadata as { pullRequestError?: string } | undefined)
+            ?.pullRequestError;
+          if (prErr) {
+            return (
+              <span
+                className="text-amber-600 dark:text-amber-500"
+                title={`PR not created: ${prErr}`}
+              >
+                PR failed
+              </span>
+            );
+          }
+          return null;
+        })()}
       </div>
 
       {/* Prompt — always shown when present, above tabs. Description
