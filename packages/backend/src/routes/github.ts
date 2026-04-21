@@ -5,7 +5,17 @@ import {
   handleAccessError,
   requireWorkspaceAccess,
 } from '../middleware/auth.js';
+import { rateLimit } from '../middleware/rateLimit.js';
 import type { ApiResponse } from '@fastowl/shared';
+
+// OAuth flows don't run more than a few times per user per hour. 20 per
+// 10 minutes per IP is generous for legitimate retries and blunts brute-
+// force attempts at guessing state tokens on /callback.
+const oauthRateLimit = rateLimit({
+  windowMs: 10 * 60_000,
+  max: 20,
+  message: 'Too many OAuth requests — slow down.',
+});
 
 // Store pending OAuth states (in production, use Redis or similar).
 // Keyed by the opaque state token; records which user started the flow
@@ -30,7 +40,7 @@ setInterval(() => {
 export function githubPublicRoutes(): Router {
   const router = Router();
 
-  router.get('/callback', async (req, res) => {
+  router.get('/callback', oauthRateLimit, async (req, res) => {
     const { code, state, error, error_description } = req.query;
 
     if (error) {
@@ -185,7 +195,7 @@ export function githubRoutes(): Router {
     res.json({ success: true, data: { configured: true, connected: false } });
   });
 
-  router.post('/connect', async (req, res) => {
+  router.post('/connect', oauthRateLimit, async (req, res) => {
     const workspaceId = await gateWorkspace(req, res, 'body');
     if (!workspaceId) return;
     if (!githubService.isConfigured()) {

@@ -5,6 +5,17 @@ import { getDbClient } from '../db/client.js';
 import { environments as environmentsTable } from '../db/schema.js';
 import { assertUser } from '../middleware/auth.js';
 import { daemonRegistry } from '../services/daemonRegistry.js';
+import { rateLimit } from '../middleware/rateLimit.js';
+
+// Pairing-token mint is a short, infrequent op — a few times per env
+// setup. 30 per 10 minutes per authenticated user is well beyond any
+// real flow, and cuts off scripted minting storms.
+const pairingTokenRateLimit = rateLimit({
+  windowMs: 10 * 60_000,
+  max: 30,
+  keyFn: (req) => req.user?.id ?? req.ip ?? 'anon',
+  message: 'Too many pairing-token requests.',
+});
 import type {
   Environment,
   EnvironmentConfig,
@@ -182,7 +193,7 @@ export function environmentRoutes(): Router {
   // --backend-url Y` on the target machine (or the desktop app's
   // useLocalDaemon hook hands it to the bundled daemon). Tokens expire
   // in 10m.
-  router.post('/:id/pairing-token', async (req, res) => {
+  router.post('/:id/pairing-token', pairingTokenRateLimit, async (req, res) => {
     const user = assertUser(req);
     const db = getDbClient();
     const rows = await db
