@@ -61,7 +61,7 @@ export function taskRoutes(): Router {
     }
 
     try {
-      const metadata = await generateTaskMetadata(body.prompt);
+      const metadata = await generateTaskMetadata(body.prompt, body.assignedEnvironmentId);
       res.json({ success: true, data: metadata } as ApiResponse<GenerateTaskMetadataResponse>);
     } catch (err) {
       console.error('Failed to generate task metadata:', err);
@@ -209,7 +209,7 @@ export function taskRoutes(): Router {
     // `task:update` so the desktop replaces the placeholder without
     // a manual refresh.
     if (body.prompt && isAIConfigured()) {
-      void generateTaskTitle(body.prompt)
+      void generateTaskTitle(body.prompt, body.assignedEnvironmentId)
         .then(async (generatedTitle) => {
           if (!generatedTitle || generatedTitle === body.title) return;
           const updatedAt = new Date();
@@ -743,6 +743,7 @@ export function taskRoutes(): Router {
             prompt: task.prompt,
             diffStat,
             diff,
+            preferredEnvId: envId,
           });
         }
 
@@ -991,6 +992,7 @@ export function taskRoutes(): Router {
       prompt: task.prompt,
       diffStat,
       diff,
+      preferredEnvId: task.assignedEnvironmentId ?? undefined,
     });
 
     res.json({ success: true, data: { message } } as ApiResponse<{ message: string }>);

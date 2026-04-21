@@ -629,6 +629,11 @@ export interface CreateTaskRequest {
 
 export interface GenerateTaskMetadataRequest {
   prompt: string;
+  /**
+   * Optional env hint — backend prefers running the LLM call on this
+   * env's daemon if it's connected. Falls back to any connected daemon.
+   */
+  assignedEnvironmentId?: string;
 }
 
 export interface GenerateTaskMetadataResponse {

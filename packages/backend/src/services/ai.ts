@@ -1,68 +1,94 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { TaskPriority, GenerateTaskMetadataResponse } from '@fastowl/shared';
-
-// Initialize Anthropic client (uses ANTHROPIC_API_KEY env var)
-let client: Anthropic | null = null;
-
-function getClient(): Anthropic {
-  if (!client) {
-    client = new Anthropic();
-  }
-  return client;
-}
-
-const TITLE_MODEL = 'claude-haiku-4-5-20251001';
+import { pickGenerationEnv, runClaudeCli } from './claudeCli.js';
 
 /**
- * Generate task title and description from a prompt using Claude Haiku
+ * AI helpers for background generation: task title refinement, task
+ * metadata, and commit messages.
+ *
+ * All calls fan out to a daemon's local `claude` CLI rather than
+ * hitting the Anthropic API directly. That way we don't manage a
+ * backend API key and each user's calls bill against their own
+ * Claude subscription. See `claudeCli.ts` for the transport details.
+ *
+ * Every helper has a deterministic fallback (first-N-chars of the
+ * prompt, etc.) so a missing daemon never blocks task creation —
+ * the feature degrades to "no LLM polish" rather than to "task fails".
  */
-export async function generateTaskMetadata(prompt: string): Promise<GenerateTaskMetadataResponse> {
-  const anthropic = getClient();
 
-  const systemPrompt = `You are a task metadata generator. Given a user's task prompt, generate:
-1. A concise title (max 60 characters)
-2. A brief description (1-2 sentences)
-3. A suggested priority (low, medium, high, or urgent)
+/**
+ * True when at least one daemon is connected and could service a
+ * background CLI call. The metadata route uses this to decide whether
+ * to call Claude at all or to immediately return the placeholder.
+ */
+export function isConfigured(): boolean {
+  return pickGenerationEnv(null) !== null;
+}
 
-Respond in JSON format only:
-{"title": "...", "description": "...", "suggestedPriority": "..."}`;
+/**
+ * Generate a concise (≤60 char) title for a task from its prompt.
+ * Called fire-and-forget after task create; the result is patched in
+ * via `task:update` WS event so the desktop replaces the placeholder
+ * without a manual refresh.
+ */
+export async function generateTaskTitle(
+  prompt: string,
+  preferredEnvId?: string | null
+): Promise<string> {
+  const fallback = prompt.slice(0, 60).trim() || 'New Task';
+  const envId = pickGenerationEnv(preferredEnvId);
+  if (!envId) return fallback;
+
+  const fullPrompt =
+    'You produce concise task titles. Respond with the title only — ' +
+    'no commentary, no quotes, no markdown, no trailing punctuation. ' +
+    'Maximum 60 characters.\n\n' +
+    `Generate a title for this task:\n\n${prompt}`;
 
   try {
-    const response = await anthropic.messages.create({
-      model: TITLE_MODEL,
-      max_tokens: 256,
-      messages: [
-        {
-          role: 'user',
-          content: `Generate task metadata for this prompt:\n\n${prompt}`,
-        },
-      ],
-      system: systemPrompt,
-    });
+    const text = await runClaudeCli(envId, fullPrompt);
+    const cleaned = text.trim().replace(/^["']|["']$/g, '').slice(0, 60);
+    return cleaned || fallback;
+  } catch (err) {
+    console.error('[ai] generateTaskTitle failed:', err);
+    return fallback;
+  }
+}
 
-    // Extract text content
-    const textContent = response.content.find(block => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
-      throw new Error('No text response from Claude');
-    }
+/**
+ * Generate task title + description + suggested priority from a prompt.
+ * Used by the create-task modal's metadata route.
+ */
+export async function generateTaskMetadata(
+  prompt: string,
+  preferredEnvId?: string | null
+): Promise<GenerateTaskMetadataResponse> {
+  const fallback: GenerateTaskMetadataResponse = {
+    title: prompt.slice(0, 60).trim() || 'New Task',
+    description: prompt.slice(0, 200).trim(),
+    suggestedPriority: 'medium',
+  };
+  const envId = pickGenerationEnv(preferredEnvId);
+  if (!envId) return fallback;
 
-    // Parse JSON response
-    const result = JSON.parse(textContent.text);
+  const fullPrompt =
+    'You generate task metadata. Output ONLY a JSON object on a single ' +
+    'line, no commentary, no markdown fences. Schema: ' +
+    '{"title": string (≤60 chars), "description": string (1-2 sentences), ' +
+    '"suggestedPriority": "low" | "medium" | "high" | "urgent"}.\n\n' +
+    `Generate metadata for this prompt:\n\n${prompt}`;
 
-    // Validate and sanitize
-    const title = String(result.title || 'New Task').slice(0, 60);
-    const description = String(result.description || prompt).slice(0, 500);
-    const suggestedPriority = validatePriority(result.suggestedPriority);
-
-    return { title, description, suggestedPriority };
-  } catch (error) {
-    console.error('Failed to generate task metadata:', error);
-    // Fallback to basic extraction
+  try {
+    const text = await runClaudeCli(envId, fullPrompt);
+    const cleaned = text.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
     return {
-      title: prompt.slice(0, 60).trim() || 'New Task',
-      description: prompt.slice(0, 200).trim(),
-      suggestedPriority: 'medium',
+      title: String(parsed.title || fallback.title).slice(0, 60),
+      description: String(parsed.description || fallback.description).slice(0, 500),
+      suggestedPriority: validatePriority(parsed.suggestedPriority),
     };
+  } catch (err) {
+    console.error('[ai] generateTaskMetadata failed:', err);
+    return fallback;
   }
 }
 
@@ -74,34 +100,23 @@ function validatePriority(priority: unknown): TaskPriority {
 }
 
 /**
- * Check if AI service is configured
- */
-export function isConfigured(): boolean {
-  return !!process.env.ANTHROPIC_API_KEY;
-}
-
-/**
  * Generate a commit message for an approved task from its title +
- * prompt + diff. Used by `POST /:id/approve` to fill in `git commit -m`
- * without forcing the user to hand-write one.
- *
- * Diff is truncated to keep the prompt bounded — Haiku is fast and
- * cheap but we'd still rather not send a 500k-line renames-only diff.
- * We send the `--stat` header first (which always fits) plus the first
- * N chars of the raw diff. Haiku gets enough signal to write a
- * reasonable Conventional-Commits subject without seeing every hunk.
- *
- * Falls back to `"<title>\n\n<prompt>"` on any failure — better to
- * commit something unglamorous than to block the approve flow.
+ * prompt + diff. Diff is truncated to keep the prompt bounded — Haiku
+ * is fast and cheap but we'd still rather not send a 500k-line
+ * renames-only diff. Falls back to `<title>\n\n<prompt>` on any
+ * failure — better to commit something unglamorous than to block
+ * the approve flow.
  */
 export async function generateCommitMessage(opts: {
   title: string;
   prompt?: string;
   diffStat?: string;
   diff?: string;
+  preferredEnvId?: string | null;
 }): Promise<string> {
   const fallback = buildCommitFallback(opts.title, opts.prompt);
-  if (!process.env.ANTHROPIC_API_KEY) return fallback;
+  const envId = pickGenerationEnv(opts.preferredEnvId);
+  if (!envId) return fallback;
 
   const diffBudget = 6000;
   const truncatedDiff =
@@ -109,27 +124,23 @@ export async function generateCommitMessage(opts: {
       ? opts.diff.slice(0, diffBudget) + '\n\n[… diff truncated …]'
       : opts.diff ?? '';
 
-  const sections: string[] = [`Task title: ${opts.title}`];
+  const sections: string[] = [
+    'You write git commit messages in the Conventional Commits style. ' +
+      'Respond with the commit message only — no commentary, no markdown ' +
+      'fences, no quotes. First line is a concise subject (≤72 chars, ' +
+      'lowercase type prefix like feat:/fix:/chore: when it fits). If the ' +
+      'change is non-trivial, add a blank line and a short body explaining ' +
+      'the why, wrapped at ~72 chars. Never mention the AI, the tooling, ' +
+      'or the task system.',
+    `Task title: ${opts.title}`,
+  ];
   if (opts.prompt) sections.push(`Original prompt:\n${opts.prompt}`);
   if (opts.diffStat) sections.push(`Diff stat:\n${opts.diffStat}`);
   if (truncatedDiff) sections.push(`Diff:\n${truncatedDiff}`);
 
   try {
-    const response = await getClient().messages.create({
-      model: TITLE_MODEL,
-      max_tokens: 300,
-      messages: [{ role: 'user', content: sections.join('\n\n') }],
-      system:
-        'You write git commit messages in the Conventional Commits style. ' +
-        'Respond with the commit message only — no commentary, no markdown fences, no quotes. ' +
-        'First line is a concise subject (≤ 72 chars, lowercase type prefix like feat:/fix:/chore: ' +
-        'when it fits). If the change is non-trivial, add a blank line and a short body explaining the ' +
-        'why, wrapped at ~72 chars. Never mention the AI, the tooling, or the task system.',
-    });
-
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') return fallback;
-    const message = text.text.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
+    const text = await runClaudeCli(envId, sections.join('\n\n'));
+    const message = text.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
     return message || fallback;
   } catch (err) {
     console.error('[ai] generateCommitMessage failed:', err);
@@ -141,37 +152,4 @@ function buildCommitFallback(title: string, prompt?: string): string {
   const subject = title.slice(0, 72);
   const body = prompt && prompt.trim() && prompt.trim() !== title.trim() ? prompt.trim() : '';
   return body ? `${subject}\n\n${body}` : subject;
-}
-
-/**
- * Generate just a concise title for a task given its prompt. Cheaper
- * + faster than `generateTaskMetadata` — only asks for one field,
- * used for the post-creation async title backfill. Falls back to the
- * first 60 chars of the prompt if the API call fails.
- */
-export async function generateTaskTitle(prompt: string): Promise<string> {
-  const fallback = prompt.slice(0, 60).trim() || 'New Task';
-  if (!process.env.ANTHROPIC_API_KEY) return fallback;
-
-  try {
-    const response = await getClient().messages.create({
-      model: TITLE_MODEL,
-      max_tokens: 60,
-      messages: [
-        {
-          role: 'user',
-          content: `Generate a concise title (max 60 chars, no quotes, no trailing punctuation) for this task:\n\n${prompt}`,
-        },
-      ],
-      system:
-        'You produce concise task titles. Respond with the title only — no commentary, no quotes, no markdown.',
-    });
-    const text = response.content.find((b) => b.type === 'text');
-    if (!text || text.type !== 'text') return fallback;
-    const title = text.text.trim().replace(/^["']|["']$/g, '').slice(0, 60);
-    return title || fallback;
-  } catch (err) {
-    console.error('[ai] generateTaskTitle failed:', err);
-    return fallback;
-  }
 }
