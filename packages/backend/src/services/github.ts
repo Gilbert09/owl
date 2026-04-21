@@ -3,6 +3,12 @@ import { v4 as uuid } from 'uuid';
 import { and, eq } from 'drizzle-orm';
 import { getDbClient, type Database } from '../db/client.js';
 import { integrations as integrationsTable } from '../db/schema.js';
+import {
+  encryptString,
+  decryptString,
+  isEncryptedEnvelope,
+  type EncryptedEnvelope,
+} from './tokenCrypto.js';
 
 // GitHub OAuth configuration. Set via environment variables in production.
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
@@ -113,11 +119,33 @@ interface StoredToken {
   createdAt: string;
 }
 
+/**
+ * Persisted shape. `accessToken` used to be a plaintext string; new
+ * rows write an `EncryptedEnvelope` under `accessTokenEnc` instead and
+ * leave `accessToken` unset. Legacy rows are migrated to the encrypted
+ * shape transparently on next write.
+ */
 interface GitHubIntegrationConfig {
-  accessToken: string;
+  accessToken?: string;
+  accessTokenEnc?: EncryptedEnvelope;
   tokenType?: string;
   scope?: string;
   createdAt?: string;
+}
+
+function readAccessToken(config: GitHubIntegrationConfig): string | null {
+  if (config.accessTokenEnc && isEncryptedEnvelope(config.accessTokenEnc)) {
+    try {
+      return decryptString(config.accessTokenEnc);
+    } catch (err) {
+      console.error('Failed to decrypt GitHub access token:', err);
+      return null;
+    }
+  }
+  if (typeof config.accessToken === 'string' && config.accessToken.length > 0) {
+    return config.accessToken;
+  }
+  return null;
 }
 
 class GitHubService extends EventEmitter {
@@ -140,10 +168,12 @@ class GitHubService extends EventEmitter {
 
       for (const row of rows) {
         const config = row.config as GitHubIntegrationConfig | null;
-        if (!config?.accessToken) continue;
+        if (!config) continue;
+        const accessToken = readAccessToken(config);
+        if (!accessToken) continue;
         this.tokens.set(row.workspaceId, {
           workspaceId: row.workspaceId,
-          accessToken: config.accessToken,
+          accessToken,
           tokenType: config.tokenType || 'bearer',
           scope: config.scope || '',
           createdAt: config.createdAt || new Date().toISOString(),
@@ -208,7 +238,16 @@ class GitHubService extends EventEmitter {
     scope: string
   ): Promise<void> {
     const createdAt = new Date().toISOString();
-    const config: GitHubIntegrationConfig = { accessToken, tokenType, scope, createdAt };
+    // New rows: encrypt the access token; drop the plaintext field.
+    // Existing plaintext rows will be overwritten with the encrypted
+    // shape on next storeToken call (disconnect+reconnect, or token
+    // rotation).
+    const config: GitHubIntegrationConfig = {
+      accessTokenEnc: encryptString(accessToken),
+      tokenType,
+      scope,
+      createdAt,
+    };
 
     const existing = await this.db
       .select({ id: integrationsTable.id })
