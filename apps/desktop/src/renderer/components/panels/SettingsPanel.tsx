@@ -911,6 +911,20 @@ function EnvironmentsSettings() {
     }
   };
 
+  const [togglingAutoUpdate, setTogglingAutoUpdate] = useState<string | null>(null);
+
+  const handleToggleAutoUpdate = async (env: Environment, next: boolean) => {
+    setTogglingAutoUpdate(env.id);
+    try {
+      const updated = await api.environments.update(env.id, {
+        autoUpdateDaemon: next,
+      } as unknown as Partial<Environment>);
+      setEnvironments(environments.map((e) => (e.id === env.id ? updated : e)));
+    } finally {
+      setTogglingAutoUpdate(null);
+    }
+  };
+
   const handleToggleBypass = async (env: Environment, next: boolean) => {
     // Extra friction for flipping a LOCAL env into "bypass everything"
     // mode — that's the your-whole-machine-is-at-stake branch.
@@ -1055,6 +1069,24 @@ function EnvironmentsSettings() {
                           {updateResult.message}
                         </p>
                       )}
+                      <label className="flex items-start gap-2 mt-1 cursor-pointer text-xs">
+                        <input
+                          type="checkbox"
+                          checked={env.autoUpdateDaemon}
+                          disabled={togglingAutoUpdate === env.id}
+                          onChange={(e) =>
+                            void handleToggleAutoUpdate(env, e.target.checked)
+                          }
+                          className="mt-0.5"
+                        />
+                        <span>
+                          Auto-update daemon
+                          <span className="block text-muted-foreground">
+                            Backend pushes updates to this env on reconnect + every 15 min
+                            when its daemon is behind the latest build.
+                          </span>
+                        </span>
+                      </label>
                     </div>
                   )}
                   {env.error && (

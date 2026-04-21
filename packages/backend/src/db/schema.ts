@@ -165,6 +165,13 @@ export const environments = pgTable(
      * own build SHA to surface "stale daemon" warnings in the desktop.
      */
     daemonVersion: text('daemon_version'),
+    /**
+     * When true, the backend auto-triggers this env's daemon self-
+     * update whenever it detects a stale daemon (on reconnect or on
+     * the periodic scheduler tick). Opt-in per env so a bad release
+     * can only take down the envs you explicitly marked auto.
+     */
+    autoUpdateDaemon: boolean('auto_update_daemon').notNull().default(false),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

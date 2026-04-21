@@ -233,6 +233,7 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     renderer: (row.renderer as Environment['renderer']) ?? 'pty',
     toolAllowlist: (row.toolAllowlist as string[]) ?? [],
     daemonVersion: row.daemonVersion ?? undefined,
+    autoUpdateDaemon: row.autoUpdateDaemon,
   };
 }
 

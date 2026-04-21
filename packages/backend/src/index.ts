@@ -20,6 +20,7 @@ import { backlogService } from './services/backlog/service.js';
 import { continuousBuildScheduler } from './services/continuousBuild.js';
 import { permissionInboxService } from './services/permissionInbox.js';
 import { taskFileWatcher } from './services/taskFileWatcher.js';
+import { daemonAutoUpdate } from './services/daemonAutoUpdate.js';
 
 const PORT = process.env.PORT || 4747;
 
@@ -43,6 +44,7 @@ async function main() {
   daemonRegistry.init();
   permissionInboxService.init();
   taskFileWatcher.init();
+  daemonAutoUpdate.init();
 
   const app = express();
   app.use(cors());

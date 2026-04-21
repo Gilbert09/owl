@@ -95,6 +95,7 @@ export function environmentRoutes(): Router {
       config?: EnvironmentConfig;
       status?: EnvironmentStatus;
       autonomousBypassPermissions?: boolean;
+      autoUpdateDaemon?: boolean;
       renderer?: EnvironmentRenderer;
       toolAllowlist?: string[];
     };
@@ -113,6 +114,9 @@ export function environmentRoutes(): Router {
     if (body.status !== undefined) updates.status = body.status;
     if (body.autonomousBypassPermissions !== undefined) {
       updates.autonomousBypassPermissions = body.autonomousBypassPermissions;
+    }
+    if (body.autoUpdateDaemon !== undefined) {
+      updates.autoUpdateDaemon = body.autoUpdateDaemon;
     }
     if (body.renderer !== undefined) {
       updates.renderer = body.renderer;
@@ -260,5 +264,7 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     autonomousBypassPermissions: row.autonomousBypassPermissions,
     renderer: (row.renderer as EnvironmentRenderer) ?? 'pty',
     toolAllowlist: (row.toolAllowlist as string[]) ?? [],
+    daemonVersion: row.daemonVersion ?? undefined,
+    autoUpdateDaemon: row.autoUpdateDaemon,
   };
 }

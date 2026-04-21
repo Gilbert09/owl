@@ -131,6 +131,12 @@ export interface Environment {
    * the backend's own build SHA to surface "stale daemon" warnings.
    */
   daemonVersion?: string;
+  /**
+   * Opt-in auto-update: when true, the backend triggers this env's
+   * daemon self-update on reconnect (and on a periodic scheduler
+   * tick) whenever it sees a stale version. Off by default.
+   */
+  autoUpdateDaemon: boolean;
 }
 
 export type EnvironmentRenderer = 'pty' | 'structured';
