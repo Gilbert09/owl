@@ -29,9 +29,9 @@ describe('gitService', () => {
 
       const commands = fake.commands.map((c) => c.command);
       // First command checks for existence
-      expect(commands[0]).toContain(`git rev-parse --verify ${branch}`);
+      expect(commands[0]).toContain(`git rev-parse --verify '${branch}'`);
       // Second command creates a new branch
-      expect(commands[1]).toBe(`git checkout -b ${branch}`);
+      expect(commands[1]).toBe(`git checkout -b '${branch}'`);
       // All commands ran in the right cwd
       for (const c of fake.commands) {
         expect(c.cwd).toBe('/repo');
@@ -49,8 +49,8 @@ describe('gitService', () => {
 
       const commands = fake.commands.map((c) => c.command);
       expect(commands).toEqual([
-        `git rev-parse --verify ${branch} 2>/dev/null && echo "exists" || echo "not-exists"`,
-        `git checkout ${branch}`,
+        `git rev-parse --verify '${branch}' 2>/dev/null && echo "exists" || echo "not-exists"`,
+        `git checkout '${branch}'`,
       ]);
     });
 
@@ -95,10 +95,10 @@ describe('gitService', () => {
 
       const commands = fake.commands.map((c) => c.command);
       // Must see fetch → checkout base → ff-only pull → checkout -b
-      const fetchIdx = commands.findIndex((c) => c === 'git fetch origin main');
-      const checkoutBaseIdx = commands.findIndex((c) => c === 'git checkout main');
-      const pullIdx = commands.findIndex((c) => c === 'git pull --ff-only origin main');
-      const createIdx = commands.findIndex((c) => c === `git checkout -b ${branch}`);
+      const fetchIdx = commands.findIndex((c) => c === "git fetch origin 'main'");
+      const checkoutBaseIdx = commands.findIndex((c) => c === "git checkout 'main'");
+      const pullIdx = commands.findIndex((c) => c === "git pull --ff-only origin 'main'");
+      const createIdx = commands.findIndex((c) => c === `git checkout -b '${branch}'`);
 
       expect(fetchIdx).toBeGreaterThanOrEqual(0);
       expect(checkoutBaseIdx).toBeGreaterThan(fetchIdx);
@@ -134,7 +134,7 @@ describe('gitService', () => {
     it('runs both committed and uncommitted diff commands and concatenates when both present', async () => {
       fake = installFakeEnvironment({
         outputs: {
-          'git diff main...feature': '+added line\n',
+          "git diff 'main'...'feature'": '+added line\n',
           'git diff HEAD': '+uncommitted change\n',
         },
       });
@@ -146,14 +146,14 @@ describe('gitService', () => {
       expect(diff).toContain('+uncommitted change');
 
       const commands = fake.commands.map((c) => c.command);
-      expect(commands.some((c) => c.startsWith('git diff main...feature'))).toBe(true);
+      expect(commands.some((c) => c.startsWith("git diff 'main'...'feature'"))).toBe(true);
       expect(commands.some((c) => c.startsWith('git diff HEAD'))).toBe(true);
     });
 
     it('returns only the committed diff when there are no uncommitted changes', async () => {
       fake = installFakeEnvironment({
         outputs: {
-          'git diff main...feature': '+committed only\n',
+          "git diff 'main'...'feature'": '+committed only\n',
           // no match for `git diff HEAD` → empty uncommitted
         },
       });

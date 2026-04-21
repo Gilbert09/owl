@@ -62,11 +62,12 @@ class GitService {
     baseBranch: string,
     workingDirectory?: string
   ): Promise<void> {
+    const qBase = shellQuote(baseBranch);
     try {
       await this.executeGitCommand(
         environmentId,
         `git:fetch:${Date.now()}`,
-        `git fetch origin ${baseBranch}`,
+        `git fetch origin ${qBase}`,
         workingDirectory
       );
     } catch (err) {
@@ -77,7 +78,7 @@ class GitService {
     await this.executeGitCommand(
       environmentId,
       `git:checkout-base:${Date.now()}`,
-      `git checkout ${baseBranch}`,
+      `git checkout ${qBase}`,
       workingDirectory
     );
 
@@ -85,7 +86,7 @@ class GitService {
       await this.executeGitCommand(
         environmentId,
         `git:pull:${Date.now()}`,
-        `git pull --ff-only origin ${baseBranch}`,
+        `git pull --ff-only origin ${qBase}`,
         workingDirectory
       );
     } catch (err) {
@@ -120,12 +121,13 @@ class GitService {
     // Execute git commands to create and checkout the branch
     const sessionId = `git:${taskId}`;
 
+    const qBranch = shellQuote(branchName);
     try {
       // Check if branch already exists
       const checkResult = await this.executeGitCommand(
         environmentId,
         sessionId,
-        `git rev-parse --verify ${branchName} 2>/dev/null && echo "exists" || echo "not-exists"`,
+        `git rev-parse --verify ${qBranch} 2>/dev/null && echo "exists" || echo "not-exists"`,
         workingDirectory
       );
 
@@ -134,7 +136,7 @@ class GitService {
         await this.executeGitCommand(
           environmentId,
           sessionId,
-          `git checkout ${branchName}`,
+          `git checkout ${qBranch}`,
           workingDirectory
         );
       } else {
@@ -142,7 +144,7 @@ class GitService {
         await this.executeGitCommand(
           environmentId,
           sessionId,
-          `git checkout -b ${branchName}`,
+          `git checkout -b ${qBranch}`,
           workingDirectory
         );
       }
@@ -167,7 +169,7 @@ class GitService {
     await this.executeGitCommand(
       environmentId,
       sessionId,
-      `git checkout ${branchName}`,
+      `git checkout ${shellQuote(branchName)}`,
       workingDirectory
     );
   }
@@ -215,10 +217,14 @@ class GitService {
     workingDirectory?: string
   ): Promise<void> {
     const sessionId = `git:stash:${Date.now()}`;
+    // Pass message via base64 → decoded into a shell var → single-arg
+    // expansion ("$msg"). No interpolation inside double-quoted var
+    // expansion, so arbitrary bytes (quotes, backticks, $()) are safe.
+    const b64 = Buffer.from(message, 'utf8').toString('base64');
     await this.executeGitCommand(
       environmentId,
       sessionId,
-      `git stash push -m "${message}"`,
+      `msg=$(printf '%s' '${b64}' | base64 -d) && git stash push -m "$msg"`,
       workingDirectory
     );
   }
@@ -288,7 +294,7 @@ class GitService {
     await this.executeGitCommand(
       environmentId,
       `git:push:${Date.now()}`,
-      `git push -u origin ${branch}`,
+      `git push -u origin ${shellQuote(branch)}`,
       workingDirectory
     );
   }
@@ -333,9 +339,10 @@ class GitService {
       }
     };
 
+    const qBase = shellQuote(base);
     const [nameStatusOut, numStatOut, untrackedOut] = await Promise.all([
-      safeExec(`git diff -M --name-status ${base}`),
-      safeExec(`git diff -M --numstat ${base}`),
+      safeExec(`git diff -M --name-status ${qBase}`),
+      safeExec(`git diff -M --numstat ${qBase}`),
       safeExec('git ls-files --others --exclude-standard'),
     ]);
 
@@ -438,10 +445,12 @@ class GitService {
     base: string = 'main',
     workingDirectory?: string
   ): Promise<string> {
+    const qBase = shellQuote(base);
+    const qBranch = shellQuote(branch);
     const out = await this.executeGitCommand(
       environmentId,
       `git:diff-stat:${Date.now()}`,
-      `git diff --stat ${base}...${branch} 2>/dev/null || git diff --stat`,
+      `git diff --stat ${qBase}...${qBranch} 2>/dev/null || git diff --stat`,
       workingDirectory
     );
     return out;
@@ -460,10 +469,12 @@ class GitService {
     const sessionId = `git:diff:${Date.now()}`;
     // git diff <base>...<branch> shows changes from base merge-base to branch tip
     // Append working tree changes (uncommitted) with git diff HEAD
+    const qBase = shellQuote(base);
+    const qBranch = shellQuote(branch);
     const committed = await this.executeGitCommand(
       environmentId,
       `${sessionId}:committed`,
-      `git diff ${base}...${branch} 2>/dev/null || git diff ${branch}`,
+      `git diff ${qBase}...${qBranch} 2>/dev/null || git diff ${qBranch}`,
       workingDirectory
     );
     const uncommitted = await this.executeGitCommand(
@@ -493,6 +504,9 @@ class GitService {
     workingDirectory?: string
   ): Promise<string | null> {
     const ref = `refs/fastowl/${refNamespace}/${taskId}`;
+    if (!/^refs\/fastowl\/[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/.test(ref)) {
+      throw new Error(`Refusing suspicious ref: ${ref}`);
+    }
 
     const createOut = await this.executeGitCommand(
       environmentId,
@@ -502,10 +516,13 @@ class GitService {
     );
     const stashSha = createOut.trim();
     if (stashSha) {
+      if (!/^[0-9a-f]{40}$/.test(stashSha)) {
+        throw new Error(`stash create returned unexpected value: ${stashSha}`);
+      }
       await this.executeGitCommand(
         environmentId,
         `git:update-ref:${Date.now()}`,
-        `git update-ref ${ref} ${stashSha}`,
+        `git update-ref ${shellQuote(ref)} ${stashSha}`,
         workingDirectory
       );
       return ref;
@@ -520,10 +537,13 @@ class GitService {
     );
     const headSha = headOut.trim();
     if (!headSha) return null;
+    if (!/^[0-9a-f]{40}$/.test(headSha)) {
+      throw new Error(`rev-parse HEAD returned unexpected value: ${headSha}`);
+    }
     await this.executeGitCommand(
       environmentId,
       `git:update-ref-head:${Date.now()}`,
-      `git update-ref ${ref} ${headSha}`,
+      `git update-ref ${shellQuote(ref)} ${headSha}`,
       workingDirectory
     );
     return ref;
@@ -541,16 +561,17 @@ class GitService {
     baseBranch: string,
     workingDirectory?: string
   ): Promise<void> {
+    const qBase = shellQuote(baseBranch);
     await this.executeGitCommand(
       environmentId,
       `git:checkout-base-f:${Date.now()}`,
-      `git checkout -f ${baseBranch}`,
+      `git checkout -f ${qBase}`,
       workingDirectory
     );
     await this.executeGitCommand(
       environmentId,
       `git:reset-hard:${Date.now()}`,
-      `git reset --hard origin/${baseBranch}`,
+      `git reset --hard origin/${qBase}`,
       workingDirectory
     );
     await this.executeGitCommand(
@@ -575,7 +596,7 @@ class GitService {
     await this.executeGitCommand(
       environmentId,
       `git:branch-D:${Date.now()}`,
-      `git branch -D ${branchName}`,
+      `git branch -D ${shellQuote(branchName)}`,
       workingDirectory
     );
   }
@@ -599,7 +620,7 @@ class GitService {
     await this.executeGitCommand(
       environmentId,
       sessionId,
-      `git branch -d ${branchName}`,
+      `git branch -d ${shellQuote(branchName)}`,
       workingDirectory
     );
   }
