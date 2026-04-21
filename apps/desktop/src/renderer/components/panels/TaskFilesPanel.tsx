@@ -7,6 +7,9 @@ import {
   FileText,
   Loader2,
 } from 'lucide-react';
+import * as Diff2Html from 'diff2html';
+import { ColorSchemeType } from 'diff2html/lib/types';
+import 'diff2html/bundles/css/diff2html.min.css';
 import { cn } from '../../lib/utils';
 import { api, wsClient } from '../../lib/api';
 import { useTaskFiles, type ChangedFile } from '../../hooks/useTaskFiles';
@@ -214,8 +217,6 @@ interface FileDiffViewProps {
   refreshKey: number;
 }
 
-const MAX_RENDER_LINES = 2000;
-
 function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
   const [diff, setDiff] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -244,13 +245,19 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     };
   }, [taskId, path, refreshKey]);
 
-  const lines = useMemo(() => {
-    const raw = (diff ?? '').split('\n');
-    if (raw.length <= MAX_RENDER_LINES) return { lines: raw, truncated: false };
-    return {
-      lines: raw.slice(0, MAX_RENDER_LINES),
-      truncated: true,
-    };
+  const html = useMemo(() => {
+    if (!diff || diff.trim().length === 0) return '';
+    // diff2html parses unified-diff text and renders a GitHub-style
+    // side-by-side or line-by-line HTML view. We render line-by-line
+    // inline so it flows with the panel; the "github" colorScheme
+    // follows the app theme via CSS variables we override below.
+    return Diff2Html.html(diff, {
+      outputFormat: 'line-by-line',
+      drawFileList: false,
+      matching: 'lines',
+      colorScheme: ColorSchemeType.AUTO,
+      renderNothingWhenEmpty: true,
+    });
   }, [diff]);
 
   if (loading && !diff) {
@@ -266,7 +273,7 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     return <p className="p-6 text-sm text-muted-foreground">Error: {error}</p>;
   }
 
-  if (!diff || diff.trim().length === 0) {
+  if (!diff || diff.trim().length === 0 || !html) {
     return (
       <p className="p-6 text-sm text-muted-foreground">
         No diff available for this file.
@@ -274,30 +281,9 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     );
   }
 
-  return (
-    <pre className="text-xs font-mono leading-5 p-3 whitespace-pre-wrap break-all">
-      <div className="text-muted-foreground mb-2 text-[11px]">{path}</div>
-      {lines.lines.map((line, idx) => {
-        let color = '';
-        if (line.startsWith('+++') || line.startsWith('---')) color = 'text-muted-foreground';
-        else if (line.startsWith('+')) color = 'text-green-600 dark:text-green-500';
-        else if (line.startsWith('-')) color = 'text-red-600 dark:text-red-500';
-        else if (line.startsWith('@@')) color = 'text-cyan-600 dark:text-cyan-400';
-        else if (line.startsWith('diff ') || line.startsWith('index '))
-          color = 'text-muted-foreground';
-        return (
-          <div key={idx} className={color}>
-            {line || ' '}
-          </div>
-        );
-      })}
-      {lines.truncated && (
-        <div className="text-amber-600 dark:text-amber-500 mt-2">
-          [diff truncated — {MAX_RENDER_LINES.toLocaleString()} lines shown]
-        </div>
-      )}
-    </pre>
-  );
+  // HTML comes from diff2html, which renders its own well-known
+  // (safe) markup from our trusted server-side unified-diff string.
+  return <div className="diff2html-wrapper" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 /**

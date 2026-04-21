@@ -619,15 +619,6 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 >
                   {priorityConfig[task.priority].label} Priority
                 </Badge>
-                {task.status === 'awaiting_review' && task.repositoryId && (
-                  <Badge
-                    variant="outline"
-                    className="text-amber-600 dark:text-amber-500 border-amber-500/50"
-                    title="This task holds the working tree on its environment + repo. Other tasks for the same pair will queue until you commit & push or reject."
-                  >
-                    Holding env+repo
-                  </Badge>
-                )}
               </div>
             </div>
           </div>
@@ -701,130 +692,124 @@ function TaskDetail({ taskId }: TaskDetailProps) {
         </div>
       </div>
 
-      {/* Content */}
-      <ScrollArea className="flex-1 p-4">
-        <div className="space-y-6">
-          {/* Description is hidden when it just duplicates the prompt
-              (the common case — modal falls back to prompt when the
-              user doesn't type a separate description). Showing both
-              wastes vertical space and makes the panel feel cluttered. */}
-          {task.description && task.description.trim() !== (task.prompt ?? '').trim() && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Description</h3>
-              <p className="text-sm text-muted-foreground break-words">{task.description}</p>
-            </div>
-          )}
+      {/* Compact info strip — replaces the bulky Details card so the
+          tabs below can own the vertical space. */}
+      <div className="px-4 py-2 border-b text-xs text-muted-foreground flex items-center gap-4 flex-wrap">
+        {repo && (
+          <span className="flex items-center gap-1 min-w-0">
+            <GitBranch className="w-3 h-3 shrink-0" />
+            <span className="truncate" title={repo.fullName}>{repo.fullName}</span>
+          </span>
+        )}
+        {task.branch && (
+          <span
+            className="font-mono bg-secondary px-1.5 py-0.5 rounded truncate max-w-[220px]"
+            title={task.branch}
+          >
+            {task.branch}
+          </span>
+        )}
+        <span title={new Date(task.createdAt).toLocaleString()}>
+          Created {new Date(task.createdAt).toLocaleDateString()}
+        </span>
+        {task.completedAt && (
+          <span title={new Date(task.completedAt).toLocaleString()}>
+            Completed {new Date(task.completedAt).toLocaleDateString()}
+          </span>
+        )}
+      </div>
 
-          {task.prompt && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Prompt</h3>
-              <pre className="text-sm bg-secondary p-3 rounded-lg whitespace-pre-wrap break-words">
-                {task.prompt}
-              </pre>
-            </div>
-          )}
-
-          {task.result && (
-            <div>
-              <h3 className="text-sm font-medium mb-2">Result</h3>
-              <Card className="p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  {task.result.success ? (
-                    <CheckCircle className="w-4 h-4 text-green-400" />
-                  ) : (
-                    <AlertCircle className="w-4 h-4 text-red-400" />
-                  )}
-                  <span
-                    className={cn(
-                      'text-sm font-medium',
-                      task.result.success ? 'text-green-400' : 'text-red-400'
-                    )}
-                  >
-                    {task.result.success ? 'Success' : 'Failed'}
-                  </span>
-                </div>
-                {task.result.summary && (
-                  <p className="text-sm text-muted-foreground">
-                    {task.result.summary}
-                  </p>
-                )}
-                {task.result.error && (
-                  <p className="text-sm text-red-400 mt-1">
-                    {task.result.error}
-                  </p>
-                )}
-              </Card>
-            </div>
-          )}
-
-          <div>
-            <h3 className="text-sm font-medium mb-2">Details</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-              <div className="min-w-0">
-                <span className="text-muted-foreground">Type:</span>
-                <span className="ml-2">{taskTypeConfig[task.type]?.label ?? task.type}</span>
-              </div>
-              {repo && (
-                <div className="min-w-0 flex items-center gap-1">
-                  <span className="text-muted-foreground shrink-0">Repository:</span>
-                  <GitBranch className="w-3 h-3 ml-1 shrink-0" />
-                  <span className="truncate" title={repo.fullName}>{repo.fullName}</span>
-                </div>
-              )}
-              {task.branch && (
-                <div className="min-w-0">
-                  <span className="text-muted-foreground">Branch:</span>
-                  <span
-                    className="ml-2 font-mono text-xs bg-secondary px-2 py-0.5 rounded inline-block max-w-full align-bottom truncate"
-                    title={task.branch}
-                  >
-                    {task.branch}
-                  </span>
-                </div>
-              )}
-              <div className="min-w-0">
-                <span className="text-muted-foreground">Created:</span>
-                <span className="ml-2">
-                  {new Date(task.createdAt).toLocaleString()}
-                </span>
-              </div>
-              {task.completedAt && (
-                <div className="min-w-0">
-                  <span className="text-muted-foreground">Completed:</span>
-                  <span className="ml-2">
-                    {new Date(task.completedAt).toLocaleString()}
-                  </span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {task.status === 'awaiting_review' && task.branch && task.repositoryId && (
-            <div className="h-[480px]">
-              <TaskFilesPanel taskId={task.id} />
-            </div>
-          )}
-
-          {gitLogEntries.length > 0 && task.status !== 'in_progress' && (
-            <div>
-              <h3 className="text-sm font-medium mb-2 flex items-center gap-1.5">
-                <GitCommit className="w-3.5 h-3.5" />
-                Git activity
-                <span className="text-xs text-muted-foreground font-normal">
-                  ({gitLogEntries.length})
-                </span>
-              </h3>
-              <div className="h-72">
-                <TaskGitPanel taskId={task.id} />
-              </div>
-            </div>
-          )}
-
-          {['awaiting_review', 'completed', 'failed', 'cancelled'].includes(task.status) && (
-            <TerminalHistory taskId={task.id} />
+      {/* Prompt — always shown when present, above tabs. Description
+          dropped when it just duplicates the prompt (common case). */}
+      {(task.prompt ||
+        (task.description && task.description.trim() !== (task.prompt ?? '').trim())) && (
+        <div className="px-4 pt-3 pb-2 border-b">
+          {task.prompt ? (
+            <pre className="text-sm bg-secondary p-3 rounded-lg whitespace-pre-wrap break-words max-h-32 overflow-auto">
+              {task.prompt}
+            </pre>
+          ) : (
+            <p className="text-sm text-muted-foreground break-words">{task.description}</p>
           )}
         </div>
-      </ScrollArea>
+      )}
+
+      {/* Failed/cancelled result banner — brief, above tabs. */}
+      {task.result && !task.result.success && (
+        <div className="px-4 py-2 border-b bg-red-500/5 text-sm">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-red-500" />
+            <span className="font-medium text-red-600 dark:text-red-400">
+              {task.result.summary || task.result.error || 'Failed'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Tabs — same shape as the in_progress view. */}
+      <div className="border-b px-4 flex items-center gap-1 shrink-0">
+        <TabButton
+          active={activeTab === 'terminal'}
+          onClick={() => setActiveTab('terminal')}
+        >
+          <Terminal className="w-3.5 h-3.5 mr-1.5" />
+          Transcript
+        </TabButton>
+        <TabButton
+          active={activeTab === 'files'}
+          onClick={() => setActiveTab('files')}
+        >
+          <GitBranch className="w-3.5 h-3.5 mr-1.5" />
+          Files
+          {changedFiles.length > 0 && (
+            <Badge
+              variant="secondary"
+              className={cn(
+                'ml-1.5 h-5 px-1.5 text-[10px] tabular-nums',
+                activeTab !== 'files' && 'bg-primary/15 text-primary'
+              )}
+            >
+              {changedFiles.length}
+            </Badge>
+          )}
+        </TabButton>
+        <TabButton
+          active={activeTab === 'git'}
+          onClick={() => setActiveTab('git')}
+        >
+          <GitCommit className="w-3.5 h-3.5 mr-1.5" />
+          Git
+          {gitLogEntries.length > 0 && (
+            <Badge
+              variant="secondary"
+              className={cn(
+                'ml-1.5 h-5 px-1.5 text-[10px] tabular-nums',
+                activeTab !== 'git' && 'bg-primary/15 text-primary'
+              )}
+            >
+              {gitLogEntries.length}
+            </Badge>
+          )}
+        </TabButton>
+      </div>
+
+      <div className="flex-1 overflow-hidden p-4">
+        {activeTab === 'terminal' && (
+          <div className="h-full overflow-auto">
+            <TerminalHistory taskId={task.id} />
+          </div>
+        )}
+        {activeTab === 'files' && (
+          <div className="h-full">
+            <TaskFilesPanel taskId={task.id} />
+          </div>
+        )}
+        {activeTab === 'git' && (
+          <div className="h-full">
+            <TaskGitPanel taskId={task.id} />
+          </div>
+        )}
+      </div>
       <ApproveTaskModal
         taskId={taskId}
         taskTitle={task.title}
