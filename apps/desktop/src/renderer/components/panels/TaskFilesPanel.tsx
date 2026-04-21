@@ -10,6 +10,7 @@ import {
 import * as Diff2Html from 'diff2html';
 import { ColorSchemeType } from 'diff2html/lib/types';
 import 'diff2html/bundles/css/diff2html.min.css';
+import DOMPurify from 'dompurify';
 import { cn } from '../../lib/utils';
 import { api, wsClient } from '../../lib/api';
 import { useTaskFiles, type ChangedFile } from '../../hooks/useTaskFiles';
@@ -251,13 +252,17 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     // side-by-side or line-by-line HTML view. We render line-by-line
     // inline so it flows with the panel; the "github" colorScheme
     // follows the app theme via CSS variables we override below.
-    return Diff2Html.html(diff, {
+    const raw = Diff2Html.html(diff, {
       outputFormat: 'line-by-line',
       drawFileList: false,
       matching: 'lines',
       colorScheme: ColorSchemeType.AUTO,
       renderNothingWhenEmpty: true,
     });
+    // Diff bodies come from the user's own repos, but a malicious
+    // upstream could smuggle HTML that diff2html's escape misses.
+    // Sanitize before dangerouslySetInnerHTML — belt-and-braces.
+    return DOMPurify.sanitize(raw);
   }, [diff]);
 
   if (loading && !diff) {
@@ -281,8 +286,7 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     );
   }
 
-  // HTML comes from diff2html, which renders its own well-known
-  // (safe) markup from our trusted server-side unified-diff string.
+  // HTML is DOMPurify-sanitized diff2html output.
   return <div className="diff2html-wrapper" dangerouslySetInnerHTML={{ __html: html }} />;
 }
 

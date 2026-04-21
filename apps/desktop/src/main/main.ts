@@ -278,6 +278,13 @@ const createWindow = async () => {
       preload: app.isPackaged
         ? path.join(__dirname, 'preload.js')
         : path.join(__dirname, '../../.erb/dll/preload.js'),
+      // Explicit defense-in-depth: these are the Electron defaults on
+      // recent versions, but pinning them makes the posture visible
+      // and survives future default-flipping.
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
     },
   });
 
