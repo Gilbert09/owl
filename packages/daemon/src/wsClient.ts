@@ -118,7 +118,10 @@ export class DaemonWsClient {
     const withToken = `${url}?token=${encodeURIComponent(token)}`;
 
     console.log(`daemon: connecting to ${url}`);
-    const ws = new WebSocket(withToken);
+    // `rejectUnauthorized: true` is the default but pinning it makes
+    // MITM hygiene explicit — the daemon holds a device token and runs
+    // privileged commands; it must refuse to dial an untrusted backend.
+    const ws = new WebSocket(withToken, { rejectUnauthorized: true });
     this.ws = ws;
 
     ws.on('open', () => {

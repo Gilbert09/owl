@@ -90,8 +90,28 @@ if [[ -z "$PAIRING_TOKEN" ]]; then
   exit 2
 fi
 
+# Every user-controlled variable downstream flows into shell strings via
+# `run()`, so validate each one against a strict regex up-front. If any
+# of these fails, the script aborts before any command runs.
+validate() {
+  local name="$1" value="$2" pattern="$3"
+  if [[ ! "$value" =~ $pattern ]]; then
+    echo "error: $name=$value does not match expected shape" >&2
+    exit 2
+  fi
+}
+validate "--backend-url"    "$BACKEND_URL"    '^https?://[a-zA-Z0-9.:/_-]+$'
+validate "--pairing-token"  "$PAIRING_TOKEN"  '^[a-zA-Z0-9/+=_-]+$'
+validate "--branch"         "$BRANCH"         '^[a-zA-Z0-9._/-]+$'
+validate "--install-dir"    "$INSTALL_DIR"    '^/[a-zA-Z0-9._/-]+$'
+validate "--user"           "$RUN_USER"       '^[a-zA-Z_][a-zA-Z0-9_-]*$'
+
 log()  { echo ">>> $*" >&2; }
-run()  { log "$*"; [[ "$DRY_RUN" == "true" ]] || eval "$@"; }
+# Callers pass a single command string with intentional shell metachars
+# (pipes, redirections). We still need a shell to interpret those, but
+# with variables validated above, `bash -c` is safe and clearer than
+# `eval`.
+run()  { log "$*"; [[ "$DRY_RUN" == "true" ]] || bash -c "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 SUDO=""
