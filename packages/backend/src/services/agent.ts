@@ -591,9 +591,18 @@ class AgentService extends EventEmitter {
     agentStructuredService.stop(agent.sessionId);
     this.activeAgents.delete(agentId);
 
+    // Null the persisted permissionToken so a future rehydrate can't
+    // re-register a credential whose child process is already gone.
+    // The in-memory runTokens entry is cleared by agentStructuredService
+    // on the exit event.
     this.db
       .update(agentsTable)
-      .set({ status: 'idle', attention: 'none', lastActivity: new Date() })
+      .set({
+        status: 'idle',
+        attention: 'none',
+        lastActivity: new Date(),
+        permissionToken: null,
+      })
       .where(eq(agentsTable.id, agentId))
       .then(() => {
         emitAgentStatus(agent.workspaceId, agentId, 'idle', 'none');
