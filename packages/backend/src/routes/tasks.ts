@@ -676,65 +676,124 @@ export function taskRoutes(): Router {
 
     const task = rowToTask(rows[0]);
 
-    // Resolve the git context (repo row OR env CWD) so we can commit +
-    // push on the env that owns the working tree. If there's no
-    // branch or no resolvable context the task has nothing to push —
-    // just mark completed (manual tasks etc.).
-    let pushed = false;
-    if (task.branch && task.assignedEnvironmentId) {
-      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
-      if (gitContext) {
-        const workingDirectory = gitContext.workingDirectory;
-        const envId = task.assignedEnvironmentId;
-        const baseBranch = gitContext.baseBranch;
+    // Agent tasks must commit + push before they can be completed. We
+    // refuse to flip the status flag without doing the actual git work
+    // — the previous behaviour silently marked completed when any
+    // precondition was missing (no branch, no repo, no env), which is
+    // how "Approve & push did nothing but said success" happened.
+    if (isAgentTask(task.type)) {
+      if (!task.branch) {
+        return res.status(400).json({
+          success: false,
+          error:
+            'Task has no branch. It was likely started before branch-per-task was wired up. Reject and re-queue, then approve the new run.',
+        });
+      }
+      if (!task.assignedEnvironmentId) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Task has no assigned environment to run git on.' });
+      }
 
-        try {
-          // 1. Decide the commit message. User override wins; otherwise
-          //    ask Haiku, falling back to `<title>\n\n<prompt>`.
-          let message = overrideMessage?.trim();
-          if (!message) {
-            const [diffStat, diff] = await Promise.all([
-              gitService.getDiffStat(envId, task.branch, baseBranch, workingDirectory),
-              gitService.getDiff(envId, task.branch, baseBranch, workingDirectory),
-            ]);
-            message = await generateCommitMessage({
-              title: task.title,
-              prompt: task.prompt,
-              diffStat,
-              diff,
+      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
+      if (!gitContext) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Task's repository has no local path configured. Set one in Settings → Repositories before approving.",
+        });
+      }
+
+      const workingDirectory = gitContext.workingDirectory;
+      const envId = task.assignedEnvironmentId;
+      const baseBranch = gitContext.baseBranch;
+      const tag = `[tasks] approve ${task.id.slice(0, 8)}`;
+      console.log(
+        `${tag}: starting · env=${envId} wd=${workingDirectory} branch=${task.branch}`
+      );
+
+      try {
+        // Defensive: explicitly checkout the task branch before
+        // staging. The agent may have moved off the branch (or never
+        // landed on it cleanly), and committing on the wrong branch
+        // is exactly the failure mode that produced the silent-bug.
+        const before = await gitService.getCurrentBranch(envId, workingDirectory);
+        console.log(`${tag}: current branch before commit is ${before}`);
+        if (before !== task.branch) {
+          console.warn(`${tag}: not on task branch (on ${before}); checking out ${task.branch}`);
+          await gitService.checkoutBranch(envId, task.branch, workingDirectory);
+          const after = await gitService.getCurrentBranch(envId, workingDirectory);
+          if (after !== task.branch) {
+            return res.status(500).json({
+              success: false,
+              error: `Could not switch to task branch ${task.branch} (still on ${after}).`,
             });
           }
+          console.log(`${tag}: now on ${after}`);
+        }
 
-          // 2. Commit any uncommitted tree changes.
-          await gitService.commitAll(envId, message, workingDirectory);
-
-          // 3. Push. Push errors (auth, rejected, conflicts) flow back
-          //    to the desktop — the task stays in awaiting_review so the
-          //    user can fix + re-approve.
-          await gitService.pushBranch(envId, task.branch, workingDirectory);
-          pushed = true;
-
-          // 4. Cleanup: return the working tree to the base branch and
-          //    delete the local branch so the (env, repo) slot is free
-          //    for the next task. Remote branch stays — it may be tied
-          //    to a PR the user wants to keep open.
-          try {
-            await gitService.checkoutBranch(envId, baseBranch, workingDirectory);
-            await gitService.forceDeleteBranch(envId, task.branch, workingDirectory);
-          } catch (cleanupErr) {
-            // Non-fatal: the push succeeded, the task is approved. Log
-            // so the user can clean up by hand if needed, but don't
-            // stall the approve flow.
-            console.warn('[tasks] approve: local branch cleanup failed:', cleanupErr);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error('[tasks] approve commit/push failed:', err);
-          return res.status(500).json({
-            success: false,
-            error: `Commit/push failed: ${msg}. Task left in awaiting_review.`,
+        let message = overrideMessage?.trim();
+        if (!message) {
+          const [diffStat, diff] = await Promise.all([
+            gitService.getDiffStat(envId, task.branch, baseBranch, workingDirectory),
+            gitService.getDiff(envId, task.branch, baseBranch, workingDirectory),
+          ]);
+          message = await generateCommitMessage({
+            title: task.title,
+            prompt: task.prompt,
+            diffStat,
+            diff,
           });
         }
+
+        console.log(`${tag}: committing with subject: ${message.split('\n')[0]}`);
+        const sha = await gitService.commitAll(envId, message, workingDirectory);
+        console.log(`${tag}: commit result sha=${sha ?? '(none — nothing to stage)'}`);
+
+        if (!sha) {
+          // Nothing got committed. Either everything was already
+          // committed by the agent (unlikely — it doesn't run git
+          // commit on its own) or every change is gitignored. Either
+          // way, refuse to mark completed and tell the user.
+          return res.status(400).json({
+            success: false,
+            error:
+              "Nothing to commit. The agent's changes may all be in .gitignore, or there were no edits. Task left in awaiting_review.",
+          });
+        }
+
+        console.log(`${tag}: pushing branch ${task.branch} to origin`);
+        await gitService.pushBranch(envId, task.branch, workingDirectory);
+        console.log(`${tag}: push done`);
+
+        // Final guard: working tree must be clean before we call this
+        // task done. Catches anything subtle that left modifications
+        // behind (post-commit edits, partial stage failures, etc.).
+        const stillDirty = await gitService.hasUncommittedChanges(envId, workingDirectory);
+        if (stillDirty) {
+          return res.status(500).json({
+            success: false,
+            error:
+              'Commit + push completed but working tree still has uncommitted changes. Task left in awaiting_review.',
+          });
+        }
+
+        // Cleanup: return to base branch + drop the local task branch
+        // so the env+repo slot is free.
+        try {
+          await gitService.checkoutBranch(envId, baseBranch, workingDirectory);
+          await gitService.forceDeleteBranch(envId, task.branch, workingDirectory);
+          console.log(`${tag}: cleanup done · checked out ${baseBranch}, deleted ${task.branch}`);
+        } catch (cleanupErr) {
+          console.warn(`${tag}: local branch cleanup failed (non-fatal):`, cleanupErr);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`${tag}: commit/push failed:`, err);
+        return res.status(500).json({
+          success: false,
+          error: `Commit/push failed: ${msg}. Task left in awaiting_review.`,
+        });
       }
     }
 
@@ -745,7 +804,6 @@ export function taskRoutes(): Router {
       .where(eq(tasksTable.id, req.params.id));
 
     emitTaskStatus(task.workspaceId, req.params.id, 'completed');
-    void pushed; // kept for future: expose on response so UI can link to the branch
 
     const updatedRows = await db
       .select()
