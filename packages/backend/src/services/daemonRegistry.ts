@@ -231,13 +231,24 @@ class DaemonRegistry extends EventEmitter {
   }
 
   private markEnvConnected(environmentId: string): void {
+    const active = this.active.get(environmentId);
+    const daemonVersion = active?.meta.daemonVersion;
     this.queueEnvStatus(
       environmentId,
       async () => {
         const now = new Date();
+        const patch: Record<string, unknown> = {
+          status: 'connected',
+          lastSeenAt: now,
+          lastConnected: now,
+          error: null,
+        };
+        // Persist the daemon's version string so the desktop can show
+        // it in Settings even when the env is momentarily disconnected.
+        if (daemonVersion) patch.daemonVersion = daemonVersion;
         await getDbClient()
           .update(environmentsTable)
-          .set({ status: 'connected', lastSeenAt: now, lastConnected: now, error: null })
+          .set(patch)
           .where(eq(environmentsTable.id, environmentId));
         emitEnvironmentStatus(environmentId, 'connected');
       },

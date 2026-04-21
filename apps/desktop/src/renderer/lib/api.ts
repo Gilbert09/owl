@@ -536,6 +536,23 @@ class WebSocketClient {
   }
 }
 
+/**
+ * Fetch the backend's "latest daemon version" — a short SHA the
+ * current build was deployed from. Unauthenticated (public constant)
+ * and on `/daemon/...`, not `/api/v1/...`. Used by Settings to
+ * compare against each env's reported version.
+ */
+export async function fetchLatestDaemonVersion(): Promise<string | null> {
+  try {
+    const res = await fetch(`${BASE_URL}/daemon/latest-version`);
+    if (!res.ok) return null;
+    const json = (await res.json()) as { success?: boolean; data?: { version?: string } };
+    return json?.data?.version ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // Singleton instance
 export const wsClient = new WebSocketClient();
 

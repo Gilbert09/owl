@@ -40,13 +40,23 @@ build_one() {
     suffix=".exe"
   fi
   local out_path="${OUT_DIR}/fastowl-daemon-${target#bun-}${suffix}"
-  echo "→ building ${target} → ${out_path}"
+  echo "→ building ${target} (sha=${BUILD_SHA:0:7}) → ${out_path}"
+  # --define bakes the SHA into the compiled binary so
+  # resolveDaemonVersion() returns the right value at runtime without
+  # needing a version.json on disk.
   bun build --compile --minify --sourcemap \
     --target="${target}" \
+    --define 'process.env.FASTOWL_DAEMON_SHA='"\"${BUILD_SHA}\"" \
     "${ENTRY}" \
     --outfile "${out_path}"
   echo "  ok ($(du -h "${out_path}" | cut -f1))"
 }
+
+# Capture the SHA the binary is being built from. In CI,
+# `GITHUB_SHA` is always set; locally we fall back to `git rev-parse`
+# so dev builds still identify themselves. Baked into the binary via
+# bun's --define so resolveDaemonVersion() sees it at runtime.
+BUILD_SHA="${GITHUB_SHA:-$(git -C "${ROOT}/../.." rev-parse HEAD 2>/dev/null || echo unknown)}"
 
 mkdir -p "${OUT_DIR}"
 

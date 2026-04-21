@@ -26,8 +26,9 @@ import {
 import { gitDispatch } from './git.js';
 import { saveConfig, loadConfig, type ResolvedConfig } from './config.js';
 import { DaemonProxyServer } from './proxyServer.js';
+import { resolveDaemonVersion } from './version.js';
 
-const DAEMON_VERSION = '0.1.0';
+const DAEMON_VERSION = resolveDaemonVersion();
 const INITIAL_RECONNECT_MS = 1000;
 const MAX_RECONNECT_MS = 30_000;
 

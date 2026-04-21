@@ -124,6 +124,13 @@ export interface Environment {
    * stick across every task on that machine.
    */
   toolAllowlist: string[];
+  /**
+   * Version string reported by the daemon on its most recent hello,
+   * shape `<pkgVersion>+<shortSha>` (e.g. `0.1.0+a1b2c3d`). Undefined
+   * for envs that have never successfully paired. Compared against
+   * the backend's own build SHA to surface "stale daemon" warnings.
+   */
+  daemonVersion?: string;
 }
 
 export type EnvironmentRenderer = 'pty' | 'structured';

@@ -203,6 +203,15 @@ run "cd $INSTALL_DIR && npm install --no-audit --no-fund"
 run "cd $INSTALL_DIR && npm run build -w @fastowl/shared"
 run "cd $INSTALL_DIR && npm run build -w @fastowl/daemon"
 
+# Stamp a version.json alongside the built daemon so the running
+# process can report its real SHA in the hello message. The daemon
+# reads this on startup via src/version.ts. Without it, the daemon
+# falls back to "<pkgVersion>-dev" and the desktop can't tell
+# whether it's stale.
+INSTALL_SHA="$(cd "$INSTALL_DIR" && git rev-parse HEAD 2>/dev/null || echo unknown)"
+INSTALL_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+run "printf '%s\n' '{\"sha\":\"$INSTALL_SHA\",\"builtAt\":\"$INSTALL_BUILT_AT\"}' > $INSTALL_DIR/packages/daemon/version.json"
+
 # ---------- 3. Pair once (foreground) ----------
 CONFIG_DIR_LINUX="/etc/fastowl"
 CONFIG_DIR_USER="$HOME/.fastowl"

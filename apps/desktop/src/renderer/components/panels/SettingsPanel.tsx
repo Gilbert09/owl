@@ -37,7 +37,14 @@ import type {
   Environment,
   MarkdownFileBacklogConfig,
 } from '@fastowl/shared';
-import { api, GitHubStatus, GitHubUser, GitHubRepo, WatchedRepo } from '../../lib/api';
+import {
+  api,
+  fetchLatestDaemonVersion,
+  GitHubStatus,
+  GitHubUser,
+  GitHubRepo,
+  WatchedRepo,
+} from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -809,6 +816,24 @@ function EnvironmentsSettings() {
     platform: string;
   } | null>(null);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
+  const [latestDaemonVersion, setLatestDaemonVersion] = useState<string | null>(null);
+
+  // Poll the backend for its "latest daemon version" (short SHA) so
+  // we can flag remote envs whose daemon is stale. Poll sparingly —
+  // it only changes when the backend is redeployed.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      const v = await fetchLatestDaemonVersion();
+      if (!cancelled) setLatestDaemonVersion(v);
+    };
+    void refresh();
+    const interval = setInterval(refresh, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   // Local-daemon info refresh. Fetch once on mount + every 5s so the
   // UI reflects launchd state changes (install, crashes, PID rotation)
@@ -975,10 +1000,16 @@ function EnvironmentsSettings() {
                     </div>
                   )}
                   {env.type === 'remote' && env.config.hostname && (
-                    <p className="text-sm text-muted-foreground mt-1">
-                      Remote daemon{' '}
-                      <span className="font-mono">{env.config.hostname}</span>
-                    </p>
+                    <div className="text-sm text-muted-foreground mt-1 space-y-1">
+                      <p>
+                        Remote daemon{' '}
+                        <span className="font-mono">{env.config.hostname}</span>
+                      </p>
+                      <DaemonVersionLine
+                        daemonVersion={env.daemonVersion}
+                        latestVersion={latestDaemonVersion}
+                      />
+                    </div>
                   )}
                   {env.error && (
                     <div className="flex items-center gap-1 text-sm text-red-500 mt-1">
@@ -1663,5 +1694,56 @@ function AccountSettings() {
         </Card>
       </div>
     </div>
+  );
+}
+
+interface DaemonVersionLineProps {
+  daemonVersion: string | undefined;
+  latestVersion: string | null;
+}
+
+/**
+ * Render the remote env's daemon version with an "Up to date" /
+ * "Stale" badge. Stale = the env's reported SHA (second half of
+ * `<pkg>+<sha>`) doesn't match the backend's latest build SHA.
+ *
+ * Shows "unknown" when the daemon hasn't reported yet (pre-Slice 1
+ * daemons or an env that's never paired). That's not treated as
+ * stale — we'd rather stay quiet than false-positive on VMs running
+ * old binaries we haven't instrumented yet.
+ */
+function DaemonVersionLine({ daemonVersion, latestVersion }: DaemonVersionLineProps) {
+  const reportedSha = daemonVersion?.split('+')[1] ?? null;
+  const state: 'unknown' | 'up-to-date' | 'stale' =
+    !reportedSha || !latestVersion
+      ? 'unknown'
+      : reportedSha === latestVersion
+        ? 'up-to-date'
+        : 'stale';
+  return (
+    <p className="flex items-center gap-2 text-xs">
+      <span>
+        Daemon version:{' '}
+        <span className="font-mono">{daemonVersion || 'unknown'}</span>
+      </span>
+      {state === 'stale' && (
+        <Badge
+          variant="outline"
+          className="text-amber-600 dark:text-amber-500 border-amber-500/50"
+          title={`Backend is on ${latestVersion}. The daemon is behind and may be missing fixes.`}
+        >
+          Update available
+        </Badge>
+      )}
+      {state === 'up-to-date' && (
+        <Badge
+          variant="outline"
+          className="text-green-600 dark:text-green-500 border-green-500/50"
+          title="Daemon SHA matches the backend's latest build."
+        >
+          Up to date
+        </Badge>
+      )}
+    </p>
   );
 }

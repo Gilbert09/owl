@@ -232,6 +232,7 @@ function rowToEnvironment(row: typeof environmentsTable.$inferSelect): Environme
     autonomousBypassPermissions: row.autonomousBypassPermissions,
     renderer: (row.renderer as Environment['renderer']) ?? 'pty',
     toolAllowlist: (row.toolAllowlist as string[]) ?? [],
+    daemonVersion: row.daemonVersion ?? undefined,
   };
 }
 

@@ -158,6 +158,13 @@ export const environments = pgTable(
      * "Allow always" button. Example: `["Read", "Grep", "Bash(git *)"]`.
      */
     toolAllowlist: jsonb('tool_allowlist').notNull().default([]),
+    /**
+     * Version string reported by the daemon on its most recent hello.
+     * Format `<pkgVersion>+<shortSha>` (e.g. `0.1.0+a1b2c3d`). Null
+     * when no daemon has ever paired. Compared against the backend's
+     * own build SHA to surface "stale daemon" warnings in the desktop.
+     */
+    daemonVersion: text('daemon_version'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

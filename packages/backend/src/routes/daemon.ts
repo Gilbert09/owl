@@ -3,6 +3,24 @@ import fs from 'fs';
 import path from 'path';
 
 /**
+ * Resolve the backend's own daemon "latest version" string. We assume
+ * daemon + backend are built from the same repo, so the backend's
+ * deploy SHA is also the SHA of the daemon source the install script
+ * would clone right now. In Railway, `RAILWAY_GIT_COMMIT_SHA` is set
+ * automatically; locally you can export `FASTOWL_BUILD_SHA` if you
+ * want the endpoint to return something truthful during dev.
+ */
+function resolveLatestDaemonVersion(): string {
+  const sha =
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.FASTOWL_BUILD_SHA ||
+    process.env.GITHUB_SHA ||
+    '';
+  if (!sha) return 'dev';
+  return sha.slice(0, 7);
+}
+
+/**
  * Public routes for provisioning the FastOwl daemon on a remote VM.
  * These are unauthenticated by design — they serve a static script that
  * takes a pairing token as input. The pairing token itself is the
@@ -52,6 +70,20 @@ export function daemonPublicRoutes(): Router {
     res.setHeader('Content-Type', 'text/x-shellscript; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     fs.createReadStream(scriptPath).pipe(res);
+  });
+
+  /**
+   * Public endpoint returning the current "latest daemon version" —
+   * the backend's own build SHA. Desktop and polling daemons read this
+   * to decide whether they're stale. No auth: this is a public
+   * constant tied to the deployed backend, not per-user data.
+   */
+  router.get('/latest-version', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      data: { version: resolveLatestDaemonVersion() },
+    });
   });
 
   return router;
