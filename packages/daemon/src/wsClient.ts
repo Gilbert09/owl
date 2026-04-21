@@ -107,21 +107,20 @@ export class DaemonWsClient {
     if (this.shuttingDown) return;
 
     const url = toWsUrl(this.config.backendUrl) + '/daemon-ws';
-    // Send the token in the URL so the backend can authorize before
-    // accepting the upgrade. The hello message then confirms identity
-    // and swaps pairing → device token if needed.
+    // Token is sent inside the `hello` frame, not the URL, so it
+    // doesn't leak into access/edge logs. Guard against an unconfigured
+    // daemon up front so we don't dial with nothing.
     const token = this.config.deviceToken ?? this.config.pairingToken;
     if (!token) {
       console.error('daemon: no token configured; aborting');
       process.exit(1);
     }
-    const withToken = `${url}?token=${encodeURIComponent(token)}`;
 
     console.log(`daemon: connecting to ${url}`);
     // `rejectUnauthorized: true` is the default but pinning it makes
     // MITM hygiene explicit — the daemon holds a device token and runs
     // privileged commands; it must refuse to dial an untrusted backend.
-    const ws = new WebSocket(withToken, { rejectUnauthorized: true });
+    const ws = new WebSocket(url, { rejectUnauthorized: true });
     this.ws = ws;
 
     ws.on('open', () => {

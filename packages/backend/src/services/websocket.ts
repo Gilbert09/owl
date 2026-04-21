@@ -22,35 +22,62 @@ const subscriptions = new Map<WebSocket, Set<string>>();
 const connectionUsers = new Map<WebSocket, AuthUser>();
 
 export function setupWebSocket(wss: WebSocketServer): void {
-  wss.on('connection', async (ws: WebSocket, req) => {
-    const token = extractTokenFromUpgrade(req.url);
-    if (!token) {
-      ws.close(4401, 'missing token');
-      return;
-    }
+  wss.on('connection', async (ws: WebSocket) => {
+    // Accept the upgrade anonymously. The client must send an
+    // `{type:'auth', token}` message within the handshake window
+    // or the socket is closed. Keeping the token out of the URL
+    // stops it leaking into access logs, Railway edge logs, and
+    // monitoring tool URL captures.
+    let authenticated = false;
+    const handshakeTimer = setTimeout(() => {
+      if (!authenticated) {
+        console.warn('WebSocket auth timeout; closing');
+        ws.close(4401, 'auth timeout');
+      }
+    }, 5_000);
 
-    const user = await verifyTokenAndGetUser(token).catch(() => null);
-    if (!user) {
-      ws.close(4401, 'invalid token');
-      return;
-    }
-
-    console.log(`WebSocket client connected (user=${user.id})`);
-    clients.add(ws);
-    subscriptions.set(ws, new Set());
-    connectionUsers.set(ws, user);
-
-    ws.on('message', (data: Buffer) => {
+    ws.on('message', async (data: Buffer) => {
+      let message: unknown;
       try {
-        const message = JSON.parse(data.toString());
-        void handleMessage(ws, message);
+        message = JSON.parse(data.toString());
       } catch (err) {
         console.error('Invalid WebSocket message:', err);
+        return;
       }
+
+      if (!authenticated) {
+        const m = message as { type?: unknown; token?: unknown };
+        if (m.type !== 'auth' || typeof m.token !== 'string') {
+          ws.close(4401, 'expected auth');
+          return;
+        }
+        const user = await verifyTokenAndGetUser(m.token).catch(() => null);
+        if (!user) {
+          ws.close(4401, 'invalid token');
+          return;
+        }
+        authenticated = true;
+        clearTimeout(handshakeTimer);
+        clients.add(ws);
+        subscriptions.set(ws, new Set());
+        connectionUsers.set(ws, user);
+        console.log(`WebSocket client connected (user=${user.id})`);
+        sendToClient(ws, {
+          type: 'connection:status',
+          payload: { connected: true },
+          timestamp: new Date().toISOString(),
+        });
+        return;
+      }
+
+      void handleMessage(ws, message);
     });
 
     ws.on('close', () => {
-      console.log('WebSocket client disconnected');
+      clearTimeout(handshakeTimer);
+      if (authenticated) {
+        console.log('WebSocket client disconnected');
+      }
       clients.delete(ws);
       subscriptions.delete(ws);
       connectionUsers.delete(ws);
@@ -58,29 +85,12 @@ export function setupWebSocket(wss: WebSocketServer): void {
 
     ws.on('error', (err) => {
       console.error('WebSocket error:', err);
+      clearTimeout(handshakeTimer);
       clients.delete(ws);
       subscriptions.delete(ws);
       connectionUsers.delete(ws);
     });
-
-    sendToClient(ws, {
-      type: 'connection:status',
-      payload: { connected: true },
-      timestamp: new Date().toISOString(),
-    });
   });
-}
-
-/** Parse the `?token=<jwt>` query param off the upgrade URL. */
-function extractTokenFromUpgrade(url: string | undefined): string | null {
-  if (!url) return null;
-  try {
-    // Provide a dummy base; the ws URL is path-relative.
-    const parsed = new URL(url, 'http://localhost');
-    return parsed.searchParams.get('token');
-  } catch {
-    return null;
-  }
 }
 
 async function handleMessage(ws: WebSocket, message: any): Promise<void> {

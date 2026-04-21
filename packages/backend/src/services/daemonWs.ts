@@ -18,8 +18,10 @@ import { handleProxyHttpRequest } from './daemonProxyHandler.js';
  * keeps deploy footprints small (one port, one TLS terminator).
  *
  * Flow:
- *   1. Daemon connects with `?token=<pairing-or-device-token>`.
- *   2. Daemon sends a `hello` message with meta + the same token.
+ *   1. Daemon dials `/daemon-ws` anonymously (no URL token — tokens
+ *      would leak into access logs).
+ *   2. Daemon sends a `hello` message carrying the pairing or device
+ *      token. Must arrive within the handshake window or we close.
  *   3. Backend authenticates via daemonRegistry.authenticate().
  *      - Bad token → close with 4401.
  *      - Good pairing → issue device token in hello_ack, save hash.

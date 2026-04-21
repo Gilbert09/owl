@@ -429,6 +429,7 @@ class WebSocketClient {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private subscribedWorkspaces: Set<string> = new Set();
+  private authenticated = false;
 
   async connect(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN) return;
@@ -441,25 +442,33 @@ class WebSocketClient {
       return;
     }
     console.log('Connecting to WebSocket...');
-    // Pass token as query param — upgrade requests in browsers/Electron
-    // don't let you set custom headers, so this is the canonical path.
-    this.ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(token)}`);
+    // Token rides in the first frame after open, not the URL, so it
+    // doesn't end up in access/edge logs. The backend closes the
+    // socket if auth doesn't arrive within its handshake window.
+    this.authenticated = false;
+    this.ws = new WebSocket(WS_URL);
 
     this.ws.onopen = () => {
-      console.log('WebSocket connected');
+      console.log('WebSocket opened; authenticating…');
       this.reconnectAttempts = 0;
-
-      // Resubscribe to workspaces
-      for (const workspaceId of this.subscribedWorkspaces) {
-        this.send({ type: 'subscribe', workspaceId });
-      }
-
-      this.emit('connection:status', { connected: true });
+      this.ws?.send(JSON.stringify({ type: 'auth', token }));
     };
 
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as WSEvent;
+        // The server emits connection:status {connected:true} only
+        // after auth succeeds. That's our signal to resubscribe.
+        if (
+          data.type === 'connection:status' &&
+          (data.payload as { connected?: boolean })?.connected &&
+          !this.authenticated
+        ) {
+          this.authenticated = true;
+          for (const workspaceId of this.subscribedWorkspaces) {
+            this.send({ type: 'subscribe', workspaceId });
+          }
+        }
         this.emit(data.type, data.payload);
       } catch (err) {
         console.error('Failed to parse WebSocket message:', err);
@@ -468,6 +477,7 @@ class WebSocketClient {
 
     this.ws.onclose = () => {
       console.log('WebSocket disconnected');
+      this.authenticated = false;
       this.emit('connection:status', { connected: false });
       this.scheduleReconnect();
     };
