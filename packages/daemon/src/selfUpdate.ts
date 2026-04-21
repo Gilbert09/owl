@@ -84,6 +84,18 @@ export interface PerformUpdateResult {
 export async function performSelfUpdate(opts: {
   drainTimeoutSeconds?: number;
 }): Promise<PerformUpdateResult> {
+  // Self-update pulls + runs arbitrary code from the upstream git repo.
+  // Disabled by default: a compromised backend paired with this daemon
+  // would otherwise get supply-chain-style persistence by pushing a
+  // bad commit to main. Operators opt in explicitly per host.
+  if (process.env.FASTOWL_SELF_UPDATE_ENABLED !== 'true') {
+    throw new Error(
+      'Self-update is disabled on this daemon. Set ' +
+        'FASTOWL_SELF_UPDATE_ENABLED=true in the daemon environment to allow ' +
+        'backend-triggered updates.'
+    );
+  }
+
   const root = findSourceRoot();
   if (!root) {
     throw new Error(
@@ -101,12 +113,16 @@ export async function performSelfUpdate(opts: {
     );
   }
 
-  // Sequential: fetch → reset → install → build. `reset --hard`
-  // intentionally wipes any local edits on the VM install root —
-  // hand-edits there are not a supported workflow.
+  // Sequential: fetch → fast-forward-only check → reset → install →
+  // build. `reset --hard` intentionally wipes any local edits on the
+  // VM install root — hand-edits there are not a supported workflow.
+  // `merge-base --is-ancestor` refuses to advance when origin/main
+  // has been force-pushed to a non-descendant commit, so a rewritten
+  // upstream history can't silently replace the daemon at runtime.
   const script =
     'set -euo pipefail && ' +
     'git fetch origin main && ' +
+    'git merge-base --is-ancestor HEAD origin/main && ' +
     'git reset --hard origin/main && ' +
     'npm install --no-audit --no-fund && ' +
     'npm run build -w @fastowl/shared && ' +
