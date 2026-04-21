@@ -120,6 +120,111 @@ function validatePriority(priority: unknown): TaskPriority {
 }
 
 /**
+ * Generate a PR title + body from the task's diff. Title always
+ * follows Conventional Commits; body either fills in the repo's PR
+ * template (if found by the caller and passed in) or is generated
+ * from scratch.
+ *
+ * The caller is responsible for locating the template file on the
+ * env's working directory (e.g. `.github/pull_request_template.md`)
+ * and passing its raw content — this function doesn't hit the
+ * filesystem itself.
+ *
+ * Falls back to `{ title: task.title, body: quoted prompt }` on any
+ * failure so `openPullRequestForTask` always has something to send
+ * to GitHub.
+ */
+export async function generatePullRequestContent(opts: {
+  taskTitle: string;
+  prompt?: string;
+  diffStat?: string;
+  diff?: string;
+  templateContent?: string;
+  preferredEnvId?: string | null;
+}): Promise<{ title: string; body: string }> {
+  const fallback = {
+    title: opts.taskTitle.slice(0, 72),
+    body: buildPrBodyFallback(opts.prompt),
+  };
+  const envId = pickGenerationEnv(opts.preferredEnvId);
+  if (!envId) return fallback;
+
+  const diffBudget = 6000;
+  const truncatedDiff =
+    opts.diff && opts.diff.length > diffBudget
+      ? opts.diff.slice(0, diffBudget) + '\n\n[… diff truncated …]'
+      : opts.diff ?? '';
+
+  const bodyInstruction = opts.templateContent
+    ? 'For the body: FILL IN the repository PR template below. Preserve the ' +
+      'template structure exactly — headings, checkboxes, order — and fill ' +
+      'each section based on the diff. If a section asks for something the ' +
+      'diff does not cover (e.g. breaking-change notes when there are none), ' +
+      'say "N/A". Leave checkboxes unchecked unless the diff clearly satisfies ' +
+      'the item.'
+    : 'For the body: write a GitHub-style PR description. Start with a one- ' +
+      'or two-sentence summary of what the PR does. Then a short "Changes" ' +
+      'bullet list of the main edits. Then any notable caveats or follow-ups ' +
+      '(or omit if none). Keep it under ~200 words.';
+
+  const system =
+    'You produce GitHub pull-request titles and descriptions for a single PR. ' +
+    'Output ONLY a JSON object with keys "title" and "body" — no prose, no ' +
+    'markdown fences, no extra keys. ' +
+    'Title rules: follow Conventional Commits exactly — lowercase type prefix ' +
+    'from {feat, fix, chore, refactor, docs, test, perf, build, ci, style}, ' +
+    'optional scope in parens, colon, space, then a short lowercase summary. ' +
+    '≤72 chars. Pick the type from the diff (feat = new behaviour, fix = bug ' +
+    'fix, refactor = no behaviour change, etc). No period at the end. ' +
+    bodyInstruction +
+    ' Describe what the DIFF does — do not paraphrase or echo the task prompt. ' +
+    'Never mention AI, Claude, FastOwl, tooling, or the task system in the ' +
+    'title or body.';
+
+  const sections: string[] = [system];
+  if (opts.templateContent) {
+    sections.push(
+      'PR TEMPLATE (fill this in for the body):\n```\n' +
+        opts.templateContent.slice(0, 4000) +
+        '\n```'
+    );
+  }
+  if (opts.diffStat) sections.push('Diff stat:\n' + opts.diffStat);
+  if (truncatedDiff) sections.push('Diff:\n' + truncatedDiff);
+
+  try {
+    const raw = await runClaudeCli(envId, sections.join('\n\n'));
+    const cleaned = raw
+      .trim()
+      .replace(/^```[a-z]*\n?|\n?```$/g, '')
+      .trim();
+    const parsed = JSON.parse(cleaned) as { title?: unknown; body?: unknown };
+    const title =
+      typeof parsed.title === 'string' && parsed.title.trim().length > 0
+        ? parsed.title.trim().slice(0, 100)
+        : fallback.title;
+    const body =
+      typeof parsed.body === 'string' && parsed.body.trim().length > 0
+        ? parsed.body.trim()
+        : fallback.body;
+    return { title, body };
+  } catch (err) {
+    console.error('[ai] generatePullRequestContent failed:', err);
+    return fallback;
+  }
+}
+
+function buildPrBodyFallback(prompt?: string): string {
+  if (!prompt || !prompt.trim()) return '';
+  const quoted = prompt
+    .trim()
+    .split('\n')
+    .map((l) => `> ${l}`)
+    .join('\n');
+  return '**Task prompt**\n\n' + quoted;
+}
+
+/**
  * Generate a commit message for an approved task from its diff. We
  * deliberately DO NOT pass the user's original prompt as LLM context
  * — a commit message should describe what the code does now, not

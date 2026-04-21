@@ -153,6 +153,11 @@ export const tasks = {
   reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
   proposeCommitMessage: (id: string) =>
     request<{ message: string }>('GET', `/tasks/${id}/proposed-commit-message`),
+  retryPullRequest: (id: string) =>
+    request<{ pullRequest: { number: number; url: string } }>(
+      'POST',
+      `/tasks/${id}/retry-pr`
+    ),
   getTerminal: (id: string) =>
     request<{
       terminalOutput: string;

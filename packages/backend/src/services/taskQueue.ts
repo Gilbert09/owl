@@ -349,15 +349,33 @@ class TaskQueueService extends EventEmitter {
                 // Roll the task back to queued on any prep/start
                 // failure below so the scheduler will re-pick it on
                 // the next tick (different env, different moment).
+                // Persist the reason on task.metadata.lastScheduleError
+                // so the desktop can show WHY a task that keeps going
+                // in_progress → queued isn't actually running.
                 const rollback = async (reason: string): Promise<void> => {
                   console.error(
                     `[TaskQueue] rolling ${task.title} back to queued: ${reason}`
                   );
+                  const existingRows = await this.db
+                    .select({ metadata: tasksTable.metadata })
+                    .from(tasksTable)
+                    .where(eq(tasksTable.id, task.id))
+                    .limit(1);
+                  const existingMetadata =
+                    (existingRows[0]?.metadata as Record<string, unknown>) ?? {};
+                  const nextMetadata = {
+                    ...existingMetadata,
+                    lastScheduleError: {
+                      at: new Date().toISOString(),
+                      reason,
+                    },
+                  };
                   await this.db
                     .update(tasksTable)
                     .set({
                       status: 'queued',
                       assignedEnvironmentId: null,
+                      metadata: nextMetadata,
                       updatedAt: new Date(),
                     })
                     .where(eq(tasksTable.id, task.id));

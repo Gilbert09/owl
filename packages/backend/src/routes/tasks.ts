@@ -1176,6 +1176,62 @@ export function taskRoutes(): Router {
     }
   });
 
+  // Retry creating a PR for a task whose first attempt errored
+  // (usually a missing GH integration, a pre-existing PR, or a
+  // transient GH API failure). Re-runs openPullRequestForTask,
+  // which overwrites task.metadata.pullRequest or ...Error.
+  router.post('/:id/retry-pr', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, req.params.id))
+      .limit(1);
+    if (!rows[0]) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    const task = rowToTask(rows[0]);
+    if (!task.branch) {
+      return res.status(400).json({
+        success: false,
+        error: 'Task has no branch — cannot create a PR.',
+      });
+    }
+
+    // Run synchronously so the desktop gets a meaningful response
+    // (success → new PR URL, failure → the error the user saw before
+    // but now also persisted on metadata).
+    await openPullRequestForTask(task.id);
+
+    const updated = await db
+      .select()
+      .from(tasksTable)
+      .where(eq(tasksTable.id, task.id))
+      .limit(1);
+    const updatedTask = rowToTask(updated[0]);
+    const prState =
+      (updatedTask.metadata as {
+        pullRequest?: { number: number; url: string };
+        pullRequestError?: string;
+      } | undefined) ?? {};
+
+    if (prState.pullRequest) {
+      return res.json({
+        success: true,
+        data: { pullRequest: prState.pullRequest },
+      });
+    }
+    return res.status(502).json({
+      success: false,
+      error: prState.pullRequestError || 'PR creation failed',
+    });
+  });
+
   // Read the audit log of every git command FastOwl ran on this
   // task's behalf — drives the desktop Git tab.
   router.get('/:id/git-log', async (req, res) => {

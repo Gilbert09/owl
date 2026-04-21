@@ -458,11 +458,24 @@ class AgentService extends EventEmitter {
         // approve modal has a message ready when the user opens it.
         void prefetchCommitMessage(agent.currentTaskId);
       } else {
+        // Persist a result so the desktop failed-view banner has
+        // something meaningful to show — without this the user sees
+        // only a generic "Failed" label and has to dig through logs
+        // to work out why.
+        const failureError = `Agent exited with code ${code}. Check the task's Git tab and terminal for details.`;
         await this.db
           .update(tasksTable)
-          .set({ status: 'failed', completedAt: now, updatedAt: now })
+          .set({
+            status: 'failed',
+            result: { success: false, error: failureError },
+            completedAt: now,
+            updatedAt: now,
+          })
           .where(eq(tasksTable.id, agent.currentTaskId));
-        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed');
+        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'failed', {
+          success: false,
+          error: failureError,
+        });
       }
     }
 

@@ -26,6 +26,7 @@ import { Card } from '../ui/card';
 import { ScrollArea } from '../ui/scroll-area';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
+import { api } from '../../lib/api';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
 import { ApproveTaskModal } from '../modals/ApproveTaskModal';
 import { TaskTerminal } from './TaskTerminal';
@@ -413,6 +414,22 @@ function TaskDetail({ taskId }: TaskDetailProps) {
 
   const [approveModalOpen, setApproveModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'terminal' | 'files' | 'git'>('terminal');
+  const [retryingPr, setRetryingPr] = useState(false);
+
+  const handleRetryPr = async () => {
+    setRetryingPr(true);
+    try {
+      await api.tasks.retryPullRequest(taskId);
+      // Result flows in via task:update WS — no need to update local
+      // state explicitly; the metadata.pullRequest change will trigger
+      // a re-render.
+    } catch {
+      // Error is now on task.metadata.pullRequestError and will show
+      // in the info strip via the existing WS update.
+    } finally {
+      setRetryingPr(false);
+    }
+  };
 
   const handleApproveClick = (e: React.MouseEvent) => {
     // Shift-click bypasses the modal — commits with the auto-generated
@@ -738,11 +755,21 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             ?.pullRequestError;
           if (prErr) {
             return (
-              <span
-                className="text-amber-600 dark:text-amber-500"
-                title={`PR not created: ${prErr}`}
-              >
-                PR failed
+              <span className="flex items-center gap-1.5">
+                <span
+                  className="text-amber-600 dark:text-amber-500"
+                  title={prErr}
+                >
+                  PR failed
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRetryPr}
+                  disabled={retryingPr}
+                  className="text-primary hover:underline disabled:opacity-60"
+                >
+                  {retryingPr ? 'Retrying…' : 'Retry'}
+                </button>
               </span>
             );
           }
@@ -765,17 +792,61 @@ function TaskDetail({ taskId }: TaskDetailProps) {
         </div>
       )}
 
-      {/* Failed/cancelled result banner — brief, above tabs. */}
+      {/* Failed/cancelled result banner — loud, above tabs, with the
+          full reason + a Retry action. */}
       {task.result && !task.result.success && (
-        <div className="px-4 py-2 border-b bg-red-500/5 text-sm">
-          <div className="flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-red-500" />
-            <span className="font-medium text-red-600 dark:text-red-400">
-              {task.result.summary || task.result.error || 'Failed'}
-            </span>
+        <div className="px-4 py-3 border-b bg-red-500/10 text-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+              <div className="min-w-0">
+                <p className="font-medium text-red-700 dark:text-red-400">
+                  Task failed
+                </p>
+                <p className="text-xs text-red-700/80 dark:text-red-300/80 mt-1 break-words whitespace-pre-wrap">
+                  {task.result.summary || task.result.error || 'Unknown error.'}
+                </p>
+              </div>
+            </div>
+            {task.status === 'failed' && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0"
+                onClick={handleRetryTask}
+                disabled={isLoading}
+              >
+                <RotateCw className="w-3 h-3 mr-1" />
+                Retry
+              </Button>
+            )}
           </div>
         </div>
       )}
+
+      {/* Scheduler-rollback banner: task is still in queued but the
+          last attempt to pick it up failed (git prep error, agent
+          start threw, etc). Gives the user a clue why they keep
+          seeing the spinner without progress. */}
+      {task.status === 'queued' &&
+        (() => {
+          const meta = task.metadata as
+            | { lastScheduleError?: { at: string; reason: string } }
+            | undefined;
+          const err = meta?.lastScheduleError;
+          if (!err) return null;
+          return (
+            <div className="px-4 py-2 border-b bg-amber-500/10 text-xs">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-amber-700 dark:text-amber-300 break-words">
+                  Last attempt to start this task failed at{' '}
+                  {new Date(err.at).toLocaleTimeString()}: {err.reason}
+                </p>
+              </div>
+            </div>
+          );
+        })()}
 
       {/* Tabs — same shape as the in_progress view. */}
       <div className="border-b px-4 flex items-center gap-1 shrink-0">
