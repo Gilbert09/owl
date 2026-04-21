@@ -6,8 +6,9 @@ import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
 import { gitService } from './git.js';
 import { resolveTaskGitContext } from './gitContext.js';
+import { generateTaskTitle, looksLikePlaceholderTitle } from './ai.js';
 import { permissionService } from './permissionService.js';
-import { emitTaskStatus } from './websocket.js';
+import { emitTaskStatus, emitTaskUpdate } from './websocket.js';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   tasks as tasksTable,
@@ -459,6 +460,32 @@ class TaskQueueService extends EventEmitter {
   > {
     const gitContext = await resolveTaskGitContext(task, environmentId);
     if (!gitContext) return { ok: true };
+
+    // Refine the title inline if it's still the prompt placeholder —
+    // mirrors the same step in /start so scheduler-launched tasks
+    // also get clean branch slugs. The title patch is broadcast so
+    // the desktop replaces the placeholder live.
+    if (task.prompt && looksLikePlaceholderTitle(task.title, task.prompt)) {
+      try {
+        const refined = await generateTaskTitle(task.prompt, environmentId);
+        if (refined && refined !== task.title) {
+          await this.db
+            .update(tasksTable)
+            .set({ title: refined, updatedAt: new Date() })
+            .where(eq(tasksTable.id, task.id));
+          task.title = refined;
+          emitTaskUpdate(task.workspaceId, task.id, {
+            title: refined,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[TaskQueue] inline title refinement failed for ${task.id}, branch slug may be ugly:`,
+          err
+        );
+      }
+    }
 
     const { workingDirectory, baseBranch } = gitContext;
 

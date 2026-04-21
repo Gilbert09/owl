@@ -25,6 +25,26 @@ export function isConfigured(): boolean {
 }
 
 /**
+ * Heuristic: is this title still the placeholder the modal sets at
+ * task-create time (the prompt's first ~60 chars), rather than a
+ * proper LLM-generated title? Used by `/start` to know whether to
+ * refine the title inline before deriving a branch slug from it —
+ * branches like `fastowl/abc-fix-the-bug-where-i-keep` look bad and
+ * are the visible side-effect of a late-arriving title.
+ */
+export function looksLikePlaceholderTitle(
+  title: string | null | undefined,
+  prompt: string | null | undefined
+): boolean {
+  if (!title || !prompt) return false;
+  const t = title.trim();
+  const p = prompt.trim();
+  if (!t || !p) return false;
+  // Modal default is exactly `prompt.slice(0, 60).trim()`.
+  return t === p.slice(0, 60).trim();
+}
+
+/**
  * Generate a concise (≤60 char) title for a task from its prompt.
  * Called fire-and-forget after task create; the result is patched in
  * via `task:update` WS event so the desktop replaces the placeholder

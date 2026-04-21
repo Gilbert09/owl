@@ -18,6 +18,7 @@ import {
   generateTaskMetadata,
   generateTaskTitle,
   isConfigured as isAIConfigured,
+  looksLikePlaceholderTitle,
 } from '../services/ai.js';
 import {
   assertUser,
@@ -424,6 +425,31 @@ export function taskRoutes(): Router {
           success: false,
           error: `Repository is busy on this environment — task "${holder.title}" is ${holder.status}. Approve or reject it before starting another.`,
         });
+      }
+    }
+
+    // Branch slug derives from task.title. If the title is still the
+    // raw-prompt placeholder (LLM refinement hasn't landed yet because
+    // the user clicked Start within ~2s of Create), refine it inline
+    // here so the branch comes out clean — `fastowl/<id>-<slug>` looks
+    // bad with 30 chars of arbitrary prompt text.
+    if (task.prompt && looksLikePlaceholderTitle(task.title, task.prompt)) {
+      try {
+        const refined = await generateTaskTitle(task.prompt, environmentId);
+        if (refined && refined !== task.title) {
+          await db
+            .update(tasksTable)
+            .set({ title: refined, updatedAt: new Date() })
+            .where(eq(tasksTable.id, task.id));
+          task.title = refined;
+          emitTaskUpdate(task.workspaceId, task.id, {
+            title: refined,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+      } catch (err) {
+        // Non-fatal — branch will fall back to the placeholder slug.
+        console.warn('[tasks] inline title refinement failed, branch slug may be ugly:', err);
       }
     }
 
