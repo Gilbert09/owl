@@ -6,6 +6,7 @@ import { agentService } from './agent.js';
 import { environmentService } from './environment.js';
 import { gitService } from './git.js';
 import { resolveTaskGitContext } from './gitContext.js';
+import { withTaskGitLog } from './gitLogService.js';
 import { generateTaskTitle, looksLikePlaceholderTitle } from './ai.js';
 import { permissionService } from './permissionService.js';
 import { emitTaskStatus, emitTaskUpdate } from './websocket.js';
@@ -489,30 +490,37 @@ class TaskQueueService extends EventEmitter {
 
     const { workingDirectory, baseBranch } = gitContext;
 
-    if (task.branch) {
-      try {
-        await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
-        return { ok: true, workingDirectory, branch: task.branch };
-      } catch (err) {
-        console.warn(
-          `[TaskQueue] Failed to checkout existing branch ${task.branch}, will create fresh:`,
-          err
-        );
+    // Wrap the git work in a task-scoped context so every command
+    // shows up in the desktop Git tab.
+    return withTaskGitLog(task.id, async () => {
+      if (task.branch) {
+        try {
+          await gitService.checkoutBranch(environmentId, task.branch, workingDirectory);
+          return { ok: true, workingDirectory, branch: task.branch } as const;
+        } catch (err) {
+          console.warn(
+            `[TaskQueue] Failed to checkout existing branch ${task.branch}, will create fresh:`,
+            err
+          );
+        }
       }
-    }
 
-    try {
-      const branch = await gitService.prepareTaskBranch({
-        environmentId,
-        taskId: task.id,
-        taskTitle: task.title,
-        workingDirectory,
-        baseBranch,
-      });
-      return { ok: true, workingDirectory, branch };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
+      try {
+        const branch = await gitService.prepareTaskBranch({
+          environmentId,
+          taskId: task.id,
+          taskTitle: task.title,
+          workingDirectory,
+          baseBranch,
+        });
+        return { ok: true, workingDirectory, branch } as const;
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+        } as const;
+      }
+    });
   }
 }
 

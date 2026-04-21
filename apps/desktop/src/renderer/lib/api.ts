@@ -185,6 +185,18 @@ export const tasks = {
       'GET',
       `/tasks/${id}/diff/file?path=${encodeURIComponent(path)}`
     ),
+  getGitLog: (id: string) =>
+    request<{
+      entries: Array<{
+        ts: string;
+        command: string;
+        cwd?: string;
+        exitCode: number;
+        stdoutPreview: string;
+        stderrPreview: string;
+        durationMs: number;
+      }>;
+    }>('GET', `/tasks/${id}/git-log`),
   // Generate task metadata from prompt using AI
   generateMetadata: (prompt: string) =>
     request<TaskMetadata>('POST', '/tasks/generate-metadata', { prompt }),

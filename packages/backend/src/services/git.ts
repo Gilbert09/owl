@@ -1,4 +1,5 @@
 import { environmentService } from './environment.js';
+import { recordGitCommand } from './gitLogService.js';
 
 /**
  * Single-quote a string for POSIX shell. Every embedded `'` is escaped
@@ -614,9 +615,24 @@ class GitService {
     command: string,
     workingDirectory?: string
   ): Promise<string> {
+    const start = Date.now();
     const { stdout, stderr, code } = await environmentService.exec(environmentId, command, {
       cwd: workingDirectory,
     });
+    const durationMs = Date.now() - start;
+
+    // Best-effort audit log so the desktop's Git tab can show what
+    // FastOwl actually did. No-op when no task context is active.
+    void recordGitCommand({
+      ts: new Date().toISOString(),
+      command,
+      cwd: workingDirectory,
+      exitCode: code,
+      stdoutPreview: stdout.slice(0, 500),
+      stderrPreview: stderr.slice(0, 500),
+      durationMs,
+    });
+
     if (code !== 0) {
       throw new Error(`Git command failed: ${stderr || stdout}`);
     }

@@ -263,6 +263,28 @@ export function emitTaskFilesChanged(
   });
 }
 
+export interface GitLogEntryEvent {
+  ts: string;
+  command: string;
+  cwd?: string;
+  exitCode: number;
+  stdoutPreview: string;
+  stderrPreview: string;
+  durationMs: number;
+}
+
+export function emitTaskGitLog(
+  workspaceId: string,
+  taskId: string,
+  entry: GitLogEntryEvent
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'task:git_log',
+    payload: { taskId, entry },
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function emitAgentPermissionRequest(
   workspaceId: string,
   req: PermissionRequest

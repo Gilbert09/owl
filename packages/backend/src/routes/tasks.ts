@@ -11,6 +11,7 @@ import { agentService } from '../services/agent.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { resolveTaskGitContext } from '../services/gitContext.js';
+import { enterTaskGitLog, getGitLog } from '../services/gitLogService.js';
 import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
@@ -469,6 +470,7 @@ export function taskRoutes(): Router {
     }
     if (gitContext) {
       workingDirectory = gitContext.workingDirectory;
+      enterTaskGitLog(task.id);
 
       if (task.branch) {
         // Resume: checkout the existing task branch. Skip base sync —
@@ -737,6 +739,9 @@ export function taskRoutes(): Router {
       console.log(
         `${tag}: starting · env=${envId} wd=${workingDirectory} branch=${task.branch}`
       );
+      // Audit every git command into the task's gitLog so the desktop's
+      // Git tab can show what happened.
+      enterTaskGitLog(task.id);
 
       try {
         // Defensive: explicitly checkout the task branch before
@@ -871,6 +876,8 @@ export function taskRoutes(): Router {
         const envId = task.assignedEnvironmentId;
         const workingDirectory = gitContext.workingDirectory;
         const baseBranch = gitContext.baseBranch;
+        // Audit every git command into the task's gitLog.
+        enterTaskGitLog(task.id);
 
         try {
           await gitService.stashToBackupRef(envId, 'rejected', task.id, workingDirectory);
@@ -1063,6 +1070,20 @@ export function taskRoutes(): Router {
       console.error('Failed to get diff:', err);
       res.status(500).json({ success: false, error: msg });
     }
+  });
+
+  // Read the audit log of every git command FastOwl ran on this
+  // task's behalf — drives the desktop Git tab.
+  router.get('/:id/git-log', async (req, res) => {
+    try {
+      await requireTaskAccess(req, req.params.id);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+    const entries = await getGitLog(req.params.id);
+    res.json({ success: true, data: { entries } } as ApiResponse<{
+      entries: Awaited<ReturnType<typeof getGitLog>>;
+    }>);
   });
 
   // List files changed on this task's branch vs base, one entry per path.

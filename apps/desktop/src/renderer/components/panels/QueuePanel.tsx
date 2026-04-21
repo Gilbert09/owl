@@ -16,6 +16,7 @@ import {
   Eye,
   Hand,
   Trash2,
+  GitCommit,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -29,7 +30,9 @@ import { ApproveTaskModal } from '../modals/ApproveTaskModal';
 import { TaskTerminal } from './TaskTerminal';
 import { TerminalHistory } from './TerminalHistory';
 import { TaskFilesPanel } from './TaskFilesPanel';
+import { TaskGitPanel } from './TaskGitPanel';
 import { useTaskFiles } from '../../hooks/useTaskFiles';
+import { useTaskGitLog } from '../../hooks/useTaskGitLog';
 import { isAgentTask } from '@fastowl/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
 
@@ -359,6 +362,8 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   // detail-view level so the count is visible even on the Terminal
   // tab. Same hook drives TaskFilesPanel inside the tab.
   const { files: changedFiles } = useTaskFiles(taskId);
+  // Same pattern for the Git tab badge — count of recorded commands.
+  const { entries: gitLogEntries } = useTaskGitLog(taskId);
 
   const handleStartTask = async () => {
     setIsLoading(true);
@@ -406,7 +411,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   };
 
   const [approveModalOpen, setApproveModalOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'terminal' | 'files'>('terminal');
+  const [activeTab, setActiveTab] = useState<'terminal' | 'files' | 'git'>('terminal');
 
   const handleApproveClick = (e: React.MouseEvent) => {
     // Shift-click bypasses the modal — commits with the auto-generated
@@ -542,17 +547,41 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               </Badge>
             )}
           </TabButton>
+          <TabButton
+            active={activeTab === 'git'}
+            onClick={() => setActiveTab('git')}
+          >
+            <GitCommit className="w-3.5 h-3.5 mr-1.5" />
+            Git
+            {gitLogEntries.length > 0 && (
+              <Badge
+                variant="secondary"
+                className={cn(
+                  'ml-1.5 h-5 px-1.5 text-[10px] tabular-nums',
+                  activeTab !== 'git' && 'bg-primary/15 text-primary'
+                )}
+              >
+                {gitLogEntries.length}
+              </Badge>
+            )}
+          </TabButton>
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-hidden p-4">
-          {activeTab === 'terminal' ? (
+          {activeTab === 'terminal' && (
             <div className="h-full">
               <TaskTerminal task={task} />
             </div>
-          ) : (
+          )}
+          {activeTab === 'files' && (
             <div className="h-full">
               <TaskFilesPanel taskId={task.id} />
+            </div>
+          )}
+          {activeTab === 'git' && (
+            <div className="h-full">
+              <TaskGitPanel taskId={task.id} />
             </div>
           )}
         </div>
@@ -773,6 +802,21 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           {task.status === 'awaiting_review' && task.branch && task.repositoryId && (
             <div className="h-[480px]">
               <TaskFilesPanel taskId={task.id} />
+            </div>
+          )}
+
+          {gitLogEntries.length > 0 && task.status !== 'in_progress' && (
+            <div>
+              <h3 className="text-sm font-medium mb-2 flex items-center gap-1.5">
+                <GitCommit className="w-3.5 h-3.5" />
+                Git activity
+                <span className="text-xs text-muted-foreground font-normal">
+                  ({gitLogEntries.length})
+                </span>
+              </h3>
+              <div className="h-72">
+                <TaskGitPanel taskId={task.id} />
+              </div>
             </div>
           )}
 
