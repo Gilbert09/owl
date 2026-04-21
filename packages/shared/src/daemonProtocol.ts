@@ -78,7 +78,8 @@ export type DaemonRequestPayload =
   | KillSessionRequest
   | GitCommandRequest
   | PingRequest
-  | ProxyHttpRequest;
+  | ProxyHttpRequest
+  | UpdateDaemonRequest;
 
 export interface DaemonRequest {
   kind: 'request';
@@ -171,6 +172,37 @@ export interface GitCommandRequest {
 
 export interface PingRequest {
   op: 'ping';
+}
+
+/**
+ * Ask the daemon to pull the latest FastOwl source, rebuild, and exit
+ * (its OS-level supervisor — systemd on Linux, launchd on macOS —
+ * restarts it into the new binary). Supported today only for
+ * source-install daemons (the shape `install-daemon.sh` produces);
+ * compiled-binary daemons return an error asking the user to re-run
+ * the install script manually.
+ *
+ * Flow on the daemon side:
+ *   1. Wait up to `drainTimeoutSeconds` for active sessions to close.
+ *   2. Shell out to `git fetch && reset --hard && npm install && build`.
+ *   3. Stamp `packages/daemon/version.json` with the new HEAD SHA.
+ *   4. Respond `ok` and `process.exit(0)`.
+ */
+export interface UpdateDaemonRequest {
+  op: 'update_daemon';
+  /**
+   * Seconds to wait for in-flight sessions to drain before forcing
+   * through the update. Daemon rejects the request with a
+   * "busy" error if the drain times out.
+   */
+  drainTimeoutSeconds?: number;
+}
+
+export interface UpdateDaemonResult {
+  /** SHA the daemon is now built from (next restart loads this). */
+  newSha: string;
+  /** Short summary of what happened — shown verbatim in the desktop toast. */
+  message: string;
 }
 
 /**

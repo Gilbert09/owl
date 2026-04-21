@@ -197,6 +197,54 @@ export function environmentRoutes(): Router {
     });
   });
 
+  // Trigger a self-update on the env's daemon. Only meaningful for
+  // `remote` envs — local daemons update with the Electron app. The
+  // daemon pulls latest from origin, rebuilds, stamps version.json,
+  // replies ok, then exits so systemd/launchd restarts it.
+  router.post('/:id/update-daemon', async (req, res) => {
+    const user = assertUser(req);
+    const db = getDbClient();
+    const rows = await db
+      .select()
+      .from(environmentsTable)
+      .where(and(eq(environmentsTable.id, req.params.id), eq(environmentsTable.ownerId, user.id)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Environment not found' });
+    }
+    if (row.type === 'local') {
+      return res.status(400).json({
+        success: false,
+        error:
+          'Local daemon updates ship with the Electron app — check for a new FastOwl desktop release instead.',
+      });
+    }
+    if (!daemonRegistry.isConnected(row.id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Daemon is not connected; cannot trigger an update.',
+      });
+    }
+
+    try {
+      // Use a longer request timeout than the default — install +
+      // build can legitimately take 1–2 minutes on a small VM.
+      const result = await daemonRegistry.request<{ newSha: string; message: string }>(
+        row.id,
+        { op: 'update_daemon', drainTimeoutSeconds: 30 },
+        5 * 60 * 1000
+      );
+      res.json({ success: true, data: result } as ApiResponse<{
+        newSha: string;
+        message: string;
+      }>);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(500).json({ success: false, error: `Update failed: ${msg}` });
+    }
+  });
+
   return router;
 }
 

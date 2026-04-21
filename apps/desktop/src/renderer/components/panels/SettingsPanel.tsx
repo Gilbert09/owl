@@ -817,6 +817,12 @@ function EnvironmentsSettings() {
   } | null>(null);
   const [restartingDaemon, setRestartingDaemon] = useState(false);
   const [latestDaemonVersion, setLatestDaemonVersion] = useState<string | null>(null);
+  const [updatingDaemonId, setUpdatingDaemonId] = useState<string | null>(null);
+  const [updateResult, setUpdateResult] = useState<{
+    envId: string;
+    ok: boolean;
+    message: string;
+  } | null>(null);
 
   // Poll the backend for its "latest daemon version" (short SHA) so
   // we can flag remote envs whose daemon is stale. Poll sparingly —
@@ -834,6 +840,31 @@ function EnvironmentsSettings() {
       clearInterval(interval);
     };
   }, []);
+
+  const handleUpdateDaemon = async (envId: string) => {
+    setUpdatingDaemonId(envId);
+    setUpdateResult(null);
+    try {
+      const result = await api.environments.updateDaemon(envId);
+      setUpdateResult({
+        envId,
+        ok: true,
+        message: result.message || `Updated to ${result.newSha}`,
+      });
+      // The daemon exits after replying, so it'll go "disconnected"
+      // briefly then come back on the new build. Refresh latest
+      // version so the badge flips to Up-to-date on return.
+      void fetchLatestDaemonVersion().then((v) => setLatestDaemonVersion(v));
+    } catch (err) {
+      setUpdateResult({
+        envId,
+        ok: false,
+        message: err instanceof Error ? err.message : 'Update failed',
+      });
+    } finally {
+      setUpdatingDaemonId(null);
+    }
+  };
 
   // Local-daemon info refresh. Fetch once on mount + every 5s so the
   // UI reflects launchd state changes (install, crashes, PID rotation)
@@ -1008,7 +1039,22 @@ function EnvironmentsSettings() {
                       <DaemonVersionLine
                         daemonVersion={env.daemonVersion}
                         latestVersion={latestDaemonVersion}
+                        connected={env.status === 'connected'}
+                        updating={updatingDaemonId === env.id}
+                        onUpdate={() => void handleUpdateDaemon(env.id)}
                       />
+                      {updateResult && updateResult.envId === env.id && (
+                        <p
+                          className={cn(
+                            'text-xs',
+                            updateResult.ok
+                              ? 'text-green-600 dark:text-green-500'
+                              : 'text-red-600 dark:text-red-500'
+                          )}
+                        >
+                          {updateResult.message}
+                        </p>
+                      )}
                     </div>
                   )}
                   {env.error && (
@@ -1700,11 +1746,15 @@ function AccountSettings() {
 interface DaemonVersionLineProps {
   daemonVersion: string | undefined;
   latestVersion: string | null;
+  connected: boolean;
+  updating: boolean;
+  onUpdate: () => void;
 }
 
 /**
  * Render the remote env's daemon version with an "Up to date" /
- * "Stale" badge. Stale = the env's reported SHA (second half of
+ * "Stale" badge, plus an Update button when the daemon is behind and
+ * connected. Stale = the env's reported SHA (second half of
  * `<pkg>+<sha>`) doesn't match the backend's latest build SHA.
  *
  * Shows "unknown" when the daemon hasn't reported yet (pre-Slice 1
@@ -1712,7 +1762,13 @@ interface DaemonVersionLineProps {
  * stale — we'd rather stay quiet than false-positive on VMs running
  * old binaries we haven't instrumented yet.
  */
-function DaemonVersionLine({ daemonVersion, latestVersion }: DaemonVersionLineProps) {
+function DaemonVersionLine({
+  daemonVersion,
+  latestVersion,
+  connected,
+  updating,
+  onUpdate,
+}: DaemonVersionLineProps) {
   const reportedSha = daemonVersion?.split('+')[1] ?? null;
   const state: 'unknown' | 'up-to-date' | 'stale' =
     !reportedSha || !latestVersion
@@ -1721,7 +1777,7 @@ function DaemonVersionLine({ daemonVersion, latestVersion }: DaemonVersionLinePr
         ? 'up-to-date'
         : 'stale';
   return (
-    <p className="flex items-center gap-2 text-xs">
+    <div className="flex items-center gap-2 text-xs flex-wrap">
       <span>
         Daemon version:{' '}
         <span className="font-mono">{daemonVersion || 'unknown'}</span>
@@ -1744,6 +1800,22 @@ function DaemonVersionLine({ daemonVersion, latestVersion }: DaemonVersionLinePr
           Up to date
         </Badge>
       )}
-    </p>
+      {state === 'stale' && (
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-6 text-xs"
+          onClick={onUpdate}
+          disabled={!connected || updating}
+          title={
+            !connected
+              ? 'Daemon offline — connect before updating.'
+              : 'Pull the latest FastOwl on the VM, rebuild, and restart the daemon.'
+          }
+        >
+          {updating ? 'Updating…' : 'Update'}
+        </Button>
+      )}
+    </div>
   );
 }

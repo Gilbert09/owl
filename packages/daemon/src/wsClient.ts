@@ -27,6 +27,7 @@ import { gitDispatch } from './git.js';
 import { saveConfig, loadConfig, type ResolvedConfig } from './config.js';
 import { DaemonProxyServer } from './proxyServer.js';
 import { resolveDaemonVersion } from './version.js';
+import { performSelfUpdate } from './selfUpdate.js';
 
 const DAEMON_VERSION = resolveDaemonVersion();
 const INITIAL_RECONNECT_MS = 1000;
@@ -288,6 +289,19 @@ export class DaemonWsClient {
       case 'proxy_http_request':
         // Daemon → backend only. Shouldn't arrive here.
         throw new Error('proxy_http_request is daemon→backend only');
+      case 'update_daemon': {
+        const result = await performSelfUpdate({
+          drainTimeoutSeconds: p.drainTimeoutSeconds,
+        });
+        // Exit AFTER the WS response is flushed (handleRequest sends
+        // it immediately on return). 500ms is plenty of wire time for
+        // the ack to reach Railway before systemd/launchd swaps us.
+        setTimeout(() => {
+          console.log('daemon: exiting for supervisor-driven restart into new build');
+          process.exit(0);
+        }, 500).unref();
+        return result;
+      }
     }
   }
 

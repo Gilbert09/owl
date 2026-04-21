@@ -75,6 +75,11 @@ export const workspaces = {
 };
 
 // Environments
+interface UpdateDaemonResult {
+  newSha: string;
+  message: string;
+}
+
 export const environments = {
   list: () => request<Environment[]>('GET', '/environments'),
   get: (id: string) => request<Environment>('GET', `/environments/${id}`),
@@ -90,6 +95,8 @@ export const environments = {
       'POST',
       `/environments/${id}/pairing-token`
     ),
+  updateDaemon: (id: string) =>
+    request<UpdateDaemonResult>('POST', `/environments/${id}/update-daemon`),
 };
 
 // Agents
