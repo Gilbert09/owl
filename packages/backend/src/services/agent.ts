@@ -7,12 +7,15 @@ import type {
   AgentAttention,
   InboxItem,
   StartAgentRequest,
+  TaskType,
 } from '@fastowl/shared';
+import { isAgentTask } from '@fastowl/shared';
 import { environmentService } from './environment.js';
 import { agentStructuredService } from './agentStructured.js';
 import { daemonRegistry } from './daemonRegistry.js';
 import { permissionService } from './permissionService.js';
 import { ensurePermissionHook } from './permissionHook.js';
+import { prefetchCommitMessage } from './commitMessagePrefetch.js';
 import {
   emitAgentStatus,
   emitInboxNew,
@@ -55,16 +58,23 @@ class AgentService extends EventEmitter {
     await this.cleanupStaleAgents();
 
     // Structured runs fire `turn_complete` after each `result` event.
-    // For interactive runs that means "child is idling on stdin,
-    // waiting for the next user message" — flip the agent status
-    // back to idle so the desktop re-enables the input box.
+    // One-shot runs already exit the CLI here (handleStructuredExit
+    // flips the task to awaiting_review). Interactive runs keep the
+    // CLI alive between turns — we auto-finish those too: flip the
+    // agent to idle, then on agent tasks fire the same path
+    // /ready-for-review takes (stop the child + move task to
+    // awaiting_review). Saves the user a manual Finish click; if
+    // they want another turn they use the Continue button.
     agentStructuredService.on(
       'turn_complete',
-      (run: { interactive: boolean; agentId: string }) => {
+      (run: { interactive: boolean; agentId: string; taskId?: string; workspaceId: string }) => {
         if (!run.interactive) return;
         this.updateAgentStatus(run.agentId, 'idle', 'none').catch((err) =>
           console.error('turn_complete status update failed:', err)
         );
+        if (run.taskId) {
+          void this.maybeAutoFinishAgentTask(run.taskId, run.agentId, run.workspaceId);
+        }
       }
     );
 
@@ -444,6 +454,9 @@ class AgentService extends EventEmitter {
           .set({ status: 'awaiting_review', updatedAt: now })
           .where(eq(tasksTable.id, agent.currentTaskId));
         emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
+        // Kick off commit-message generation in the background so the
+        // approve modal has a message ready when the user opens it.
+        void prefetchCommitMessage(agent.currentTaskId);
       } else {
         await this.db
           .update(tasksTable)
@@ -515,6 +528,48 @@ class AgentService extends EventEmitter {
     this.updateAgentStatus(agentId, 'working', 'none').catch((err) =>
       console.error('updateAgentStatus error:', err)
     );
+  }
+
+  /**
+   * Auto-finish an interactive agent task when the child turns idle
+   * (fires from the structured `turn_complete` event). Mirrors the
+   * manual Finish / `/ready-for-review` flow: stop the agent, flip
+   * the task status to awaiting_review, broadcast.
+   *
+   * Scoped to agent-type tasks (code_writing / pr_response /
+   * pr_review) — manual tasks have no "finish" concept. Idempotent
+   * on task.status so a late turn_complete after the user already
+   * hit Finish doesn't double-flip.
+   */
+  private async maybeAutoFinishAgentTask(
+    taskId: string,
+    agentId: string,
+    workspaceId: string
+  ): Promise<void> {
+    try {
+      const rows = await this.db
+        .select({ type: tasksTable.type, status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, taskId))
+        .limit(1);
+      const row = rows[0];
+      if (!row) return;
+      if (!isAgentTask(row.type as TaskType)) return;
+      if (row.status !== 'in_progress') return;
+
+      this.stopAgent(agentId);
+
+      const now = new Date();
+      await this.db
+        .update(tasksTable)
+        .set({ status: 'awaiting_review', updatedAt: now })
+        .where(eq(tasksTable.id, taskId));
+      emitTaskStatus(workspaceId, taskId, 'awaiting_review');
+      void prefetchCommitMessage(taskId);
+      console.log(`[agent] auto-finished task ${taskId.slice(0, 8)} on agent idle`);
+    } catch (err) {
+      console.error(`[agent] auto-finish for task ${taskId} failed:`, err);
+    }
   }
 
   stopAgent(agentId: string): void {

@@ -120,12 +120,16 @@ function validatePriority(priority: unknown): TaskPriority {
 }
 
 /**
- * Generate a commit message for an approved task from its title +
- * prompt + diff. Diff is truncated to keep the prompt bounded — Haiku
- * is fast and cheap but we'd still rather not send a 500k-line
- * renames-only diff. Falls back to `<title>\n\n<prompt>` on any
- * failure — better to commit something unglamorous than to block
- * the approve flow.
+ * Generate a commit message for an approved task from its diff. We
+ * deliberately DO NOT pass the user's original prompt as LLM context
+ * — a commit message should describe what the code does now, not
+ * what the user asked for. Past output included the prompt verbatim,
+ * either because the fallback path was firing or because Haiku was
+ * echoing the context it saw.
+ *
+ * Diff is truncated to keep the prompt bounded — Haiku is fast and
+ * cheap but we'd still rather not send a 500k-line renames-only
+ * diff. Falls back to the task title alone on any failure.
  */
 export async function generateCommitMessage(opts: {
   title: string;
@@ -134,7 +138,7 @@ export async function generateCommitMessage(opts: {
   diff?: string;
   preferredEnvId?: string | null;
 }): Promise<string> {
-  const fallback = buildCommitFallback(opts.title, opts.prompt);
+  const fallback = opts.title.slice(0, 72);
   const envId = pickGenerationEnv(opts.preferredEnvId);
   if (!envId) return fallback;
 
@@ -147,29 +151,41 @@ export async function generateCommitMessage(opts: {
   const sections: string[] = [
     'You write git commit messages in the Conventional Commits style. ' +
       'Respond with the commit message only — no commentary, no markdown ' +
-      'fences, no quotes. First line is a concise subject (≤72 chars, ' +
-      'lowercase type prefix like feat:/fix:/chore: when it fits). If the ' +
-      'change is non-trivial, add a blank line and a short body explaining ' +
-      'the why, wrapped at ~72 chars. Never mention the AI, the tooling, ' +
-      'or the task system.',
-    `Task title: ${opts.title}`,
+      'fences, no quotes, no prefixes like "Commit message:". First line ' +
+      'is a concise subject (≤72 chars, lowercase type prefix like ' +
+      'feat:/fix:/chore: when it fits). If the change is non-trivial, ' +
+      'add a blank line and a short body explaining the WHY, wrapped ' +
+      'at ~72 chars. ' +
+      'Describe what the DIFF actually does — do NOT paraphrase or copy ' +
+      'any task-description or user-intent you see elsewhere. Never ' +
+      'mention the AI, the tooling, or the task system.',
+    `Reference task title (for context only, do NOT copy verbatim): ${opts.title}`,
   ];
-  if (opts.prompt) sections.push(`Original prompt:\n${opts.prompt}`);
   if (opts.diffStat) sections.push(`Diff stat:\n${opts.diffStat}`);
   if (truncatedDiff) sections.push(`Diff:\n${truncatedDiff}`);
 
   try {
     const text = await runClaudeCli(envId, sections.join('\n\n'));
     const message = text.trim().replace(/^```[a-z]*\n?|\n?```$/g, '').trim();
-    return message || fallback;
+    if (!message) return fallback;
+
+    // Echo detection: if the model just returned the task's prompt
+    // back (±whitespace), treat as a fallback. Keeps the "prompt
+    // appears verbatim" bug from silently regressing.
+    if (opts.prompt && looksLikeEcho(message, opts.prompt)) {
+      console.warn('[ai] generateCommitMessage returned the user prompt; falling back');
+      return fallback;
+    }
+    return message;
   } catch (err) {
     console.error('[ai] generateCommitMessage failed:', err);
     return fallback;
   }
 }
 
-function buildCommitFallback(title: string, prompt?: string): string {
-  const subject = title.slice(0, 72);
-  const body = prompt && prompt.trim() && prompt.trim() !== title.trim() ? prompt.trim() : '';
-  return body ? `${subject}\n\n${body}` : subject;
+function looksLikeEcho(message: string, prompt: string): boolean {
+  const m = message.trim().toLowerCase();
+  const p = prompt.trim().toLowerCase();
+  if (!p) return false;
+  return m === p || m.includes(p) || p.includes(m);
 }

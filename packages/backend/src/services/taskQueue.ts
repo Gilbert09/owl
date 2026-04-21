@@ -332,19 +332,45 @@ class TaskQueueService extends EventEmitter {
               if (!targetEnvironmentId || env.id === targetEnvironmentId) {
                 console.log(`[TaskQueue] Starting new agent on ${env.name}...`);
 
-                // Prep the task branch on a synced base before the
-                // agent touches anything. Manual `/start` does the
-                // equivalent in routes/tasks.ts — but scheduler-picked
-                // tasks previously skipped this entirely and edited
-                // whatever branch happened to be checked out.
+                // Flip the task to in_progress up-front so the UI
+                // doesn't see the 10-60s git-prep window as a stall
+                // in `queued`. Pin the env on the row too so the
+                // approve/reject/git-tab endpoints can find it.
+                await this.db
+                  .update(tasksTable)
+                  .set({
+                    status: 'in_progress',
+                    assignedEnvironmentId: env.id,
+                    updatedAt: new Date(),
+                  })
+                  .where(eq(tasksTable.id, task.id));
+                emitTaskStatus(task.workspaceId, task.id, 'in_progress');
+
+                // Roll the task back to queued on any prep/start
+                // failure below so the scheduler will re-pick it on
+                // the next tick (different env, different moment).
+                const rollback = async (reason: string): Promise<void> => {
+                  console.error(
+                    `[TaskQueue] rolling ${task.title} back to queued: ${reason}`
+                  );
+                  await this.db
+                    .update(tasksTable)
+                    .set({
+                      status: 'queued',
+                      assignedEnvironmentId: null,
+                      updatedAt: new Date(),
+                    })
+                    .where(eq(tasksTable.id, task.id));
+                  emitTaskStatus(task.workspaceId, task.id, 'queued');
+                };
+
+                // Prep the task branch on a synced base.
                 let workingDirectory: string | undefined;
                 let taskBranch: string | undefined = task.branch;
                 if (task.repositoryId) {
                   const prep = await this.prepareRepoForTask(task, env.id);
                   if (!prep.ok) {
-                    console.error(
-                      `[TaskQueue] Failed to prepare repo for task "${task.title}": ${prep.error}`
-                    );
+                    await rollback(`Failed to prepare repo: ${prep.error}`);
                     continue;
                   }
                   workingDirectory = prep.workingDirectory;
@@ -362,7 +388,6 @@ class TaskQueueService extends EventEmitter {
                   console.log(`[TaskQueue] Agent started: ${newAgent.id}`);
 
                   const updateValues: Record<string, unknown> = {
-                    status: 'in_progress',
                     assignedAgentId: newAgent.id,
                     updatedAt: new Date(),
                   };
@@ -373,10 +398,11 @@ class TaskQueueService extends EventEmitter {
                     .set(updateValues)
                     .where(eq(tasksTable.id, task.id));
 
-                  emitTaskStatus(task.workspaceId, task.id, 'in_progress');
                   break;
                 } catch (err) {
-                  console.error(`[TaskQueue] Failed to start agent on ${env.name}:`, err);
+                  await rollback(
+                    err instanceof Error ? err.message : String(err)
+                  );
                 }
               }
             }

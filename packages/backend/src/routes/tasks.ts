@@ -12,6 +12,7 @@ import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { resolveTaskGitContext } from '../services/gitContext.js';
 import { enterTaskGitLog, getGitLog } from '../services/gitLogService.js';
+import { prefetchCommitMessage } from '../services/commitMessagePrefetch.js';
 import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
@@ -429,6 +430,23 @@ export function taskRoutes(): Router {
       }
     }
 
+    // Flip the task to `in_progress` BEFORE we do the slow git prep
+    // (fetch + pull + checkout -b) — otherwise the task sits in
+    // `queued` for 10-60s from the UI's perspective. Git activity is
+    // already visible via the Git tab (enterTaskGitLog).
+    {
+      const now = new Date();
+      await db
+        .update(tasksTable)
+        .set({
+          status: 'in_progress',
+          assignedEnvironmentId: environmentId,
+          updatedAt: now,
+        })
+        .where(eq(tasksTable.id, task.id));
+      emitTaskStatus(task.workspaceId, task.id, 'in_progress');
+    }
+
     // Branch slug derives from task.title. If the title is still the
     // raw-prompt placeholder (LLM refinement hasn't landed yet because
     // the user clicked Start within ~2s of Create), refine it inline
@@ -457,16 +475,34 @@ export function taskRoutes(): Router {
     let workingDirectory: string | undefined;
     let taskBranch: string | undefined;
 
+    // Helper: any git-prep / agent-start failure below has to roll
+    // the task back out of in_progress, since we flipped it early.
+    const rollbackToFailed = async (error: string): Promise<void> => {
+      const now = new Date();
+      await db
+        .update(tasksTable)
+        .set({
+          status: 'failed',
+          result: { success: false, error },
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(tasksTable.id, task.id));
+      emitTaskStatus(task.workspaceId, task.id, 'failed', {
+        success: false,
+        error,
+      });
+    };
+
     const gitContext = await resolveTaskGitContext(task, environmentId);
     if (!gitContext && isAgentTask(task.type) && task.repositoryId) {
       // Agent task tied to a repo, but the repo has no localPath.
       // Refuse rather than silently running on whatever branch is
       // checked out in the env's default working directory.
-      return res.status(400).json({
-        success: false,
-        error:
-          "This task's repository has no local path configured. Set a local path for the repository in Settings before starting the task.",
-      });
+      const msg =
+        "This task's repository has no local path configured. Set a local path for the repository in Settings before starting the task.";
+      await rollbackToFailed(msg);
+      return res.status(400).json({ success: false, error: msg });
     }
     if (gitContext) {
       workingDirectory = gitContext.workingDirectory;
@@ -494,6 +530,7 @@ export function taskRoutes(): Router {
           });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
+          await rollbackToFailed(msg);
           return res.status(400).json({ success: false, error: msg });
         }
       }
@@ -508,12 +545,11 @@ export function taskRoutes(): Router {
         workingDirectory,
       });
 
-      const now = new Date();
+      // Task status was already flipped to in_progress up-front; just
+      // fill in the agent + branch references now that they exist.
       const updateValues: Record<string, unknown> = {
-        status: 'in_progress',
         assignedAgentId: agent.id,
-        assignedEnvironmentId: environmentId,
-        updatedAt: now,
+        updatedAt: new Date(),
       };
       if (taskBranch) updateValues.branch = taskBranch;
 
@@ -521,8 +557,6 @@ export function taskRoutes(): Router {
         .update(tasksTable)
         .set(updateValues)
         .where(eq(tasksTable.id, task.id));
-
-      emitTaskStatus(task.workspaceId, task.id, 'in_progress');
 
       const updatedRows = await db
         .select()
@@ -538,6 +572,7 @@ export function taskRoutes(): Router {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to start task';
       console.error('Failed to start task:', err);
+      await rollbackToFailed(msg);
       res.status(500).json({ success: false, error: msg });
     }
   });
@@ -669,6 +704,7 @@ export function taskRoutes(): Router {
       .where(eq(tasksTable.id, task.id));
 
     emitTaskStatus(task.workspaceId, task.id, 'awaiting_review');
+    void prefetchCommitMessage(task.id);
 
     const updatedRows = await db
       .select()
@@ -808,6 +844,53 @@ export function taskRoutes(): Router {
             error:
               'Commit + push completed but working tree still has uncommitted changes. Task left in awaiting_review.',
           });
+        }
+
+        // Snapshot the per-file list + each file's diff onto
+        // task.metadata.finalFiles BEFORE we delete the local
+        // branch. Post-completion the Files tab reads from this
+        // snapshot — the task becomes self-contained and history
+        // doesn't depend on the env being online or the remote
+        // branch still existing.
+        try {
+          const files = await gitService.getChangedFiles(
+            envId,
+            baseBranch,
+            workingDirectory
+          );
+          const FILE_DIFF_CAP = 50_000;
+          const snapshot = await Promise.all(
+            files.map(async (f) => {
+              if (f.binary) return { ...f, diff: '' };
+              let diff = '';
+              try {
+                diff = await gitService.getFileDiff(
+                  envId,
+                  baseBranch,
+                  f.path,
+                  workingDirectory
+                );
+              } catch (err) {
+                console.warn(`${tag}: snapshot diff failed for ${f.path}:`, err);
+              }
+              if (diff.length > FILE_DIFF_CAP) {
+                diff = diff.slice(0, FILE_DIFF_CAP) + '\n[… truncated …]';
+              }
+              return { ...f, diff };
+            })
+          );
+
+          const existingMetadata = (rows[0].metadata as Record<string, unknown>) ?? {};
+          await db
+            .update(tasksTable)
+            .set({
+              metadata: { ...existingMetadata, finalFiles: snapshot },
+              updatedAt: new Date(),
+            })
+            .where(eq(tasksTable.id, task.id));
+          console.log(`${tag}: snapshotted ${snapshot.length} file diffs to metadata`);
+        } catch (snapshotErr) {
+          console.warn(`${tag}: final-diff snapshot failed (non-fatal):`, snapshotErr);
         }
 
         // Cleanup: return to base branch + drop the local task branch
@@ -992,6 +1075,20 @@ export function taskRoutes(): Router {
     }
     const task = rowToTask(rows[0]);
 
+    // Serve from the prefetched cache if available — the backend
+    // kicks off a background generation the moment a task lands in
+    // awaiting_review, so the modal opens instantly in the common
+    // case instead of waiting on a 3–5s daemon CLI round-trip.
+    const cached =
+      (task.metadata as { proposedCommitMessage?: string } | undefined)
+        ?.proposedCommitMessage;
+    if (typeof cached === 'string' && cached.trim().length > 0) {
+      return res.json({
+        success: true,
+        data: { message: cached },
+      } as ApiResponse<{ message: string }>);
+    }
+
     let diffStat: string | undefined;
     let diff: string | undefined;
     if (task.branch && task.assignedEnvironmentId) {
@@ -1094,6 +1191,23 @@ export function taskRoutes(): Router {
     } catch (err) {
       return handleAccessError(err, res);
     }
+
+    // Prefer the snapshot persisted at approve time — once the task
+    // is completed, the local branch is gone and the working tree is
+    // back on base, so live `git diff` would return nothing. The
+    // snapshot is the record of what actually shipped.
+    const snapshot = await readFinalFilesSnapshot(req.params.id);
+    if (snapshot) {
+      const files = snapshot.map((f) => ({
+        path: f.path,
+        status: f.status,
+        added: f.added,
+        removed: f.removed,
+        binary: f.binary,
+      }));
+      return res.json({ success: true, data: { files } } as ApiResponse<{ files: typeof files }>);
+    }
+
     const context = await resolveTaskDiffContext(req);
     if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
     try {
@@ -1121,6 +1235,18 @@ export function taskRoutes(): Router {
     if (typeof pathParam !== 'string' || !pathParam) {
       return res.status(400).json({ success: false, error: 'path query param is required' });
     }
+
+    const snapshot = await readFinalFilesSnapshot(req.params.id);
+    if (snapshot) {
+      const hit = snapshot.find((f) => f.path === pathParam);
+      if (hit) {
+        return res.json({
+          success: true,
+          data: { diff: hit.diff ?? '' },
+        } as ApiResponse<{ diff: string }>);
+      }
+    }
+
     const context = await resolveTaskDiffContext(req);
     if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
     try {
@@ -1310,6 +1436,32 @@ async function findConnectedEnvironmentForUser(req: import('express').Request): 
     )
     .limit(1);
   return rows[0]?.id ?? null;
+}
+
+interface FinalFileEntry {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+  added: number;
+  removed: number;
+  binary: boolean;
+  diff?: string;
+}
+
+/**
+ * Return the persisted per-file snapshot captured at approve time,
+ * or null if the task never reached completion / was approved before
+ * snapshots were added.
+ */
+async function readFinalFilesSnapshot(taskId: string): Promise<FinalFileEntry[] | null> {
+  const db = getDbClient();
+  const rows = await db
+    .select({ metadata: tasksTable.metadata })
+    .from(tasksTable)
+    .where(eq(tasksTable.id, taskId))
+    .limit(1);
+  const metadata = rows[0]?.metadata as Record<string, unknown> | undefined;
+  const snapshot = metadata?.finalFiles;
+  return Array.isArray(snapshot) ? (snapshot as FinalFileEntry[]) : null;
 }
 
 function rowToTask(
