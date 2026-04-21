@@ -39,13 +39,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(next ?? null);
     });
 
-    // Bridge: main process forwards `fastowl://auth-callback#...` here.
+    // Bridge: main process forwards `fastowl://auth-callback?...` here.
+    // With flowType: 'pkce', Supabase returns a short-lived `code` that
+    // we exchange for a session using the verifier it stashed during
+    // signInWithOAuth — this verifies the callback came from a flow
+    // we actually started and can't be replayed with stolen tokens.
     const off = window.electron?.auth?.onCallback(async (url: string) => {
-      const params = parseHashFromUrl(url);
-      const access_token = params.get('access_token');
-      const refresh_token = params.get('refresh_token');
-      if (access_token && refresh_token) {
-        await supabase.auth.setSession({ access_token, refresh_token });
+      const code = extractCodeParam(url);
+      if (!code) return;
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      if (error) {
+        console.error('auth: exchangeCodeForSession failed:', error.message);
       }
     });
 
@@ -98,9 +102,13 @@ export function useAuth(): AuthContextValue {
   return ctx;
 }
 
-/** Supabase returns tokens in the URL hash (not query), so parse that. */
-function parseHashFromUrl(url: string): URLSearchParams {
-  const hashIdx = url.indexOf('#');
-  if (hashIdx < 0) return new URLSearchParams();
-  return new URLSearchParams(url.slice(hashIdx + 1));
+/** PKCE callback returns `?code=…` on the query string. */
+function extractCodeParam(url: string): string | null {
+  try {
+    // fastowl://auth-callback?code=... — URL parses custom schemes fine.
+    const u = new URL(url);
+    return u.searchParams.get('code');
+  } catch {
+    return null;
+  }
 }

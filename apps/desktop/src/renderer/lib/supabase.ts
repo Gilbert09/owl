@@ -23,6 +23,11 @@ export function getSupabase(): SupabaseClient {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: false, // We handle the deep link ourselves.
+      // PKCE gives us a `code` on the callback that we exchange for a
+      // session server-side via the stored code_verifier. Drops the
+      // implicit flow (access_token in URL hash) so a crafted deep link
+      // can't fixate a session with attacker-supplied tokens.
+      flowType: 'pkce',
     },
   });
   return client;
