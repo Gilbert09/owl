@@ -47,7 +47,24 @@ async function main() {
   daemonAutoUpdate.init();
 
   const app = express();
-  app.use(cors());
+  // Only real browser origins need CORS. Desktop/CLI/MCP clients send no
+  // Origin header (or `null`), so they're always allowed. Env-override
+  // `ALLOWED_ORIGINS` is a comma-separated allowlist — keep it empty in
+  // production if nothing legitimately runs in a browser against this API.
+  const originAllowlist = (process.env.ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  app.use(
+    cors({
+      origin(origin, cb) {
+        if (!origin) return cb(null, true);
+        if (originAllowlist.includes(origin)) return cb(null, true);
+        return cb(new Error(`Origin not allowed: ${origin}`));
+      },
+      credentials: true,
+    })
+  );
   app.use(express.json());
 
   app.get('/health', (_req, res) => {
