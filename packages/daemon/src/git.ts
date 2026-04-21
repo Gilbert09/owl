@@ -1,4 +1,4 @@
-import { exec } from './executor.js';
+import { run } from './executor.js';
 
 /**
  * Mirror of backend's `gitService` — the backend used to shell out to
@@ -6,6 +6,9 @@ import { exec } from './executor.js';
  * now on this side of the WS. Moving git here means the backend just
  * sends `{ op: 'git', method: 'createTaskBranch', args: [...] }` and
  * the work happens locally.
+ *
+ * All commands use argv-based spawn (`run`) — no shell, no quoting,
+ * caller-supplied strings cannot inject metacharacters.
  *
  * All methods take an optional `cwd` — the repo path on this machine.
  */
@@ -18,28 +21,35 @@ export async function createTaskBranch(
   const slug = slugify(taskTitle);
   const branchName = `fastowl/${taskId}-${slug}`;
 
-  const exists = await exec(
-    `git rev-parse --verify refs/heads/${branchName} 2>/dev/null && echo exists || true`,
+  const exists = await run(
+    'git',
+    ['rev-parse', '--verify', `refs/heads/${branchName}`],
     cwd
   );
-  if (exists.stdout.trim() === 'exists') {
-    await exec(`git checkout ${branchName}`, cwd);
+  if (exists.code === 0 && exists.stdout.trim().length > 0) {
+    const checkout = await run('git', ['checkout', branchName], cwd);
+    if (checkout.code !== 0) {
+      throw new Error(`git checkout failed: ${checkout.stderr || checkout.stdout}`);
+    }
     return branchName;
   }
 
-  await exec(`git checkout -b ${branchName}`, cwd);
+  const create = await run('git', ['checkout', '-b', branchName], cwd);
+  if (create.code !== 0) {
+    throw new Error(`git checkout -b failed: ${create.stderr || create.stdout}`);
+  }
   return branchName;
 }
 
 export async function checkoutBranch(branch: string, cwd?: string): Promise<void> {
-  const res = await exec(`git checkout ${branch}`, cwd);
+  const res = await run('git', ['checkout', branch], cwd);
   if (res.code !== 0) {
     throw new Error(`git checkout failed: ${res.stderr || res.stdout}`);
   }
 }
 
 export async function getCurrentBranch(cwd?: string): Promise<string> {
-  const res = await exec(`git rev-parse --abbrev-ref HEAD`, cwd);
+  const res = await run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
   if (res.code !== 0) {
     throw new Error(`git rev-parse failed: ${res.stderr || res.stdout}`);
   }
@@ -47,7 +57,7 @@ export async function getCurrentBranch(cwd?: string): Promise<string> {
 }
 
 export async function hasUncommittedChanges(cwd?: string): Promise<boolean> {
-  const res = await exec(`git status --porcelain`, cwd);
+  const res = await run('git', ['status', '--porcelain'], cwd);
   if (res.code !== 0) {
     throw new Error(`git status failed: ${res.stderr || res.stdout}`);
   }
@@ -55,9 +65,8 @@ export async function hasUncommittedChanges(cwd?: string): Promise<boolean> {
 }
 
 export async function stashChanges(message: string, cwd?: string): Promise<void> {
-  // Escape the message so shell doesn't mangle quotes
-  const safe = message.replace(/"/g, '\\"');
-  const res = await exec(`git stash push -u -m "${safe}"`, cwd);
+  // No shell, no quoting — message is passed as a single argv[n].
+  const res = await run('git', ['stash', 'push', '-u', '-m', message], cwd);
   if (res.code !== 0) {
     throw new Error(`git stash failed: ${res.stderr || res.stdout}`);
   }
@@ -68,23 +77,25 @@ export async function getDiff(
   base: string = 'main',
   cwd?: string
 ): Promise<string> {
-  const committed = await exec(`git diff ${base}...${branch}`, cwd);
-  const uncommitted = await exec(`git diff HEAD`, cwd);
-  // Committed diff first, uncommitted second — matches the old backend
-  // concatenation order so the desktop's diff view isn't surprised.
+  const committed = await run('git', ['diff', `${base}...${branch}`], cwd);
+  const uncommitted = await run('git', ['diff', 'HEAD'], cwd);
   return (committed.stdout || '') + (uncommitted.stdout || '');
 }
 
 export async function deleteBranch(branch: string, cwd?: string): Promise<void> {
   const current = await getCurrentBranch(cwd);
   if (current === branch) {
-    // Can't delete the branch you're on. Switch to main/master first.
-    const tryMain = await exec(`git checkout main`, cwd);
+    const tryMain = await run('git', ['checkout', 'main'], cwd);
     if (tryMain.code !== 0) {
-      await exec(`git checkout master`, cwd);
+      const tryMaster = await run('git', ['checkout', 'master'], cwd);
+      if (tryMaster.code !== 0) {
+        throw new Error(
+          `cannot switch off ${branch} before delete: ${tryMaster.stderr || tryMaster.stdout}`
+        );
+      }
     }
   }
-  const res = await exec(`git branch -d ${branch}`, cwd);
+  const res = await run('git', ['branch', '-d', branch], cwd);
   if (res.code !== 0) {
     throw new Error(`git branch -d failed: ${res.stderr || res.stdout}`);
   }

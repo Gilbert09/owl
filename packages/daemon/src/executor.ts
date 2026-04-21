@@ -1,5 +1,67 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import path from 'node:path';
 import type { ExecResult } from '@fastowl/shared';
+
+/**
+ * Normalize + sanity-check a caller-supplied cwd. The daemon trusts the
+ * paired backend, but cwd values thread through `spawn()` which inherits
+ * the daemon's privileges, so obvious misuse (traversal residue, leading
+ * `-`, NUL, CR/LF) is rejected at the boundary. `undefined` is allowed —
+ * it means "use daemon's default cwd" (usually $HOME).
+ */
+function assertSafeCwd(cwd: string | undefined): void {
+  if (cwd === undefined) return;
+  if (typeof cwd !== 'string' || cwd.length === 0) {
+    throw new Error('cwd must be a non-empty string when provided');
+  }
+  if (cwd.includes('\0') || cwd.includes('\n') || cwd.includes('\r')) {
+    throw new Error('cwd must not contain control characters');
+  }
+  if (cwd.startsWith('-')) {
+    throw new Error('cwd must not start with "-"');
+  }
+  const normalized = path.normalize(cwd);
+  if (!path.isAbsolute(normalized)) {
+    throw new Error('cwd must be absolute');
+  }
+  if (normalized.split(path.sep).includes('..')) {
+    throw new Error('cwd must not contain traversal segments');
+  }
+}
+
+/**
+ * Binaries the backend is allowed to spawn via stream_spawn. This is a
+ * defense-in-depth allowlist; the daemon already only accepts commands
+ * from the paired backend. Bare names only — no paths. Binaries are
+ * looked up on $PATH by spawn().
+ */
+const ALLOWED_STREAM_BINARIES = new Set<string>([
+  'claude',
+  'bash',
+  'sh',
+  'node',
+  'npm',
+  'npx',
+  'python3',
+  'python',
+  'git',
+  'fastowl',
+]);
+
+function assertAllowedStreamBinary(binary: string): void {
+  if (typeof binary !== 'string' || binary.length === 0) {
+    throw new Error('binary must be a non-empty string');
+  }
+  if (binary.includes('/') || binary.includes('\\')) {
+    throw new Error('binary must be a bare name (no path separators)');
+  }
+  if (binary.includes('\0') || binary.includes('\n') || binary.includes('\r')) {
+    throw new Error('binary must not contain control characters');
+  }
+  if (!ALLOWED_STREAM_BINARIES.has(binary)) {
+    throw new Error(`binary not in allowlist: ${binary}`);
+  }
+}
 
 /**
  * Local execution primitives. The daemon is always "on" the machine it
@@ -83,6 +145,7 @@ export async function exec(
   command: string,
   cwd?: string
 ): Promise<ExecResult> {
+  assertSafeCwd(cwd);
   return new Promise((resolve) => {
     const proc = spawn('bash', ['-c', command], {
       cwd,
@@ -102,6 +165,48 @@ export async function exec(
       resolve({ stdout, stderr, code: code ?? 0 });
     });
 
+    proc.on('error', (err) => {
+      resolve({ stdout, stderr: stderr + (err.message ?? ''), code: -1 });
+    });
+  });
+}
+
+/**
+ * Run a binary with a strict argv array — no shell, no interpolation.
+ * Prefer this over `exec()` when the caller knows the binary and its
+ * arguments ahead of time (e.g. daemon-local git plumbing). `binary` is
+ * a bare name; stdin is closed. Stdout/stderr are buffered to UTF-8.
+ */
+export async function run(
+  binary: string,
+  args: string[],
+  cwd?: string
+): Promise<ExecResult> {
+  assertSafeCwd(cwd);
+  if (typeof binary !== 'string' || binary.length === 0) {
+    throw new Error('binary must be a non-empty string');
+  }
+  if (binary.includes('\0')) {
+    throw new Error('binary must not contain control characters');
+  }
+  return new Promise((resolve) => {
+    const proc = spawn(binary, args, {
+      cwd,
+      env: buildChildEnv(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    proc.stdout.on('data', (b: Buffer) => {
+      stdout += b.toString('utf-8');
+    });
+    proc.stderr.on('data', (b: Buffer) => {
+      stderr += b.toString('utf-8');
+    });
+    proc.on('close', (code) => {
+      resolve({ stdout, stderr, code: code ?? 0 });
+    });
     proc.on('error', (err) => {
       resolve({ stdout, stderr: stderr + (err.message ?? ''), code: -1 });
     });
@@ -135,6 +240,8 @@ export function streamSpawn(
   if (streamSessions.has(sessionId)) {
     throw new Error(`session ${sessionId} already exists`);
   }
+  assertAllowedStreamBinary(binary);
+  assertSafeCwd(opts.cwd);
 
   const childEnv: NodeJS.ProcessEnv = buildChildEnv();
   if (opts.env) {
