@@ -1,10 +1,34 @@
 import { Router } from 'express';
+import path from 'node:path';
 import { prMonitorService } from '../services/prMonitor.js';
 import {
   handleAccessError,
   requireRepositoryAccess,
   requireWorkspaceAccess,
 } from '../middleware/auth.js';
+
+/**
+ * Normalize + validate a user-supplied local filesystem path. The path
+ * will flow into `cwd` on git subprocesses, so we reject obvious
+ * injection shapes (NUL, leading `-`, newlines) and require absolute,
+ * post-normalize paths with no traversal residue.
+ */
+function validateLocalPath(raw: string): string {
+  if (raw.includes('\0') || raw.includes('\n') || raw.includes('\r')) {
+    throw new Error('localPath must not contain control characters');
+  }
+  if (raw.startsWith('-')) {
+    throw new Error('localPath must not start with "-"');
+  }
+  const normalized = path.normalize(raw);
+  if (!path.isAbsolute(normalized)) {
+    throw new Error('localPath must be absolute');
+  }
+  if (normalized.split(path.sep).includes('..')) {
+    throw new Error('localPath must not contain traversal segments');
+  }
+  return normalized;
+}
 
 export function repositoryRoutes(): Router {
   const router = Router();
@@ -36,13 +60,22 @@ export function repositoryRoutes(): Router {
     } catch (err) {
       return handleAccessError(err, res);
     }
+    let safeLocalPath: string | undefined;
+    if (typeof localPath === 'string' && localPath.trim().length > 0) {
+      try {
+        safeLocalPath = validateLocalPath(localPath.trim());
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'invalid localPath';
+        return res.status(400).json({ success: false, error: msg });
+      }
+    }
     try {
       const watched = await prMonitorService.addWatchedRepo(
         workspaceId,
         owner,
         repo,
         url,
-        typeof localPath === 'string' ? localPath : undefined
+        safeLocalPath
       );
       res.json({ success: true, data: watched });
     } catch (err: unknown) {
@@ -60,11 +93,19 @@ export function repositoryRoutes(): Router {
     const { localPath } = req.body as { localPath?: string | null };
     // `null` explicitly clears; missing leaves as-is. Empty string
     // collapses to null so the repo reverts to "no local path".
-    const normalised = localPath === undefined
-      ? undefined
-      : typeof localPath === 'string' && localPath.trim().length > 0
-        ? localPath.trim()
-        : null;
+    let normalised: string | null | undefined;
+    if (localPath === undefined) {
+      normalised = undefined;
+    } else if (typeof localPath === 'string' && localPath.trim().length > 0) {
+      try {
+        normalised = validateLocalPath(localPath.trim());
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'invalid localPath';
+        return res.status(400).json({ success: false, error: msg });
+      }
+    } else {
+      normalised = null;
+    }
     try {
       await prMonitorService.updateWatchedRepo(req.params.id, { localPath: normalised });
       res.json({ success: true, data: null });
