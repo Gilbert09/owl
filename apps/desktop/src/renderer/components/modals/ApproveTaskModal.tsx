@@ -76,10 +76,10 @@ export function ApproveTaskModal({
     <Dialog open={open} onOpenChange={(v) => (v ? null : onClose())}>
       <DialogContent className="max-w-xl" onClose={onClose}>
         <DialogHeader>
-          <DialogTitle>Approve & push</DialogTitle>
+          <DialogTitle>Commit &amp; push</DialogTitle>
           <DialogDescription>
-            FastOwl will commit the working tree and push the task branch to origin.
-            Edit the commit message below before approving.
+            FastOwl will stage the working tree, commit on the task branch, and push it to origin.
+            Edit the commit message below before continuing.
           </DialogDescription>
         </DialogHeader>
 
@@ -117,7 +117,7 @@ export function ApproveTaskModal({
             ) : (
               <CheckCircle className="w-4 h-4 mr-1" />
             )}
-            Approve &amp; push
+            Commit &amp; push
           </Button>
         </DialogFooter>
       </DialogContent>

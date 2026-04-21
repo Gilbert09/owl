@@ -29,6 +29,7 @@ import { ApproveTaskModal } from '../modals/ApproveTaskModal';
 import { TaskTerminal } from './TaskTerminal';
 import { TerminalHistory } from './TerminalHistory';
 import { TaskFilesPanel } from './TaskFilesPanel';
+import { useTaskFiles } from '../../hooks/useTaskFiles';
 import { isAgentTask } from '@fastowl/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
 
@@ -354,6 +355,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   const canStart = isAgent && ['pending', 'queued'].includes(task.status);
   const agentStatus = task.agentStatus || 'working';
 
+  // Live file count for the Files tab badge — subscribed at the
+  // detail-view level so the count is visible even on the Terminal
+  // tab. Same hook drives TaskFilesPanel inside the tab.
+  const { files: changedFiles } = useTaskFiles(taskId);
+
   const handleStartTask = async () => {
     setIsLoading(true);
     try {
@@ -524,6 +530,17 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           >
             <GitBranch className="w-3.5 h-3.5 mr-1.5" />
             Files
+            {changedFiles.length > 0 && (
+              <Badge
+                variant="secondary"
+                className={cn(
+                  'ml-1.5 h-5 px-1.5 text-[10px] tabular-nums',
+                  activeTab !== 'files' && 'bg-primary/15 text-primary'
+                )}
+              >
+                {changedFiles.length}
+              </Badge>
+            )}
           </TabButton>
         </div>
 
@@ -548,19 +565,19 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     <>
       {/* Header */}
       <div className="p-4 border-b">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-3">
+        <div className="flex items-start justify-between gap-3 mb-3 flex-wrap">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             <div
               className={cn(
-                'w-10 h-10 rounded-lg flex items-center justify-center bg-secondary',
+                'w-10 h-10 rounded-lg flex items-center justify-center bg-secondary shrink-0',
                 statusConfig[task.status].color
               )}
             >
               <StatusIcon className="w-5 h-5" />
             </div>
-            <div>
-              <h2 className="text-lg font-semibold">{task.title}</h2>
-              <div className="flex items-center gap-2 mt-1">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-lg font-semibold break-words">{task.title}</h2>
+              <div className="flex items-center gap-2 mt-1 flex-wrap">
                 <Badge variant="outline">{statusConfig[task.status].label}</Badge>
                 <Badge
                   variant={
@@ -573,24 +590,33 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 >
                   {priorityConfig[task.priority].label} Priority
                 </Badge>
+                {task.status === 'awaiting_review' && task.repositoryId && (
+                  <Badge
+                    variant="outline"
+                    className="text-amber-600 dark:text-amber-500 border-amber-500/50"
+                    title="This task holds the working tree on its environment + repo. Other tasks for the same pair will queue until you commit & push or reject."
+                  >
+                    Holding env+repo
+                  </Badge>
+                )}
               </div>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
             {task.status === 'awaiting_review' && (
               <>
                 <Button
                   size="sm"
                   onClick={handleApproveClick}
                   disabled={isLoading}
-                  title="Review commit message, then commit + push. Shift-click to skip the modal."
+                  title="Review commit message, then commit + push to origin. Shift-click to skip the modal."
                 >
                   {isLoading ? (
                     <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                   ) : (
                     <CheckCircle className="w-4 h-4 mr-1" />
                   )}
-                  Approve
+                  Commit &amp; push
                 </Button>
                 <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={isLoading}>
                   <RotateCw className="w-4 h-4 mr-1" />
@@ -649,15 +675,21 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       {/* Content */}
       <ScrollArea className="flex-1 p-4">
         <div className="space-y-6">
-          <div>
-            <h3 className="text-sm font-medium mb-2">Description</h3>
-            <p className="text-sm text-muted-foreground">{task.description}</p>
-          </div>
+          {/* Description is hidden when it just duplicates the prompt
+              (the common case — modal falls back to prompt when the
+              user doesn't type a separate description). Showing both
+              wastes vertical space and makes the panel feel cluttered. */}
+          {task.description && task.description.trim() !== (task.prompt ?? '').trim() && (
+            <div>
+              <h3 className="text-sm font-medium mb-2">Description</h3>
+              <p className="text-sm text-muted-foreground break-words">{task.description}</p>
+            </div>
+          )}
 
           {task.prompt && (
             <div>
               <h3 className="text-sm font-medium mb-2">Prompt</h3>
-              <pre className="text-sm bg-secondary p-3 rounded-lg whitespace-pre-wrap">
+              <pre className="text-sm bg-secondary p-3 rounded-lg whitespace-pre-wrap break-words">
                 {task.prompt}
               </pre>
             </div>
@@ -698,36 +730,37 @@ function TaskDetail({ taskId }: TaskDetailProps) {
 
           <div>
             <h3 className="text-sm font-medium mb-2">Details</h3>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+              <div className="min-w-0">
                 <span className="text-muted-foreground">Type:</span>
                 <span className="ml-2">{taskTypeConfig[task.type]?.label ?? task.type}</span>
               </div>
               {repo && (
-                <div>
-                  <span className="text-muted-foreground">Repository:</span>
-                  <span className="ml-2 flex items-center gap-1">
-                    <GitBranch className="w-3 h-3" />
-                    {repo.fullName}
-                  </span>
+                <div className="min-w-0 flex items-center gap-1">
+                  <span className="text-muted-foreground shrink-0">Repository:</span>
+                  <GitBranch className="w-3 h-3 ml-1 shrink-0" />
+                  <span className="truncate" title={repo.fullName}>{repo.fullName}</span>
                 </div>
               )}
               {task.branch && (
-                <div>
+                <div className="min-w-0">
                   <span className="text-muted-foreground">Branch:</span>
-                  <span className="ml-2 font-mono text-xs bg-secondary px-2 py-0.5 rounded">
+                  <span
+                    className="ml-2 font-mono text-xs bg-secondary px-2 py-0.5 rounded inline-block max-w-full align-bottom truncate"
+                    title={task.branch}
+                  >
                     {task.branch}
                   </span>
                 </div>
               )}
-              <div>
+              <div className="min-w-0">
                 <span className="text-muted-foreground">Created:</span>
                 <span className="ml-2">
                   {new Date(task.createdAt).toLocaleString()}
                 </span>
               </div>
               {task.completedAt && (
-                <div>
+                <div className="min-w-0">
                   <span className="text-muted-foreground">Completed:</span>
                   <span className="ml-2">
                     {new Date(task.completedAt).toLocaleString()}

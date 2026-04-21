@@ -9,25 +9,14 @@ import {
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { api, wsClient } from '../../lib/api';
-
-type FileStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
-
-interface ChangedFile {
-  path: string;
-  status: FileStatus;
-  added: number;
-  removed: number;
-  binary: boolean;
-}
+import { useTaskFiles, type ChangedFile } from '../../hooks/useTaskFiles';
 
 interface TaskFilesPanelProps {
   taskId: string;
 }
 
 export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
-  const [files, setFiles] = useState<ChangedFile[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const { files, loading, error } = useTaskFiles(taskId);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [writingPaths, setWritingPaths] = useState<Set<string>>(new Set());
   const [pulseKey, setPulseKey] = useState(0);
@@ -36,40 +25,13 @@ export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
   // re-subscribing on every click.
   const userTouchedSelectionRef = useRef(false);
 
+  // Bump pulseKey whenever the live file list changes so the diff
+  // viewer re-fetches the currently selected file.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    api.tasks
-      .getChangedFiles(taskId)
-      .then((data) => {
-        if (cancelled) return;
-        setFiles(data.files);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(err?.message || 'Failed to list changed files');
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [taskId]);
+    setPulseKey((k) => k + 1);
+  }, [files]);
 
-  // Live updates from the backend's file watcher.
   useEffect(() => {
-    const unsubFiles = wsClient.on<{
-      taskId: string;
-      files: ChangedFile[];
-    }>('task:files_changed', (payload) => {
-      if (payload.taskId !== taskId) return;
-      setFiles(payload.files);
-      setPulseKey((k) => k + 1);
-    });
-
     // Track in-flight writes from tool_use events so we can render a
     // pulse next to the path Claude is currently editing.
     const unsubEvents = wsClient.on<{
@@ -118,7 +80,6 @@ export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
     });
 
     return () => {
-      unsubFiles();
       unsubEvents();
     };
   }, [taskId]);
@@ -162,8 +123,8 @@ export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
   }
 
   return (
-    <div className="flex h-full min-h-[300px] border rounded-lg overflow-hidden">
-      <div className="w-72 border-r bg-[#0b0b0b] overflow-auto">
+    <div className="flex h-full min-h-[300px] min-w-0 border rounded-lg overflow-hidden bg-card">
+      <div className="w-56 min-w-[160px] max-w-[40%] shrink-0 border-r bg-muted/30 overflow-auto">
         <ul className="text-sm">
           {files.map((f) => (
             <FileRow
@@ -177,7 +138,7 @@ export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
           ))}
         </ul>
       </div>
-      <div className="flex-1 min-w-0 bg-[#0b0b0b] overflow-auto">
+      <div className="flex-1 min-w-0 bg-card overflow-auto">
         {selectedPath ? (
           <FileDiffView taskId={taskId} path={selectedPath} refreshKey={pulseKey} />
         ) : (
@@ -209,10 +170,10 @@ function FileRow({ file, selected, writing, onClick }: FileRowProps) {
           : FileText;
   const statusColor =
     file.status === 'added' || file.status === 'untracked'
-      ? 'text-green-500'
+      ? 'text-green-600 dark:text-green-500'
       : file.status === 'deleted'
-        ? 'text-red-500'
-        : 'text-slate-400';
+        ? 'text-red-600 dark:text-red-500'
+        : 'text-muted-foreground';
 
   return (
     <li>
@@ -220,28 +181,28 @@ function FileRow({ file, selected, writing, onClick }: FileRowProps) {
         type="button"
         onClick={onClick}
         className={cn(
-          'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-white/5 font-mono text-xs',
-          selected && 'bg-white/10'
+          'w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-accent font-mono text-xs',
+          selected && 'bg-accent'
         )}
       >
         <StatusIcon className={cn('w-3.5 h-3.5 shrink-0', statusColor)} />
-        <span className="flex-1 min-w-0 truncate text-slate-200" title={file.path}>
+        <span className="flex-1 min-w-0 truncate" title={file.path}>
           {file.path}
         </span>
         {writing && (
           <CircleDot
-            className="w-3 h-3 text-amber-400 animate-pulse"
+            className="w-3 h-3 text-amber-500 animate-pulse"
             aria-label="Being edited"
           />
         )}
         {!file.binary && (file.added > 0 || file.removed > 0) && (
           <span className="ml-2 text-[11px] tabular-nums">
-            {file.added > 0 && <span className="text-green-500">+{file.added}</span>}
+            {file.added > 0 && <span className="text-green-600 dark:text-green-500">+{file.added}</span>}
             {file.added > 0 && file.removed > 0 && ' '}
-            {file.removed > 0 && <span className="text-red-500">-{file.removed}</span>}
+            {file.removed > 0 && <span className="text-red-600 dark:text-red-500">-{file.removed}</span>}
           </span>
         )}
-        {file.binary && <span className="text-[11px] text-slate-500">bin</span>}
+        {file.binary && <span className="text-[11px] text-muted-foreground">bin</span>}
       </button>
     </li>
   );
@@ -314,16 +275,16 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
   }
 
   return (
-    <pre className="text-xs font-mono leading-5 p-3">
-      <div className="text-slate-500 mb-2 text-[11px]">{path}</div>
+    <pre className="text-xs font-mono leading-5 p-3 whitespace-pre-wrap break-all">
+      <div className="text-muted-foreground mb-2 text-[11px]">{path}</div>
       {lines.lines.map((line, idx) => {
-        let color = 'text-slate-300';
-        if (line.startsWith('+++') || line.startsWith('---')) color = 'text-slate-500';
-        else if (line.startsWith('+')) color = 'text-green-400';
-        else if (line.startsWith('-')) color = 'text-red-400';
-        else if (line.startsWith('@@')) color = 'text-cyan-400';
+        let color = '';
+        if (line.startsWith('+++') || line.startsWith('---')) color = 'text-muted-foreground';
+        else if (line.startsWith('+')) color = 'text-green-600 dark:text-green-500';
+        else if (line.startsWith('-')) color = 'text-red-600 dark:text-red-500';
+        else if (line.startsWith('@@')) color = 'text-cyan-600 dark:text-cyan-400';
         else if (line.startsWith('diff ') || line.startsWith('index '))
-          color = 'text-slate-500';
+          color = 'text-muted-foreground';
         return (
           <div key={idx} className={color}>
             {line || ' '}
@@ -331,7 +292,7 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
         );
       })}
       {lines.truncated && (
-        <div className="text-amber-400 mt-2">
+        <div className="text-amber-600 dark:text-amber-500 mt-2">
           [diff truncated — {MAX_RENDER_LINES.toLocaleString()} lines shown]
         </div>
       )}
