@@ -835,11 +835,14 @@ export function taskRoutes(): Router {
         await gitService.pushBranch(envId, task.branch, workingDirectory);
         console.log(`${tag}: push done`);
 
-        // Auto-open a PR on the freshly-pushed branch. Fire-and-forget
-        // — any failure (no GH integration, existing PR, non-github
-        // remote) is captured onto task.metadata so the desktop can
-        // surface it without blocking the approve flow.
-        void openPullRequestForTask(task.id);
+        // Open the PR synchronously. Used to be fire-and-forget, but
+        // the task was flipping to `completed` before the PR existed,
+        // which read to the user as "approve finished, nothing got
+        // published." Awaiting keeps the task in `awaiting_review`
+        // until the PR is up (or openPullRequestForTask has written a
+        // pullRequestError onto metadata for the retry button). All
+        // failure modes are internalised — the call never throws.
+        await openPullRequestForTask(task.id);
 
         // Final guard: working tree must be clean before we call this
         // task done. Catches anything subtle that left modifications
