@@ -5,7 +5,7 @@
   "private": true,
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "NODE_OPTIONS='--dns-result-order=ipv4first' tsx watch src/index.ts",
     "build": "tsc && npm run build:copy-migrations",
     "build:copy-migrations": "node -e \"const fs=require('fs'),p=require('path');const src=p.resolve('src/db/migrations'),dst=p.resolve('dist/db/migrations');fs.rmSync(dst,{recursive:true,force:true});fs.cpSync(src,dst,{recursive:true});console.log('copied migrations to',dst)\"",
     "start": "node dist/index.js",
