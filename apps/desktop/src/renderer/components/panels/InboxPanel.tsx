@@ -364,9 +364,9 @@ function InboxItemCard({
       )}
       {item.actions.length > 0 && (
         <div className="flex gap-2 mt-3 ml-11">
-          {item.actions.slice(0, 2).map((action) => (
+          {item.actions.slice(0, 2).map((action, idx) => (
             <Button
-              key={action.id}
+              key={action.id ?? `${action.label}-${idx}`}
               variant={action.type === 'primary' ? 'default' : 'outline'}
               size="sm"
               className="h-7 text-xs"

@@ -152,7 +152,15 @@ export function TaskFilesPanel({ taskId, files, loading, error }: TaskFilesPanel
       </div>
       <div className="flex-1 min-w-0 bg-card overflow-auto">
         {selectedPath ? (
-          <FileDiffView taskId={taskId} path={selectedPath} refreshKey={pulseKey} />
+          // `key={selectedPath}` makes clicking a different file a
+          // fresh mount — the previous file's diff state can't leak
+          // into the new render while the fetch is in flight.
+          <FileDiffView
+            key={selectedPath}
+            taskId={taskId}
+            path={selectedPath}
+            refreshKey={pulseKey}
+          />
         ) : (
           <div className="p-6 text-sm text-muted-foreground">
             Select a file to view its diff.
@@ -233,6 +241,10 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
 
   useEffect(() => {
     let cancelled = false;
+    // Clear the previous file's diff so the loading branch renders.
+    // Without this, switching files shows the old diff until the new
+    // fetch resolves, which reads as "click did nothing".
+    setDiff(null);
     setLoading(true);
     setError(null);
     api.tasks

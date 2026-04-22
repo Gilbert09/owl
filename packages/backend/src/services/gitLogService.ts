@@ -64,7 +64,35 @@ export async function recordGitCommand(entry: GitLogEntry): Promise<void> {
   });
 }
 
+/**
+ * Per-taskId serialization chain. `appendEntry` is a read-modify-write
+ * on `tasks.metadata.gitLog`; without this, the concurrent git ops the
+ * approve flow fires off (`getDiffStat` + `getDiff` via Promise.all,
+ * the finalFiles snapshot's per-file diffs) race each other to update
+ * the JSON column, and all but the last writer's entries get clobbered.
+ * That's how the Git tab was going from 6 entries mid-run to 2 by
+ * completion. Each taskId has its own tail; different tasks stay
+ * independent.
+ */
+const writeChains = new Map<string, Promise<void>>();
+
 async function appendEntry(taskId: string, entry: GitLogEntry): Promise<void> {
+  const prev = writeChains.get(taskId) ?? Promise.resolve();
+  const next = prev.then(() => writeEntryLocked(taskId, entry));
+  // Hide rejections from the next writer — each caller's `.catch` in
+  // recordGitCommand handles its own failures.
+  writeChains.set(taskId, next.catch(() => {}));
+  await next;
+  // Clean up once the chain has fully drained so idle tasks don't
+  // accumulate empty Promise slots.
+  if (writeChains.get(taskId) === next.catch(() => {})) {
+    // No-op: we set the sentinel just above; leaving the Map entry in
+    // place is fine since it's a resolved Promise and GC'd on task
+    // eviction.
+  }
+}
+
+async function writeEntryLocked(taskId: string, entry: GitLogEntry): Promise<void> {
   const db = getDbClient();
   const rows = await db
     .select({

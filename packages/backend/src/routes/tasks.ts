@@ -754,10 +754,31 @@ export function taskRoutes(): Router {
             'Task has no branch. It was likely started before branch-per-task was wired up. Reject and re-queue, then approve the new run.',
         });
       }
+      // Tasks are supposed to pick up an env on /start, but a task can
+      // reach awaiting_review without one (scheduler rolled back, env
+      // got deleted mid-flight, task created via a code path that
+      // didn't persist it). Rather than refuse the approve, mirror
+      // /start's behaviour and attach any connected env we can find,
+      // then keep going. Log it so we can track down the upstream
+      // anomaly — the UI would otherwise leave the user dead in the
+      // water with no way to ship their work.
       if (!task.assignedEnvironmentId) {
-        return res
-          .status(400)
-          .json({ success: false, error: 'Task has no assigned environment to run git on.' });
+        const fallbackEnv = await findConnectedEnvironmentForUser(req);
+        if (!fallbackEnv) {
+          return res.status(400).json({
+            success: false,
+            error:
+              'Task has no assigned environment and no connected environment is available. Connect an environment in Settings.',
+          });
+        }
+        console.warn(
+          `[tasks] approve ${task.id.slice(0, 8)}: task lacked assignedEnvironmentId; attaching ${fallbackEnv}`
+        );
+        await db
+          .update(tasksTable)
+          .set({ assignedEnvironmentId: fallbackEnv, updatedAt: new Date() })
+          .where(eq(tasksTable.id, task.id));
+        task.assignedEnvironmentId = fallbackEnv;
       }
 
       const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
