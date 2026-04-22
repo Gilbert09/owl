@@ -72,6 +72,24 @@ const priorityConfig: Record<
   urgent: { label: 'Urgent', color: 'text-red-400', badge: 'destructive' },
 };
 
+/**
+ * Short "when did this finish" label for completed task rows. Today →
+ * time only; this year → day+month; older → full date. Matches the
+ * bog-standard mail-client treatment so rows stay scannable without a
+ * full Date object in the badge.
+ */
+function formatCompletedAt(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  }
+  return d.toLocaleDateString();
+}
+
 export function QueuePanel() {
   const { tasks, selectedTaskId, selectTask } = useWorkspaceStore();
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -302,18 +320,29 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
             )}
           </div>
           <div className="flex items-center gap-2 mt-1">
-            <Badge
-              variant={
-                task.priority === 'urgent'
-                  ? 'destructive'
-                  : task.priority === 'high'
-                  ? 'warning'
-                  : 'outline'
-              }
-              className="text-xs"
-            >
-              {priorityConfig[task.priority].label}
-            </Badge>
+            {task.status === 'completed' && task.completedAt ? (
+              // Priority is uninteresting once a task is done; the
+              // completion time is what you scan for.
+              <span
+                className="text-xs text-muted-foreground tabular-nums"
+                title={new Date(task.completedAt).toLocaleString()}
+              >
+                {formatCompletedAt(task.completedAt)}
+              </span>
+            ) : (
+              <Badge
+                variant={
+                  task.priority === 'urgent'
+                    ? 'destructive'
+                    : task.priority === 'high'
+                    ? 'warning'
+                    : 'outline'
+                }
+                className="text-xs"
+              >
+                {priorityConfig[task.priority].label}
+              </Badge>
+            )}
             {isRunning && (
               <Badge variant="secondary" className="text-xs">
                 {agentStatusConfig[agentStatus].label}
@@ -727,14 +756,26 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             {task.branch}
           </span>
         )}
-        <span title={new Date(task.createdAt).toLocaleString()}>
-          Created {new Date(task.createdAt).toLocaleDateString()}
-        </span>
-        {task.completedAt && (
-          <span title={new Date(task.completedAt).toLocaleString()}>
-            Completed {new Date(task.completedAt).toLocaleDateString()}
-          </span>
-        )}
+        {(() => {
+          const created = new Date(task.createdAt);
+          const completed = task.completedAt ? new Date(task.completedAt) : null;
+          // Same-day tasks are common — render the time for both
+          // endpoints so the header isn't just two identical dates.
+          const sameDay =
+            completed !== null && created.toDateString() === completed.toDateString();
+          const fmt = (d: Date) =>
+            sameDay
+              ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+              : d.toLocaleDateString();
+          return (
+            <>
+              <span title={created.toLocaleString()}>Created {fmt(created)}</span>
+              {completed && (
+                <span title={completed.toLocaleString()}>Completed {fmt(completed)}</span>
+              )}
+            </>
+          );
+        })()}
         {(() => {
           const pr = (task.metadata as { pullRequest?: { number: number; url: string } } | undefined)
             ?.pullRequest;
@@ -855,7 +896,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           onClick={() => setActiveTab('terminal')}
         >
           <Terminal className="w-3.5 h-3.5 mr-1.5" />
-          Transcript
+          Terminal
         </TabButton>
         <TabButton
           active={activeTab === 'files'}

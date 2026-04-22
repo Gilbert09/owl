@@ -286,8 +286,15 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     );
   }
 
-  // HTML is DOMPurify-sanitized diff2html output.
-  return <div className="diff2html-wrapper" dangerouslySetInnerHTML={{ __html: html }} />;
+  // HTML is DOMPurify-sanitized diff2html output. overflow-x-auto +
+  // max-w-full keep long lines scrolling inside the panel instead of
+  // spilling past the task detail's right edge.
+  return (
+    <div
+      className="diff2html-wrapper overflow-x-auto max-w-full"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 /**
