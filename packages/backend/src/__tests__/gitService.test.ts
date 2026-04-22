@@ -181,4 +181,124 @@ describe('gitService', () => {
       expect(await gitService.hasUncommittedChanges('env1', '/repo')).toBe(false);
     });
   });
+
+  describe('commitAll', () => {
+    it('returns null when there is nothing staged', async () => {
+      // git add -A → staged check exits 0 (nothing staged) → return null.
+      fake = installFakeEnvironment({
+        exitCodes: { 'git diff --cached --quiet': 0 },
+      });
+
+      const sha = await gitService.commitAll('env1', 'msg', '/repo');
+      expect(sha).toBeNull();
+    });
+
+    it('commits through stdin + returns the new HEAD sha on success', async () => {
+      fake = installFakeEnvironment({
+        outputs: { 'git rev-parse HEAD': 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' },
+        // Non-zero on the stage check → proceed to commit.
+        exitCodes: { 'git diff --cached --quiet': 1 },
+      });
+
+      const sha = await gitService.commitAll('env1', 'multi\nline\n`message`', '/repo');
+      expect(sha).toBe('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
+      const commands = fake.commands.map((c) => c.command);
+      // Verify the commit command was issued (message flows via stdin).
+      expect(commands).toContain('git add -A');
+      expect(commands).toContain('git commit -F -');
+    });
+  });
+
+  describe('pushBranch', () => {
+    it('refuses to push a branch name containing shell metacharacters', async () => {
+      fake = installFakeEnvironment();
+      await expect(
+        gitService.pushBranch('env1', 'main; rm -rf /', '/repo')
+      ).rejects.toThrow(/suspicious/);
+    });
+
+    it('pushes a normal branch', async () => {
+      fake = installFakeEnvironment();
+      await gitService.pushBranch('env1', 'fastowl/abc-do-thing', '/repo');
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain('git push -u origin fastowl/abc-do-thing');
+    });
+  });
+
+  describe('stashToBackupRef', () => {
+    it('refuses a suspicious namespace/taskId combination', async () => {
+      fake = installFakeEnvironment();
+      await expect(
+        gitService.stashToBackupRef('env1', 'rejected', '../attack', '/repo')
+      ).rejects.toThrow(/suspicious ref/);
+    });
+
+    it('stores the stash sha under refs/fastowl/<namespace>/<taskId>', async () => {
+      const stashSha = 'aabbccddeeff00112233445566778899aabbccdd';
+      fake = installFakeEnvironment({
+        outputs: { 'git stash create': `${stashSha}\n` },
+      });
+
+      const ref = await gitService.stashToBackupRef('env1', 'rejected', 'task-abc', '/repo');
+      expect(ref).toBe('refs/fastowl/rejected/task-abc');
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain(
+        `git update-ref refs/fastowl/rejected/task-abc ${stashSha}`
+      );
+    });
+
+    it('falls back to backing up HEAD when the tree is clean (no stash created)', async () => {
+      const headSha = '1122334455667788112233445566778811223344';
+      fake = installFakeEnvironment({
+        outputs: {
+          'git stash create': '\n', // empty → clean tree
+          'git rev-parse HEAD': `${headSha}\n`,
+        },
+      });
+
+      const ref = await gitService.stashToBackupRef('env1', 'rejected', 'task-abc', '/repo');
+      expect(ref).toBe('refs/fastowl/rejected/task-abc');
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain(
+        `git update-ref refs/fastowl/rejected/task-abc ${headSha}`
+      );
+    });
+  });
+
+  describe('resetToBase', () => {
+    it('runs checkout -f → reset --hard origin/<base> → clean -fd', async () => {
+      fake = installFakeEnvironment();
+      await gitService.resetToBase('env1', 'main', '/repo');
+
+      const commands = fake.commands.map((c) => c.command);
+      const checkoutIdx = commands.indexOf('git checkout -f main');
+      const resetIdx = commands.indexOf('git reset --hard origin/main');
+      const cleanIdx = commands.indexOf('git clean -fd');
+      expect(checkoutIdx).toBeGreaterThanOrEqual(0);
+      expect(resetIdx).toBeGreaterThan(checkoutIdx);
+      expect(cleanIdx).toBeGreaterThan(resetIdx);
+    });
+  });
+
+  describe('forceDeleteBranch', () => {
+    it('issues git branch -D on the branch', async () => {
+      fake = installFakeEnvironment();
+      await gitService.forceDeleteBranch('env1', 'fastowl/old', '/repo');
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain('git branch -D fastowl/old');
+    });
+  });
+
+  describe('deleteBranch', () => {
+    it('falls back to master when main checkout fails', async () => {
+      fake = installFakeEnvironment({
+        // Scripted: `git checkout main` fails (exit 1), master succeeds (0).
+        exitCodes: { 'git checkout main': 1 },
+      });
+      await gitService.deleteBranch('env1', 'fastowl/old', '/repo');
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain("git checkout master");
+      expect(commands).toContain('git branch -d fastowl/old');
+    });
+  });
 });
