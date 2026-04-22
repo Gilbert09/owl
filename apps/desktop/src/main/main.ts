@@ -9,7 +9,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { app, BrowserWindow, shell, ipcMain } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, safeStorage } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import MenuBuilder from './menu';
@@ -24,6 +24,7 @@ import {
   restartDaemon,
   uninstallDaemon,
 } from './localDaemon';
+import { AuthStorage, type EncryptionBackend } from './authStorage';
 
 class AppUpdater {
   constructor() {
@@ -115,6 +116,31 @@ ipcMain.handle('auth:drain-pending', async () => {
   const pending = pendingAuthCallbackUrl;
   pendingAuthCallbackUrl = null;
   return pending;
+});
+
+// Encrypted-at-rest store for Supabase session tokens. The renderer's
+// localStorage would otherwise keep the JWT + refresh token in
+// plaintext under the Electron userData dir — readable by anyone with
+// filesystem access (other local users, backup snapshots, malware
+// running as the user). safeStorage binds the encryption key to the OS
+// user account via Keychain / DPAPI / libsecret.
+const safeStorageBackend: EncryptionBackend = {
+  isAvailable: () => safeStorage.isEncryptionAvailable(),
+  encrypt: (plaintext) => safeStorage.encryptString(plaintext),
+  decrypt: (ciphertext) => safeStorage.decryptString(ciphertext),
+};
+const authStorage = new AuthStorage(
+  safeStorageBackend,
+  path.join(app.getPath('userData'), 'auth-storage')
+);
+ipcMain.handle('auth:storage:get', async (_event, key: string) => {
+  return authStorage.getItem(key);
+});
+ipcMain.handle('auth:storage:set', async (_event, key: string, value: string) => {
+  await authStorage.setItem(key, value);
+});
+ipcMain.handle('auth:storage:remove', async (_event, key: string) => {
+  await authStorage.removeItem(key);
 });
 
 registerDeepLinkProtocol();

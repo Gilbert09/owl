@@ -41,6 +41,22 @@ const electronHandler = {
       });
       return () => ipcRenderer.removeListener('auth:callback', handler);
     },
+    /**
+     * safeStorage-backed key/value store used as Supabase's session
+     * storage. All three methods cross into the main process; the
+     * ciphertext never rides through the renderer's localStorage.
+     */
+    storage: {
+      getItem(key: string): Promise<string | null> {
+        return ipcRenderer.invoke('auth:storage:get', key);
+      },
+      setItem(key: string, value: string): Promise<void> {
+        return ipcRenderer.invoke('auth:storage:set', key, value);
+      },
+      removeItem(key: string): Promise<void> {
+        return ipcRenderer.invoke('auth:storage:remove', key);
+      },
+    },
   },
   daemon: {
     /** Whether the daemon config on disk already has a device token (=paired). */
