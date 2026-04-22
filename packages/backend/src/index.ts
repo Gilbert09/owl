@@ -51,14 +51,20 @@ async function main() {
   // Origin header (or `null`), so they're always allowed. Env-override
   // `ALLOWED_ORIGINS` is a comma-separated allowlist — keep it empty in
   // production if nothing legitimately runs in a browser against this API.
+  // Loopback origins (localhost / 127.0.0.1 on any port) are accepted
+  // unconditionally — the dev renderer on webpack-dev-server uses them,
+  // and a request from 127.0.0.1 already implies code running on the
+  // same host, which has other routes to the backend anyway.
   const originAllowlist = (process.env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+  const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
   app.use(
     cors({
       origin(origin, cb) {
         if (!origin) return cb(null, true);
+        if (LOOPBACK_ORIGIN.test(origin)) return cb(null, true);
         if (originAllowlist.includes(origin)) return cb(null, true);
         return cb(new Error(`Origin not allowed: ${origin}`));
       },
