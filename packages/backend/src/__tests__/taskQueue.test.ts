@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { taskQueueService } from '../services/taskQueue.js';
+import { taskQueueService, findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import { type Database } from '../db/client.js';
 import {
@@ -231,6 +231,117 @@ describe('taskQueueService', () => {
         .limit(1);
       expect(rows[0].status).toBe('queued');
       expect(rows[0].assignedAgentId).toBeNull();
+    });
+  });
+
+  describe('findTaskHoldingEnvRepoSlot', () => {
+    beforeEach(async () => {
+      // Set up env + repo rows the other tasks reference.
+      await db.insert(environmentsTable).values({
+        id: 'env1',
+        ownerId: TEST_USER_ID,
+        name: 'e',
+        type: 'local',
+        config: { type: 'local' },
+      });
+      // repositoriesTable requires a name (NOT NULL).
+      await db.execute(
+        `INSERT INTO repositories (id, workspace_id, name, url, default_branch)
+         VALUES ('repo1', 'ws1', 'acme/widgets', 'https://github.com/acme/widgets', 'main')` as never
+      );
+    });
+
+    it('returns null when no task holds the slot', async () => {
+      const holder = await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1');
+      expect(holder).toBeNull();
+    });
+
+    it('identifies an in_progress task holding (env, repo)', async () => {
+      await seedTask(db, {
+        id: 't-running',
+        status: 'in_progress',
+        priority: 'medium',
+      });
+      // Additional fields the seedTask helper doesn't set — do it via update.
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env1', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-running'));
+
+      const holder = await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1');
+      expect(holder?.id).toBe('t-running');
+      expect(holder?.status).toBe('in_progress');
+    });
+
+    it('identifies an awaiting_review task holding the slot', async () => {
+      await seedTask(db, {
+        id: 't-waiting',
+        status: 'awaiting_review',
+        priority: 'medium',
+      });
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env1', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-waiting'));
+
+      const holder = await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1');
+      expect(holder?.status).toBe('awaiting_review');
+    });
+
+    it('ignores completed and failed tasks on the same slot', async () => {
+      await seedTask(db, { id: 't-done', status: 'completed', priority: 'medium' });
+      await seedTask(db, { id: 't-failed', status: 'failed', priority: 'medium' });
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env1', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-done'));
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env1', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-failed'));
+
+      const holder = await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1');
+      expect(holder).toBeNull();
+    });
+
+    it('excludes a specific taskId via excludeTaskId (caller is itself)', async () => {
+      await seedTask(db, {
+        id: 't-self',
+        status: 'in_progress',
+        priority: 'medium',
+      });
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env1', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-self'));
+
+      // Slot is held — but if we exclude the holder itself, slot is "free".
+      const holder = await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1', 't-self');
+      expect(holder).toBeNull();
+    });
+
+    it('scopes by env — same repo on a different env is free', async () => {
+      await db.insert(environmentsTable).values({
+        id: 'env2',
+        ownerId: TEST_USER_ID,
+        name: 'e2',
+        type: 'local',
+        config: { type: 'local' },
+      });
+      await seedTask(db, {
+        id: 't-other-env',
+        status: 'in_progress',
+        priority: 'medium',
+      });
+      await db
+        .update(tasksTable)
+        .set({ assignedEnvironmentId: 'env2', repositoryId: 'repo1' })
+        .where(eq(tasksTable.id, 't-other-env'));
+
+      expect(await findTaskHoldingEnvRepoSlot(db, 'env1', 'repo1')).toBeNull();
+      expect(
+        (await findTaskHoldingEnvRepoSlot(db, 'env2', 'repo1'))?.id
+      ).toBe('t-other-env');
     });
   });
 });
