@@ -13,14 +13,22 @@ import 'diff2html/bundles/css/diff2html.min.css';
 import DOMPurify from 'dompurify';
 import { cn } from '../../lib/utils';
 import { api, wsClient } from '../../lib/api';
-import { useTaskFiles, type ChangedFile } from '../../hooks/useTaskFiles';
+import { type ChangedFile } from '../../hooks/useTaskFiles';
 
 interface TaskFilesPanelProps {
   taskId: string;
+  /**
+   * Passed in by the parent (QueuePanel.TaskDetail) — the files tab
+   * button shows the same count as this list, so we hoist the hook up
+   * there and push data down to avoid two independent fetch+WS
+   * subscriptions drifting out of sync.
+   */
+  files: ChangedFile[];
+  loading: boolean;
+  error: string | null;
 }
 
-export function TaskFilesPanel({ taskId }: TaskFilesPanelProps) {
-  const { files, loading, error } = useTaskFiles(taskId);
+export function TaskFilesPanel({ taskId, files, loading, error }: TaskFilesPanelProps) {
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [writingPaths, setWritingPaths] = useState<Set<string>>(new Set());
   const [pulseKey, setPulseKey] = useState(0);

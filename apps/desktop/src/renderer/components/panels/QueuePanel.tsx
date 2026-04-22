@@ -391,10 +391,22 @@ function TaskDetail({ taskId }: TaskDetailProps) {
 
   // Live file count for the Files tab badge — subscribed at the
   // detail-view level so the count is visible even on the Terminal
-  // tab. Same hook drives TaskFilesPanel inside the tab.
-  const { files: changedFiles } = useTaskFiles(taskId);
+  // tab. We pass the result down into TaskFilesPanel instead of
+  // having the panel call the hook itself, so the badge and the
+  // list body never show different counts.
+  const {
+    files: changedFiles,
+    loading: changedFilesLoading,
+    error: changedFilesError,
+  } = useTaskFiles(taskId);
   // Same pattern for the Git tab badge — count of recorded commands.
-  const { entries: gitLogEntries } = useTaskGitLog(taskId);
+  // Lifted here (instead of the panel owning it) so the badge number
+  // never drifts from the list the user sees after clicking the tab.
+  const {
+    entries: gitLogEntries,
+    loading: gitLogLoading,
+    error: gitLogError,
+  } = useTaskGitLog(taskId);
 
   const handleStartTask = async () => {
     setIsLoading(true);
@@ -623,12 +635,22 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           )}
           {activeTab === 'files' && (
             <div className="h-full">
-              <TaskFilesPanel taskId={task.id} />
+              <TaskFilesPanel
+              taskId={task.id}
+              files={changedFiles}
+              loading={changedFilesLoading}
+              error={changedFilesError}
+            />
             </div>
           )}
           {activeTab === 'git' && (
             <div className="h-full">
-              <TaskGitPanel taskId={task.id} />
+              <TaskGitPanel
+              taskId={task.id}
+              entries={gitLogEntries}
+              loading={gitLogLoading}
+              error={gitLogError}
+            />
             </div>
           )}
         </div>
@@ -944,12 +966,22 @@ function TaskDetail({ taskId }: TaskDetailProps) {
         )}
         {activeTab === 'files' && (
           <div className="h-full">
-            <TaskFilesPanel taskId={task.id} />
+            <TaskFilesPanel
+              taskId={task.id}
+              files={changedFiles}
+              loading={changedFilesLoading}
+              error={changedFilesError}
+            />
           </div>
         )}
         {activeTab === 'git' && (
           <div className="h-full">
-            <TaskGitPanel taskId={task.id} />
+            <TaskGitPanel
+              taskId={task.id}
+              entries={gitLogEntries}
+              loading={gitLogLoading}
+              error={gitLogError}
+            />
           </div>
         )}
       </div>

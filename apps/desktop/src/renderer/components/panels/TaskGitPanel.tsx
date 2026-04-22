@@ -1,10 +1,18 @@
 import { useEffect, useRef } from 'react';
 import { CheckCircle, Loader2, XCircle } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { useTaskGitLog } from '../../hooks/useTaskGitLog';
+import type { GitLogEntry } from '../../hooks/useTaskGitLog';
 
 interface TaskGitPanelProps {
   taskId: string;
+  /**
+   * Passed in by the parent so the Git tab button badge and this
+   * panel list always show the same count. See
+   * TaskFilesPanel for the same pattern.
+   */
+  entries: GitLogEntry[];
+  loading: boolean;
+  error: string | null;
 }
 
 /**
@@ -13,8 +21,7 @@ interface TaskGitPanelProps {
  * exit code, duration, and a preview of stdout/stderr. Helps debug
  * "why didn't approve push anything?" without tail-ing backend logs.
  */
-export function TaskGitPanel({ taskId }: TaskGitPanelProps) {
-  const { entries, loading, error } = useTaskGitLog(taskId);
+export function TaskGitPanel({ entries, loading, error }: TaskGitPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to the latest entry on append.
