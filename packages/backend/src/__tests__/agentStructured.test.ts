@@ -114,4 +114,66 @@ describe('buildClaudeArgs', () => {
     expect(settings).toContain('PreToolUse');
     expect(settings).toContain('/tmp/permission.cjs');
   });
+
+  it('strict mode requires a hookScriptPath (throws when missing)', () => {
+    expect(() =>
+      buildClaudeArgs({ ...base, permissionMode: 'strict' })
+    ).toThrow(/hookScriptPath/);
+  });
+
+  it('--resume coexists with --input-format on an interactive resume', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      permissionMode: 'bypass',
+      resumeSessionId: 'session-999',
+      interactive: true,
+    });
+    expect(args).toContain('--resume');
+    expect(args).toContain('--input-format');
+  });
+
+  it('emits the --settings payload as valid JSON pointing at the hook', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      permissionMode: 'strict',
+      hookScriptPath: '/tmp/p.cjs',
+    });
+    const raw = args[args.indexOf('--settings') + 1];
+    expect(() => JSON.parse(raw)).not.toThrow();
+    const parsed = JSON.parse(raw);
+    expect(parsed.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command).toBe('/tmp/p.cjs');
+  });
+});
+
+describe('JsonlLineParser — additional resilience cases', () => {
+  it('emits nothing on a trailing newline after all events', () => {
+    const p = new JsonlLineParser();
+    const out = p.push('{"type":"once"}\n');
+    expect(out).toHaveLength(1);
+    expect(p.push('\n')).toEqual([]);
+  });
+
+  it('preserves event order across chunks', () => {
+    const p = new JsonlLineParser();
+    p.push('{"type":"a","n":1}\n{"type":"b","n":2}\n{"type":"c","n":');
+    const tail = p.push('3}\n{"type":"d","n":4}\n');
+    const types = tail.map((e) => (e as { type: string }).type);
+    expect(types).toEqual(['c', 'd']);
+  });
+
+  it('handles one gigantic JSON line accumulated across many chunks', () => {
+    const p = new JsonlLineParser();
+    const text = '{"type":"x","blob":"' + 'z'.repeat(50_000) + '"}\n';
+    // Push in 8KB chunks.
+    for (let i = 0; i < text.length; i += 8192) {
+      p.push(text.slice(i, i + 8192));
+    }
+    // The full object should be in the last chunk's output.
+    const tail = p.push('');
+    expect(tail).toEqual([]);
+    // Re-push the exact slice that ends with a newline to confirm parsing.
+    const out = new JsonlLineParser().push(text);
+    expect(out).toHaveLength(1);
+    expect((out[0] as { blob: string }).blob.length).toBe(50_000);
+  });
 });
