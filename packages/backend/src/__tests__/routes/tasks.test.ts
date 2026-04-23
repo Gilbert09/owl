@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'http';
 import { AddressInfo } from 'net';
 import { eq } from 'drizzle-orm';
 import { taskRoutes } from '../../routes/tasks.js';
+import { gitService } from '../../services/git.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
 import type { Database } from '../../db/client.js';
@@ -593,5 +594,173 @@ describe('GET /tasks/:id/diff/files — snapshot path', () => {
     await insertTask(db, { id: 'f3', metadata: {} });
     const res = await fetch(`${serverUrl}/tasks/f3/diff/file`, { headers: authHeaders });
     expect(res.status).toBe(400);
+  });
+});
+
+// Exercise the live-diff path (no snapshot). These routes share
+// resolveTaskDiffContext, which owns env/repo selection + auth + git
+// context lookup — cover both success and every error exit.
+describe('GET /tasks/:id/diff* — live-diff path (no snapshot)', () => {
+  let db: Database;
+  let cleanup: () => Promise<void>;
+  let serverUrl: string;
+  let closeServer: () => Promise<void>;
+
+  beforeEach(async () => {
+    const testDb = await createTestDb();
+    db = testDb.db;
+    cleanup = testDb.cleanup;
+    await seed(db);
+    const s = await makeServer();
+    serverUrl = s.url;
+    closeServer = s.close;
+
+    // Stub the gitService surface the diff routes call into —
+    // resolveTaskDiffContext itself doesn't shell out.
+    vi.spyOn(gitService, 'getDiff').mockResolvedValue('unified diff body');
+    vi.spyOn(gitService, 'getChangedFiles').mockResolvedValue([
+      { path: 'src/a.ts', status: 'modified', added: 1, removed: 0, binary: false },
+    ]);
+    vi.spyOn(gitService, 'getFileDiff').mockResolvedValue('+hello\n');
+  });
+
+  afterEach(async () => {
+    await closeServer();
+    await cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it('/diff — happy path with assigned env + repo localPath shells out to gitService.getDiff', async () => {
+    await insertTask(db, {
+      id: 'd1',
+      branch: 'fastowl/d1-slug',
+      assignedEnvironmentId: 'env1',
+    });
+    const res = await fetch(`${serverUrl}/tasks/d1/diff`, { headers: authHeaders });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.diff).toBe('unified diff body');
+    expect(gitService.getDiff).toHaveBeenCalledWith(
+      'env1',
+      'fastowl/d1-slug',
+      'main',
+      '/tmp/widgets'
+    );
+  });
+
+  it('/diff — 400 when the task has no branch', async () => {
+    await insertTask(db, { id: 'd2', branch: null });
+    const res = await fetch(`${serverUrl}/tasks/d2/diff`, { headers: authHeaders });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/no branch/i);
+  });
+
+  it('/diff/files — falls back to live gitService.getChangedFiles when no snapshot is present', async () => {
+    await insertTask(db, {
+      id: 'd3',
+      branch: 'fastowl/d3-slug',
+      assignedEnvironmentId: 'env1',
+      metadata: {},
+    });
+    const res = await fetch(`${serverUrl}/tasks/d3/diff/files`, { headers: authHeaders });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.files).toHaveLength(1);
+    expect(body.data.files[0].path).toBe('src/a.ts');
+    expect(gitService.getChangedFiles).toHaveBeenCalled();
+  });
+
+  it('/diff/file — falls back to live gitService.getFileDiff when no snapshot hit for path', async () => {
+    await insertTask(db, {
+      id: 'd4',
+      branch: 'fastowl/d4-slug',
+      assignedEnvironmentId: 'env1',
+      metadata: {},
+    });
+    const res = await fetch(
+      `${serverUrl}/tasks/d4/diff/file?path=${encodeURIComponent('src/a.ts')}`,
+      { headers: authHeaders }
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.diff).toBe('+hello\n');
+    expect(gitService.getFileDiff).toHaveBeenCalledWith('env1', 'main', 'src/a.ts', '/tmp/widgets');
+  });
+
+  it('/diff — auto-picks a connected env when the task has no assigned env', async () => {
+    await insertTask(db, {
+      id: 'd5',
+      branch: 'fastowl/d5-slug',
+      assignedEnvironmentId: null,
+    });
+    const res = await fetch(`${serverUrl}/tasks/d5/diff`, { headers: authHeaders });
+    expect(res.status).toBe(200);
+    // env1 is the only connected env owned by TEST_USER_ID — picked as the
+    // fallback and passed into gitService.getDiff.
+    expect(gitService.getDiff).toHaveBeenCalledWith(
+      'env1',
+      'fastowl/d5-slug',
+      'main',
+      '/tmp/widgets'
+    );
+  });
+
+  it('/diff — 400 when there is no assigned env AND no connected env to fall back on', async () => {
+    await db
+      .update(environmentsTable)
+      .set({ status: 'disconnected' })
+      .where(eq(environmentsTable.id, 'env1'));
+    await insertTask(db, {
+      id: 'd6',
+      branch: 'fastowl/d6-slug',
+      assignedEnvironmentId: null,
+    });
+    const res = await fetch(`${serverUrl}/tasks/d6/diff`, { headers: authHeaders });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/No connected environment/i);
+  });
+
+  it('/diff — refuses (5xx) when the task pins an env the caller does not own', async () => {
+    // Env owned by a different user. requireEnvironmentAccess throws
+    // AccessError('environment not found'), which resolveTaskDiffContext
+    // surfaces as a 500 with that message. (The handler has a dead
+    // `=== 'Forbidden'` branch for a 403 — cleanup target, not a
+    // behavioural expectation.)
+    await db.insert(environmentsTable).values({
+      id: 'env-other',
+      ownerId: OTHER_USER_ID,
+      name: 'other-user',
+      type: 'local',
+      status: 'connected',
+      config: {},
+    });
+    await insertTask(db, {
+      id: 'd7',
+      branch: 'fastowl/d7-slug',
+      assignedEnvironmentId: 'env-other',
+    });
+    const res = await fetch(`${serverUrl}/tasks/d7/diff`, { headers: authHeaders });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/environment not found/i);
+    expect(gitService.getDiff).not.toHaveBeenCalled();
+  });
+
+  it('/diff — 400 when the task has a branch but the repo has no localPath', async () => {
+    await db
+      .update(repositoriesTable)
+      .set({ localPath: null })
+      .where(eq(repositoriesTable.id, 'repo1'));
+    await insertTask(db, {
+      id: 'd8',
+      branch: 'fastowl/d8-slug',
+      assignedEnvironmentId: 'env1',
+    });
+    const res = await fetch(`${serverUrl}/tasks/d8/diff`, { headers: authHeaders });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/Could not resolve a git working directory/i);
   });
 });
