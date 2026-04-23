@@ -73,18 +73,27 @@ const priorityConfig: Record<
 };
 
 /**
- * Short "when did this finish" label for completed task rows. Today →
- * time only; this year → day+month; older → full date. Matches the
- * bog-standard mail-client treatment so rows stay scannable without a
- * full Date object in the badge.
+ * Human-readable relative time — "just now", "5m ago", "2h ago",
+ * "3d ago", "4w ago" — with a flip to a month/day stamp past 60 days
+ * so the display stops creeping into three-digit weeks. Paired with a
+ * full-timestamp tooltip at the call site for when the user wants
+ * precision.
  */
-function formatCompletedAt(iso: string): string {
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const deltaSec = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (deltaSec < 30) return 'just now';
+  if (deltaSec < 60) return `${deltaSec}s ago`;
+  const deltaMin = Math.round(deltaSec / 60);
+  if (deltaMin < 60) return `${deltaMin}m ago`;
+  const deltaHr = Math.round(deltaMin / 60);
+  if (deltaHr < 24) return `${deltaHr}h ago`;
+  const deltaDay = Math.round(deltaHr / 24);
+  if (deltaDay < 7) return `${deltaDay}d ago`;
+  if (deltaDay < 60) return `${Math.round(deltaDay / 7)}w ago`;
   const d = new Date(iso);
-  const now = new Date();
-  if (d.toDateString() === now.toDateString()) {
-    return d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  }
-  if (d.getFullYear() === now.getFullYear()) {
+  if (d.getFullYear() === new Date().getFullYear()) {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
   return d.toLocaleDateString();
@@ -342,7 +351,7 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
                 className="text-xs text-muted-foreground tabular-nums"
                 title={new Date(task.completedAt).toLocaleString()}
               >
-                {formatCompletedAt(task.completedAt)}
+                {formatRelativeTime(task.completedAt)}
               </span>
             ) : (
               <Badge
@@ -805,26 +814,14 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             {task.branch}
           </span>
         )}
-        {(() => {
-          const created = new Date(task.createdAt);
-          const completed = task.completedAt ? new Date(task.completedAt) : null;
-          // Same-day tasks are common — render the time for both
-          // endpoints so the header isn't just two identical dates.
-          const sameDay =
-            completed !== null && created.toDateString() === completed.toDateString();
-          const fmt = (d: Date) =>
-            sameDay
-              ? d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-              : d.toLocaleDateString();
-          return (
-            <>
-              <span title={created.toLocaleString()}>Created {fmt(created)}</span>
-              {completed && (
-                <span title={completed.toLocaleString()}>Completed {fmt(completed)}</span>
-              )}
-            </>
-          );
-        })()}
+        <span title={new Date(task.createdAt).toLocaleString()}>
+          Created {formatRelativeTime(task.createdAt)}
+        </span>
+        {task.completedAt && (
+          <span title={new Date(task.completedAt).toLocaleString()}>
+            Completed {formatRelativeTime(task.completedAt)}
+          </span>
+        )}
         {(() => {
           const pr = (task.metadata as { pullRequest?: { number: number; url: string } } | undefined)
             ?.pullRequest;
