@@ -345,8 +345,6 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
           </div>
           <div className="flex items-center gap-2 mt-1">
             {task.status === 'completed' && task.completedAt ? (
-              // Priority is uninteresting once a task is done; the
-              // completion time is what you scan for.
               <span
                 className="text-xs text-muted-foreground tabular-nums"
                 title={new Date(task.completedAt).toLocaleString()}
@@ -354,18 +352,12 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
                 {formatRelativeTime(task.completedAt)}
               </span>
             ) : (
-              <Badge
-                variant={
-                  task.priority === 'urgent'
-                    ? 'destructive'
-                    : task.priority === 'high'
-                    ? 'warning'
-                    : 'outline'
-                }
-                className="text-xs"
+              <span
+                className="text-xs text-muted-foreground tabular-nums"
+                title={new Date(task.createdAt).toLocaleString()}
               >
-                {priorityConfig[task.priority].label}
-              </Badge>
+                {formatRelativeTime(task.createdAt)}
+              </span>
             )}
             {isRunning && (
               <Badge variant="secondary" className="text-xs">
