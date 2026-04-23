@@ -25,5 +25,14 @@
     }
   },
   "include": ["src/**/*"],
-  "exclude": ["test", "release/build", "release/app/dist", ".erb/dll", "node_modules"]
+  "exclude": ["test", "release/build", "release/app/dist", ".erb/dll", "node_modules"],
+  // ts-node runs the .erb/* webpack configs under `-r ts-node/register`.
+  // That path needs CommonJS output + Node resolution, independent of the
+  // ESNext/Bundler settings above (which exist for typechecking only).
+  "ts-node": {
+    "compilerOptions": {
+      "module": "CommonJS",
+      "moduleResolution": "Node"
+    }
+  }
 }

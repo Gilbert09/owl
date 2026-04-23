@@ -22,9 +22,12 @@ const configuration: webpack.Configuration = {
           options: {
             // Remove this line to enable type checking in webpack builds
             transpileOnly: true,
+            // Emit ESM so webpack resolves package `exports` via the
+            // `import` condition — ESM-only subpaths like
+            // `@pierre/diffs/react` don't expose a `require` variant.
             compilerOptions: {
-              module: 'nodenext',
-              moduleResolution: 'nodenext',
+              module: 'esnext',
+              moduleResolution: 'bundler',
             },
           },
         },
