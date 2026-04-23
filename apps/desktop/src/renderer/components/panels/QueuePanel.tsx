@@ -112,12 +112,7 @@ export function QueuePanel() {
       {/* Task List */}
       <div className="w-80 border-r flex flex-col">
         <div className="flex items-center justify-between p-4 border-b">
-          <div>
-            <h2 className="text-lg font-semibold">Task Queue</h2>
-            <p className="text-sm text-muted-foreground">
-              {queuedTasks.length} queued · {inProgressTasks.length} running · {reviewTasks.length} awaiting review
-            </p>
-          </div>
+          <h2 className="text-lg font-semibold">Task Queue</h2>
           <Button size="sm" onClick={() => setIsCreateModalOpen(true)}>
             <Plus className="w-4 h-4 mr-1" />
             Add
@@ -141,8 +136,11 @@ export function QueuePanel() {
             <div className="p-2">
               {reviewTasks.length > 0 && (
                 <div className="mb-4">
-                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                    AWAITING REVIEW
+                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1 flex items-center gap-1.5">
+                    <span>AWAITING REVIEW</span>
+                    <span className="tabular-nums text-muted-foreground/70">
+                      {reviewTasks.length}
+                    </span>
                   </h3>
                   <div className="space-y-1">
                     {reviewTasks.map((task) => (
@@ -159,8 +157,11 @@ export function QueuePanel() {
 
               {inProgressTasks.length > 0 && (
                 <div className="mb-4">
-                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                    RUNNING
+                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1 flex items-center gap-1.5">
+                    <span>RUNNING</span>
+                    <span className="tabular-nums text-muted-foreground/70">
+                      {inProgressTasks.length}
+                    </span>
                   </h3>
                   <div className="space-y-1">
                     {inProgressTasks.map((task) => (
@@ -177,8 +178,11 @@ export function QueuePanel() {
 
               {queuedTasks.length > 0 && (
                 <div className="mb-4">
-                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                    QUEUED
+                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1 flex items-center gap-1.5">
+                    <span>QUEUED</span>
+                    <span className="tabular-nums text-muted-foreground/70">
+                      {queuedTasks.length}
+                    </span>
                   </h3>
                   <div className="space-y-1">
                     {queuedTasks.map((task) => (
@@ -195,8 +199,11 @@ export function QueuePanel() {
 
               {completedTasks.length > 0 && (
                 <div>
-                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1">
-                    COMPLETED
+                  <h3 className="text-xs font-medium text-muted-foreground mb-2 px-1 flex items-center gap-1.5">
+                    <span>COMPLETED</span>
+                    <span className="tabular-nums text-muted-foreground/70">
+                      {completedTasks.length}
+                    </span>
                   </h3>
                   <div className="space-y-1">
                     {completedTasks.slice(0, 5).map((task) => (
