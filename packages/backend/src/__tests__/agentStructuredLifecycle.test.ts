@@ -382,6 +382,162 @@ describe('agentStructuredService lifecycle', () => {
     await run.completion;
   });
 
+  it('resumeRun preloads transcript from tasks.transcript and keeps seq monotonic', async () => {
+    const existing = Array.from({ length: 3 }, (_, i) => ({
+      seq: i,
+      type: 'assistant',
+      turn: i,
+    }));
+    await db
+      .update(tasksTable)
+      .set({ transcript: existing as unknown as object })
+      .where(eq(tasksTable.id, 't-struct'));
+
+    const run = await agentStructuredService.resumeRun({
+      sessionKey: 'agent:resume',
+      agentId: 'a',
+      environmentId: 'env1',
+      workspaceId: 'ws1',
+      taskId: 't-struct',
+      interactive: false,
+    });
+
+    expect(run.transcript).toHaveLength(3);
+    // spawnStreaming must NOT be called — resumeRun only adopts a
+    // child that already exists under the daemon.
+    expect(spawnCalls).toHaveLength(0);
+
+    // A new event from the live child continues the seq counter.
+    environmentService.emit(
+      'session:data',
+      'agent:resume',
+      Buffer.from('{"type":"result","subtype":"success"}\n')
+    );
+    await new Promise((r) => setTimeout(r, 15));
+
+    expect(run.transcript).toHaveLength(4);
+    expect(run.transcript[3].seq).toBe(3);
+
+    environmentService.emit('session:close', 'agent:resume', 0);
+    await run.completion;
+  });
+
+  it('resumeRun with no taskId starts with an empty transcript', async () => {
+    const run = await agentStructuredService.resumeRun({
+      sessionKey: 'agent:resume-notask',
+      agentId: 'a',
+      environmentId: 'env1',
+      workspaceId: 'ws1',
+      interactive: true,
+    });
+
+    expect(run.transcript).toHaveLength(0);
+    expect(run.taskId).toBeUndefined();
+
+    environmentService.emit('session:close', 'agent:resume-notask', 0);
+    await run.completion;
+  });
+
+  it('resumeRun rejects a sessionKey already owned by a live run', async () => {
+    const run = await agentStructuredService.start({
+      sessionKey: 'agent:collide',
+      agentId: 'a',
+      environmentId: 'env1',
+      workspaceId: 'ws1',
+      permissionMode: 'bypass',
+    });
+
+    await expect(
+      agentStructuredService.resumeRun({
+        sessionKey: 'agent:collide',
+        agentId: 'a',
+        environmentId: 'env1',
+        workspaceId: 'ws1',
+        interactive: false,
+      })
+    ).rejects.toThrow(/already active/);
+
+    environmentService.emit('session:close', 'agent:collide', 0);
+    await run.completion;
+  });
+
+  it('resumeRun session:close resolves completion and emits exit', async () => {
+    const run = await agentStructuredService.resumeRun({
+      sessionKey: 'agent:resume-exit',
+      agentId: 'a',
+      environmentId: 'env1',
+      workspaceId: 'ws1',
+      interactive: false,
+    });
+
+    const exitSpy = vi.fn();
+    agentStructuredService.once('exit', exitSpy);
+
+    environmentService.emit('session:close', 'agent:resume-exit', 7);
+    const code = await run.completion;
+    expect(code).toBe(7);
+    expect(exitSpy).toHaveBeenCalledWith(run, 7);
+    expect(agentStructuredService.has('agent:resume-exit')).toBe(false);
+  });
+
+  it('persistTranscript truncates when the transcript exceeds the 2000-event cap', async () => {
+    // Seed 2100 events — 101 over the cap. Truncation keeps first 100
+    // + last 1899 + a `system/truncated` marker in between.
+    const huge = Array.from({ length: 2100 }, (_, i) => ({
+      seq: i,
+      type: i === 0 ? 'system' : 'assistant',
+      n: i,
+    }));
+    await db
+      .update(tasksTable)
+      .set({ transcript: huge as unknown as object })
+      .where(eq(tasksTable.id, 't-struct'));
+
+    const run = await agentStructuredService.resumeRun({
+      sessionKey: 'agent:trunc',
+      agentId: 'a',
+      environmentId: 'env1',
+      workspaceId: 'ws1',
+      taskId: 't-struct',
+      interactive: false,
+    });
+
+    // Fire a `result` event — force-persists the transcript.
+    environmentService.emit(
+      'session:data',
+      'agent:trunc',
+      Buffer.from('{"type":"result","subtype":"success"}\n')
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    const rows = await db
+      .select({ transcript: tasksTable.transcript })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, 't-struct'));
+    const persisted = rows[0].transcript as Array<{
+      seq: number;
+      type: string;
+      subtype?: string;
+      dropped?: number;
+    }>;
+
+    // head 100 + truncation marker + tail 1899 = 2000 events.
+    expect(persisted).toHaveLength(2000);
+    // First 100 preserve their original seq.
+    expect(persisted[0].seq).toBe(0);
+    expect(persisted[99].seq).toBe(99);
+    // Marker lands right after the head.
+    expect(persisted[100].type).toBe('system');
+    expect(persisted[100].subtype).toBe('truncated');
+    // 2101 total in memory - (100 head + 1899 tail) = 102 dropped.
+    expect(persisted[100].dropped).toBe(102);
+    // Tail preserves the newest events, including the just-added result.
+    expect(persisted[persisted.length - 1].type).toBe('result');
+
+    environmentService.emit('session:close', 'agent:trunc', 0);
+    await run.completion;
+  });
+
   it('ignores session:data for other sessionKeys', async () => {
     const run = await agentStructuredService.start({
       sessionKey: 'agent:mine',
