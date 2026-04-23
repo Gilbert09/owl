@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'http';
 import { AddressInfo } from 'net';
+import path from 'node:path';
 import { eq } from 'drizzle-orm';
 import { repositoryRoutes } from '../../routes/repositories.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
@@ -184,7 +185,10 @@ describe('routes/repositories', () => {
       });
       expect(res.status).toBe(200);
       const rows = await db.select().from(repositoriesTable);
-      expect(rows[0].localPath).toBe('/Users/me/safe');
+      // The route normalises via path.normalize() — OS-specific
+      // (forward slashes on POSIX, backslashes on Windows). Match the
+      // same normalisation in the expected value.
+      expect(rows[0].localPath).toBe(path.normalize('/Users/me/safe'));
     });
 
     it('rejects a relative localPath', async () => {
@@ -244,7 +248,7 @@ describe('routes/repositories', () => {
       });
       expect(res.status).toBe(200);
       const rows = await db.select().from(repositoriesTable);
-      expect(rows[0].localPath).toBe('/Users/me/code/widgets');
+      expect(rows[0].localPath).toBe(path.normalize('/Users/me/code/widgets'));
     });
   });
 
@@ -289,7 +293,7 @@ describe('routes/repositories', () => {
         .select({ localPath: repositoriesTable.localPath })
         .from(repositoriesTable)
         .where(eq(repositoriesTable.id, 'r1'));
-      expect(rows[0].localPath).toBe('/Users/me/code/a');
+      expect(rows[0].localPath).toBe(path.normalize('/Users/me/code/a'));
     });
 
     it('rejects an invalid localPath on update', async () => {

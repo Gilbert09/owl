@@ -104,6 +104,10 @@ describe('resolveDaemonVersion', () => {
       const v = resolveDaemonVersion();
       expect(v).toMatch(/\+feedbee$/);
     } finally {
+      // Windows refuses to rmdir the cwd of a running process
+      // (EBUSY). The afterEach also chdirs back, but that runs after
+      // this finally — so we need to escape tmp before deleting it.
+      process.chdir(originalCwd);
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
