@@ -26,6 +26,7 @@ import { Card } from '../ui/card';
 import { ScrollArea } from '../ui/scroll-area';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useTaskActions } from '../../hooks/useApi';
+import { useTaskFiles } from '../../hooks/useTaskFiles';
 import { api } from '../../lib/api';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
 import { ApproveTaskModal } from '../modals/ApproveTaskModal';
@@ -33,7 +34,6 @@ import { TaskTerminal } from './TaskTerminal';
 import { TerminalHistory } from './TerminalHistory';
 import { TaskFilesPanel } from './TaskFilesPanel';
 import { TaskGitPanel } from './TaskGitPanel';
-import { useTaskFiles } from '../../hooks/useTaskFiles';
 import { useTaskGitLog } from '../../hooks/useTaskGitLog';
 import { isAgentTask } from '@fastowl/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
@@ -274,6 +274,21 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
   const agentStatus = task.agentStatus || 'working';
   const agentAttention = task.agentAttention || 'none';
 
+  // Diff stats (+NN -MM) only make sense once the task has a branch to
+  // diff against. Gate the fetch so branch-less tasks (pending / queued
+  // pre-scheduler) don't hit the backend for an empty list.
+  const { files: changedFiles } = useTaskFiles(task.id, {
+    enabled: !!task.branch,
+  });
+  const diffStats = changedFiles.reduce(
+    (acc, f) => ({
+      added: acc.added + (f.binary ? 0 : f.added),
+      removed: acc.removed + (f.binary ? 0 : f.removed),
+    }),
+    { added: 0, removed: 0 },
+  );
+  const hasDiff = changedFiles.length > 0;
+
   // Determine which icon to show
   const StatusIcon = isRunning
     ? agentStatusConfig[agentStatus].icon
@@ -355,6 +370,15 @@ function TaskListItem({ task, isSelected, onSelect }: TaskListItemProps) {
                   return <TypeIcon className="w-3 h-3" />;
                 })()}
                 {taskTypeConfig[task.type]?.label ?? task.type}
+              </span>
+            )}
+            {hasDiff && (
+              <span
+                className="text-xs tabular-nums flex items-center gap-1"
+                title={`${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'} changed`}
+              >
+                <span className="text-green-500">+{diffStats.added}</span>
+                <span className="text-red-500">-{diffStats.removed}</span>
               </span>
             )}
           </div>

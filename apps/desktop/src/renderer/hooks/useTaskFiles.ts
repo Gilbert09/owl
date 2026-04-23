@@ -16,20 +16,31 @@ export interface ChangedFile {
  * `GET /tasks/:id/diff/files`, then subscribed to the `task:files_changed`
  * WS event for updates as the agent edits more files.
  *
- * Used by both `TaskFilesPanel` (renders the list + diffs) and the
- * Files tab button (renders the count badge), so the subscription is
- * shared rather than duplicated.
+ * Used by `TaskFilesPanel` (list + diffs), the Files tab badge, and
+ * the per-row "+NN -MM" summary in the task list. The `enabled` flag
+ * lets list-row callers skip the fetch for tasks that have no branch
+ * yet (nothing to diff).
  */
-export function useTaskFiles(taskId: string): {
+export function useTaskFiles(
+  taskId: string,
+  options: { enabled?: boolean } = {},
+): {
   files: ChangedFile[];
   loading: boolean;
   error: string | null;
 } {
+  const { enabled = true } = options;
   const [files, setFiles] = useState<ChangedFile[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!enabled) {
+      setFiles([]);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -50,9 +61,10 @@ export function useTaskFiles(taskId: string): {
     return () => {
       cancelled = true;
     };
-  }, [taskId]);
+  }, [taskId, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     const unsub = wsClient.on<{
       taskId: string;
       files: ChangedFile[];
@@ -61,7 +73,7 @@ export function useTaskFiles(taskId: string): {
       setFiles(payload.files);
     });
     return () => unsub();
-  }, [taskId]);
+  }, [taskId, enabled]);
 
   return { files, loading, error };
 }
