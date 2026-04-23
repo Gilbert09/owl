@@ -576,7 +576,10 @@ class GitService {
 
     void recordGitCommand({
       ts: new Date().toISOString(),
-      command: `git ${args.join(' ')}`,
+      // Pull the subject line out of piped stdin (used by commitAll
+      // to deliver the commit message) so the Git tab shows what
+      // actually got committed, not an opaque `git commit -F -`.
+      command: formatLoggedCommand(args, stdinBase64),
       cwd: workingDirectory,
       exitCode: result.code,
       stdoutPreview: result.stdout.slice(0, 500),
@@ -606,3 +609,27 @@ class GitService {
 }
 
 export const gitService = new GitService();
+
+/**
+ * Render the `command` string shown in the Git tab. If stdin carried
+ * a commit message (base64-encoded, passed to `git commit -F -`),
+ * append the subject line so the audit log shows what was committed.
+ */
+function formatLoggedCommand(args: string[], stdinBase64?: string): string {
+  const base = `git ${args.join(' ')}`;
+  if (!stdinBase64) return base;
+  // Only `git commit -F -` is a meaningful consumer of piped stdin;
+  // for anything else, surface a byte count rather than the raw bytes
+  // (could be a binary patch, a tree, etc.).
+  const isCommit = args[0] === 'commit' && args.includes('-F') && args.includes('-');
+  if (!isCommit) return `${base} [stdin: ${Buffer.byteLength(stdinBase64, 'base64')} bytes]`;
+  try {
+    const message = Buffer.from(stdinBase64, 'base64').toString('utf8');
+    const subject = message.split('\n')[0].trim();
+    if (!subject) return base;
+    const truncated = subject.length > 72 ? `${subject.slice(0, 72)}…` : subject;
+    return `git commit -m "${truncated}"`;
+  } catch {
+    return base;
+  }
+}
