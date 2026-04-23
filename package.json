@@ -17,10 +17,18 @@
     "package": "npm run build:binary:all -w @fastowl/daemon && npm run package -w @fastowl/desktop",
     "lint": "npm run lint --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run build -w @fastowl/shared && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json && tsc --noEmit -p packages/mcp-server/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json"
+    "typecheck": "npm run build -w @fastowl/shared && tsc --noEmit -p packages/backend/tsconfig.json && tsc --noEmit -p packages/cli/tsconfig.json && tsc --noEmit -p packages/mcp-server/tsconfig.json && tsc --noEmit -p apps/desktop/tsconfig.json",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "{apps,packages}/**/*.{js,jsx,ts,tsx}": [
+      "eslint"
+    ]
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "typescript": "^5.8.2"
   },
   "engines": {

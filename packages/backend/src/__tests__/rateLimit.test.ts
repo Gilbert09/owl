@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import express from 'express';
 import { createServer } from 'http';
 import { AddressInfo } from 'net';

@@ -1,6 +1,5 @@
 import React, {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -563,12 +562,12 @@ function PermissionBlock({
   const [busy, setBusy] = useState<null | 'allow' | 'deny' | 'allow-always'>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const respond = async (decision: 'allow' | 'deny', persist: boolean) => {
-    const btn = decision === 'deny' ? 'deny' : persist ? 'allow-always' : 'allow';
+  const respond = async (decision: 'allow' | 'deny', persistDecision: boolean) => {
+    const btn = decision === 'deny' ? 'deny' : persistDecision ? 'allow-always' : 'allow';
     setBusy(btn);
     setError(null);
     try {
-      await api.tasks.respondToPermission(taskId, requestId, decision, persist);
+      await api.tasks.respondToPermission(taskId, requestId, decision, persistDecision);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to respond');
     } finally {

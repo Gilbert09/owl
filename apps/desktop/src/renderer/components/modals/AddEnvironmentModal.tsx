@@ -41,7 +41,7 @@ export function AddEnvironmentModal({ open, onOpenChange }: AddEnvironmentModalP
   const [name, setName] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const [pairingToken, setPairingToken] = useState<string | null>(null);
-  const [envId, setEnvId] = useState<string | null>(null);
+  const [_envId, setEnvId] = useState<string | null>(null);
   const [daemonStatus, setDaemonStatus] = useState<'pending' | 'connected' | 'failed'>('pending');
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);

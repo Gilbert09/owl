@@ -3,7 +3,6 @@ import { eq } from 'drizzle-orm';
 import { agentService } from '../services/agent.js';
 import { agentStructuredService } from '../services/agentStructured.js';
 import { daemonRegistry } from '../services/daemonRegistry.js';
-import { environmentService } from '../services/environment.js';
 import { permissionService } from '../services/permissionService.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';

@@ -703,7 +703,7 @@ export class JsonlLineParser {
       if (!line) continue;
       try {
         events.push(JSON.parse(line));
-      } catch (err) {
+      } catch {
         console.warn('[JsonlLineParser] dropping malformed line:', line.slice(0, 200));
       }
     }

@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'http';
 import { AddressInfo } from 'net';
-import { eq } from 'drizzle-orm';
 import { environmentRoutes } from '../../routes/environments.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';

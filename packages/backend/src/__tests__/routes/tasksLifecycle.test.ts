@@ -16,10 +16,8 @@ import {
   environments as environmentsTable,
   repositories as repositoriesTable,
   tasks as tasksTable,
-  agents as agentsTable,
 } from '../../db/schema.js';
 import { agentService } from '../../services/agent.js';
-import { environmentService } from '../../services/environment.js';
 import * as aiModule from '../../services/ai.js';
 import * as prefetchModule from '../../services/commitMessagePrefetch.js';
 import * as prModule from '../../services/taskPullRequest.js';

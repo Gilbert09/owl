@@ -309,13 +309,8 @@ describe('githubService', () => {
     it('hydrates the in-memory cache from integrations rows on init', async () => {
       // Seed a row directly, then init().
       await githubService.storeToken('ws1', 'gho_preexisting', 'bearer', 'repo');
-      // Drop the in-memory state and re-init to force a DB reload.
-      const connected = githubService.getConnectedWorkspaces();
-      for (const ws of connected) {
-        // Clear by wiping state — use a private path via re-init.
-      }
-      // Simplest: remove in-memory, then re-init.
-      // The cleanest way is calling init() again — idempotent.
+      // init() is idempotent — calling it again forces a DB reload and
+      // re-hydrates the in-memory cache from persisted integrations rows.
       await githubService.init();
       expect(githubService.isConnected('ws1')).toBe(true);
     });

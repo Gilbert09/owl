@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { taskQueueService } from '../services/taskQueue.js';
 import { agentService } from '../services/agent.js';
-import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
