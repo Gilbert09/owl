@@ -28,17 +28,26 @@ export function useTaskFiles(
   files: ChangedFile[];
   loading: boolean;
   error: string | null;
+  /**
+   * 'live' = served from a live git query against the env,
+   * 'cache' = served from the `metadata.finalFiles` snapshot.
+   * The UI can use this to surface an "env offline — showing
+   * cached diffs" hint when the branch isn't reachable.
+   */
+  source: 'live' | 'cache' | null;
 } {
   const { enabled = true } = options;
   const [files, setFiles] = useState<ChangedFile[]>([]);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
+  const [source, setSource] = useState<'live' | 'cache' | null>(null);
 
   useEffect(() => {
     if (!enabled) {
       setFiles([]);
       setLoading(false);
       setError(null);
+      setSource(null);
       return;
     }
     let cancelled = false;
@@ -49,6 +58,7 @@ export function useTaskFiles(
       .then((data) => {
         if (cancelled) return;
         setFiles(data.files);
+        setSource(data.source);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -71,9 +81,12 @@ export function useTaskFiles(
     }>('task:files_changed', (payload) => {
       if (payload.taskId !== taskId) return;
       setFiles(payload.files);
+      // Live WS updates only fire on in_progress tasks via
+      // TaskFileWatcher, so we're always 'live' when one lands.
+      setSource('live');
     });
     return () => unsub();
   }, [taskId, enabled]);
 
-  return { files, loading, error };
+  return { files, loading, error, source };
 }

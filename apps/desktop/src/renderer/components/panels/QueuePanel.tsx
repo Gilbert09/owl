@@ -18,6 +18,7 @@ import {
   Trash2,
   GitCommit,
   ExternalLink,
+  GitPullRequest,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -29,7 +30,6 @@ import { useTaskActions } from '../../hooks/useApi';
 import { useTaskFiles } from '../../hooks/useTaskFiles';
 import { api } from '../../lib/api';
 import { CreateTaskModal } from '../modals/CreateTaskModal';
-import { ApproveTaskModal } from '../modals/ApproveTaskModal';
 import { TaskTerminal } from './TaskTerminal';
 import { TerminalHistory } from './TerminalHistory';
 import { TaskFilesPanel } from './TaskFilesPanel';
@@ -477,7 +477,6 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     }
   };
 
-  const [approveModalOpen, setApproveModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'terminal' | 'files' | 'git'>('terminal');
   const [retryingPr, setRetryingPr] = useState(false);
 
@@ -496,24 +495,13 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     }
   };
 
-  const handleApproveClick = (e: React.MouseEvent) => {
-    // Shift-click bypasses the modal — commits with the auto-generated
-    // message and pushes in one step. For users who trust the LLM.
-    if (e.shiftKey) {
-      void handleApproveTask();
-      return;
-    }
-    setApproveModalOpen(true);
-  };
-
-  const handleApproveTask = async (commitMessage?: string) => {
+  const handleCreatePr = async () => {
     setIsLoading(true);
     setActionError(null);
     try {
-      await approveTask(taskId, commitMessage);
+      await approveTask(taskId);
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Approve failed');
-      throw err;
+      setActionError(err instanceof Error ? err.message : 'Create PR failed');
     } finally {
       setIsLoading(false);
     }
@@ -720,16 +708,16 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               <>
                 <Button
                   size="sm"
-                  onClick={handleApproveClick}
+                  onClick={handleCreatePr}
                   disabled={isLoading}
-                  title="Review commit message, then commit + push to origin. Shift-click to skip the modal."
+                  title="Push the task branch to origin and open a pull request."
                 >
                   {isLoading ? (
                     <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                   ) : (
-                    <CheckCircle className="w-4 h-4 mr-1" />
+                    <GitPullRequest className="w-4 h-4 mr-1" />
                   )}
-                  Commit &amp; push
+                  Create PR
                 </Button>
                 <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={isLoading}>
                   <RotateCw className="w-4 h-4 mr-1" />
@@ -1009,14 +997,6 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           </div>
         )}
       </div>
-      <ApproveTaskModal
-        taskId={taskId}
-        taskTitle={task.title}
-        open={approveModalOpen}
-        onClose={() => setApproveModalOpen(false)}
-        onApproved={() => setApproveModalOpen(false)}
-        onApprove={(commitMessage) => handleApproveTask(commitMessage)}
-      />
     </>
   );
 }

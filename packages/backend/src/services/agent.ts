@@ -15,7 +15,7 @@ import { agentStructuredService } from './agentStructured.js';
 import { daemonRegistry } from './daemonRegistry.js';
 import { permissionService } from './permissionService.js';
 import { ensurePermissionHook } from './permissionHook.js';
-import { prefetchCommitMessage } from './commitMessagePrefetch.js';
+import { autoCommitAndSnapshot } from './taskCommitSnapshot.js';
 import {
   emitAgentStatus,
   emitInboxNew,
@@ -449,14 +449,16 @@ class AgentService extends EventEmitter {
     if (agent.currentTaskId) {
       const now = new Date();
       if (code === 0) {
+        // Commit the agent's work + snapshot file diffs onto the
+        // task's metadata BEFORE the status flip. Non-fatal on
+        // empty-changeset or offline-env; the Files tab falls back
+        // to whatever snapshot is already cached.
+        await autoCommitAndSnapshot(agent.currentTaskId);
         await this.db
           .update(tasksTable)
           .set({ status: 'awaiting_review', updatedAt: now })
           .where(eq(tasksTable.id, agent.currentTaskId));
         emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
-        // Kick off commit-message generation in the background so the
-        // approve modal has a message ready when the user opens it.
-        void prefetchCommitMessage(agent.currentTaskId);
       } else {
         // Persist a result so the desktop failed-view banner has
         // something meaningful to show — without this the user sees
@@ -572,13 +574,15 @@ class AgentService extends EventEmitter {
 
       this.stopAgent(agentId);
 
+      // Same commit + snapshot path the one-shot exit takes.
+      await autoCommitAndSnapshot(taskId);
+
       const now = new Date();
       await this.db
         .update(tasksTable)
         .set({ status: 'awaiting_review', updatedAt: now })
         .where(eq(tasksTable.id, taskId));
       emitTaskStatus(workspaceId, taskId, 'awaiting_review');
-      void prefetchCommitMessage(taskId);
       console.log(`[agent] auto-finished task ${taskId.slice(0, 8)} on agent idle`);
     } catch (err) {
       console.error(`[agent] auto-finish for task ${taskId} failed:`, err);

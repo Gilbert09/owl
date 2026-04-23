@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { resolveTaskGitContext } from '../services/gitContext.js';
 import { pickGenerationEnv, runClaudeCli } from '../services/claudeCli.js';
-import { prefetchCommitMessage } from '../services/commitMessagePrefetch.js';
+import { autoCommitAndSnapshot } from '../services/taskCommitSnapshot.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
@@ -146,7 +146,7 @@ describe('services/claudeCli — runClaudeCli', () => {
   });
 });
 
-describe('services/commitMessagePrefetch — prefetchCommitMessage', () => {
+describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
   let db: Database;
   let cleanup: () => Promise<void>;
 
@@ -166,8 +166,12 @@ describe('services/commitMessagePrefetch — prefetchCommitMessage', () => {
       id: 'repo1', workspaceId: 'ws1', name: 'a/b',
       url: 'https://github.com/a/b', localPath: '/tmp/b', defaultBranch: 'main',
     });
+    vi.spyOn(gitService, 'getCurrentBranch').mockResolvedValue('fastowl/abc');
+    vi.spyOn(gitService, 'checkoutBranch').mockResolvedValue();
     vi.spyOn(gitService, 'getDiff').mockResolvedValue('+added\n-removed\n');
     vi.spyOn(gitService, 'getDiffStat').mockResolvedValue('1 file changed');
+    vi.spyOn(gitService, 'getChangedFiles').mockResolvedValue([]);
+    vi.spyOn(gitService, 'getFileDiff').mockResolvedValue('');
   });
 
   afterEach(async () => {
@@ -182,13 +186,13 @@ describe('services/commitMessagePrefetch — prefetchCommitMessage', () => {
       repositoryId: string | null;
     }>
   ): Promise<string> {
-    const id = 't-prefetch';
+    const id = 't-autocommit';
     const now = new Date();
     await db.insert(tasksTable).values({
       id,
       workspaceId: 'ws1',
       type: 'code_writing',
-      status: 'awaiting_review',
+      status: 'in_progress',
       priority: 'medium',
       title: 'Add login',
       description: 'd',
@@ -213,59 +217,100 @@ describe('services/commitMessagePrefetch — prefetchCommitMessage', () => {
     return (rows[0]?.metadata as Record<string, unknown>) ?? {};
   }
 
-  it('no-ops when the task has no branch', async () => {
+  it('returns no-branch without calling git when the task has no branch', async () => {
     const id = await insertTask({ branch: null });
-    const gen = vi.spyOn(ai, 'generateCommitMessage');
+    const commit = vi.spyOn(gitService, 'commitAll');
 
-    await prefetchCommitMessage(id);
+    const result = await autoCommitAndSnapshot(id);
 
-    expect(gen).not.toHaveBeenCalled();
-    expect(await readMeta(id)).not.toHaveProperty('proposedCommitMessage');
+    expect(result).toEqual({ committed: false, reason: 'no-branch' });
+    expect(commit).not.toHaveBeenCalled();
   });
 
-  it('no-ops when the task has no assignedEnvironmentId', async () => {
+  it('returns no-env when the task has no assignedEnvironmentId', async () => {
     const id = await insertTask({ assignedEnvironmentId: null });
-    const gen = vi.spyOn(ai, 'generateCommitMessage');
-
-    await prefetchCommitMessage(id);
-
-    expect(gen).not.toHaveBeenCalled();
+    const result = await autoCommitAndSnapshot(id);
+    expect(result).toEqual({ committed: false, reason: 'no-env' });
   });
 
-  it('no-ops when the repo has no localPath', async () => {
+  it('returns no-repo when the repo has no localPath', async () => {
     await db
       .update(repositoriesTable)
       .set({ localPath: null })
       .where(eq(repositoriesTable.id, 'repo1'));
-
     const id = await insertTask({});
-    const gen = vi.spyOn(ai, 'generateCommitMessage');
-
-    await prefetchCommitMessage(id);
-
-    expect(gen).not.toHaveBeenCalled();
+    const result = await autoCommitAndSnapshot(id);
+    expect(result).toEqual({ committed: false, reason: 'no-repo' });
   });
 
-  it('writes metadata.proposedCommitMessage on success', async () => {
+  it('returns no-changes when commitAll finds nothing to stage', async () => {
     const id = await insertTask({});
-    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue(
-      'feat(auth): add login endpoint\n\nWires the GitHub OAuth callback.'
-    );
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: nothing');
+    vi.spyOn(gitService, 'commitAll').mockResolvedValue(null);
 
-    await prefetchCommitMessage(id);
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result).toEqual({ committed: false, reason: 'no-changes' });
+    expect(await readMeta(id)).not.toHaveProperty('finalFiles');
+  });
+
+  it('commits + snapshots finalFiles on success', async () => {
+    const id = await insertTask({});
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat(auth): add login endpoint');
+    vi.spyOn(gitService, 'commitAll').mockResolvedValue('sha123456789');
+    vi.spyOn(gitService, 'getChangedFiles').mockResolvedValue([
+      { path: 'src/login.ts', status: 'added', added: 42, removed: 0, binary: false },
+    ]);
+    vi.spyOn(gitService, 'getFileDiff').mockResolvedValue('+ added login\n');
+
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result).toEqual({
+      committed: true,
+      sha: 'sha123456789',
+      message: 'feat(auth): add login endpoint',
+    });
+    const meta = await readMeta(id);
+    const finalFiles = meta.finalFiles as Array<{ path: string; diff: string }>;
+    expect(finalFiles).toHaveLength(1);
+    expect(finalFiles[0]).toMatchObject({ path: 'src/login.ts', diff: '+ added login\n' });
+  });
+
+  it('snapshots cumulatively on re-run (overwrites finalFiles)', async () => {
+    const id = await insertTask({});
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: round 1');
+    vi.spyOn(gitService, 'commitAll')
+      .mockResolvedValueOnce('shaA')
+      .mockResolvedValueOnce('shaB');
+    const changedFiles = vi.spyOn(gitService, 'getChangedFiles');
+    changedFiles.mockResolvedValueOnce([
+      { path: 'a.ts', status: 'added', added: 1, removed: 0, binary: false },
+    ]);
+    changedFiles.mockResolvedValueOnce([
+      { path: 'a.ts', status: 'added', added: 1, removed: 0, binary: false },
+      { path: 'b.ts', status: 'added', added: 2, removed: 0, binary: false },
+    ]);
+    vi.spyOn(gitService, 'getFileDiff').mockResolvedValue('+diff');
+
+    await autoCommitAndSnapshot(id);
+    await autoCommitAndSnapshot(id);
 
     const meta = await readMeta(id);
-    expect(meta.proposedCommitMessage).toBe(
-      'feat(auth): add login endpoint\n\nWires the GitHub OAuth callback.'
-    );
+    const finalFiles = meta.finalFiles as Array<{ path: string }>;
+    expect(finalFiles.map((f) => f.path)).toEqual(['a.ts', 'b.ts']);
   });
 
-  it('swallows unexpected errors rather than throwing', async () => {
+  it('returns error (non-throwing) when an unexpected git call rejects', async () => {
     const id = await insertTask({});
-    vi.spyOn(ai, 'generateCommitMessage').mockRejectedValue(new Error('ai exploded'));
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: x');
+    vi.spyOn(gitService, 'commitAll').mockRejectedValue(new Error('daemon dead'));
 
-    await expect(prefetchCommitMessage(id)).resolves.toBeUndefined();
-    // No metadata written on failure.
-    expect(await readMeta(id)).not.toHaveProperty('proposedCommitMessage');
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result.committed).toBe(false);
+    if (result.committed === false) {
+      expect(result.reason).toBe('error');
+      expect(result.error).toContain('daemon dead');
+    }
   });
 });

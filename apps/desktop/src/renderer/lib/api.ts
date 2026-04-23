@@ -148,11 +148,8 @@ export const tasks = {
   stop: (id: string) => request<Task>('POST', `/tasks/${id}/stop`),
   readyForReview: (id: string) =>
     request<Task>('POST', `/tasks/${id}/ready-for-review`),
-  approve: (id: string, commitMessage?: string) =>
-    request<Task>('POST', `/tasks/${id}/approve`, commitMessage ? { commitMessage } : {}),
+  approve: (id: string) => request<Task>('POST', `/tasks/${id}/approve`),
   reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
-  proposeCommitMessage: (id: string) =>
-    request<{ message: string }>('GET', `/tasks/${id}/proposed-commit-message`),
   retryPullRequest: (id: string) =>
     request<{ pullRequest: { number: number; url: string } }>(
       'POST',
@@ -191,9 +188,10 @@ export const tasks = {
         removed: number;
         binary: boolean;
       }>;
+      source: 'live' | 'cache';
     }>('GET', `/tasks/${id}/diff/files`),
   getFileDiff: (id: string, path: string) =>
-    request<{ diff: string }>(
+    request<{ diff: string; source: 'live' | 'cache' }>(
       'GET',
       `/tasks/${id}/diff/file?path=${encodeURIComponent(path)}`
     ),

@@ -12,12 +12,11 @@ import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import { resolveTaskGitContext } from '../services/gitContext.js';
 import { enterTaskGitLog, getGitLog } from '../services/gitLogService.js';
-import { prefetchCommitMessage } from '../services/commitMessagePrefetch.js';
+import { autoCommitAndSnapshot, writeFinalFilesSnapshot } from '../services/taskCommitSnapshot.js';
 import { openPullRequestForTask } from '../services/taskPullRequest.js';
 import { findTaskHoldingEnvRepoSlot } from '../services/taskQueue.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskDeleted } from '../services/websocket.js';
 import {
-  generateCommitMessage,
   generateTaskMetadata,
   generateTaskTitle,
   isConfigured as isAIConfigured,
@@ -699,13 +698,18 @@ export function taskRoutes(): Router {
     const activeAgent = agentService.getAgentByTaskId(task.id);
     if (activeAgent) agentService.stopAgent(activeAgent.id);
 
+    // Auto-commit the branch's pending work + snapshot the file
+    // diffs onto metadata before flipping status. Failure is non-
+    // fatal — empty-changeset / offline-env tasks still transition;
+    // the Files tab falls back to any previously cached snapshot.
+    await autoCommitAndSnapshot(task.id);
+
     await db
       .update(tasksTable)
       .set({ status: 'awaiting_review', updatedAt: new Date() })
       .where(eq(tasksTable.id, task.id));
 
     emitTaskStatus(task.workspaceId, task.id, 'awaiting_review');
-    void prefetchCommitMessage(task.id);
 
     const updatedRows = await db
       .select()
@@ -715,7 +719,22 @@ export function taskRoutes(): Router {
     res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Approve an awaiting_review task → commit + push branch → completed
+  // Approve an awaiting_review task → push branch → open PR → completed.
+  //
+  // The actual commit + file-diff snapshot already happened on the
+  // `in_progress → awaiting_review` transition (see
+  // autoCommitAndSnapshot). This handler is the "ship it" button:
+  // push the branch, open the PR, mark the task completed, clean up
+  // the local branch.
+  //
+  // Defensive: we still call autoCommitAndSnapshot on entry. Covers
+  // three cases:
+  //   1. Pre-refactor tasks that landed in awaiting_review before
+  //      this flow existed.
+  //   2. The env was offline at transition time, so autoCommit
+  //      returned an error — a retry now (env back up) commits.
+  //   3. The user made small manual tweaks in awaiting_review and
+  //      wants them shipped with the same task.
   router.post('/:id/approve', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -723,9 +742,6 @@ export function taskRoutes(): Router {
       return handleAccessError(err, res);
     }
     const db = getDbClient();
-    const { commitMessage: overrideMessage } = (req.body ?? {}) as {
-      commitMessage?: string;
-    };
 
     const rows = await db
       .select()
@@ -741,11 +757,7 @@ export function taskRoutes(): Router {
 
     const task = rowToTask(rows[0]);
 
-    // Agent tasks must commit + push before they can be completed. We
-    // refuse to flip the status flag without doing the actual git work
-    // — the previous behaviour silently marked completed when any
-    // precondition was missing (no branch, no repo, no env), which is
-    // how "Approve & push did nothing but said success" happened.
+    // Non-agent tasks (manual) — just flip to completed.
     if (isAgentTask(task.type)) {
       if (!task.branch) {
         return res.status(400).json({
@@ -797,61 +809,13 @@ export function taskRoutes(): Router {
       console.log(
         `${tag}: starting · env=${envId} wd=${workingDirectory} branch=${task.branch}`
       );
-      // Audit every git command into the task's gitLog so the desktop's
-      // Git tab can show what happened.
       enterTaskGitLog(task.id);
 
+      // Safety net: commit anything still pending (see block comment
+      // above for why). Returns non-fatally on empty-changeset.
+      await autoCommitAndSnapshot(task.id);
+
       try {
-        // Defensive: explicitly checkout the task branch before
-        // staging. The agent may have moved off the branch (or never
-        // landed on it cleanly), and committing on the wrong branch
-        // is exactly the failure mode that produced the silent-bug.
-        const before = await gitService.getCurrentBranch(envId, workingDirectory);
-        console.log(`${tag}: current branch before commit is ${before}`);
-        if (before !== task.branch) {
-          console.warn(`${tag}: not on task branch (on ${before}); checking out ${task.branch}`);
-          await gitService.checkoutBranch(envId, task.branch, workingDirectory);
-          const after = await gitService.getCurrentBranch(envId, workingDirectory);
-          if (after !== task.branch) {
-            return res.status(500).json({
-              success: false,
-              error: `Could not switch to task branch ${task.branch} (still on ${after}).`,
-            });
-          }
-          console.log(`${tag}: now on ${after}`);
-        }
-
-        let message = overrideMessage?.trim();
-        if (!message) {
-          const [diffStat, diff] = await Promise.all([
-            gitService.getDiffStat(envId, task.branch, baseBranch, workingDirectory),
-            gitService.getDiff(envId, task.branch, baseBranch, workingDirectory),
-          ]);
-          message = await generateCommitMessage({
-            title: task.title,
-            prompt: task.prompt,
-            diffStat,
-            diff,
-            preferredEnvId: envId,
-          });
-        }
-
-        console.log(`${tag}: committing with subject: ${message.split('\n')[0]}`);
-        const sha = await gitService.commitAll(envId, message, workingDirectory);
-        console.log(`${tag}: commit result sha=${sha ?? '(none — nothing to stage)'}`);
-
-        if (!sha) {
-          // Nothing got committed. Either everything was already
-          // committed by the agent (unlikely — it doesn't run git
-          // commit on its own) or every change is gitignored. Either
-          // way, refuse to mark completed and tell the user.
-          return res.status(400).json({
-            success: false,
-            error:
-              "Nothing to commit. The agent's changes may all be in .gitignore, or there were no edits. Task left in awaiting_review.",
-          });
-        }
-
         console.log(`${tag}: pushing branch ${task.branch} to origin`);
         await gitService.pushBranch(envId, task.branch, workingDirectory);
         console.log(`${tag}: push done`);
@@ -867,61 +831,34 @@ export function taskRoutes(): Router {
 
         // Final guard: working tree must be clean before we call this
         // task done. Catches anything subtle that left modifications
-        // behind (post-commit edits, partial stage failures, etc.).
+        // behind after the safety-net commit.
         const stillDirty = await gitService.hasUncommittedChanges(envId, workingDirectory);
         if (stillDirty) {
           return res.status(500).json({
             success: false,
             error:
-              'Commit + push completed but working tree still has uncommitted changes. Task left in awaiting_review.',
+              'Push completed but working tree still has uncommitted changes. Task left in awaiting_review.',
           });
         }
 
-        // Snapshot the per-file list + each file's diff onto
-        // task.metadata.finalFiles BEFORE we delete the local
-        // branch. Post-completion the Files tab reads from this
-        // snapshot — the task becomes self-contained and history
-        // doesn't depend on the env being online or the remote
-        // branch still existing.
-        try {
-          const files = await gitService.getChangedFiles(
+        // Re-read the task to capture any metadata updates (finalFiles
+        // or pullRequest) that the previous calls wrote — we need the
+        // freshest metadata before running the last snapshot so we
+        // don't overwrite it.
+        const refreshedRows = await db
+          .select()
+          .from(tasksTable)
+          .where(eq(tasksTable.id, task.id))
+          .limit(1);
+        if (refreshedRows[0]) {
+          await writeFinalFilesSnapshot(
+            task.id,
             envId,
             baseBranch,
-            workingDirectory
+            workingDirectory,
+            { metadata: refreshedRows[0].metadata, workspaceId: refreshedRows[0].workspaceId },
+            tag
           );
-          const FILE_DIFF_CAP = 50_000;
-          const snapshot = await Promise.all(
-            files.map(async (f) => {
-              if (f.binary) return { ...f, diff: '' };
-              let diff = '';
-              try {
-                diff = await gitService.getFileDiff(
-                  envId,
-                  baseBranch,
-                  f.path,
-                  workingDirectory
-                );
-              } catch (err) {
-                console.warn(`${tag}: snapshot diff failed for ${f.path}:`, err);
-              }
-              if (diff.length > FILE_DIFF_CAP) {
-                diff = diff.slice(0, FILE_DIFF_CAP) + '\n[… truncated …]';
-              }
-              return { ...f, diff };
-            })
-          );
-
-          const existingMetadata = (rows[0].metadata as Record<string, unknown>) ?? {};
-          await db
-            .update(tasksTable)
-            .set({
-              metadata: { ...existingMetadata, finalFiles: snapshot },
-              updatedAt: new Date(),
-            })
-            .where(eq(tasksTable.id, task.id));
-          console.log(`${tag}: snapshotted ${snapshot.length} file diffs to metadata`);
-        } catch (snapshotErr) {
-          console.warn(`${tag}: final-diff snapshot failed (non-fatal):`, snapshotErr);
         }
 
         // Cleanup: return to base branch + drop the local task branch
@@ -935,10 +872,10 @@ export function taskRoutes(): Router {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error(`${tag}: commit/push failed:`, err);
+        console.error(`${tag}: push/PR failed:`, err);
         return res.status(500).json({
           success: false,
-          error: `Commit/push failed: ${msg}. Task left in awaiting_review.`,
+          error: `Push/PR failed: ${msg}. Task left in awaiting_review.`,
         });
       }
     }
@@ -1086,79 +1023,6 @@ export function taskRoutes(): Router {
     res.json({ success: true, data: rowToTask(updatedRows[0]) } as ApiResponse<Task>);
   });
 
-  // Propose a commit message for an awaiting_review task so the
-  // desktop approve modal can pre-fill the textarea. Calls the same
-  // helper `/approve` uses when no override is supplied.
-  router.get('/:id/proposed-commit-message', async (req, res) => {
-    try {
-      await requireTaskAccess(req, req.params.id);
-    } catch (err) {
-      return handleAccessError(err, res);
-    }
-    const db = getDbClient();
-    const rows = await db
-      .select()
-      .from(tasksTable)
-      .where(eq(tasksTable.id, req.params.id))
-      .limit(1);
-    if (!rows[0]) {
-      return res.status(404).json({ success: false, error: 'Task not found' });
-    }
-    const task = rowToTask(rows[0]);
-
-    // Serve from the prefetched cache if available — the backend
-    // kicks off a background generation the moment a task lands in
-    // awaiting_review, so the modal opens instantly in the common
-    // case instead of waiting on a 3–5s daemon CLI round-trip.
-    const cached =
-      (task.metadata as { proposedCommitMessage?: string } | undefined)
-        ?.proposedCommitMessage;
-    if (typeof cached === 'string' && cached.trim().length > 0) {
-      return res.json({
-        success: true,
-        data: { message: cached },
-      } as ApiResponse<{ message: string }>);
-    }
-
-    let diffStat: string | undefined;
-    let diff: string | undefined;
-    if (task.branch && task.assignedEnvironmentId) {
-      const gitContext = await resolveTaskGitContext(task, task.assignedEnvironmentId);
-      if (gitContext) {
-        try {
-          [diffStat, diff] = await Promise.all([
-            gitService.getDiffStat(
-              task.assignedEnvironmentId,
-              task.branch,
-              gitContext.baseBranch,
-              gitContext.workingDirectory
-            ),
-            gitService.getDiff(
-              task.assignedEnvironmentId,
-              task.branch,
-              gitContext.baseBranch,
-              gitContext.workingDirectory
-            ),
-          ]);
-        } catch (err) {
-          // If we can't read the diff, still return a reasonable
-          // message from title/prompt alone rather than erroring out.
-          console.warn('[tasks] proposed-commit-message: failed to read diff:', err);
-        }
-      }
-    }
-
-    const message = await generateCommitMessage({
-      title: task.title,
-      prompt: task.prompt,
-      diffStat,
-      diff,
-      preferredEnvId: task.assignedEnvironmentId ?? undefined,
-    });
-
-    res.json({ success: true, data: { message } } as ApiResponse<{ message: string }>);
-  });
-
   // Get the diff of a task's work against the base branch
   router.get('/:id/diff', async (req, res) => {
     try {
@@ -1272,6 +1136,19 @@ export function taskRoutes(): Router {
 
   // List files changed on this task's branch vs base, one entry per path.
   // Drives the desktop Files tab.
+  //
+  // Read policy (depends on task state):
+  //   - completed: snapshot only (branch + worktree are gone).
+  //   - awaiting_review: try live git, fall back to snapshot if the
+  //     env's offline or git fails. Autocommit populates the snapshot
+  //     on the transition, so fallback is always fresh.
+  //   - everything else (in_progress etc.): live git only. We don't
+  //     fall back to a stale snapshot from a prior round — showing
+  //     old files would be more confusing than showing none.
+  //
+  // `source` in the response is `'live' | 'cache'`, so the UI can
+  // surface a "showing cached diffs — env offline" banner when it
+  // matters.
   router.get('/:id/diff/files', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -1279,39 +1156,57 @@ export function taskRoutes(): Router {
       return handleAccessError(err, res);
     }
 
-    // Prefer the snapshot persisted at approve time — once the task
-    // is completed, the local branch is gone and the working tree is
-    // back on base, so live `git diff` would return nothing. The
-    // snapshot is the record of what actually shipped.
-    const snapshot = await readFinalFilesSnapshot(req.params.id);
-    if (snapshot) {
-      const files = snapshot.map((f) => ({
-        path: f.path,
-        status: f.status,
-        added: f.added,
-        removed: f.removed,
-        binary: f.binary,
-      }));
-      return res.json({ success: true, data: { files } } as ApiResponse<{ files: typeof files }>);
+    const taskState = await readTaskDiffState(req.params.id);
+    if (!taskState) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    if (taskState.status === 'completed') {
+      const files = snapshotAsFileList(taskState.snapshot);
+      return res.json({
+        success: true,
+        data: { files, source: 'cache' as const },
+      } as ApiResponse<{ files: typeof files; source: 'live' | 'cache' }>);
     }
 
     const context = await resolveTaskDiffContext(req);
-    if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
-    try {
-      const files = await gitService.getChangedFiles(
-        context.environmentId,
-        context.baseBranch,
-        context.workingDirectory
-      );
-      res.json({ success: true, data: { files } } as ApiResponse<{ files: typeof files }>);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to list changed files';
-      console.error('[tasks] diff/files failed:', err);
-      res.status(500).json({ success: false, error: msg });
+    if (context.ok) {
+      try {
+        const files = await gitService.getChangedFiles(
+          context.environmentId,
+          context.baseBranch,
+          context.workingDirectory
+        );
+        return res.json({
+          success: true,
+          data: { files, source: 'live' as const },
+        } as ApiResponse<{ files: typeof files; source: 'live' | 'cache' }>);
+      } catch (err) {
+        console.warn(
+          `[tasks] diff/files live query failed for ${req.params.id}, trying cache:`,
+          err
+        );
+      }
     }
+
+    // Live path unavailable. Fall back to snapshot only for awaiting_review —
+    // in_progress tasks shouldn't read a stale snapshot from a previous round.
+    if (taskState.status === 'awaiting_review' && taskState.snapshot) {
+      const files = snapshotAsFileList(taskState.snapshot);
+      return res.json({
+        success: true,
+        data: { files, source: 'cache' as const },
+      } as ApiResponse<{ files: typeof files; source: 'live' | 'cache' }>);
+    }
+
+    if (!context.ok) {
+      return res.status(context.status).json({ success: false, error: context.error });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to list changed files' });
   });
 
   // Unified diff for a single file on this task's branch vs base.
+  // Same state-aware policy as /diff/files.
   router.get('/:id/diff/file', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -1323,32 +1218,55 @@ export function taskRoutes(): Router {
       return res.status(400).json({ success: false, error: 'path query param is required' });
     }
 
-    const snapshot = await readFinalFilesSnapshot(req.params.id);
-    if (snapshot) {
-      const hit = snapshot.find((f) => f.path === pathParam);
-      if (hit) {
-        return res.json({
-          success: true,
-          data: { diff: hit.diff ?? '' },
-        } as ApiResponse<{ diff: string }>);
-      }
+    const taskState = await readTaskDiffState(req.params.id);
+    if (!taskState) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    const cacheDiff = (): string => {
+      const hit = taskState.snapshot?.find((f) => f.path === pathParam);
+      return hit?.diff ?? '';
+    };
+
+    if (taskState.status === 'completed') {
+      return res.json({
+        success: true,
+        data: { diff: cacheDiff(), source: 'cache' as const },
+      } as ApiResponse<{ diff: string; source: 'live' | 'cache' }>);
     }
 
     const context = await resolveTaskDiffContext(req);
-    if (!context.ok) return res.status(context.status).json({ success: false, error: context.error });
-    try {
-      const diff = await gitService.getFileDiff(
-        context.environmentId,
-        context.baseBranch,
-        pathParam,
-        context.workingDirectory
-      );
-      res.json({ success: true, data: { diff } } as ApiResponse<{ diff: string }>);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Failed to get file diff';
-      console.error('[tasks] diff/file failed:', err);
-      res.status(500).json({ success: false, error: msg });
+    if (context.ok) {
+      try {
+        const diff = await gitService.getFileDiff(
+          context.environmentId,
+          context.baseBranch,
+          pathParam,
+          context.workingDirectory
+        );
+        return res.json({
+          success: true,
+          data: { diff, source: 'live' as const },
+        } as ApiResponse<{ diff: string; source: 'live' | 'cache' }>);
+      } catch (err) {
+        console.warn(
+          `[tasks] diff/file live query failed for ${req.params.id}:${pathParam}, trying cache:`,
+          err
+        );
+      }
     }
+
+    if (taskState.status === 'awaiting_review' && taskState.snapshot) {
+      return res.json({
+        success: true,
+        data: { diff: cacheDiff(), source: 'cache' as const },
+      } as ApiResponse<{ diff: string; source: 'live' | 'cache' }>);
+    }
+
+    if (!context.ok) {
+      return res.status(context.status).json({ success: false, error: context.error });
+    }
+    return res.status(500).json({ success: false, error: 'Failed to get file diff' });
   });
 
   // Get terminal output for a task. Returns the PTY transcript (bytes)
@@ -1535,20 +1453,45 @@ interface FinalFileEntry {
 }
 
 /**
- * Return the persisted per-file snapshot captured at approve time,
- * or null if the task never reached completion / was approved before
- * snapshots were added.
+ * Read the task's status and file-diff snapshot in one query — both
+ * are needed on every Files-tab request to pick between the live-git
+ * path and the cached snapshot.
  */
-async function readFinalFilesSnapshot(taskId: string): Promise<FinalFileEntry[] | null> {
+async function readTaskDiffState(
+  taskId: string
+): Promise<{ status: TaskStatus; snapshot: FinalFileEntry[] | null } | null> {
   const db = getDbClient();
   const rows = await db
-    .select({ metadata: tasksTable.metadata })
+    .select({ status: tasksTable.status, metadata: tasksTable.metadata })
     .from(tasksTable)
     .where(eq(tasksTable.id, taskId))
     .limit(1);
-  const metadata = rows[0]?.metadata as Record<string, unknown> | undefined;
-  const snapshot = metadata?.finalFiles;
-  return Array.isArray(snapshot) ? (snapshot as FinalFileEntry[]) : null;
+  const row = rows[0];
+  if (!row) return null;
+  const metadata = row.metadata as Record<string, unknown> | undefined;
+  const finalFiles = metadata?.finalFiles;
+  return {
+    status: row.status as TaskStatus,
+    snapshot: Array.isArray(finalFiles) ? (finalFiles as FinalFileEntry[]) : null,
+  };
+}
+
+/**
+ * Strip the per-file unified diff off each snapshot entry — the list
+ * endpoint only returns metadata, the per-file endpoint is where the
+ * diff text is served.
+ */
+function snapshotAsFileList(
+  snapshot: FinalFileEntry[] | null
+): Array<Omit<FinalFileEntry, 'diff'>> {
+  if (!snapshot) return [];
+  return snapshot.map((f) => ({
+    path: f.path,
+    status: f.status,
+    added: f.added,
+    removed: f.removed,
+    binary: f.binary,
+  }));
 }
 
 function rowToTask(

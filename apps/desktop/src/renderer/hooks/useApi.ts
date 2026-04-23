@@ -399,8 +399,8 @@ export function useTaskActions() {
   );
 
   const approveTask = useCallback(
-    async (taskId: string, commitMessage?: string) => {
-      const task = await api.tasks.approve(taskId, commitMessage);
+    async (taskId: string) => {
+      const task = await api.tasks.approve(taskId);
       updateTask(taskId, task);
       return task;
     },

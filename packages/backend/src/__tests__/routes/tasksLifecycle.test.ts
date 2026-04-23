@@ -19,7 +19,7 @@ import {
 } from '../../db/schema.js';
 import { agentService } from '../../services/agent.js';
 import * as aiModule from '../../services/ai.js';
-import * as prefetchModule from '../../services/commitMessagePrefetch.js';
+import * as taskCommitSnapshotModule from '../../services/taskCommitSnapshot.js';
 import * as prModule from '../../services/taskPullRequest.js';
 
 const OTHER_USER_ID = 'user-other';
@@ -137,7 +137,13 @@ describe('routes/tasks lifecycle', () => {
     vi.spyOn(aiModule, 'generateCommitMessage').mockResolvedValue('feat: LLM-generated message');
     vi.spyOn(aiModule, 'generateTaskTitle').mockResolvedValue('Refined title');
     vi.spyOn(aiModule, 'isConfigured').mockReturnValue(false);
-    vi.spyOn(prefetchModule, 'prefetchCommitMessage').mockResolvedValue(undefined);
+    // Short-circuit autocommit — individual approve/ready-for-review
+    // tests override this to assert end-to-end wiring when needed.
+    vi.spyOn(taskCommitSnapshotModule, 'autoCommitAndSnapshot').mockResolvedValue({
+      committed: false,
+      reason: 'no-changes',
+    });
+    vi.spyOn(taskCommitSnapshotModule, 'writeFinalFilesSnapshot').mockResolvedValue();
 
     // PR creation is a network call — keep it out of tests by default.
     vi.spyOn(prModule, 'openPullRequestForTask').mockImplementation(async (taskId) => {
@@ -428,6 +434,10 @@ describe('routes/tasks lifecycle', () => {
         id: 'a-live',
       } as unknown as ReturnType<typeof agentService.getAgentByTaskId>);
       const stopSpy = vi.spyOn(agentService, 'stopAgent').mockImplementation(() => {});
+      const autoCommitSpy = vi.spyOn(
+        taskCommitSnapshotModule,
+        'autoCommitAndSnapshot'
+      );
 
       const res = await fetch(`${serverUrl}/tasks/${id}/ready-for-review`, {
         method: 'POST',
@@ -435,7 +445,27 @@ describe('routes/tasks lifecycle', () => {
       });
       expect(res.status).toBe(200);
       expect(stopSpy).toHaveBeenCalledWith('a-live');
+      // Auto-commit + snapshot runs on the transition — this is what
+      // makes "Files tab stays complete" work.
+      expect(autoCommitSpy).toHaveBeenCalledWith(id);
 
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, id));
+      expect(rows[0].status).toBe('awaiting_review');
+    });
+
+    it('still transitions when autoCommitAndSnapshot reports no changes', async () => {
+      const id = await insertTask(db, { status: 'in_progress' });
+      vi.spyOn(agentService, 'getAgentByTaskId').mockReturnValue(undefined);
+      // Default beforeEach mock already returns `no-changes`; assert
+      // the transition still completes instead of wedging the task.
+      const res = await fetch(`${serverUrl}/tasks/${id}/ready-for-review`, {
+        method: 'POST',
+        headers: authHeaders,
+      });
+      expect(res.status).toBe(200);
       const rows = await db
         .select({ status: tasksTable.status })
         .from(tasksTable)
@@ -506,76 +536,29 @@ describe('routes/tasks lifecycle', () => {
 
     it('attaches a fallback connected env when assignedEnvironmentId is null', async () => {
       const id = await insertApprovableTask({ assignedEnvironmentId: null });
-      // hasUncommittedChanges starts returning "" (clean), but the
-      // actual approve path runs commitAll which needs stage to
-      // return non-zero to proceed. Scripting exit codes on the fake:
-      const fakeWithCodes = installFakeEnvironment({
-        exitCodes: {
-          'git diff --cached --quiet': 1, // something staged
-          'git rev-parse --verify': 0,
-        },
-        outputs: {
-          'git rev-parse HEAD': 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n',
-          'git rev-parse --abbrev-ref HEAD': 'fastowl/abc-slug\n',
-        },
+      const res = await fetch(`${serverUrl}/tasks/${id}/approve`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({}),
       });
-      try {
-        const res = await fetch(`${serverUrl}/tasks/${id}/approve`, {
-          method: 'POST',
-          headers: authHeaders,
-          body: JSON.stringify({ commitMessage: 'test commit' }),
-        });
-        // Either 200 (happy path) or a structured 500 from a later
-        // step — what we're asserting is that the "no env" 400 path
-        // did NOT fire. 400-with-"no assigned env" would mean the
-        // fallback didn't kick in.
-        if (res.status === 400) {
-          const body = await res.json();
-          expect(body.error).not.toMatch(/no assigned environment/i);
-        }
-        // After the fallback, assignedEnvironmentId should be set.
-        const rows = await db
-          .select({ assignedEnvironmentId: tasksTable.assignedEnvironmentId })
-          .from(tasksTable)
-          .where(eq(tasksTable.id, id));
-        expect(rows[0].assignedEnvironmentId).toBe('env1');
-      } finally {
-        fakeWithCodes.restore();
+      // The "no env" 400 path should NOT fire — the fallback lookup
+      // should attach env1 before push/PR even start.
+      if (res.status === 400) {
+        const body = await res.json();
+        expect(body.error).not.toMatch(/no assigned environment/i);
       }
+      const rows = await db
+        .select({ assignedEnvironmentId: tasksTable.assignedEnvironmentId })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, id));
+      expect(rows[0].assignedEnvironmentId).toBe('env1');
     });
 
-    it('400s when commitAll produces no SHA (nothing to commit)', async () => {
+    it('happy path: pushes branch, opens PR, marks completed', async () => {
       const id = await insertApprovableTask();
-      // Teach the fake to claim the agent is already on the task
-      // branch so the approve handler skips the checkout dance; every
-      // other command returns exit 0 (default), so `git diff --cached
-      // --quiet` exits 0 → commitAll returns null → handler 400s.
       fake.restore();
       const scripted = installFakeEnvironment({
-        outputs: { 'git rev-parse --abbrev-ref HEAD': 'fastowl/abc-slug\n' },
-      });
-      try {
-        const res = await fetch(`${serverUrl}/tasks/${id}/approve`, {
-          method: 'POST',
-          headers: authHeaders,
-          body: JSON.stringify({ commitMessage: 'nothing here' }),
-        });
-        expect(res.status).toBe(400);
-        const body = await res.json();
-        expect(body.error).toMatch(/nothing to commit/i);
-      } finally {
-        scripted.restore();
-        fake = installFakeEnvironment();
-      }
-    });
-
-    it('happy path: commits, pushes, awaits PR, marks completed', async () => {
-      const id = await insertApprovableTask();
-      fake.restore(); // replace with a new scripted one
-      const scripted = installFakeEnvironment({
-        exitCodes: { 'git diff --cached --quiet': 1 },
         outputs: {
-          'git rev-parse HEAD': 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n',
           'git rev-parse --abbrev-ref HEAD': 'fastowl/abc-slug\n',
           'git status --porcelain': '',
         },
@@ -585,7 +568,7 @@ describe('routes/tasks lifecycle', () => {
         const res = await fetch(`${serverUrl}/tasks/${id}/approve`, {
           method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({ commitMessage: 'feat: add thing' }),
+          body: JSON.stringify({}),
         });
         expect(res.status).toBe(200);
 
@@ -609,15 +592,14 @@ describe('routes/tasks lifecycle', () => {
       }
     });
 
-    it('refuses to complete when the working tree is still dirty after commit', async () => {
+    it('refuses to complete when the working tree is still dirty after push', async () => {
       const id = await insertApprovableTask();
       fake.restore();
       const scripted = installFakeEnvironment({
-        exitCodes: { 'git diff --cached --quiet': 1 },
         outputs: {
-          'git rev-parse HEAD': 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n',
           'git rev-parse --abbrev-ref HEAD': 'fastowl/abc-slug\n',
-          // Dirty-tree check AFTER commit+push returns " M file" — not empty.
+          // Post-push safety-net check: ' M file' → uncommitted work
+          // remains even though autoCommit was mocked to no-op.
           'git status --porcelain': ' M leftover.ts\n',
         },
       });
@@ -626,7 +608,7 @@ describe('routes/tasks lifecycle', () => {
         const res = await fetch(`${serverUrl}/tasks/${id}/approve`, {
           method: 'POST',
           headers: authHeaders,
-          body: JSON.stringify({ commitMessage: 'feat: add' }),
+          body: JSON.stringify({}),
         });
         expect(res.status).toBe(500);
         const body = await res.json();
@@ -737,35 +719,4 @@ describe('routes/tasks lifecycle', () => {
     });
   });
 
-  // -------- /proposed-commit-message --------
-
-  describe('GET /tasks/:id/proposed-commit-message', () => {
-    it('serves the cached message from metadata when available', async () => {
-      const id = await insertTask(db, {
-        metadata: { proposedCommitMessage: 'feat: cached message' },
-      });
-      const gen = vi.spyOn(aiModule, 'generateCommitMessage');
-
-      const res = await fetch(`${serverUrl}/tasks/${id}/proposed-commit-message`, {
-        headers: authHeaders,
-      });
-      const body = await res.json();
-      expect(body.data.message).toBe('feat: cached message');
-      // Cached path bypasses the LLM helper.
-      expect(gen).not.toHaveBeenCalled();
-    });
-
-    it('generates fresh when no cached message exists', async () => {
-      const id = await insertTask(db, {
-        branch: 'fastowl/abc',
-        metadata: {},
-      });
-      const res = await fetch(`${serverUrl}/tasks/${id}/proposed-commit-message`, {
-        headers: authHeaders,
-      });
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.data.message).toBe('feat: LLM-generated message');
-    });
-  });
 });

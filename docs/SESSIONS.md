@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 21 — Split commit off approve; cache diffs on the transition
+
+Moves the auto-commit + file-diff snapshot from `/approve` to the `in_progress → awaiting_review` transition. Motivation: the Files tab used to go blank once the env disconnected (because `getChangedFiles` is a live git query), and the working tree stayed dirty until the user approved, blocking back-to-back tasks on the same repo. With the snapshot persisted on the transition, the Files tab survives env offline, and the approve button shifts role — it's now "Create PR", the terminal step.
+
+- **`autoCommitAndSnapshot(taskId)`** (`services/taskCommitSnapshot.ts`, new): checks out the task branch, regenerates the commit message via `generateCommitMessage`, runs `commitAll`, then persists a `{files[], perFileDiffs}` snapshot on `task.metadata.finalFiles` (per-file diff capped at 50 k chars). Same shape the old approve path wrote; overwrites on each call so follow-up rounds produce a fresh cumulative snapshot. Non-fatal on empty-changeset, env offline, or any git error — callers always transition.
+
+- **Wired into all three `in_progress → awaiting_review` sites**: `POST /tasks/:id/ready-for-review`, `AgentService.handleStructuredExit` (one-shot clean exit), and `AgentService.maybeAutoFinishAgentTask` (interactive turn-complete auto-finish). Replaced the old `prefetchCommitMessage` fire-and-forget at each site; `services/commitMessagePrefetch.ts` and the `GET /tasks/:id/proposed-commit-message` route are gone.
+
+- **`/approve` slimmed to push + PR + completed** (`routes/tasks.ts`): drops commit/snapshot logic (done earlier on the transition). Still calls `autoCommitAndSnapshot` as a safety net on entry — covers pre-refactor tasks, env-was-offline-at-transition tasks, and manual tweaks made in `awaiting_review`. Dirty-tree check remains as a post-push guard.
+
+- **State-aware Files-tab routes** (`GET /tasks/:id/diff/files`, `/diff/file`): `completed` → snapshot only. `awaiting_review` → try live git, fall back to `metadata.finalFiles` if the env's offline or git throws. Everything else (in_progress etc.) → live only (no fallback, to avoid showing stale snapshots from a previous round). New `source: 'live' | 'cache'` field on the response; `useTaskFiles` surfaces it so the UI can indicate offline state later.
+
+- **UI**: `QueuePanel.tsx` "Commit & push" button → "Create PR" (one-click, uses `GitPullRequest` icon). `ApproveTaskModal.tsx` deleted — commit message isn't user-editable anymore since the commit already happened. `api.tasks.approve` drops its `commitMessage` param; `proposeCommitMessage` is gone.
+
+- **Tests**: helperServices — new `autoCommitAndSnapshot` suite covering all five `reason` branches, cumulative-snapshot overwrite on re-run, and non-throwing error surface. routes/tasks — new awaiting_review cache-fallback test, in_progress-doesn't-fall-back-to-stale-cache test, `source: 'live'` assertion on the live path. routes/tasksLifecycle — approve tests rewritten for push+PR semantics (no more commit exit-code scripting), new ready-for-review assertion that autoCommit fires, empty-changeset still transitions. All 564 backend + 98 daemon tests pass.
+
 ## Session 20 — Git-centric task flow (Phase 14.2–14.5)
 
 Closes the loop on Phase 14: tasks now own their branch end-to-end, from a synced base at start through commit + push on approve. Landed together so each piece makes sense alongside the next — a partial slice here would leave tasks in a worse state than before.

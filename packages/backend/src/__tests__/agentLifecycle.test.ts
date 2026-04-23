@@ -4,7 +4,7 @@ import { agentService } from '../services/agent.js';
 import { agentStructuredService } from '../services/agentStructured.js';
 import { environmentService } from '../services/environment.js';
 import * as permissionHook from '../services/permissionHook.js';
-import * as prefetch from '../services/commitMessagePrefetch.js';
+import * as taskCommitSnapshot from '../services/taskCommitSnapshot.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
@@ -121,7 +121,10 @@ describe('agentService — startAgent + handleStructuredExit', () => {
     vi.spyOn(environmentService, 'getStatus').mockResolvedValue('connected');
     vi.spyOn(environmentService, 'connect').mockResolvedValue(undefined);
     vi.spyOn(permissionHook, 'ensurePermissionHook').mockResolvedValue('/tmp/permission.cjs');
-    vi.spyOn(prefetch, 'prefetchCommitMessage').mockResolvedValue(undefined);
+    vi.spyOn(taskCommitSnapshot, 'autoCommitAndSnapshot').mockResolvedValue({
+      committed: false,
+      reason: 'no-changes',
+    });
   });
 
   afterEach(async () => {
@@ -306,7 +309,10 @@ describe('agentService — continueTask', () => {
     vi.spyOn(environmentService, 'getStatus').mockResolvedValue('connected');
     vi.spyOn(environmentService, 'connect').mockResolvedValue(undefined);
     vi.spyOn(permissionHook, 'ensurePermissionHook').mockResolvedValue('/tmp/permission.cjs');
-    vi.spyOn(prefetch, 'prefetchCommitMessage').mockResolvedValue(undefined);
+    vi.spyOn(taskCommitSnapshot, 'autoCommitAndSnapshot').mockResolvedValue({
+      committed: false,
+      reason: 'no-changes',
+    });
   });
 
   afterEach(async () => {

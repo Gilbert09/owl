@@ -763,4 +763,72 @@ describe('GET /tasks/:id/diff* — live-diff path (no snapshot)', () => {
     const body = await res.json();
     expect(body.error).toMatch(/Could not resolve a git working directory/i);
   });
+
+  it('/diff/files — awaiting_review falls back to cached snapshot when live git throws', async () => {
+    const finalFiles = [
+      {
+        path: 'cached.ts',
+        status: 'modified' as const,
+        added: 1,
+        removed: 1,
+        binary: false,
+        diff: '+c\n-a\n',
+      },
+    ];
+    await insertTask(db, {
+      id: 'd9',
+      status: 'awaiting_review',
+      branch: 'fastowl/d9-slug',
+      assignedEnvironmentId: 'env1',
+      metadata: { finalFiles },
+    });
+    vi.mocked(gitService.getChangedFiles).mockRejectedValueOnce(new Error('env offline'));
+
+    const res = await fetch(`${serverUrl}/tasks/d9/diff/files`, { headers: authHeaders });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.source).toBe('cache');
+    expect(body.data.files).toHaveLength(1);
+    expect(body.data.files[0].path).toBe('cached.ts');
+  });
+
+  it('/diff/files — in_progress does NOT fall back to stale cache', async () => {
+    const staleSnapshot = [
+      {
+        path: 'stale.ts',
+        status: 'modified' as const,
+        added: 1,
+        removed: 0,
+        binary: false,
+        diff: '+stale\n',
+      },
+    ];
+    await insertTask(db, {
+      id: 'd10',
+      status: 'in_progress',
+      branch: 'fastowl/d10-slug',
+      assignedEnvironmentId: 'env1',
+      metadata: { finalFiles: staleSnapshot },
+    });
+    vi.mocked(gitService.getChangedFiles).mockRejectedValueOnce(new Error('env offline'));
+
+    const res = await fetch(`${serverUrl}/tasks/d10/diff/files`, { headers: authHeaders });
+    // Live failed, no fallback allowed in_progress → 500 (the
+    // resolveTaskDiffContext-failure 400 isn't hit because env1 is
+    // reachable; only the git call itself fails).
+    expect(res.status).toBe(500);
+  });
+
+  it('/diff/files — live path returns source: "live"', async () => {
+    await insertTask(db, {
+      id: 'd11',
+      status: 'in_progress',
+      branch: 'fastowl/d11-slug',
+      assignedEnvironmentId: 'env1',
+    });
+    const res = await fetch(`${serverUrl}/tasks/d11/diff/files`, { headers: authHeaders });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data.source).toBe('live');
+  });
 });
