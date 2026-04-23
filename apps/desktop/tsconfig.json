@@ -2,13 +2,17 @@
   "compilerOptions": {
     "incremental": true,
     "target": "ES2022",
-    "module": "Node16",
+    "module": "ESNext",
     "lib": ["DOM", "ES2022"],
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,
     "sourceMap": true,
-    "moduleResolution": "Node16",
+    // "Bundler" resolution lets us import ESM-only packages (e.g.
+    // @pierre/diffs) from source files that webpack still outputs as
+    // CJS. The tsconfig is only for typechecking — webpack owns the
+    // real module transform at build time.
+    "moduleResolution": "Bundler",
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "resolveJsonModule": true,

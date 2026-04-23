@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CircleDot,
   FileDiff,
@@ -7,10 +7,7 @@ import {
   FileText,
   Loader2,
 } from 'lucide-react';
-import * as Diff2Html from 'diff2html';
-import { ColorSchemeType } from 'diff2html/lib/types';
-import 'diff2html/bundles/css/diff2html.min.css';
-import DOMPurify from 'dompurify';
+import { PatchDiff } from '@pierre/diffs/react';
 import { cn } from '../../lib/utils';
 import { api, wsClient } from '../../lib/api';
 import { type ChangedFile } from '../../hooks/useTaskFiles';
@@ -266,25 +263,6 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     };
   }, [taskId, path, refreshKey]);
 
-  const html = useMemo(() => {
-    if (!diff || diff.trim().length === 0) return '';
-    // diff2html parses unified-diff text and renders a GitHub-style
-    // side-by-side or line-by-line HTML view. We render line-by-line
-    // inline so it flows with the panel; the "github" colorScheme
-    // follows the app theme via CSS variables we override below.
-    const raw = Diff2Html.html(diff, {
-      outputFormat: 'line-by-line',
-      drawFileList: false,
-      matching: 'lines',
-      colorScheme: ColorSchemeType.AUTO,
-      renderNothingWhenEmpty: true,
-    });
-    // Diff bodies come from the user's own repos, but a malicious
-    // upstream could smuggle HTML that diff2html's escape misses.
-    // Sanitize before dangerouslySetInnerHTML — belt-and-braces.
-    return DOMPurify.sanitize(raw);
-  }, [diff]);
-
   if (loading && !diff) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground p-6 justify-center">
@@ -298,7 +276,7 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     return <p className="p-6 text-sm text-muted-foreground">Error: {error}</p>;
   }
 
-  if (!diff || diff.trim().length === 0 || !html) {
+  if (!diff || diff.trim().length === 0) {
     return (
       <p className="p-6 text-sm text-muted-foreground">
         No diff available for this file.
@@ -306,14 +284,14 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
     );
   }
 
-  // HTML is DOMPurify-sanitized diff2html output. overflow-x-auto +
-  // max-w-full keep long lines scrolling inside the panel instead of
-  // spilling past the task detail's right edge.
+  // Renders the unified-diff text via @pierre/diffs' PatchDiff, which
+  // runs the hunks through Shiki for language-aware syntax highlighting
+  // and auto-adapts to our light/dark theme. overflow-x-auto keeps
+  // long lines scrolling within the panel.
   return (
-    <div
-      className="diff2html-wrapper overflow-x-auto max-w-full"
-      dangerouslySetInnerHTML={{ __html: html }}
-    />
+    <div className="overflow-x-auto max-w-full">
+      <PatchDiff patch={diff} />
+    </div>
   );
 }
 
