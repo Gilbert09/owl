@@ -82,11 +82,3 @@
   outline: none;
 }
 
-/* Drag region for electron window title bar */
-.titlebar-drag-region {
-  -webkit-app-region: drag;
-}
-
-.titlebar-no-drag {
-  -webkit-app-region: no-drag;
-}
