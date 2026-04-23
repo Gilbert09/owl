@@ -747,6 +747,21 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 Unqueue
               </Button>
             )}
+            {task.status === 'completed' && (() => {
+              const pr = (task.metadata as { pullRequest?: { number: number; url: string } } | undefined)
+                ?.pullRequest;
+              if (!pr) return null;
+              return (
+                <Button
+                  size="sm"
+                  onClick={() => window.open(pr.url, '_blank', 'noopener,noreferrer')}
+                  title={pr.url}
+                >
+                  <GitPullRequest className="w-4 h-4 mr-1" />
+                  View PR #{pr.number}
+                </Button>
+              );
+            })()}
             {task.status === 'failed' && (
               <>
                 <Button size="sm" onClick={handleRetryTask} disabled={isLoading}>
