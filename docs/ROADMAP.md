@@ -38,14 +38,14 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 
 --- later ---
 
-13. **Phase 13.2 — Structured renderer + native UI overlays** (IN PROGRESS)
+13. ~~**Phase 13.2 — Structured renderer + native UI overlays**~~ DONE
     - Slice 1 DONE (Session 18): backend plumbing via `claude -p --output-format stream-json`. `environments.renderer: 'pty' | 'structured'`, `tasks.transcript` jsonb, new `agentStructured` service, interim desktop renderer.
     - Slice 2 DONE (Session 18): `AgentConversation.tsx` (markdown-ish, collapsible tool_use/tool_result/thinking, cost/token footer) + per-tool Approve/Deny UX via a `PreToolUse` hook (`permissionHook.ts` / `permissionService.ts`). "Allow always" persists onto `environments.tool_allowlist`.
     - Slice 3 DONE (Session 18): interactive multi-turn via `--input-format stream-json`; long-lived child per task; `sendMessage` appends user JSONL turns on stdin; `closeInput` for graceful end. Also: removed permission timeout (infinite wait), coalesced inbox items for pending prompts (one per task), boot-time orphan cleanup extended to mark tasks `failed` immediately. Slash-command palette deferred — passes through to the child's own parser.
     - Slice 4 DONE (Session 18): daemon + SSH envs migrated to structured (`stream_spawn` wire op + ssh2 exec channel). PTY code path deleted — no more `node-pty`, `XTerm`, `STATUS_PATTERNS`, `buildFastOwlEnvPrefix`, `spawnInteractive`. `tasks.terminal_output` kept read-only for historical rows; `environments.renderer` defaults to and is back-filled to `'structured'`.
-    - Follow-up: deeper backend-restart reliability — keeping in-flight children alive across backend redeploys (currently orphaned children die via SIGPIPE, tasks flip to `failed` on boot). Candidates: co-local daemon, PID reattach, or accept + buy time via graceful SIGTERM-and-wait on shutdown.
+    - Backend-restart reliability follow-up DONE (Session 19 Slice 6): daemon owns child pipes, backend restart no longer orphans tasks; per-run state + permission tokens rehydrate on reconnect.
 14. **Phase 16.3 — Automated PR Response** — hook PR monitor → auto-create `pr_response` tasks on new review comments
-15. **Phase 12.5 — Testing framework** — see `docs/TESTING.md`. 66 backend + 7 MCP + 3 CLI + 1 desktop tests now landed
+15. **Phase 12.5 — Testing framework** (IN PROGRESS) — see `docs/TESTING.md`. Phase B + C largely landed (agent, agentStructured, prMonitor, ai, taskQueue, environment, github, backlog, routes/tasks/inbox/daemon/permission/repositories, middleware/auth, daemon package tests for config/executor/git/version/proxyServer/wsClient/selfUpdate). Frontend hook + component tests (Phase D) and Playwright E2E (Phase E) still to do.
 16. **Phase 18 (rest) — Deployment hardening** — after 18.1/18.3/18.4 land
 
 ## Backlog
@@ -53,17 +53,22 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
 - [ ] **Analytics panel — token / cost usage** — structured-renderer tasks emit a `result` event with `total_cost_usd` + `usage.{input_tokens, output_tokens}` per turn. Surface an Analytics tab that aggregates: per-workspace total spend, per-task spend + token breakdown, per-model usage mix (Opus vs Sonnet vs Haiku), a daily/weekly trend chart. Store a row per `result` event (or aggregate inline). Inspiration: how PostHog / Linear surface "insights" around usage.
 - [ ] **Per-tool allowlist patterns (`Bash(git *)`-style)** — today `environments.tool_allowlist` stores tool names as strings, so "Allow always (Bash)" approves every future `Bash` call — broad. The CLI's own `--allowedTools` supports patterns like `Bash(git *)` meaning "only bash commands starting with `git`". Match that: change `permissionService.isPreApproved` to check both exact tool name AND command-pattern match, and update the "Allow always" button to offer a pattern (e.g. extract `git` from `git status` and suggest `Bash(git *)`).
 - [ ] **Duplicate "Stop" button on running tasks** — two Stop buttons show up on a task while it's in_progress. Figure out where the second one lives (likely TaskTerminal + TaskDetail both render one) and de-dupe.
-- [ ] **Task detail screen is sluggish** — noticeable lag when switching to / interacting with a running task. Likely the terminal output re-render; candidate causes: unbatched WS `task:output` events, xterm writes on every keystroke, full task re-fetch on every status tick. Profile + fix.
+- [ ] **Task detail screen is sluggish** — noticeable lag when switching to / interacting with a running task. With the PTY path gone the likely culprit is now unbatched `task:event` WS updates re-rendering the full `AgentConversation` tree on every token. Profile + memoise blocks / batch transcript updates.
 - [ ] **Inbox 3-dots menu does nothing** — clicking the three-dots icon on an item in the Inbox panel doesn't open a menu. Find which component renders it and wire up the dropdown actions (mark read, snooze, dismiss, etc.).
-- [ ] **Terminal output blanks on task switch** — sometimes clicking off a running task and back shows an empty terminal / "waiting for output" instead of the persisted output. `tasks.terminal_output` column is populated; probably the XTerm component isn't rehydrating from `task.terminalOutput` on remount, only subscribing to live WS events.
-- [ ] **XTerm input disabled in strict-autonomous mode** — when a task runs with `--permission-mode acceptEdits` (non-daemon env), Claude can pause on bash / MCP trust prompts. The always-visible input below the terminal works for typing "1"+Enter, but the XTerm itself has `inputEnabled={agentStatus === 'awaiting_input'}`, so arrow-key TUI flows don't work. Consider enabling XTerm input any time the task has a live PTY session, or widening the awaiting-input detection.
 - [ ] **Show logged-in user in the app chrome** — bottom-left of the sidebar should display GitHub username + avatar so users know which account they're using (especially on laptops with multiple GitHub accounts).
 - [ ] **Auto-connect GitHub integration from the Supabase login session** — today users sign in with GitHub OAuth (Supabase), then *separately* click "Connect GitHub" in Settings → Integrations to run a second OAuth flow. Supabase's sign-in session already returns `provider_token` with `repo` scope — we should pull it off `session.provider_token` on first login and store it as the workspace's GitHub integration token, skipping the second flow.
-- [x] **Workspace endpoint returns empty `repos` + `integrations`** — Fixed 2026-04-19. `rowToWorkspace` in `routes/workspaces.ts` was returning hardcoded empty arrays/maps (two `// TODO: Load from ... table` markers). Now batches the joins so `GET /workspaces` is O(1) queries and the sidebar's "N repos" count actually updates when you watch/unwatch a repo.
-- [ ] **Coder environments not implemented** — `services/environment.ts` throws `'Coder environments not yet implemented'` on `connect`. Not on the critical path; `daemon` envs + `local` cover the use cases today. Tracked here so it's not rediscovered as a surprise.
 - [ ] **`node --ignore-scripts` and other eslint-disables are load-bearing** — a few `eslint-disable-next-line` / `@ts-ignore` sites exist (`middleware/auth.ts` namespace augmentation, `apps/desktop/src/main/main.ts` console usage, Electron ERB build scripts). All intentional and low-risk; noted for a future "lint-cleanup" pass if it's ever worth the churn.
+- [x] **Workspace endpoint returns empty `repos` + `integrations`** — Fixed 2026-04-19.
 - [x] **Change default ports** — Changed from 3001 to 4747 to avoid conflicts with common dev servers
 - [x] **Fix ESLint configuration** — Removed broken 'erb' extends, simplified config, fixed all lint errors
+- [x] **Diff renderer — swap diff2html for Shiki-based `@pierre/diffs`** — `TaskFilesPanel` now renders via `<PatchDiff>` from `@pierre/diffs/react` with syntax-highlighted hunks. Dropped diff2html + DOMPurify. (2026-04-23)
+- [x] **Per-task "+NN -MM" badge in the queue** — each task row shows aggregate added/removed line counts, live-updating off `task:files_changed`. Gated on `task.branch` so pending tasks don't fetch. (2026-04-23)
+- [x] **Pre-commit hook** — husky + lint-staged run the same ESLint CI runs, only on staged files. (2026-04-23)
+
+**Obsoleted by Session 18/19 (kept here for history):**
+- ~~XTerm input disabled in strict-autonomous mode~~ — XTerm was deleted in Session 18 Slice 4c; structured renderer has no such gate.
+- ~~Coder environments not implemented~~ — env types collapsed to `local | remote` in Session 19; Coder/SSH are gone.
+- ~~Terminal output blanks on task switch~~ — tied to the removed XTerm rehydrate path; `AgentConversation` renders from persisted `tasks.transcript` on mount. If the symptom reappears with the structured renderer, file a fresh item.
 
 ## Known Gaps (tracked but not yet phased)
 
@@ -413,13 +418,14 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [ ] Database optimization
   - [ ] Memory management
 
-- [ ] **12.5 Testing** (IN PROGRESS — Phase A + B landed)
+- [ ] **12.5 Testing** (IN PROGRESS — Phase A + B + most of C landed)
   - See [`docs/TESTING.md`](./TESTING.md) for the full plan (stack, layers, CI wiring, rollout)
   - [x] Phase A: Vitest on backend; desktop Jest setup fixed for headless CI
-  - [x] Phase B: Backend service tests — migrations (6), status detection (10), gitService (8), taskQueue (8). Fake-environment harness at `src/__tests__/helpers/fakeEnvironment.ts`
-  - [ ] Phase B cont'd: agentService integration tests, prMonitor tests, ai service tests
-  - [ ] Phase C: Backend route tests via supertest
-  - [ ] Phase D: Frontend hook + component tests
+  - [x] Phase B: Backend service tests — migrations, status detection, gitService (+ commit/push/stash/reset extensions), taskQueue (+ slot-guard), environment. Fake-environment harness at `src/__tests__/helpers/fakeEnvironment.ts`.
+  - [x] Phase B cont'd: agentService lifecycle + init + cleanupStaleAgents, agentStructured (start/stop/sendMessage/resumeRun/truncation), prMonitor, ai, websocket, taskFileWatcher, daemonProxyHandler, daemonAutoUpdate, taskPullRequest, gitContext, claudeCli, commitMessagePrefetch, github, middleware/auth.
+  - [x] Phase C (mostly done): routes/tasks lifecycle + live-diff, routes/inbox, routes/backlog, routes/daemon, routes/permission, routes/github, routes/repositories, routes/environments. A few small routes still uncovered.
+  - [x] Daemon package tests: config, executor, git, version, proxyServer, wsClient, selfUpdate (98 tests across 7 files).
+  - [ ] Phase D: Frontend hook + component tests (e.g. `useTaskFiles`, `AgentConversation`, `QueuePanel` row rendering)
   - [ ] Phase E: Playwright E2E for 5 golden flows
 
 - [ ] **12.6 Documentation**
@@ -623,16 +629,15 @@ Full phased TODO list. Active priorities live in [`CLAUDE.md`](../CLAUDE.md). Th
   - [x] Daemon auth: one-shot pairing token → long-lived device token (SHA-256 hash stored). Session 15.
   - [x] **Option-1 HTTP relay for CLI/MCP inside tasks**: daemon runs a localhost HTTP proxy; child processes' REST calls tunnel over the daemon's authenticated WS. Backend accepts internal-auth headers (randomBytes(48) secret, timingSafeEqual) alongside JWT. No user JWT ever lives on the VM. Session 16.
   - [x] **Scheduler/backlog recognise daemon envs**: `daemonRegistry` updates `environments.status` on connect/disconnect; backlog + continuousBuildScheduler treat connected daemon envs as eligible fallbacks. Session 16.
-  - [ ] **Bundled daemon**: child process of the Electron app for the user's own machine (replaces `type: 'local'`).
+  - [x] **Bundled daemon**: installed as a launchd/systemd user service by the Electron app on first launch (Session 19 Slices 2+3). Runs outside Electron's lifetime, so quitting the app doesn't kill in-flight tasks.
   - [~] **Deployable daemon**: `fastowl-daemon` distributable to VMs (Session 17)
-    - [ ] Single-file binary (pkg, bun --compile, or Docker image) — still using git-clone + build for MVP
+    - [x] Single-file binary — cross-compiled via `bun build --compile` for darwin-arm64/x64, linux-x64/arm64, win-x64 (Session 19 Slice 1); shipped inside the Electron `.app` via `extraResources`.
     - [x] Systemd unit / launchd plist for auto-start — generated by `scripts/install-daemon.sh`
     - [x] Self-register with hosted server on first run using a one-time pairing token from the desktop app — pairing flow works end-to-end from the new "Add Environment" UI
-  - [x] **Remote install flow**: given SSH creds for a VM, FastOwl installs the daemon automatically (Session 17)
-    - [x] Desktop UI: "Add Environment" → type `Remote VM (FastOwl daemon)` with two modes: auto-install over SSH, or show manual one-liner
-    - [x] Backend provisioning: `POST /api/v1/environments/:id/install-daemon` SSHes in (ssh2), pipes `GET /daemon/install.sh` | bash, the script detects arch/OS, clones the repo, builds `@fastowl/daemon`, pairs, writes systemd/launchd unit
+  - [~] **Remote install flow**: originally shipped as SSH auto-install (Session 17); replaced in Session 19 Slice 5 with a "paste this one-liner on the VM" pairing flow when env types collapsed to `local | remote` and ssh2 was dropped.
+    - [x] Desktop UI: simplified pairing modal — name the env, mint pairing token, show install one-liner, poll until daemon dials in
     - [x] Health check: desktop polls env status after install, flips to "connected" when the daemon dials back via `daemonRegistry.register`
-    - [ ] Uninstall flow: symmetric — remove env in UI optionally tears down daemon on VM (deferred)
+    - [x] Uninstall flow: symmetric — app menu → "Uninstall FastOwl daemon and quit…" for the local daemon; bundled `scripts/fastowl-uninstall.sh` for the `.app` (Session 19 Slice 7).
 
 - [x] **18.4 Deployment** (Session 14)
   - [x] Multi-stage Dockerfile at repo root — Node 22 slim, copies pre-built node_modules from builder to avoid re-running install-scripts (keeps node-pty/ssh2 native bindings without runtime build tools)
