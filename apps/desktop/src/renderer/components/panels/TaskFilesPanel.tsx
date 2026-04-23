@@ -290,7 +290,7 @@ function FileDiffView({ taskId, path, refreshKey }: FileDiffViewProps) {
   // long lines scrolling within the panel.
   return (
     <div className="overflow-x-auto max-w-full">
-      <PatchDiff patch={diff} />
+      <PatchDiff patch={diff} options={{ diffStyle: 'unified' }} />
     </div>
   );
 }
