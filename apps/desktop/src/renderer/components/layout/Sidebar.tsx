@@ -13,10 +13,12 @@ import {
   Archive,
   CircleDot,
 } from 'lucide-react';
+import type { User } from '@supabase/supabase-js';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { useWorkspaceStore } from '../../stores/workspace';
+import { useAuth } from '../auth/AuthProvider';
 import { AddEnvironmentModal } from '../modals/AddEnvironmentModal';
 
 interface SidebarProps {
@@ -39,6 +41,7 @@ export function Sidebar({ className }: SidebarProps) {
   } = useWorkspaceStore();
 
   const [showAddEnvModal, setShowAddEnvModal] = useState(false);
+  const { user } = useAuth();
 
   const currentWorkspace = workspaces.find((w) => w.id === currentWorkspaceId);
 
@@ -223,30 +226,99 @@ export function Sidebar({ className }: SidebarProps) {
       <AddEnvironmentModal open={showAddEnvModal} onOpenChange={setShowAddEnvModal} />
 
       {/* Footer */}
-      <div className="p-2 border-t flex items-center justify-between">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={toggleSidebar}
-        >
-          {sidebarCollapsed ? (
-            <ChevronRight className="w-4 h-4" />
-          ) : (
-            <ChevronLeft className="w-4 h-4" />
-          )}
-        </Button>
-        {!sidebarCollapsed && (
+      <div className="border-t">
+        {user && (
+          <UserChip
+            user={user}
+            collapsed={sidebarCollapsed}
+            onClick={() => setActivePanel('settings')}
+          />
+        )}
+        <div className="p-2 flex items-center justify-between">
           <Button
-            variant={activePanel === 'settings' ? 'secondary' : 'ghost'}
+            variant="ghost"
             size="icon"
             className="h-8 w-8"
-            onClick={() => setActivePanel('settings')}
+            onClick={toggleSidebar}
           >
-            <Settings className="w-4 h-4" />
+            {sidebarCollapsed ? (
+              <ChevronRight className="w-4 h-4" />
+            ) : (
+              <ChevronLeft className="w-4 h-4" />
+            )}
           </Button>
-        )}
+          {!sidebarCollapsed && (
+            <Button
+              variant={activePanel === 'settings' ? 'secondary' : 'ghost'}
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setActivePanel('settings')}
+            >
+              <Settings className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+interface UserChipProps {
+  user: User;
+  collapsed: boolean;
+  onClick: () => void;
+}
+
+/**
+ * Bottom-of-sidebar identity chip. Shows the GitHub avatar + username
+ * so users on machines with multiple GitHub accounts can see which
+ * one is signed in at a glance. Clicking opens the Settings → Account
+ * panel, which is where the Sign-out action lives.
+ */
+function UserChip({ user, collapsed, onClick }: UserChipProps) {
+  const meta = (user.user_metadata ?? {}) as Record<string, unknown>;
+  // GitHub's Supabase provider fills `user_name`; fall back to
+  // `preferred_username` and finally the email local-part so something
+  // meaningful always renders.
+  const username =
+    (typeof meta.user_name === 'string' && meta.user_name) ||
+    (typeof meta.preferred_username === 'string' && meta.preferred_username) ||
+    (user.email?.split('@')[0] ?? 'user');
+  const avatarUrl =
+    typeof meta.avatar_url === 'string' ? meta.avatar_url : undefined;
+  const initials = username.slice(0, 1).toUpperCase();
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Signed in as @${username} — click for account settings`}
+      className={cn(
+        'w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors',
+        collapsed && 'justify-center px-2',
+      )}
+    >
+      <span className="relative flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-medium">
+        {avatarUrl ? (
+          <img
+            src={avatarUrl}
+            alt=""
+            className="h-full w-full object-cover"
+            // GitHub avatar hosts can fail transiently; fall back to the
+            // initials bubble rather than a broken-image icon.
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = 'none';
+            }}
+          />
+        ) : (
+          initials
+        )}
+      </span>
+      {!collapsed && (
+        <span className="flex-1 min-w-0 truncate text-left">
+          @{username}
+        </span>
+      )}
+    </button>
   );
 }
