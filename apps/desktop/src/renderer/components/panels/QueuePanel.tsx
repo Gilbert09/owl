@@ -396,7 +396,16 @@ interface TaskDetailProps {
 function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
   const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask, deleteTask } = useTaskActions();
-  const [isLoading, setIsLoading] = useState(false);
+  // Track which specific action is in flight, not a shared boolean —
+  // otherwise clicking Create PR puts the Reject button into a
+  // spinner too (and vice versa). We still disable every action
+  // while ANY one is in flight so the user can't double-click around
+  // a slow request.
+  const [activeAction, setActiveAction] = useState<
+    'start' | 'queue' | 'pause' | 'cancel' | 'retry' | 'createPr' | 'reject' | 'delete' | null
+  >(null);
+  const actionInFlight = activeAction !== null;
+  const isLoadingFor = (action: typeof activeAction): boolean => activeAction === action;
   const [actionError, setActionError] = useState<string | null>(null);
   const task = tasks.find((t) => t.id === taskId);
   const repo = task?.repositoryId ? repositories.find(r => r.id === task.repositoryId) : null;
@@ -434,47 +443,47 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   } = useTaskGitLog(taskId);
 
   const handleStartTask = async () => {
-    setIsLoading(true);
+    setActiveAction('start');
     try {
       await startTask(taskId);
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleQueueTask = async () => {
-    setIsLoading(true);
+    setActiveAction('queue');
     try {
       await updateTaskStatus(taskId, 'queued');
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handlePauseTask = async () => {
-    setIsLoading(true);
+    setActiveAction('pause');
     try {
       await updateTaskStatus(taskId, 'pending');
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleCancelTask = async () => {
-    setIsLoading(true);
+    setActiveAction('cancel');
     try {
       await cancelTask(taskId);
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleRetryTask = async () => {
-    setIsLoading(true);
+    setActiveAction('retry');
     try {
       await retryTask(taskId);
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
@@ -497,29 +506,29 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   };
 
   const handleCreatePr = async () => {
-    setIsLoading(true);
+    setActiveAction('createPr');
     setActionError(null);
     try {
       await approveTask(taskId);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Create PR failed');
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleRejectTask = async () => {
-    setIsLoading(true);
+    setActiveAction('reject');
     try {
       await rejectTask(taskId);
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
   const handleDeleteTask = async () => {
     if (!window.confirm('Delete this failed task? This cannot be undone.')) return;
-    setIsLoading(true);
+    setActiveAction('delete');
     setActionError(null);
     try {
       await deleteTask(taskId);
@@ -528,7 +537,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       // the previous UX because the finally block hid rejections.
       setActionError(err instanceof Error ? err.message : 'Delete failed');
     } finally {
-      setIsLoading(false);
+      setActiveAction(null);
     }
   };
 
@@ -710,25 +719,29 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 <Button
                   size="sm"
                   onClick={handleCreatePr}
-                  disabled={isLoading}
+                  disabled={actionInFlight}
                   title="Push the task branch to origin and open a pull request."
                 >
-                  {isLoading ? (
+                  {isLoadingFor('createPr') ? (
                     <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                   ) : (
                     <GitPullRequest className="w-4 h-4 mr-1" />
                   )}
                   Create PR
                 </Button>
-                <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={isLoading}>
-                  <RotateCw className="w-4 h-4 mr-1" />
+                <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={actionInFlight}>
+                  {isLoadingFor('reject') ? (
+                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                  ) : (
+                    <RotateCw className="w-4 h-4 mr-1" />
+                  )}
                   Reject & Requeue
                 </Button>
               </>
             )}
             {canStart && (
-              <Button size="sm" onClick={handleStartTask} disabled={isLoading}>
-                {isLoading ? (
+              <Button size="sm" onClick={handleStartTask} disabled={actionInFlight}>
+                {isLoadingFor('start') ? (
                   <Loader2 className="w-4 h-4 mr-1 animate-spin" />
                 ) : (
                   <Play className="w-4 h-4 mr-1" />
@@ -737,14 +750,14 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               </Button>
             )}
             {task.status === 'pending' && (
-              <Button size="sm" variant="outline" onClick={handleQueueTask} disabled={isLoading}>
-                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <ListTodo className="w-4 h-4 mr-1" />}
+              <Button size="sm" variant="outline" onClick={handleQueueTask} disabled={actionInFlight}>
+                {isLoadingFor('queue') ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <ListTodo className="w-4 h-4 mr-1" />}
                 Queue
               </Button>
             )}
             {task.status === 'queued' && (
-              <Button size="sm" variant="outline" onClick={handlePauseTask} disabled={isLoading}>
-                {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Pause className="w-4 h-4 mr-1" />}
+              <Button size="sm" variant="outline" onClick={handlePauseTask} disabled={actionInFlight}>
+                {isLoadingFor('pause') ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Pause className="w-4 h-4 mr-1" />}
                 Unqueue
               </Button>
             )}
@@ -765,12 +778,16 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             })()}
             {task.status === 'failed' && (
               <>
-                <Button size="sm" onClick={handleRetryTask} disabled={isLoading}>
-                  {isLoading ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1" />}
+                <Button size="sm" onClick={handleRetryTask} disabled={actionInFlight}>
+                  {isLoadingFor('retry') ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <RotateCw className="w-4 h-4 mr-1" />}
                   Retry
                 </Button>
-                <Button size="sm" variant="destructive" onClick={handleDeleteTask} disabled={isLoading}>
-                  <Trash2 className="w-4 h-4 mr-1" />
+                <Button size="sm" variant="destructive" onClick={handleDeleteTask} disabled={actionInFlight}>
+                  {isLoadingFor('delete') ? (
+                    <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+                  ) : (
+                    <Trash2 className="w-4 h-4 mr-1" />
+                  )}
                   Delete
                 </Button>
                 {actionError && (
@@ -781,7 +798,8 @@ function TaskDetail({ taskId }: TaskDetailProps) {
               </>
             )}
             {['pending', 'queued'].includes(task.status) && (
-              <Button size="sm" variant="destructive" onClick={handleCancelTask} disabled={isLoading}>
+              <Button size="sm" variant="destructive" onClick={handleCancelTask} disabled={actionInFlight}>
+                {isLoadingFor('cancel') && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
                 Cancel
               </Button>
             )}
@@ -893,9 +911,13 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 variant="outline"
                 className="shrink-0"
                 onClick={handleRetryTask}
-                disabled={isLoading}
+                disabled={actionInFlight}
               >
-                <RotateCw className="w-3 h-3 mr-1" />
+                {isLoadingFor('retry') ? (
+                  <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                ) : (
+                  <RotateCw className="w-3 h-3 mr-1" />
+                )}
                 Retry
               </Button>
             )}
