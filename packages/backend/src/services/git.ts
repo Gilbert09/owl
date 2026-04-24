@@ -267,11 +267,18 @@ class GitService {
    * still-uncommitted working-tree changes AND not-yet-added untracked
    * files. One entry per path — the shape that drives the desktop
    * Files tab.
+   *
+   * When `branch` is provided, switches to a commit-range comparison
+   * (`<base>..<branch>`) — committed changes only, untracked files
+   * excluded. Use this for the completed-task snapshot so the output
+   * doesn't depend on what's currently checked out or what's dirty in
+   * the working tree.
    */
   async getChangedFiles(
     environmentId: string,
     base: string,
-    workingDirectory: string
+    workingDirectory: string,
+    branch?: string
   ): Promise<
     Array<{
       path: string;
@@ -289,10 +296,16 @@ class GitService {
       return res.code === 0 ? res.stdout : '';
     };
 
+    const range = branch ? `${base}...${branch}` : base;
     const [nameStatusOut, numStatOut, untrackedOut] = await Promise.all([
-      safeRun(['diff', '-M', '--name-status', base]),
-      safeRun(['diff', '-M', '--numstat', base]),
-      safeRun(['ls-files', '--others', '--exclude-standard']),
+      safeRun(['diff', '-M', '--name-status', range]),
+      safeRun(['diff', '-M', '--numstat', range]),
+      // Untracked files only make sense in the working-tree mode —
+      // in commit-range mode an "untracked" file either was committed
+      // on the branch (shows up via diff) or doesn't belong to the task.
+      branch
+        ? Promise.resolve('')
+        : safeRun(['ls-files', '--others', '--exclude-standard']),
     ]);
 
     type Stat = { added: number; removed: number; binary: boolean };
@@ -347,25 +360,33 @@ class GitService {
    * Unified diff for a single file, working tree vs `base`. Includes
    * uncommitted changes. For untracked files, shows the file as a
    * "new file" diff so the Files tab can render it.
+   *
+   * When `branch` is provided, switches to a commit-range comparison
+   * (`<base>..<branch> -- <path>`) so the output doesn't depend on
+   * what's currently checked out. Untracked-file handling is dropped
+   * in that mode — see `getChangedFiles` for the rationale.
    */
   async getFileDiff(
     environmentId: string,
     base: string,
     path: string,
-    workingDirectory: string
+    workingDirectory: string,
+    branch?: string
   ): Promise<string> {
     // Cheap defensive check — path comes from the query string.
     if (path.includes('\0') || path.startsWith('-')) {
       throw new Error(`Refusing suspicious path: ${path}`);
     }
+    const range = branch ? `${base}...${branch}` : base;
     const tracked = await this.runGit(
       environmentId,
-      ['diff', base, '--', path],
+      ['diff', range, '--', path],
       workingDirectory
     );
     if (tracked.code === 0 && tracked.stdout.trim().length > 0) {
       return tracked.stdout;
     }
+    if (branch) return tracked.stdout;
 
     // `--no-index` returns exit code 1 when files differ (which is
     // always, for a non-empty new file). Accept non-zero here.

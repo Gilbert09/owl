@@ -131,7 +131,7 @@ export async function autoCommitAndSnapshot(taskId: string): Promise<AutoCommitR
         return { committed: false, reason: 'no-changes' } as const;
       }
 
-      await writeFinalFilesSnapshot(taskId, envId, baseBranch, workingDirectory, row, tag);
+      await writeFinalFilesSnapshot(taskId, envId, baseBranch, workingDirectory, row, tag, branch);
 
       console.log(`${tag}: committed ${sha.slice(0, 10)} · ${message.split('\n')[0]}`);
       return { committed: true, sha, message } as const;
@@ -199,16 +199,21 @@ export async function writeFinalFilesSnapshot(
   baseBranch: string,
   workingDirectory: string,
   taskRow: { metadata: unknown; workspaceId: string },
-  tag: string
+  tag: string,
+  // When set, query against the commit range `base..branch` rather
+  // than the working tree. Use this at the approve step, after the
+  // commit has landed on the task branch — a working-tree query can
+  // return empty if an earlier helper happened to check out base.
+  branch?: string
 ): Promise<void> {
   try {
-    const files = await gitService.getChangedFiles(envId, baseBranch, workingDirectory);
+    const files = await gitService.getChangedFiles(envId, baseBranch, workingDirectory, branch);
     const snapshot = await Promise.all(
       files.map(async (f) => {
         if (f.binary) return { ...f, diff: '' };
         let diff = '';
         try {
-          diff = await gitService.getFileDiff(envId, baseBranch, f.path, workingDirectory);
+          diff = await gitService.getFileDiff(envId, baseBranch, f.path, workingDirectory, branch);
         } catch (err) {
           console.warn(`${tag}: snapshot diff failed for ${f.path}:`, err);
         }

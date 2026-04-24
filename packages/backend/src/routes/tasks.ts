@@ -851,13 +851,21 @@ export function taskRoutes(): Router {
           .where(eq(tasksTable.id, task.id))
           .limit(1);
         if (refreshedRows[0]) {
+          // Pass the task branch explicitly — the snapshot should
+          // reflect `<base>..<branch>` (committed range), not the
+          // working tree. This is the one called before branch
+          // cleanup; if we relied on the working tree and anything
+          // earlier had checked out base, the saved snapshot would
+          // be empty and the completed task's Files tab would go
+          // blank (the "PR made, no files visible" regression).
           await writeFinalFilesSnapshot(
             task.id,
             envId,
             baseBranch,
             workingDirectory,
             { metadata: refreshedRows[0].metadata, workspaceId: refreshedRows[0].workspaceId },
-            tag
+            tag,
+            task.branch
           );
         }
 

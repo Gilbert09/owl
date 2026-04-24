@@ -153,6 +153,74 @@ describe('gitService', () => {
     });
   });
 
+  describe('getChangedFiles', () => {
+    it('uses working-tree comparison (git diff <base>) when no branch is passed', async () => {
+      fake = installFakeEnvironment({
+        outputs: {
+          'git diff -M --name-status main': 'M\tsrc/a.ts\n',
+          'git diff -M --numstat main': '3\t1\tsrc/a.ts\n',
+          'git ls-files --others --exclude-standard': 'scratch.txt\n',
+        },
+      });
+
+      const files = await gitService.getChangedFiles('env1', 'main', '/repo');
+
+      expect(files).toHaveLength(2);
+      expect(files.map((f) => f.path)).toEqual(['scratch.txt', 'src/a.ts']);
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain('git diff -M --name-status main');
+      expect(commands).toContain('git ls-files --others --exclude-standard');
+    });
+
+    it('uses commit-range comparison when a branch is passed, skipping untracked scan', async () => {
+      fake = installFakeEnvironment({
+        outputs: {
+          'git diff -M --name-status main...feature': 'A\tsrc/b.ts\n',
+          'git diff -M --numstat main...feature': '10\t0\tsrc/b.ts\n',
+        },
+      });
+
+      const files = await gitService.getChangedFiles('env1', 'main', '/repo', 'feature');
+
+      expect(files).toEqual([
+        { path: 'src/b.ts', status: 'added', added: 10, removed: 0, binary: false },
+      ]);
+      const commands = fake.commands.map((c) => c.command);
+      expect(commands).toContain('git diff -M --name-status main...feature');
+      // Untracked scan is intentionally skipped in commit-range mode —
+      // untracked files aren't part of the committed task range.
+      expect(commands.some((c) => c.startsWith('git ls-files'))).toBe(false);
+    });
+  });
+
+  describe('getFileDiff', () => {
+    it('uses working-tree comparison when no branch is passed', async () => {
+      fake = installFakeEnvironment({
+        outputs: { 'git diff main -- src/a.ts': '@@ -1 +1 @@\n-old\n+new\n' },
+      });
+      const diff = await gitService.getFileDiff('env1', 'main', 'src/a.ts', '/repo');
+      expect(diff).toContain('+new');
+      expect(fake.commands.some((c) => c.command === 'git diff main -- src/a.ts')).toBe(true);
+    });
+
+    it('uses commit-range comparison when a branch is passed', async () => {
+      fake = installFakeEnvironment({
+        outputs: { 'git diff main...feature -- src/b.ts': '+committed\n' },
+      });
+      const diff = await gitService.getFileDiff(
+        'env1',
+        'main',
+        'src/b.ts',
+        '/repo',
+        'feature'
+      );
+      expect(diff).toBe('+committed\n');
+      expect(
+        fake.commands.some((c) => c.command === 'git diff main...feature -- src/b.ts')
+      ).toBe(true);
+    });
+  });
+
   describe('getCurrentBranch', () => {
     it('returns the trimmed branch name', async () => {
       fake = installFakeEnvironment({
