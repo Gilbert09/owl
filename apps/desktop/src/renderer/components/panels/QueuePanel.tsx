@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ListTodo,
   Plus,
@@ -17,8 +17,10 @@ import {
   Hand,
   Trash2,
   GitCommit,
+  ChevronDown,
   ExternalLink,
   GitPullRequest,
+  XCircle,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
@@ -97,6 +99,97 @@ function formatRelativeTime(iso: string): string {
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   }
   return d.toLocaleDateString();
+}
+
+/**
+ * Split button used on the awaiting-review action bar. The primary
+ * action ("Reject & Requeue") is the muscle-memory path — requeue the
+ * task so the agent can have another go. The chevron exposes the
+ * alternative: abandon the work entirely (task → completed, no PR).
+ */
+function RejectSplitButton({
+  onReject,
+  disabled,
+  loading,
+}: {
+  onReject: (mode: 'requeue' | 'abandon') => void;
+  disabled: boolean;
+  loading: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="relative inline-flex">
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => onReject('requeue')}
+        disabled={disabled}
+        className="rounded-r-none border-r-0"
+      >
+        {loading ? (
+          <Loader2 className="w-4 h-4 mr-1 animate-spin" />
+        ) : (
+          <RotateCw className="w-4 h-4 mr-1" />
+        )}
+        Reject &amp; Requeue
+      </Button>
+      <Button
+        size="sm"
+        variant="outline"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More reject options"
+        className="rounded-l-none px-2"
+      >
+        <ChevronDown className="w-4 h-4" />
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-50 mt-1 w-48 rounded-md border bg-popover text-popover-foreground shadow-md"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              onReject('abandon');
+            }}
+            disabled={disabled}
+            className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+          >
+            <XCircle className="w-4 h-4" />
+            <span className="flex-1">
+              <span className="block">Reject</span>
+              <span className="block text-xs text-muted-foreground">
+                Complete task without a PR
+              </span>
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function QueuePanel() {
@@ -508,10 +601,10 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     }
   };
 
-  const handleRejectTask = async () => {
+  const handleRejectTask = async (mode: 'requeue' | 'abandon' = 'requeue') => {
     setIsLoading(true);
     try {
-      await rejectTask(taskId);
+      await rejectTask(taskId, mode);
     } finally {
       setIsLoading(false);
     }
@@ -720,10 +813,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                   )}
                   Create PR
                 </Button>
-                <Button size="sm" variant="outline" onClick={handleRejectTask} disabled={isLoading}>
-                  <RotateCw className="w-4 h-4 mr-1" />
-                  Reject & Requeue
-                </Button>
+                <RejectSplitButton
+                  onReject={handleRejectTask}
+                  disabled={isLoading}
+                  loading={isLoading}
+                />
               </>
             )}
             {canStart && (

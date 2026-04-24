@@ -897,9 +897,15 @@ export function taskRoutes(): Router {
   });
 
   // Reject an awaiting_review task → stash rejected work to a backup
-  // ref → reset working tree to base → re-queue so the env+repo slot
-  // is usable again. The backup ref lets the user recover rejected
-  // work with `git checkout -b <name> refs/fastowl/rejected/<taskId>`.
+  // ref → reset working tree to base. The backup ref lets the user
+  // recover rejected work with
+  // `git checkout -b <name> refs/fastowl/rejected/<taskId>`.
+  //
+  // Two modes:
+  //   - `requeue` (default): re-queue so the env+repo slot is usable
+  //     again and the task can be retried from scratch.
+  //   - `abandon`: mark the task as completed without pushing or
+  //     opening a PR. Use this when the work isn't wanted at all.
   router.post('/:id/reject', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -918,6 +924,10 @@ export function taskRoutes(): Router {
     if (rows[0].status !== 'awaiting_review') {
       return res.status(400).json({ success: false, error: 'Task is not awaiting review' });
     }
+
+    const rawMode = (req.body as { mode?: unknown } | undefined)?.mode;
+    const mode: 'requeue' | 'abandon' =
+      rawMode === 'abandon' ? 'abandon' : 'requeue';
 
     const task = rowToTask(rows[0]);
 
@@ -951,20 +961,42 @@ export function taskRoutes(): Router {
       }
     }
 
-    await db
-      .update(tasksTable)
-      .set({
-        status: 'queued',
-        assignedAgentId: null,
-        // Clear branch so the re-queued task gets a fresh
-        // prepareTaskBranch run. The rejected work lives under
-        // refs/fastowl/rejected/<taskId> if the user wants it back.
-        branch: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(tasksTable.id, req.params.id));
+    const now = new Date();
+    if (mode === 'abandon') {
+      await db
+        .update(tasksTable)
+        .set({
+          status: 'completed',
+          assignedAgentId: null,
+          // Clear branch so nothing points at the deleted local ref.
+          // The rejected work lives under refs/fastowl/rejected/<taskId>.
+          branch: null,
+          result: { success: false, error: 'Rejected by user' },
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(tasksTable.id, req.params.id));
 
-    emitTaskStatus(task.workspaceId, req.params.id, 'queued');
+      emitTaskStatus(task.workspaceId, req.params.id, 'completed', {
+        success: false,
+        error: 'Rejected by user',
+      });
+    } else {
+      await db
+        .update(tasksTable)
+        .set({
+          status: 'queued',
+          assignedAgentId: null,
+          // Clear branch so the re-queued task gets a fresh
+          // prepareTaskBranch run. The rejected work lives under
+          // refs/fastowl/rejected/<taskId> if the user wants it back.
+          branch: null,
+          updatedAt: now,
+        })
+        .where(eq(tasksTable.id, req.params.id));
+
+      emitTaskStatus(task.workspaceId, req.params.id, 'queued');
+    }
 
     const updatedRows = await db
       .select()

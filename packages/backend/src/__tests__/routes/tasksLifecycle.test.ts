@@ -659,6 +659,34 @@ describe('routes/tasks lifecycle', () => {
       });
       expect(res.status).toBe(404);
     });
+
+    it('abandons the task (mode=abandon) by marking it completed without a PR', async () => {
+      const id = await insertTask(db, {
+        status: 'awaiting_review',
+        branch: 'fastowl/abc',
+      });
+
+      const res = await fetch(`${serverUrl}/tasks/${id}/reject`, {
+        method: 'POST',
+        headers: authHeaders,
+        body: JSON.stringify({ mode: 'abandon' }),
+      });
+      expect(res.status).toBe(200);
+
+      const rows = await db
+        .select({
+          status: tasksTable.status,
+          branch: tasksTable.branch,
+          completedAt: tasksTable.completedAt,
+          result: tasksTable.result,
+        })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, id));
+      expect(rows[0].status).toBe('completed');
+      expect(rows[0].branch).toBeNull();
+      expect(rows[0].completedAt).toBeTruthy();
+      expect(rows[0].result).toMatchObject({ success: false });
+    });
   });
 
   // -------- /retry-pr --------

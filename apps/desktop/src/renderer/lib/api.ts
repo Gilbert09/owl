@@ -149,7 +149,8 @@ export const tasks = {
   readyForReview: (id: string) =>
     request<Task>('POST', `/tasks/${id}/ready-for-review`),
   approve: (id: string) => request<Task>('POST', `/tasks/${id}/approve`),
-  reject: (id: string) => request<Task>('POST', `/tasks/${id}/reject`),
+  reject: (id: string, mode: 'requeue' | 'abandon' = 'requeue') =>
+    request<Task>('POST', `/tasks/${id}/reject`, { mode }),
   retryPullRequest: (id: string) =>
     request<{ pullRequest: { number: number; url: string } }>(
       'POST',

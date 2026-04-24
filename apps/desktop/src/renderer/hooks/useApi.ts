@@ -408,8 +408,8 @@ export function useTaskActions() {
   );
 
   const rejectTask = useCallback(
-    async (taskId: string) => {
-      const task = await api.tasks.reject(taskId);
+    async (taskId: string, mode: 'requeue' | 'abandon' = 'requeue') => {
+      const task = await api.tasks.reject(taskId, mode);
       updateTask(taskId, task);
       return task;
     },
