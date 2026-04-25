@@ -226,19 +226,17 @@ export function Sidebar({ className }: SidebarProps) {
       <AddEnvironmentModal open={showAddEnvModal} onOpenChange={setShowAddEnvModal} />
 
       {/* Footer */}
-      <div className="border-t">
-        {user && (
-          <UserChip
-            user={user}
-            collapsed={sidebarCollapsed}
-            onClick={() => setActivePanel('settings')}
-          />
-        )}
-        <div className="p-2 flex items-center justify-between">
+      <div className="border-t p-2">
+        <div
+          className={cn(
+            'flex items-center gap-1',
+            sidebarCollapsed && 'flex-col',
+          )}
+        >
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8"
+            className="h-8 w-8 flex-shrink-0"
             onClick={toggleSidebar}
           >
             {sidebarCollapsed ? (
@@ -247,11 +245,18 @@ export function Sidebar({ className }: SidebarProps) {
               <ChevronLeft className="w-4 h-4" />
             )}
           </Button>
+          {user && (
+            <UserChip
+              user={user}
+              collapsed={sidebarCollapsed}
+              onClick={() => setActivePanel('settings')}
+            />
+          )}
           {!sidebarCollapsed && (
             <Button
               variant={activePanel === 'settings' ? 'secondary' : 'ghost'}
               size="icon"
-              className="h-8 w-8"
+              className="h-8 w-8 flex-shrink-0"
               onClick={() => setActivePanel('settings')}
             >
               <Settings className="w-4 h-4" />
@@ -294,8 +299,10 @@ function UserChip({ user, collapsed, onClick }: UserChipProps) {
       onClick={onClick}
       title={`Signed in as @${username} — click for account settings`}
       className={cn(
-        'w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-accent transition-colors',
-        collapsed && 'justify-center px-2',
+        'flex items-center gap-2 text-sm rounded-md hover:bg-accent transition-colors',
+        collapsed
+          ? 'h-8 w-8 justify-center flex-shrink-0'
+          : 'flex-1 min-w-0 px-2 py-1.5',
       )}
     >
       <span className="relative flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted text-xs font-medium">
@@ -315,7 +322,7 @@ function UserChip({ user, collapsed, onClick }: UserChipProps) {
         )}
       </span>
       {!collapsed && (
-        <span className="flex-1 min-w-0 truncate text-left">
+        <span className="min-w-0 flex-1 truncate text-left">
           @{username}
         </span>
       )}
