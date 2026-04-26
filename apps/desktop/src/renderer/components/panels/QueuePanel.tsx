@@ -402,14 +402,32 @@ interface TaskDetailProps {
 
 function TaskDetail({ taskId }: TaskDetailProps) {
   const { tasks, environments, repositories } = useWorkspaceStore();
-  const { updateTaskStatus, cancelTask, retryTask, startTask, approveTask, rejectTask, deleteTask } = useTaskActions();
+  const {
+    updateTaskStatus,
+    cancelTask,
+    retryTask,
+    startTask,
+    approveTask,
+    rejectTask,
+    deleteTask,
+    readyForReview,
+  } = useTaskActions();
   // Track which specific action is in flight, not a shared boolean —
   // otherwise clicking Create PR puts the Reject button into a
   // spinner too (and vice versa). We still disable every action
   // while ANY one is in flight so the user can't double-click around
   // a slow request.
   const [activeAction, setActiveAction] = useState<
-    'start' | 'queue' | 'pause' | 'cancel' | 'retry' | 'createPr' | 'reject' | 'delete' | null
+    | 'start'
+    | 'queue'
+    | 'pause'
+    | 'cancel'
+    | 'retry'
+    | 'createPr'
+    | 'reject'
+    | 'delete'
+    | 'readyForReview'
+    | null
   >(null);
   const actionInFlight = activeAction !== null;
   const isLoadingFor = (action: typeof activeAction): boolean => activeAction === action;
@@ -489,6 +507,23 @@ function TaskDetail({ taskId }: TaskDetailProps) {
     setActiveAction('retry');
     try {
       await retryTask(taskId);
+    } finally {
+      setActiveAction(null);
+    }
+  };
+
+  // Re-runs autoCommit + advances the task. Wired to the
+  // "Retry auto-commit" button in the failure banner — the same
+  // /ready-for-review endpoint the in-progress UI uses to finish a
+  // task early. If the underlying problem (dirty after commit, no
+  // commits) is fixed, this is what unsticks the task.
+  const handleReadyForReview = async () => {
+    setActiveAction('readyForReview');
+    setActionError(null);
+    try {
+      await readyForReview(taskId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to retry auto-commit');
     } finally {
       setActiveAction(null);
     }
@@ -895,6 +930,116 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           )}
         </div>
       )}
+
+      {/* Auto-commit status banner. Three shapes:
+          - Hard fail (in_progress + advanceOk=false): loud red, with a
+            Retry button that re-runs autoCommit via /ready-for-review.
+            This is the surface the user kept missing — without it,
+            "task transitioned to awaiting_review with uncommitted
+            files" was indistinguishable from "everything worked".
+          - Awaiting_review + committed: subtle green confirmation.
+          - Awaiting_review + not committed but advanced (Claude already
+            committed): subtle amber "branch had prior commits". */}
+      {(() => {
+        const meta = task.metadata as
+          | {
+              autoCommit?: {
+                committed: boolean;
+                advanceOk?: boolean;
+                at: string;
+                sha?: string;
+                message?: string;
+                reason?: string;
+                error?: string;
+                porcelain?: string;
+              };
+            }
+          | undefined;
+        const ac = meta?.autoCommit;
+        if (!ac) return null;
+
+        if (task.status === 'in_progress' && ac.advanceOk === false) {
+          const dirtyCount = ac.porcelain
+            ? ac.porcelain.split('\n').filter(Boolean).length
+            : 0;
+          return (
+            <div className="px-4 py-3 border-b bg-red-500/10 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2 min-w-0 flex-1">
+                  <AlertCircle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <p className="font-medium text-red-700 dark:text-red-400">
+                      Auto-commit refused to advance: {ac.reason}
+                    </p>
+                    {ac.error && (
+                      <p className="text-xs text-red-700/80 dark:text-red-300/80 mt-1 break-words whitespace-pre-wrap">
+                        {ac.error}
+                      </p>
+                    )}
+                    {dirtyCount > 0 && (
+                      <p className="text-xs text-red-700/80 dark:text-red-300/80 mt-1">
+                        {dirtyCount} file{dirtyCount === 1 ? '' : 's'} still uncommitted
+                        in the working tree.
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="shrink-0"
+                  onClick={handleReadyForReview}
+                  disabled={actionInFlight}
+                  title="Re-run auto-commit and try to advance to awaiting review."
+                >
+                  {isLoadingFor('readyForReview') ? (
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                  ) : (
+                    <RotateCw className="w-3 h-3 mr-1" />
+                  )}
+                  Retry auto-commit
+                </Button>
+              </div>
+            </div>
+          );
+        }
+
+        if (task.status === 'awaiting_review' && ac.committed && ac.sha) {
+          return (
+            <div className="px-4 py-2 border-b bg-emerald-500/10 text-xs">
+              <div className="flex items-start gap-2">
+                <GitCommit className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-500 shrink-0 mt-0.5" />
+                <p className="text-emerald-700 dark:text-emerald-300 break-words font-mono">
+                  Auto-committed {ac.sha.slice(0, 10)}
+                  {ac.message && (
+                    <span className="font-sans"> · {ac.message.split('\n')[0]}</span>
+                  )}
+                </p>
+              </div>
+            </div>
+          );
+        }
+
+        if (
+          task.status === 'awaiting_review' &&
+          !ac.committed &&
+          ac.reason === 'no-changes-prior-commits'
+        ) {
+          return (
+            <div className="px-4 py-2 border-b bg-amber-500/10 text-xs">
+              <div className="flex items-start gap-2">
+                <GitCommit className="w-3.5 h-3.5 text-amber-600 dark:text-amber-500 shrink-0 mt-0.5" />
+                <p className="text-amber-700 dark:text-amber-300 break-words">
+                  Branch already had commits — nothing new to add. Auto-commit
+                  skipped.
+                </p>
+              </div>
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {/* Failed/cancelled result banner — loud, above tabs, with the
           full reason + a Retry action. */}

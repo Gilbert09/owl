@@ -172,6 +172,11 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
     vi.spyOn(gitService, 'getDiffStat').mockResolvedValue('1 file changed');
     vi.spyOn(gitService, 'getChangedFiles').mockResolvedValue([]);
     vi.spyOn(gitService, 'getFileDiff').mockResolvedValue('');
+    // Default to "everything's clean and well-behaved". Individual
+    // tests override these to drive the verifier into its failure
+    // modes (dirty-after-commit, no-changes-no-commits, wrong-branch).
+    vi.spyOn(gitService, 'getPorcelainStatus').mockResolvedValue('');
+    vi.spyOn(gitService, 'commitsAhead').mockResolvedValue(1);
   });
 
   afterEach(async () => {
@@ -217,44 +222,119 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
     return (rows[0]?.metadata as Record<string, unknown>) ?? {};
   }
 
-  it('returns no-branch without calling git when the task has no branch', async () => {
+  it('returns no-branch (advanceOk=false) without calling git when the task has no branch', async () => {
     const id = await insertTask({ branch: null });
     const commit = vi.spyOn(gitService, 'commitAll');
 
     const result = await autoCommitAndSnapshot(id);
 
-    expect(result).toEqual({ committed: false, reason: 'no-branch' });
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'no-branch',
+      advanceOk: false,
+    });
     expect(commit).not.toHaveBeenCalled();
   });
 
-  it('returns no-env when the task has no assignedEnvironmentId', async () => {
+  it('returns no-env (advanceOk=false) when the task has no assignedEnvironmentId', async () => {
     const id = await insertTask({ assignedEnvironmentId: null });
     const result = await autoCommitAndSnapshot(id);
-    expect(result).toEqual({ committed: false, reason: 'no-env' });
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'no-env',
+      advanceOk: false,
+    });
   });
 
-  it('returns no-repo when the repo has no localPath', async () => {
+  it('returns no-repo (advanceOk=false) when the repo has no localPath', async () => {
     await db
       .update(repositoriesTable)
       .set({ localPath: null })
       .where(eq(repositoriesTable.id, 'repo1'));
     const id = await insertTask({});
     const result = await autoCommitAndSnapshot(id);
-    expect(result).toEqual({ committed: false, reason: 'no-repo' });
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'no-repo',
+      advanceOk: false,
+    });
   });
 
-  it('returns no-changes when commitAll finds nothing to stage', async () => {
+  it('returns no-changes-prior-commits (advanceOk=true) when nothing staged but branch already has commits', async () => {
     const id = await insertTask({});
     vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: nothing');
     vi.spyOn(gitService, 'commitAll').mockResolvedValue(null);
+    vi.mocked(gitService.commitsAhead).mockResolvedValue(2);
 
     const result = await autoCommitAndSnapshot(id);
 
-    expect(result).toEqual({ committed: false, reason: 'no-changes' });
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'no-changes-prior-commits',
+      advanceOk: true,
+    });
+    // The agent committed its own work; finalFiles still gets a fresh
+    // snapshot so the Files tab populates.
+    expect(await readMeta(id)).toHaveProperty('finalFiles');
+  });
+
+  it('returns no-changes-no-commits (advanceOk=false) when nothing was staged AND branch has no new commits', async () => {
+    const id = await insertTask({});
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: nothing');
+    vi.spyOn(gitService, 'commitAll').mockResolvedValue(null);
+    vi.mocked(gitService.commitsAhead).mockResolvedValue(0);
+
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'no-changes-no-commits',
+      advanceOk: false,
+    });
     expect(await readMeta(id)).not.toHaveProperty('finalFiles');
   });
 
-  it('commits + snapshots finalFiles on success', async () => {
+  it('returns dirty-after-commit (advanceOk=false) when working tree is still dirty after the commit attempt', async () => {
+    const id = await insertTask({});
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: x');
+    vi.spyOn(gitService, 'commitAll').mockResolvedValue('newSha1234');
+    // Pre-commit clean, post-commit dirty — the symptom we keep hitting.
+    vi.mocked(gitService.getPorcelainStatus)
+      .mockResolvedValueOnce('') // pre-commit
+      .mockResolvedValueOnce(' M apps/desktop/src/foo.tsx\n?? new.txt\n'); // post-commit
+
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'dirty-after-commit',
+      advanceOk: false,
+    });
+    if (result.committed === false) {
+      expect(result.porcelain).toContain('foo.tsx');
+    }
+    const meta = await readMeta(id);
+    expect((meta.autoCommit as { reason: string }).reason).toBe('dirty-after-commit');
+  });
+
+  it('returns wrong-branch (advanceOk=false) when checkout to the task branch fails', async () => {
+    const id = await insertTask({});
+    // Agent left HEAD on main; the checkout to fastowl/abc throws.
+    vi.mocked(gitService.getCurrentBranch).mockResolvedValueOnce('main');
+    vi.mocked(gitService.checkoutBranch).mockRejectedValue(
+      new Error('local changes would be overwritten')
+    );
+
+    const result = await autoCommitAndSnapshot(id);
+
+    expect(result).toMatchObject({
+      committed: false,
+      reason: 'wrong-branch',
+      advanceOk: false,
+    });
+  });
+
+  it('commits + snapshots finalFiles on success (advanceOk=true)', async () => {
     const id = await insertTask({});
     vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat(auth): add login endpoint');
     vi.spyOn(gitService, 'commitAll').mockResolvedValue('sha123456789');
@@ -265,15 +345,23 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
 
     const result = await autoCommitAndSnapshot(id);
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       committed: true,
       sha: 'sha123456789',
       message: 'feat(auth): add login endpoint',
+      advanceOk: true,
     });
     const meta = await readMeta(id);
     const finalFiles = meta.finalFiles as Array<{ path: string; diff: string }>;
     expect(finalFiles).toHaveLength(1);
     expect(finalFiles[0]).toMatchObject({ path: 'src/login.ts', diff: '+ added login\n' });
+    // autoCommit status persists through the per-task mutex even with
+    // gitLog appends racing in the background.
+    expect(meta.autoCommit).toMatchObject({
+      committed: true,
+      sha: 'sha123456789',
+      advanceOk: true,
+    });
   });
 
   it('snapshots cumulatively on re-run (overwrites finalFiles)', async () => {
@@ -300,7 +388,7 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
     expect(finalFiles.map((f) => f.path)).toEqual(['a.ts', 'b.ts']);
   });
 
-  it('returns error (non-throwing) when an unexpected git call rejects', async () => {
+  it('returns error (advanceOk=false, non-throwing) when an unexpected git call rejects', async () => {
     const id = await insertTask({});
     vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('feat: x');
     vi.spyOn(gitService, 'commitAll').mockRejectedValue(new Error('daemon dead'));
@@ -311,6 +399,7 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
     if (result.committed === false) {
       expect(result.reason).toBe('error');
       expect(result.error).toContain('daemon dead');
+      expect(result.advanceOk).toBe(false);
     }
   });
 });

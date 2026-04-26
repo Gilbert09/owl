@@ -699,10 +699,23 @@ export function taskRoutes(): Router {
     if (activeAgent) agentService.stopAgent(activeAgent.id);
 
     // Auto-commit the branch's pending work + snapshot the file
-    // diffs onto metadata before flipping status. Failure is non-
-    // fatal — empty-changeset / offline-env tasks still transition;
-    // the Files tab falls back to any previously cached snapshot.
-    await autoCommitAndSnapshot(task.id);
+    // diffs onto metadata before flipping status. autoCommit returns
+    // advanceOk=false on hard failures (dirty working tree after
+    // commit, no work landed at all) — when that happens we DO NOT
+    // flip to awaiting_review. Pre-hardening, this path silently
+    // advanced and the user arrived at awaiting_review with
+    // uncommitted files; the Reject button would then discard them.
+    const result = await autoCommitAndSnapshot(task.id);
+    if (!result.advanceOk) {
+      const reason =
+        result.committed === false
+          ? `${result.reason}${result.error ? ` — ${result.error}` : ''}`
+          : 'unknown';
+      return res.status(409).json({
+        success: false,
+        error: `Auto-commit refused to advance: ${reason}. Task left in_progress; see metadata.autoCommit for details.`,
+      });
+    }
 
     await db
       .update(tasksTable)
@@ -841,33 +854,22 @@ export function taskRoutes(): Router {
           });
         }
 
-        // Re-read the task to capture any metadata updates (finalFiles
-        // or pullRequest) that the previous calls wrote — we need the
-        // freshest metadata before running the last snapshot so we
-        // don't overwrite it.
-        const refreshedRows = await db
-          .select()
-          .from(tasksTable)
-          .where(eq(tasksTable.id, task.id))
-          .limit(1);
-        if (refreshedRows[0]) {
-          // Pass the task branch explicitly — the snapshot should
-          // reflect `<base>..<branch>` (committed range), not the
-          // working tree. This is the one called before branch
-          // cleanup; if we relied on the working tree and anything
-          // earlier had checked out base, the saved snapshot would
-          // be empty and the completed task's Files tab would go
-          // blank (the "PR made, no files visible" regression).
-          await writeFinalFilesSnapshot(
-            task.id,
-            envId,
-            baseBranch,
-            workingDirectory,
-            { metadata: refreshedRows[0].metadata, workspaceId: refreshedRows[0].workspaceId },
-            tag,
-            task.branch
-          );
-        }
+        // Pass the task branch explicitly — the snapshot reflects
+        // `<base>..<branch>` (committed range), not the working tree.
+        // This is the one called before branch cleanup; if we relied
+        // on the working tree and anything earlier had checked out
+        // base, the saved snapshot would be empty and the completed
+        // task's Files tab would go blank (the "PR made, no files
+        // visible" regression). The mutex inside writeFinalFilesSnapshot
+        // re-reads metadata fresh, so no race with the PR writer.
+        await writeFinalFilesSnapshot(
+          task.id,
+          envId,
+          baseBranch,
+          workingDirectory,
+          tag,
+          task.branch
+        );
 
         // Cleanup: return to base branch + drop the local task branch
         // so the env+repo slot is free.

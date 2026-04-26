@@ -141,7 +141,8 @@ describe('routes/tasks lifecycle', () => {
     // tests override this to assert end-to-end wiring when needed.
     vi.spyOn(taskCommitSnapshotModule, 'autoCommitAndSnapshot').mockResolvedValue({
       committed: false,
-      reason: 'no-changes',
+      reason: 'no-changes-prior-commits',
+      advanceOk: true,
     });
     vi.spyOn(taskCommitSnapshotModule, 'writeFinalFilesSnapshot').mockResolvedValue();
 
@@ -456,11 +457,11 @@ describe('routes/tasks lifecycle', () => {
       expect(rows[0].status).toBe('awaiting_review');
     });
 
-    it('still transitions when autoCommitAndSnapshot reports no changes', async () => {
+    it('still transitions when autoCommit reports no-changes-prior-commits (Claude already committed)', async () => {
       const id = await insertTask(db, { status: 'in_progress' });
       vi.spyOn(agentService, 'getAgentByTaskId').mockReturnValue(undefined);
-      // Default beforeEach mock already returns `no-changes`; assert
-      // the transition still completes instead of wedging the task.
+      // Default beforeEach mock returns no-changes-prior-commits with
+      // advanceOk=true — assert the transition still completes.
       const res = await fetch(`${serverUrl}/tasks/${id}/ready-for-review`, {
         method: 'POST',
         headers: authHeaders,
@@ -471,6 +472,31 @@ describe('routes/tasks lifecycle', () => {
         .from(tasksTable)
         .where(eq(tasksTable.id, id));
       expect(rows[0].status).toBe('awaiting_review');
+    });
+
+    it('refuses to transition (409) when autoCommit returns advanceOk=false', async () => {
+      const id = await insertTask(db, { status: 'in_progress' });
+      vi.spyOn(agentService, 'getAgentByTaskId').mockReturnValue(undefined);
+      vi.spyOn(taskCommitSnapshotModule, 'autoCommitAndSnapshot').mockResolvedValue({
+        committed: false,
+        reason: 'dirty-after-commit',
+        error: '2 file(s) uncommitted.',
+        porcelain: ' M a.ts\n?? b.ts',
+        advanceOk: false,
+      });
+      const res = await fetch(`${serverUrl}/tasks/${id}/ready-for-review`, {
+        method: 'POST',
+        headers: authHeaders,
+      });
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).toMatch(/dirty-after-commit/);
+      // Task stays in_progress so the user can fix manually + retry.
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, id));
+      expect(rows[0].status).toBe('in_progress');
     });
 
     it('refuses to mark a non-running task', async () => {

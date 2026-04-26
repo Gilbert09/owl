@@ -8,7 +8,7 @@ import { environmentService } from './environment.js';
 import { gitService } from './git.js';
 import { githubService } from './github.js';
 import { generatePullRequestContent } from './ai.js';
-import { emitTaskUpdate } from './websocket.js';
+import { patchTaskMetadata } from './taskMetadataMutex.js';
 
 /**
  * Fire-and-forget: open a GitHub pull request for a just-pushed task
@@ -85,8 +85,6 @@ export async function openPullRequestForTask(taskId: string): Promise<void> {
       preferredEnvId: envId,
     });
 
-    const existingMetadata = (task.metadata as Record<string, unknown>) ?? {};
-
     try {
       const pr = await githubService.createPullRequest(
         task.workspaceId,
@@ -99,31 +97,30 @@ export async function openPullRequestForTask(taskId: string): Promise<void> {
           body: body || stampFastowlFooter(task.id),
         }
       );
-      const nextMetadata = {
-        ...existingMetadata,
-        pullRequest: {
-          number: pr.number,
-          url: pr.html_url,
-          createdAt: new Date().toISOString(),
-        },
-      };
-      delete (nextMetadata as Record<string, unknown>).pullRequestError;
-      await db
-        .update(tasksTable)
-        .set({ metadata: nextMetadata, updatedAt: new Date() })
-        .where(eq(tasksTable.id, task.id));
-      emitTaskUpdate(task.workspaceId, task.id, { metadata: nextMetadata });
+      // Patch through the mutex so a concurrent gitLog append from
+      // the surrounding approve flow doesn't clobber pullRequest,
+      // and so finalFiles written elsewhere isn't lost.
+      await patchTaskMetadata(task.id, (existing) => {
+        const next = {
+          ...existing,
+          pullRequest: {
+            number: pr.number,
+            url: pr.html_url,
+            createdAt: new Date().toISOString(),
+          },
+        };
+        delete (next as Record<string, unknown>).pullRequestError;
+        return next;
+      });
       console.log(`[pr] task ${task.id.slice(0, 8)}: opened ${pr.html_url}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[pr] task ${task.id.slice(0, 8)}: create failed · ${msg}`);
-      const nextMetadata = { ...existingMetadata, pullRequestError: msg };
-      delete (nextMetadata as Record<string, unknown>).pullRequest;
-      await db
-        .update(tasksTable)
-        .set({ metadata: nextMetadata, updatedAt: new Date() })
-        .where(eq(tasksTable.id, task.id));
-      emitTaskUpdate(task.workspaceId, task.id, { metadata: nextMetadata });
+      await patchTaskMetadata(task.id, (existing) => {
+        const next = { ...existing, pullRequestError: msg };
+        delete (next as Record<string, unknown>).pullRequest;
+        return next;
+      });
     }
   } catch (err) {
     console.error('[openPullRequestForTask] unexpected failure:', err);

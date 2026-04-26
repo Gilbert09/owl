@@ -188,6 +188,47 @@ class GitService {
   }
 
   /**
+   * Return raw `git status --porcelain` output. Empty string means
+   * the working tree (incl. untracked) is clean. Used by the auto-
+   * commit verifier to fail loudly if a commit attempt left the tree
+   * dirty — that's the symptom of "task hits awaiting_review with
+   * unstaged files" the user kept hitting.
+   */
+  async getPorcelainStatus(
+    environmentId: string,
+    workingDirectory?: string
+  ): Promise<string> {
+    const res = await this.runGitOrThrow(
+      environmentId,
+      ['status', '--porcelain'],
+      workingDirectory
+    );
+    return res.stdout;
+  }
+
+  /**
+   * Number of commits on `branch` that aren't on `base`. Zero means
+   * the branch has no new work yet — useful to distinguish "Claude
+   * already committed everything" (>0) from "nothing happened" (0)
+   * when commitAll reports no-changes.
+   */
+  async commitsAhead(
+    environmentId: string,
+    branch: string,
+    base: string,
+    workingDirectory?: string
+  ): Promise<number> {
+    const res = await this.runGit(
+      environmentId,
+      ['rev-list', '--count', `${base}..${branch}`],
+      workingDirectory
+    );
+    if (res.code !== 0) return 0;
+    const n = Number(res.stdout.trim());
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  /**
    * Stash current changes with a message. Message flows as a single
    * argv element; arbitrary bytes (newlines, quotes, etc.) are safe.
    */

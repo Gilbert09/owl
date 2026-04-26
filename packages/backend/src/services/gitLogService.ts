@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import { tasks as tasksTable } from '../db/schema.js';
 import { emitTaskGitLog } from './websocket.js';
+import { patchTaskMetadata } from './taskMetadataMutex.js';
 
 /**
  * One git command's worth of audit data. Stored as a bounded array
@@ -55,71 +56,30 @@ export function enterTaskGitLog(taskId: string): void {
  * Record one git command. Called from gitService after every exec.
  * No-op when no task context is active (e.g. ad-hoc git ops outside
  * the task lifecycle).
+ *
+ * Routes through `patchTaskMetadata` so that gitLog appends serialize
+ * head-of-line against autoCommit / finalFiles / pullRequest /
+ * scheduler-rollback writers. Without that shared chain, those
+ * writers' RMW landed stale and silently ate gitLog entries (or got
+ * eaten themselves, e.g. losing `metadata.autoCommit`).
  */
 export async function recordGitCommand(entry: GitLogEntry): Promise<void> {
   const store = ctx.getStore();
   if (!store) return;
-  await appendEntry(store.taskId, entry).catch((err) => {
+  try {
+    const result = await patchTaskMetadata(store.taskId, (existing) => {
+      const prior = Array.isArray(existing.gitLog)
+        ? (existing.gitLog as GitLogEntry[])
+        : [];
+      const nextEntries = prior.concat(entry).slice(-MAX_ENTRIES);
+      return { ...existing, gitLog: nextEntries };
+    });
+    if (result) {
+      emitTaskGitLog(result.workspaceId, store.taskId, entry);
+    }
+  } catch (err) {
     console.error('[gitLog] failed to record:', err);
-  });
-}
-
-/**
- * Per-taskId serialization chain. `appendEntry` is a read-modify-write
- * on `tasks.metadata.gitLog`; without this, the concurrent git ops the
- * approve flow fires off (`getDiffStat` + `getDiff` via Promise.all,
- * the finalFiles snapshot's per-file diffs) race each other to update
- * the JSON column, and all but the last writer's entries get clobbered.
- * That's how the Git tab was going from 6 entries mid-run to 2 by
- * completion. Each taskId has its own tail; different tasks stay
- * independent.
- */
-const writeChains = new Map<string, Promise<void>>();
-
-async function appendEntry(taskId: string, entry: GitLogEntry): Promise<void> {
-  const prev = writeChains.get(taskId) ?? Promise.resolve();
-  const next = prev.then(() => writeEntryLocked(taskId, entry));
-  // Hide rejections from the next writer — each caller's `.catch` in
-  // recordGitCommand handles its own failures.
-  writeChains.set(taskId, next.catch(() => {}));
-  await next;
-  // Clean up once the chain has fully drained so idle tasks don't
-  // accumulate empty Promise slots.
-  if (writeChains.get(taskId) === next.catch(() => {})) {
-    // No-op: we set the sentinel just above; leaving the Map entry in
-    // place is fine since it's a resolved Promise and GC'd on task
-    // eviction.
   }
-}
-
-async function writeEntryLocked(taskId: string, entry: GitLogEntry): Promise<void> {
-  const db = getDbClient();
-  const rows = await db
-    .select({
-      metadata: tasksTable.metadata,
-      workspaceId: tasksTable.workspaceId,
-    })
-    .from(tasksTable)
-    .where(eq(tasksTable.id, taskId))
-    .limit(1);
-  const row = rows[0];
-  if (!row) return;
-
-  const metadata = (row.metadata as Record<string, unknown>) ?? {};
-  const existing = Array.isArray(metadata.gitLog)
-    ? (metadata.gitLog as GitLogEntry[])
-    : [];
-  const next = existing.concat(entry).slice(-MAX_ENTRIES);
-
-  await db
-    .update(tasksTable)
-    .set({
-      metadata: { ...metadata, gitLog: next },
-      updatedAt: new Date(),
-    })
-    .where(eq(tasksTable.id, taskId));
-
-  emitTaskGitLog(row.workspaceId, taskId, entry);
 }
 
 /**

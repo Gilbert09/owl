@@ -123,7 +123,8 @@ describe('agentService — startAgent + handleStructuredExit', () => {
     vi.spyOn(permissionHook, 'ensurePermissionHook').mockResolvedValue('/tmp/permission.cjs');
     vi.spyOn(taskCommitSnapshot, 'autoCommitAndSnapshot').mockResolvedValue({
       committed: false,
-      reason: 'no-changes',
+      reason: 'no-changes-prior-commits',
+      advanceOk: true,
     });
   });
 
@@ -311,7 +312,8 @@ describe('agentService — continueTask', () => {
     vi.spyOn(permissionHook, 'ensurePermissionHook').mockResolvedValue('/tmp/permission.cjs');
     vi.spyOn(taskCommitSnapshot, 'autoCommitAndSnapshot').mockResolvedValue({
       committed: false,
-      reason: 'no-changes',
+      reason: 'no-changes-prior-commits',
+      advanceOk: true,
     });
   });
 

@@ -9,6 +9,7 @@ import { resolveTaskGitContext } from './gitContext.js';
 import { withTaskGitLog } from './gitLogService.js';
 import { generateTaskTitle, looksLikePlaceholderTitle } from './ai.js';
 import { permissionService } from './permissionService.js';
+import { patchTaskMetadata } from './taskMetadataMutex.js';
 import { emitTaskStatus, emitTaskUpdate } from './websocket.js';
 import { getDbClient, type Database } from '../db/client.js';
 import {
@@ -356,26 +357,21 @@ class TaskQueueService extends EventEmitter {
                   console.error(
                     `[TaskQueue] rolling ${task.title} back to queued: ${reason}`
                   );
-                  const existingRows = await this.db
-                    .select({ metadata: tasksTable.metadata })
-                    .from(tasksTable)
-                    .where(eq(tasksTable.id, task.id))
-                    .limit(1);
-                  const existingMetadata =
-                    (existingRows[0]?.metadata as Record<string, unknown>) ?? {};
-                  const nextMetadata = {
-                    ...existingMetadata,
+                  // Metadata patch through the shared mutex so a
+                  // concurrent gitLog append (still in flight from
+                  // prepareRepoForTask) can't clobber lastScheduleError.
+                  await patchTaskMetadata(task.id, (existing) => ({
+                    ...existing,
                     lastScheduleError: {
                       at: new Date().toISOString(),
                       reason,
                     },
-                  };
+                  }));
                   await this.db
                     .update(tasksTable)
                     .set({
                       status: 'queued',
                       assignedEnvironmentId: null,
-                      metadata: nextMetadata,
                       updatedAt: new Date(),
                     })
                     .where(eq(tasksTable.id, task.id));

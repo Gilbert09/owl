@@ -450,15 +450,39 @@ class AgentService extends EventEmitter {
       const now = new Date();
       if (code === 0) {
         // Commit the agent's work + snapshot file diffs onto the
-        // task's metadata BEFORE the status flip. Non-fatal on
-        // empty-changeset or offline-env; the Files tab falls back
-        // to whatever snapshot is already cached.
-        await autoCommitAndSnapshot(agent.currentTaskId);
-        await this.db
-          .update(tasksTable)
-          .set({ status: 'awaiting_review', updatedAt: now })
-          .where(eq(tasksTable.id, agent.currentTaskId));
-        emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
+        // task's metadata BEFORE the status flip. autoCommit returns
+        // `advanceOk: false` when the working tree is still dirty
+        // after the commit attempt or when nothing landed at all.
+        // Pre-hardening this path silently advanced to awaiting_review
+        // — the user kept arriving there with uncommitted files and a
+        // Reject button that would discard them.
+        //
+        // On failure we leave the task in `in_progress`. The autoCommit
+        // status is on `metadata.autoCommit` so the desktop can surface
+        // the reason; the user can hit "Ready for Review" to retry
+        // autoCommit (which is the same code path) once they've fixed
+        // whatever was wrong, or commit manually then retry.
+        const result = await autoCommitAndSnapshot(agent.currentTaskId);
+        if (result.advanceOk) {
+          await this.db
+            .update(tasksTable)
+            .set({ status: 'awaiting_review', updatedAt: now })
+            .where(eq(tasksTable.id, agent.currentTaskId));
+          emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'awaiting_review');
+        } else {
+          const reason =
+            result.committed === false
+              ? `${result.reason}${result.error ? ` — ${result.error}` : ''}`
+              : 'unknown';
+          console.error(
+            `[agent] task ${agent.currentTaskId.slice(0, 8)}: holding in_progress · auto-commit refused: ${reason}`
+          );
+          await this.db
+            .update(tasksTable)
+            .set({ updatedAt: now })
+            .where(eq(tasksTable.id, agent.currentTaskId));
+          emitTaskStatus(agent.workspaceId, agent.currentTaskId, 'in_progress');
+        }
       } else {
         // Persist a result so the desktop failed-view banner has
         // something meaningful to show — without this the user sees
@@ -574,16 +598,34 @@ class AgentService extends EventEmitter {
 
       this.stopAgent(agentId);
 
-      // Same commit + snapshot path the one-shot exit takes.
-      await autoCommitAndSnapshot(taskId);
-
+      // Same commit + snapshot path the one-shot exit takes. Honour
+      // advanceOk: hold the task in_progress on a failed autoCommit
+      // (e.g. dirty working tree) so the user doesn't arrive at
+      // awaiting_review with uncommitted changes the Reject button
+      // would discard.
+      const result = await autoCommitAndSnapshot(taskId);
       const now = new Date();
-      await this.db
-        .update(tasksTable)
-        .set({ status: 'awaiting_review', updatedAt: now })
-        .where(eq(tasksTable.id, taskId));
-      emitTaskStatus(workspaceId, taskId, 'awaiting_review');
-      console.log(`[agent] auto-finished task ${taskId.slice(0, 8)} on agent idle`);
+      if (result.advanceOk) {
+        await this.db
+          .update(tasksTable)
+          .set({ status: 'awaiting_review', updatedAt: now })
+          .where(eq(tasksTable.id, taskId));
+        emitTaskStatus(workspaceId, taskId, 'awaiting_review');
+        console.log(`[agent] auto-finished task ${taskId.slice(0, 8)} on agent idle`);
+      } else {
+        const reason =
+          result.committed === false
+            ? `${result.reason}${result.error ? ` — ${result.error}` : ''}`
+            : 'unknown';
+        console.error(
+          `[agent] task ${taskId.slice(0, 8)}: holding in_progress on idle · auto-commit refused: ${reason}`
+        );
+        await this.db
+          .update(tasksTable)
+          .set({ updatedAt: now })
+          .where(eq(tasksTable.id, taskId));
+        emitTaskStatus(workspaceId, taskId, 'in_progress');
+      }
     } catch (err) {
       console.error(`[agent] auto-finish for task ${taskId} failed:`, err);
     }
