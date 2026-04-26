@@ -215,7 +215,7 @@ export function QueuePanel() {
                     </span>
                   </h3>
                   <div className="space-y-1">
-                    {completedTasks.slice(0, 5).map((task) => (
+                    {completedTasks.map((task) => (
                       <TaskListItem
                         key={task.id}
                         task={task}
