@@ -143,7 +143,7 @@ export function InboxPanel() {
           <p className="text-sm text-muted-foreground">
             {isArchive
               ? `${visibleItems.length} archived ${visibleItems.length === 1 ? 'item' : 'items'}`
-              : `${unreadCount} ${unreadCount === 1 ? 'item needs' : 'items need'} attention`}
+              : `${unreadCount} ${unreadCount === 1 ? 'item' : 'items'}`}
           </p>
         </div>
         {!isArchive && (
