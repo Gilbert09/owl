@@ -82,6 +82,28 @@ export interface PRSummary {
     author: string;
     state: string;
     submittedAt: string | null;
+    url: string;
+  }>;
+  /**
+   * Last 5 review-thread comments (inline-on-diff comments), freshest
+   * first. Used by the prCache to detect new pr_comment events; the
+   * detail-view review tab fetches the full thread on demand.
+   */
+  recentReviewComments: Array<{
+    id: string;
+    author: string;
+    createdAt: string;
+    url: string;
+  }>;
+  /**
+   * Last 5 issue-style PR comments (top-level conversation), freshest
+   * first. Same delta-detection role as recentReviewComments.
+   */
+  recentComments: Array<{
+    id: string;
+    author: string;
+    createdAt: string;
+    url: string;
   }>;
 }
 
@@ -299,7 +321,17 @@ fragment PRFields on PullRequest {
   baseRefName
   headRefOid
   reviews(last: 5) {
-    nodes { id author { login } state submittedAt }
+    nodes { id author { login } state submittedAt url }
+  }
+  reviewThreads(last: 5) {
+    nodes {
+      comments(last: 1) {
+        nodes { id author { login } createdAt url }
+      }
+    }
+  }
+  comments(last: 5) {
+    nodes { id author { login } createdAt url }
   }
   commits(last: 1) {
     nodes {
@@ -369,6 +401,27 @@ interface RawPullRequest {
       author: { login: string } | null;
       state: string;
       submittedAt: string | null;
+      url: string;
+    }>;
+  };
+  reviewThreads: {
+    nodes: Array<{
+      comments: {
+        nodes: Array<{
+          id: string;
+          author: { login: string } | null;
+          createdAt: string;
+          url: string;
+        }>;
+      };
+    }>;
+  };
+  comments: {
+    nodes: Array<{
+      id: string;
+      author: { login: string } | null;
+      createdAt: string;
+      url: string;
     }>;
   };
   commits: {
@@ -477,11 +530,35 @@ function rawToSummary(raw: RawPullRequest, owner: string, repo: string): PRSumma
     blockingReason,
     checks,
     checkDigest: computeCheckDigest(raw.headRefOid, normalizedContexts),
-    recentReviews: raw.reviews.nodes.map((r) => ({
-      id: r.id,
-      author: r.author?.login ?? '',
-      state: r.state,
-      submittedAt: r.submittedAt,
-    })),
+    recentReviews: raw.reviews.nodes
+      .slice()
+      .reverse() // GitHub returns last:N oldest-first; we want freshest first
+      .map((r) => ({
+        id: r.id,
+        author: r.author?.login ?? '',
+        state: r.state,
+        submittedAt: r.submittedAt,
+        url: r.url,
+      })),
+    recentReviewComments: raw.reviewThreads.nodes
+      .flatMap((thread) => thread.comments.nodes)
+      .slice()
+      .reverse()
+      .slice(0, 5)
+      .map((c) => ({
+        id: c.id,
+        author: c.author?.login ?? '',
+        createdAt: c.createdAt,
+        url: c.url,
+      })),
+    recentComments: raw.comments.nodes
+      .slice()
+      .reverse()
+      .map((c) => ({
+        id: c.id,
+        author: c.author?.login ?? '',
+        createdAt: c.createdAt,
+        url: c.url,
+      })),
   };
 }

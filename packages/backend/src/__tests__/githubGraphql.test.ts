@@ -215,12 +215,16 @@ describe('makeBatchPullRequestsQuery', () => {
     expect(q).toContain('"with\\\\back"');
   });
 
-  it('embeds the PRFields fragment with statusCheckRollup + reviews', () => {
+  it('embeds the PRFields fragment with statusCheckRollup + reviews + comments', () => {
     const q = makeBatchPullRequestsQuery(['main']);
     expect(q).toContain('fragment PRFields on PullRequest');
     expect(q).toContain('statusCheckRollup');
     expect(q).toContain('contexts(first: 100)');
     expect(q).toContain('reviews(last: 5)');
+    // Both comment surfaces are pulled in the same round-trip so the
+    // cursor delta-checker doesn't need a separate REST fan-out.
+    expect(q).toContain('reviewThreads(last: 5)');
+    expect(q).toContain('comments(last: 5)');
     expect(q).toContain('mergeable');
     expect(q).toContain('mergeStateStatus');
     expect(q).toContain('reviewDecision');
@@ -247,6 +251,8 @@ describe('decodeBatchResponse', () => {
       baseRefName: 'main',
       headRefOid: 'abcdef1',
       reviews: { nodes: [] },
+      reviewThreads: { nodes: [] },
+      comments: { nodes: [] },
       commits: {
         nodes: [
           {
@@ -375,25 +381,29 @@ describe('decodeBatchResponse', () => {
     expect(pr.blockingReason).toBe('mergeable');
   });
 
-  it('captures up to 5 recent reviews freshest-first', () => {
+  it('captures up to 5 recent reviews freshest-first (GitHub returns last:N oldest-first)', () => {
     const data = {
       repository: {
         [aliasForBranch(0)]: {
           nodes: [
             rawPR({
+              // GraphQL `last: 5` returns oldest-first within the window;
+              // the decoder must reverse so freshest sits at index 0.
               reviews: {
                 nodes: [
                   {
-                    id: 'r1',
+                    id: 'r-old',
                     author: { login: 'alice' },
-                    state: 'APPROVED',
+                    state: 'COMMENTED',
                     submittedAt: '2026-01-01T00:00:00Z',
+                    url: 'https://github.com/acme/widgets/pull/42#pullrequestreview-r-old',
                   },
                   {
-                    id: 'r2',
+                    id: 'r-new',
                     author: { login: 'bob' },
-                    state: 'COMMENTED',
+                    state: 'APPROVED',
                     submittedAt: '2026-01-02T00:00:00Z',
+                    url: 'https://github.com/acme/widgets/pull/42#pullrequestreview-r-new',
                   },
                 ],
               },
@@ -409,7 +419,93 @@ describe('decodeBatchResponse', () => {
       'widgets'
     );
     expect(result[0].pr?.recentReviews).toHaveLength(2);
-    expect(result[0].pr?.recentReviews[0].author).toBe('alice');
+    expect(result[0].pr?.recentReviews[0].id).toBe('r-new');
+    expect(result[0].pr?.recentReviews[0].author).toBe('bob');
+    expect(result[0].pr?.recentReviews[1].id).toBe('r-old');
+  });
+
+  it('flattens reviewThreads → recentReviewComments freshest-first', () => {
+    const data = {
+      repository: {
+        [aliasForBranch(0)]: {
+          nodes: [
+            rawPR({
+              reviewThreads: {
+                nodes: [
+                  {
+                    comments: {
+                      nodes: [
+                        {
+                          id: 'rc-old',
+                          author: { login: 'alice' },
+                          createdAt: '2026-01-01T00:00:00Z',
+                          url: 'https://github.com/acme/widgets/pull/42#discussion_r-old',
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    comments: {
+                      nodes: [
+                        {
+                          id: 'rc-new',
+                          author: { login: 'bob' },
+                          createdAt: '2026-01-02T00:00:00Z',
+                          url: 'https://github.com/acme/widgets/pull/42#discussion_r-new',
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            }),
+          ],
+        },
+      },
+    };
+    const pr = decodeBatchResponse(
+      ['feature/x'],
+      data as Parameters<typeof decodeBatchResponse>[1],
+      'acme',
+      'widgets'
+    )[0].pr!;
+    expect(pr.recentReviewComments.map((c) => c.id)).toEqual(['rc-new', 'rc-old']);
+  });
+
+  it('captures top-level PR comments freshest-first', () => {
+    const data = {
+      repository: {
+        [aliasForBranch(0)]: {
+          nodes: [
+            rawPR({
+              comments: {
+                nodes: [
+                  {
+                    id: 'c-old',
+                    author: { login: 'alice' },
+                    createdAt: '2026-01-01T00:00:00Z',
+                    url: 'https://github.com/acme/widgets/pull/42#issuecomment-c-old',
+                  },
+                  {
+                    id: 'c-new',
+                    author: { login: 'bob' },
+                    createdAt: '2026-01-02T00:00:00Z',
+                    url: 'https://github.com/acme/widgets/pull/42#issuecomment-c-new',
+                  },
+                ],
+              },
+            }),
+          ],
+        },
+      },
+    };
+    const pr = decodeBatchResponse(
+      ['feature/x'],
+      data as Parameters<typeof decodeBatchResponse>[1],
+      'acme',
+      'widgets'
+    )[0].pr!;
+    expect(pr.recentComments.map((c) => c.id)).toEqual(['c-new', 'c-old']);
   });
 
   it('maps state MERGED / CLOSED to the lowercase variants', () => {

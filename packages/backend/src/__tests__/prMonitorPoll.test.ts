@@ -1,84 +1,92 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { eq, and } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { prMonitorService } from '../services/prMonitor.js';
 import { githubService } from '../services/github.js';
+import * as graphqlModule from '../services/githubGraphql.js';
+import type { PRSummary } from '../services/githubGraphql.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
   workspaces as workspacesTable,
   repositories as repositoriesTable,
+  pullRequests as pullRequestsTable,
   inboxItems as inboxItemsTable,
 } from '../db/schema.js';
 
-const REPO_OWNER = 'acme';
-const REPO_NAME = 'widgets';
-const REPO_FULL = `${REPO_OWNER}/${REPO_NAME}`;
+// ---------- Helpers ----------
 
-async function seed(db: Database): Promise<void> {
-  await seedUser(db, { id: TEST_USER_ID });
-  await db.insert(workspacesTable).values({
-    id: 'ws1', ownerId: TEST_USER_ID, name: 'ws', settings: {},
-  });
-  await db.insert(repositoriesTable).values({
-    id: 'repo1',
-    workspaceId: 'ws1',
-    name: REPO_FULL,
-    url: `https://github.com/${REPO_FULL}`,
-    defaultBranch: 'main',
-  });
-}
-
-function fakePR(overrides: Partial<{
+function fakeRESTPullRequest(over: Partial<{
   number: number;
   title: string;
   userLogin: string;
+  headRef: string;
   headSha: string;
-  mergeable: boolean | null;
 }> = {}) {
   return {
     id: 1,
-    number: overrides.number ?? 42,
-    title: overrides.title ?? 'Add login',
+    number: over.number ?? 42,
+    title: over.title ?? 'Add feature',
     state: 'open' as const,
-    html_url: `https://github.com/${REPO_FULL}/pull/${overrides.number ?? 42}`,
-    user: { login: overrides.userLogin ?? 'me', avatar_url: 'x' },
+    html_url: `https://github.com/acme/widgets/pull/${over.number ?? 42}`,
+    user: { login: over.userLogin ?? 'me', avatar_url: 'x' },
     created_at: 'now',
     updated_at: 'now',
     draft: false,
-    mergeable: overrides.mergeable ?? null,
+    mergeable: null,
     mergeable_state: 'clean',
-    head: { ref: 'feature', sha: overrides.headSha ?? 'sha1' },
+    head: { ref: over.headRef ?? 'feature/x', sha: over.headSha ?? 'sha1' },
     base: { ref: 'main' },
   };
 }
 
-function fakeReview(overrides: Partial<{
-  id: number;
-  userLogin: string;
-  state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING';
-  body: string;
-}> = {}) {
+function fakeSummary(over: Partial<PRSummary> = {}): PRSummary {
   return {
-    id: overrides.id ?? 100,
-    user: { login: overrides.userLogin ?? 'reviewer', avatar_url: 'x' },
-    body: overrides.body ?? '',
-    state: overrides.state ?? 'APPROVED',
-    submitted_at: 'now',
-    html_url: 'x',
+    owner: 'acme',
+    repo: 'widgets',
+    number: 42,
+    title: 'Add feature',
+    body: '',
+    url: 'https://github.com/acme/widgets/pull/42',
+    author: 'me',
+    draft: false,
+    state: 'open',
+    mergedAt: null,
+    closedAt: null,
+    headBranch: 'feature/x',
+    baseBranch: 'main',
+    headSha: 'sha1',
+    updatedAt: '2026-01-01T00:00:00Z',
+    mergeable: 'MERGEABLE',
+    mergeStateStatus: 'CLEAN',
+    reviewDecision: null,
+    blockingReason: 'mergeable',
+    checks: { total: 0, passed: 0, failed: 0, inProgress: 0, skipped: 0 },
+    checkDigest: 'sha1:',
+    recentReviews: [],
+    recentReviewComments: [],
+    recentComments: [],
+    ...over,
   };
 }
 
-async function inboxCount(db: Database, filter?: { type?: string }): Promise<number> {
-  const conditions = [eq(inboxItemsTable.workspaceId, 'ws1')];
-  if (filter?.type) conditions.push(eq(inboxItemsTable.type, filter.type));
-  const rows = await db
-    .select()
-    .from(inboxItemsTable)
-    .where(and(...conditions));
-  return rows.length;
+async function seed(db: Database): Promise<void> {
+  await seedUser(db, { id: TEST_USER_ID });
+  await db.insert(workspacesTable).values({
+    id: 'ws1',
+    ownerId: TEST_USER_ID,
+    name: 'ws',
+    settings: {},
+  });
+  await db.insert(repositoriesTable).values({
+    id: 'repo1',
+    workspaceId: 'ws1',
+    name: 'acme/widgets',
+    url: 'https://github.com/acme/widgets',
+    defaultBranch: 'main',
+  });
 }
 
-describe('prMonitor — poll branches', () => {
+describe('prMonitor — poll orchestration', () => {
   let db: Database;
   let cleanup: () => Promise<void>;
 
@@ -88,7 +96,7 @@ describe('prMonitor — poll branches', () => {
     cleanup = testDb.cleanup;
     await seed(db);
 
-    // All tests connect workspace "ws1" to github and run as user "me".
+    // Default mocks: ws1 is connected, current user is "me".
     vi.spyOn(githubService, 'getConnectedWorkspaces').mockReturnValue(['ws1']);
     vi.spyOn(githubService, 'getUser').mockResolvedValue({
       id: 1,
@@ -97,14 +105,9 @@ describe('prMonitor — poll branches', () => {
       avatar_url: 'x',
       email: null,
     });
-    // Default stubs for the sub-polls — individual tests override.
-    vi.spyOn(githubService, 'getPRReviews').mockResolvedValue([]);
-    vi.spyOn(githubService, 'getPRReviewComments').mockResolvedValue([]);
-    vi.spyOn(githubService, 'getPRComments').mockResolvedValue([]);
-    vi.spyOn(githubService, 'getCheckRuns').mockResolvedValue({
-      total_count: 0,
-      check_runs: [],
-    } as never);
+    // Drop any cached login from previous tests — the service is a
+    // singleton so the cache survives across cases.
+    prMonitorService.invalidateUserLogin('ws1');
   });
 
   afterEach(async () => {
@@ -112,208 +115,264 @@ describe('prMonitor — poll branches', () => {
     vi.restoreAllMocks();
   });
 
-  it('first poll is a prime — no inbox items even when there are reviews/comments', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    vi.spyOn(githubService, 'getPRReviews').mockResolvedValue([fakeReview({ id: 10 })]);
-
-    await prMonitorService.forcePoll();
-
-    expect(await inboxCount(db)).toBe(0);
-  });
-
-  it('second poll surfaces a new review as a pr_review inbox item', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const reviews = vi.spyOn(githubService, 'getPRReviews').mockResolvedValue([]);
-
-    // Prime — no reviews yet.
-    await prMonitorService.forcePoll();
-
-    // Second poll has a new review.
-    reviews.mockResolvedValue([
-      fakeReview({ id: 200, state: 'CHANGES_REQUESTED', userLogin: 'colleague' }),
-    ]);
-    await prMonitorService.forcePoll();
-
-    expect(await inboxCount(db, { type: 'pr_review' })).toBe(1);
-    const rows = await db.select().from(inboxItemsTable);
-    expect(rows[0].title).toMatch(/Changes requested/i);
-    // Changes requested → high priority (not medium).
-    expect(rows[0].priority).toBe('high');
-  });
-
-  it('repeating the same review on a third poll does not double-fire', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const reviews = vi.spyOn(githubService, 'getPRReviews').mockResolvedValue([]);
-
-    await prMonitorService.forcePoll(); // prime
-    reviews.mockResolvedValue([fakeReview({ id: 200 })]);
-    await prMonitorService.forcePoll(); // fires inbox
-
-    const firstCount = await inboxCount(db, { type: 'pr_review' });
-
-    // Third poll returns the SAME review.
-    await prMonitorService.forcePoll();
-    const thirdCount = await inboxCount(db, { type: 'pr_review' });
-    expect(thirdCount).toBe(firstCount);
-  });
-
-  it('new review comments fire a single pr_comment item with a count summary', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const reviewComments = vi
-      .spyOn(githubService, 'getPRReviewComments')
-      .mockResolvedValue([]);
-
-    await prMonitorService.forcePoll(); // prime
-
-    reviewComments.mockResolvedValue([
-      {
-        id: 301,
-        user: { login: 'alice', avatar_url: 'x' },
-        body: 'line 1',
-        path: 'src/a.ts',
-        created_at: 'now',
-        updated_at: 'now',
-        html_url: 'x',
-        pull_request_review_id: 1,
-      },
-      {
-        id: 302,
-        user: { login: 'bob', avatar_url: 'x' },
-        body: 'line 2',
-        path: 'src/a.ts',
-        created_at: 'now',
-        updated_at: 'now',
-        html_url: 'x',
-        pull_request_review_id: 1,
-      },
-    ]);
-    await prMonitorService.forcePoll();
-
-    const rows = await db
-      .select()
-      .from(inboxItemsTable)
-      .where(eq(inboxItemsTable.type, 'pr_comment'));
-    expect(rows).toHaveLength(1);
-    expect(rows[0].title).toMatch(/2 new review comments/);
-    expect(rows[0].summary).toContain('@alice');
-    expect(rows[0].summary).toContain('@bob');
-  });
-
-  it('filters out the current user own review comments (no self-pings)', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const reviewComments = vi
-      .spyOn(githubService, 'getPRReviewComments')
-      .mockResolvedValue([]);
-
-    await prMonitorService.forcePoll();
-
-    reviewComments.mockResolvedValue([
-      {
-        id: 301,
-        user: { login: 'me', avatar_url: 'x' }, // self
-        body: '',
-        path: 'a',
-        created_at: 'now',
-        updated_at: 'now',
-        html_url: 'x',
-        pull_request_review_id: 1,
-      },
-    ]);
-    await prMonitorService.forcePoll();
-
-    expect(await inboxCount(db, { type: 'pr_comment' })).toBe(0);
-  });
-
-  it('CI failure on an own PR creates a ci_failure inbox item', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const checks = vi
-      .spyOn(githubService, 'getCheckRuns')
-      .mockResolvedValue({
-        total_count: 0,
-        check_runs: [],
-      } as never);
-
-    await prMonitorService.forcePoll(); // prime
-
-    checks.mockResolvedValue({
-      total_count: 1,
-      check_runs: [
-        {
-          id: 1,
-          name: 'lint',
-          status: 'completed',
-          conclusion: 'failure',
-          html_url: 'x',
-        },
-      ],
-    } as never);
-    await prMonitorService.forcePoll();
-
-    const rows = await db
-      .select()
-      .from(inboxItemsTable)
-      .where(eq(inboxItemsTable.type, 'ci_failure'));
-    expect(rows).toHaveLength(1);
-  });
-
-  it('does not re-notify CI failure while status stays failure', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([fakePR()]);
-    const checks = vi.spyOn(githubService, 'getCheckRuns').mockResolvedValue({
-      total_count: 0, check_runs: [],
-    } as never);
-
-    await prMonitorService.forcePoll(); // prime: no failures
-    checks.mockResolvedValue({
-      total_count: 1,
-      check_runs: [{ id: 1, name: 'lint', status: 'completed', conclusion: 'failure', html_url: 'x' }],
-    } as never);
-    await prMonitorService.forcePoll(); // fires once
-    await prMonitorService.forcePoll(); // still failing — should NOT fire again
-
-    const rows = await db
-      .select()
-      .from(inboxItemsTable)
-      .where(eq(inboxItemsTable.type, 'ci_failure'));
-    expect(rows).toHaveLength(1);
-  });
-
-  it('mergeability transition false → true fires a pr_ready item', async () => {
-    const pr = fakePR({ mergeable: false });
-    const listPrs = vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([pr]);
-
-    await prMonitorService.forcePoll(); // prime with mergeable=false
-
-    // Flip to mergeable=true.
-    listPrs.mockResolvedValue([fakePR({ mergeable: true })]);
-    await prMonitorService.forcePoll();
-
-    const rows = await db
-      .select()
-      .from(inboxItemsTable)
-      .where(eq(inboxItemsTable.type, 'pr_ready'));
-    expect(rows).toHaveLength(1);
-  });
-
-  it('does not fire review inbox items for someone else PR (reviews are self-scoped)', async () => {
-    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
-      fakePR({ userLogin: 'someone-else' }),
-    ]);
-    const reviews = vi.spyOn(githubService, 'getPRReviews').mockResolvedValue([]);
-
-    await prMonitorService.forcePoll(); // prime
-    reviews.mockResolvedValue([fakeReview({ id: 200 })]);
-    await prMonitorService.forcePoll();
-
-    // Reviews are only checked on your own PRs.
-    expect(await inboxCount(db, { type: 'pr_review' })).toBe(0);
-  });
-
-  it('does nothing when no workspace is connected', async () => {
+  it('does nothing when there are no connected workspaces', async () => {
     vi.spyOn(githubService, 'getConnectedWorkspaces').mockReturnValue([]);
-    const listPrs = vi.spyOn(githubService, 'listPullRequests');
+    const restSpy = vi.spyOn(githubService, 'listPullRequests');
+    const graphqlSpy = vi.spyOn(graphqlModule, 'batchPullRequests');
+    await prMonitorService.forcePoll();
+    expect(restSpy).not.toHaveBeenCalled();
+    expect(graphqlSpy).not.toHaveBeenCalled();
+  });
+
+  it('filters the open PR list to user-authored only and batches them via GraphQL', async () => {
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+      fakeRESTPullRequest({ number: 2, headRef: 'feature/b', userLogin: 'someone-else' }),
+      fakeRESTPullRequest({ number: 3, headRef: 'feature/c', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi
+      .spyOn(graphqlModule, 'batchPullRequests')
+      .mockResolvedValue([
+        { branch: 'feature/a', pr: fakeSummary({ number: 1, headBranch: 'feature/a' }) },
+        { branch: 'feature/c', pr: fakeSummary({ number: 3, headBranch: 'feature/c' }) },
+      ]);
 
     await prMonitorService.forcePoll();
-    expect(listPrs).not.toHaveBeenCalled();
-    expect(await inboxCount(db)).toBe(0);
+
+    expect(graphqlSpy).toHaveBeenCalledTimes(1);
+    // Only the two user-authored branches should be in the batch.
+    const branches = graphqlSpy.mock.calls[0][0].branches;
+    expect(branches).toEqual(['feature/a', 'feature/c']);
+
+    const rows = await db.select().from(pullRequestsTable);
+    expect(rows.map((r) => r.number).sort()).toEqual([1, 3]);
+  });
+
+  it('skips the GraphQL call entirely when every cached row is still fresh', async () => {
+    // Seed an "already polled" row.
+    await db.insert(pullRequestsTable).values({
+      id: 'pr-fresh',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'acme',
+      repo: 'widgets',
+      number: 1,
+      state: 'open',
+      lastPolledAt: new Date(),
+      lastSummary: { headBranch: 'feature/a' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi.spyOn(graphqlModule, 'batchPullRequests');
+
+    await prMonitorService.forcePoll();
+    expect(graphqlSpy).not.toHaveBeenCalled();
+  });
+
+  it('refetches only stale rows when some are fresh and others are not', async () => {
+    // Seed a fresh row for #1 and a stale row for #2.
+    const fresh = new Date();
+    const stale = new Date(Date.now() - 120_000); // older than DEFAULT_TTL_MS (60s)
+    await db.insert(pullRequestsTable).values([
+      {
+        id: 'pr-fresh',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 1,
+        state: 'open',
+        lastPolledAt: fresh,
+        lastSummary: { headBranch: 'feature/a' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'pr-stale',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 2,
+        state: 'open',
+        lastPolledAt: stale,
+        lastSummary: { headBranch: 'feature/b' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+      fakeRESTPullRequest({ number: 2, headRef: 'feature/b', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi
+      .spyOn(graphqlModule, 'batchPullRequests')
+      .mockResolvedValue([
+        { branch: 'feature/b', pr: fakeSummary({ number: 2, headBranch: 'feature/b' }) },
+      ]);
+
+    await prMonitorService.forcePoll();
+    expect(graphqlSpy).toHaveBeenCalledTimes(1);
+    expect(graphqlSpy.mock.calls[0][0].branches).toEqual(['feature/b']);
+  });
+
+  it('marks tracked rows that disappear from the open-list as closed', async () => {
+    // Seed two open rows.
+    await db.insert(pullRequestsTable).values([
+      {
+        id: 'pr-1',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 1,
+        state: 'open',
+        lastPolledAt: new Date(),
+        lastSummary: { headBranch: 'feature/a' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'pr-2',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 2,
+        state: 'open',
+        lastPolledAt: new Date(),
+        lastSummary: { headBranch: 'feature/b' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    // The user merged #2 — it's gone from the open list.
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+    ] as never);
+    vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([]);
+
+    await prMonitorService.forcePoll();
+
+    const rows = await db
+      .select()
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, 'pr-2'));
+    expect(rows[0].state).toBe('closed');
+  });
+
+  it('isolates per-workspace failures (one repo throwing does not stop others)', async () => {
+    await db.insert(repositoriesTable).values({
+      id: 'repo2',
+      workspaceId: 'ws1',
+      name: 'acme/other',
+      url: 'https://github.com/acme/other',
+      defaultBranch: 'main',
+    });
+    vi.spyOn(githubService, 'listPullRequests').mockImplementation(async (_ws, _owner, repo) => {
+      if (repo === 'widgets') throw new Error('rate limit');
+      return [fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' })] as never;
+    });
+    vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+      { branch: 'feature/a', pr: fakeSummary({ number: 1, headBranch: 'feature/a' }) },
+    ]);
+
+    await prMonitorService.forcePoll();
+    // The healthy repo's PR row landed despite the other repo throwing.
+    const rows = await db
+      .select()
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.repositoryId, 'repo2'));
+    expect(rows).toHaveLength(1);
+  });
+
+  it('emits inbox items only for deltas (cursor-based, no double-fire)', async () => {
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi.spyOn(graphqlModule, 'batchPullRequests');
+
+    // Tick 1: baseline. No inbox items.
+    graphqlSpy.mockResolvedValueOnce([
+      {
+        branch: 'feature/a',
+        pr: fakeSummary({
+          number: 1,
+          headBranch: 'feature/a',
+          recentReviews: [
+            {
+              id: 'r1',
+              author: 'alice',
+              state: 'APPROVED',
+              submittedAt: 'now',
+              url: 'x',
+            },
+          ],
+        }),
+      },
+    ]);
+    await prMonitorService.forcePoll();
+    expect((await db.select().from(inboxItemsTable)).length).toBe(0);
+
+    // Backdate so the second tick refetches.
+    await db
+      .update(pullRequestsTable)
+      .set({ lastPolledAt: new Date(Date.now() - 120_000) });
+
+    // Tick 2: r2 lands. Should emit one pr_review item.
+    graphqlSpy.mockResolvedValueOnce([
+      {
+        branch: 'feature/a',
+        pr: fakeSummary({
+          number: 1,
+          headBranch: 'feature/a',
+          recentReviews: [
+            {
+              id: 'r2',
+              author: 'bob',
+              state: 'CHANGES_REQUESTED',
+              submittedAt: 'now',
+              url: 'x',
+            },
+            {
+              id: 'r1',
+              author: 'alice',
+              state: 'APPROVED',
+              submittedAt: 'now',
+              url: 'x',
+            },
+          ],
+        }),
+      },
+    ]);
+    await prMonitorService.forcePoll();
+    const inbox = await db.select().from(inboxItemsTable);
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0].type).toBe('pr_review');
+  });
+
+  it('does not double-fire when forcePoll runs twice with no new state', async () => {
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+    ] as never);
+    vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+      {
+        branch: 'feature/a',
+        pr: fakeSummary({
+          number: 1,
+          headBranch: 'feature/a',
+          recentReviews: [
+            { id: 'r1', author: 'alice', state: 'APPROVED', submittedAt: 'now', url: 'x' },
+          ],
+        }),
+      },
+    ]);
+    await prMonitorService.forcePoll();
+    // Second call — TTL still fresh, GraphQL skipped, no inbox spam.
+    await prMonitorService.forcePoll();
+    expect((await db.select().from(inboxItemsTable)).length).toBe(0);
   });
 });

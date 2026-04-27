@@ -1,13 +1,17 @@
 import { EventEmitter } from 'events';
 import { v4 as uuid } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   repositories as repositoriesTable,
-  inboxItems as inboxItemsTable,
+  pullRequests as pullRequestsTable,
 } from '../db/schema.js';
 import { githubService } from './github.js';
-import { broadcastToWorkspace } from './websocket.js';
+import { batchPullRequests } from './githubGraphql.js';
+import {
+  upsertFromBatchResult,
+  DEFAULT_TTL_MS,
+} from './prCache.js';
 
 interface WatchedRepo {
   id: string;
@@ -24,35 +28,26 @@ interface WatchedRepo {
   defaultBranch: string;
 }
 
-interface PRState {
-  prNumber: number;
-  lastReviewId: number;
-  lastReviewCommentId: number;
-  lastCommentId: number;
-  lastCheckStatus: string | null;
-  wasMergeable: boolean | null;
-}
-
-interface MonitorState {
-  repos: Map<string, Map<number, PRState>>;
-  lastPoll: Map<string, string>;
-}
-
-const POLL_INTERVAL_MS = 60000;
+const POLL_INTERVAL_MS = 60_000;
 
 class PRMonitorService extends EventEmitter {
-  private state: MonitorState = {
-    repos: new Map(),
-    lastPoll: new Map(),
-  };
   private pollTimer: NodeJS.Timeout | null = null;
   private isPolling = false;
+  /** Cached current-user logins keyed by workspaceId — saves a round-trip
+   *  per poll. Cleared when the OAuth token rotates (via removeToken). */
+  private userLoginCache: Map<string, string> = new Map();
 
   private get db(): Database {
     return getDbClient();
   }
 
   async init(): Promise<void> {
+    // Drop the cached login if the OAuth token gets revoked or
+    // disconnected — otherwise the next poll would still try to use
+    // the previous user's login as a filter.
+    githubService.on('disconnected', (workspaceId: string) => {
+      this.invalidateUserLogin(workspaceId);
+    });
     this.startPolling();
   }
 
@@ -64,7 +59,7 @@ class PRMonitorService extends EventEmitter {
     if (this.pollTimer) return;
     console.log('Starting PR monitor polling...');
     this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
-    setTimeout(() => this.poll(), 5000);
+    setTimeout(() => this.poll(), 5_000);
   }
 
   private stopPolling(): void {
@@ -73,6 +68,8 @@ class PRMonitorService extends EventEmitter {
       this.pollTimer = null;
     }
   }
+
+  // ---------- Repo CRUD (unchanged surface, used by /repositories) ----------
 
   async getWatchedRepos(workspaceId: string): Promise<WatchedRepo[]> {
     const rows = await this.db
@@ -127,7 +124,7 @@ class PRMonitorService extends EventEmitter {
       createdAt: new Date(),
     });
 
-    const watched: WatchedRepo = {
+    return {
       id,
       workspaceId,
       owner,
@@ -136,8 +133,6 @@ class PRMonitorService extends EventEmitter {
       localPath,
       defaultBranch,
     };
-    this.state.repos.set(fullName, new Map());
-    return watched;
   }
 
   /**
@@ -159,20 +154,10 @@ class PRMonitorService extends EventEmitter {
   }
 
   async removeWatchedRepo(repoId: string): Promise<void> {
-    const rows = await this.db
-      .select({ name: repositoriesTable.name })
-      .from(repositoriesTable)
-      .where(eq(repositoriesTable.id, repoId))
-      .limit(1);
-    const row = rows[0];
-
     await this.db.delete(repositoriesTable).where(eq(repositoriesTable.id, repoId));
-
-    if (row) {
-      this.state.repos.delete(row.name);
-      this.state.lastPoll.delete(row.name);
-    }
   }
+
+  // ---------- Polling ----------
 
   private async poll(): Promise<void> {
     if (this.isPolling) return;
@@ -180,380 +165,195 @@ class PRMonitorService extends EventEmitter {
     try {
       const connectedWorkspaces = githubService.getConnectedWorkspaces();
       for (const workspaceId of connectedWorkspaces) {
-        const repos = await this.getWatchedRepos(workspaceId);
-        for (const repo of repos) {
-          try {
-            await this.pollRepo(workspaceId, repo);
-          } catch (err: unknown) {
-            const msg = err instanceof Error ? err.message : 'unknown error';
-            console.error(`Failed to poll ${repo.fullName}:`, msg);
-          }
+        try {
+          await this.pollWorkspace(workspaceId);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'unknown error';
+          console.error(`PR monitor: workspace ${workspaceId.slice(0, 8)} poll failed:`, msg);
         }
       }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      console.error('PR monitor poll error:', msg);
     } finally {
       this.isPolling = false;
     }
   }
 
-  private async pollRepo(workspaceId: string, repo: WatchedRepo): Promise<void> {
-    const prs = await githubService.listPullRequests(workspaceId, repo.owner, repo.repo, {
+  /**
+   * One workspace per tick. Per repo:
+   *   1. List open PRs (REST, single page of 100) and filter to ones
+   *      authored by the connected user. This is the "all PRs owned
+   *      by the authed user in watched repos" scope.
+   *   2. Group their head branches and call `batchPullRequests` for
+   *      the GraphQL summary + checks rollup in one round-trip per
+   *      chunk of 25.
+   *   3. For each result, hand off to `prCache.upsertFromBatchResult`
+   *      — that's where the cursor diff runs and inbox items get
+   *      emitted.
+   *   4. Sweep any tracked PRs we own in the DB but didn't see in the
+   *      open list and mark them closed/merged so the GitHub page
+   *      stops actively polling them.
+   */
+  private async pollWorkspace(workspaceId: string): Promise<void> {
+    const login = await this.resolveCurrentUser(workspaceId);
+    if (!login) return;
+    const repos = await this.getWatchedRepos(workspaceId);
+
+    for (const repo of repos) {
+      try {
+        await this.pollRepo(workspaceId, repo, login);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'unknown error';
+        console.error(`PR monitor: ${repo.fullName} poll failed:`, msg);
+      }
+    }
+  }
+
+  private async pollRepo(
+    workspaceId: string,
+    repo: WatchedRepo,
+    currentUserLogin: string
+  ): Promise<void> {
+    // REST list is cheap: one paginated call returns up to 100 open
+    // PRs with author. Filter to user-authored. We don't need the full
+    // detail here — the GraphQL batch fetch supplies that.
+    const all = await githubService.listPullRequests(workspaceId, repo.owner, repo.repo, {
       state: 'open',
-      per_page: 30,
+      per_page: 100,
+    });
+    const ownPRs = all.filter((pr) => pr.user.login === currentUserLogin);
+
+    if (ownPRs.length === 0) {
+      await this.sweepClosed(workspaceId, repo.id, []);
+      return;
+    }
+
+    // Determine which PRs are actually stale enough to need a refetch
+    // (saves the GraphQL call when nothing has aged past the TTL).
+    const stalePrs = await this.filterStale(workspaceId, repo.id, ownPRs);
+    if (stalePrs.length === 0) {
+      // Still sweep closed — the user might have merged something
+      // outside the TTL window.
+      await this.sweepClosed(workspaceId, repo.id, ownPRs.map((p) => p.number));
+      return;
+    }
+
+    const branches = stalePrs.map((p) => p.head.ref);
+    const results = await batchPullRequests({
+      workspaceId,
+      owner: repo.owner,
+      repo: repo.repo,
+      branches,
     });
 
-    let repoState = this.state.repos.get(repo.fullName);
-    if (!repoState) {
-      repoState = new Map();
-      this.state.repos.set(repo.fullName, repoState);
-    }
-
-    let currentUser: string | null = null;
-    try {
-      const user = await githubService.getUser(workspaceId);
-      currentUser = user.login;
-    } catch {
-      // Ignore
-    }
-
-    for (const pr of prs) {
-      const isOwnPR = currentUser && pr.user.login === currentUser;
-      let prState = repoState.get(pr.number);
-      const isFirstSeen = !prState;
-
-      if (!prState) {
-        prState = {
-          prNumber: pr.number,
-          lastReviewId: 0,
-          lastReviewCommentId: 0,
-          lastCommentId: 0,
-          lastCheckStatus: null,
-          wasMergeable: null,
-        };
-        repoState.set(pr.number, prState);
-      }
-
-      if (isFirstSeen) {
-        try {
-          const reviews = await githubService.getPRReviews(workspaceId, repo.owner, repo.repo, pr.number);
-          if (reviews.length > 0) prState.lastReviewId = Math.max(...reviews.map((r) => r.id));
-
-          const reviewComments = await githubService.getPRReviewComments(
-            workspaceId, repo.owner, repo.repo, pr.number
-          );
-          if (reviewComments.length > 0)
-            prState.lastReviewCommentId = Math.max(...reviewComments.map((c) => c.id));
-
-          const comments = await githubService.getPRComments(workspaceId, repo.owner, repo.repo, pr.number);
-          if (comments.length > 0) prState.lastCommentId = Math.max(...comments.map((c) => c.id));
-
-          const checks = await githubService.getCheckRuns(workspaceId, repo.owner, repo.repo, pr.head.sha);
-          prState.lastCheckStatus = this.getOverallCheckStatus(checks.check_runs);
-          prState.wasMergeable = pr.mergeable;
-        } catch {
-          // Ignore initialization errors
-        }
-        continue;
-      }
-
-      if (isOwnPR) await this.checkNewReviews(workspaceId, repo, pr, prState);
-      await this.checkNewReviewComments(workspaceId, repo, pr, prState, currentUser);
-      await this.checkNewComments(workspaceId, repo, pr, prState, currentUser);
-      if (isOwnPR) await this.checkCIStatus(workspaceId, repo, pr, prState);
-      if (isOwnPR) await this.checkMergeability(workspaceId, repo, pr, prState);
-    }
-
-    this.state.lastPoll.set(repo.fullName, new Date().toISOString());
-  }
-
-  private async checkNewReviews(
-    workspaceId: string,
-    repo: WatchedRepo,
-    pr: { number: number; title: string; html_url: string },
-    state: PRState
-  ): Promise<void> {
-    try {
-      const reviews = await githubService.getPRReviews(workspaceId, repo.owner, repo.repo, pr.number);
-      const newReviews = reviews.filter((r) => r.id > state.lastReviewId);
-
-      for (const review of newReviews) {
-        if (review.state === 'PENDING') continue;
-        await this.createInboxItem(workspaceId, {
-          type: 'pr_review',
-          priority: review.state === 'CHANGES_REQUESTED' ? 'high' : 'medium',
-          title: `${
-            review.state === 'APPROVED'
-              ? 'Approved'
-              : review.state === 'CHANGES_REQUESTED'
-                ? 'Changes requested'
-                : 'Review'
-          }: ${pr.title}`,
-          summary: `@${review.user.login} ${review.state.toLowerCase().replace('_', ' ')} on ${repo.fullName}#${pr.number}`,
-          prUrl: pr.html_url,
-          actions: [
-            { label: 'View Review', action: 'open_url', data: review.html_url },
-            { label: 'View PR', action: 'open_url', data: pr.html_url },
-          ],
-          data: {
-            repo: repo.fullName,
-            prNumber: pr.number,
-            prTitle: pr.title,
-            prUrl: pr.html_url,
-            reviewId: review.id,
-            reviewState: review.state,
-            reviewer: review.user.login,
-          },
-        });
-      }
-
-      if (reviews.length > 0) state.lastReviewId = Math.max(...reviews.map((r) => r.id));
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      console.error(`Failed to check reviews for ${repo.fullName}#${pr.number}:`, msg);
-    }
-  }
-
-  private async checkNewReviewComments(
-    workspaceId: string,
-    repo: WatchedRepo,
-    pr: { number: number; title: string; html_url: string },
-    state: PRState,
-    currentUser: string | null
-  ): Promise<void> {
-    try {
-      const comments = await githubService.getPRReviewComments(
-        workspaceId, repo.owner, repo.repo, pr.number
-      );
-      const newComments = comments.filter(
-        (c) => c.id > state.lastReviewCommentId && c.user.login !== currentUser
-      );
-
-      if (newComments.length > 0) {
-        const commentCount = newComments.length;
-        const users = [...new Set(newComments.map((c) => c.user.login))];
-        await this.createInboxItem(workspaceId, {
-          type: 'pr_comment',
-          priority: 'medium',
-          title: `${commentCount} new review comment${commentCount > 1 ? 's' : ''} on ${pr.title}`,
-          summary: `${users.map((u) => `@${u}`).join(', ')} commented on ${repo.fullName}#${pr.number}`,
-          prUrl: pr.html_url,
-          actions: [
-            { label: 'View Comments', action: 'open_url', data: newComments[0].html_url },
-            { label: 'View PR', action: 'open_url', data: pr.html_url },
-          ],
-          data: {
-            repo: repo.fullName,
-            prNumber: pr.number,
-            prTitle: pr.title,
-            prUrl: pr.html_url,
-            commentCount,
-            commenters: users,
-          },
-        });
-      }
-
-      if (comments.length > 0) state.lastReviewCommentId = Math.max(...comments.map((c) => c.id));
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      console.error(`Failed to check review comments for ${repo.fullName}#${pr.number}:`, msg);
-    }
-  }
-
-  private async checkNewComments(
-    workspaceId: string,
-    repo: WatchedRepo,
-    pr: { number: number; title: string; html_url: string },
-    state: PRState,
-    currentUser: string | null
-  ): Promise<void> {
-    try {
-      const comments = await githubService.getPRComments(workspaceId, repo.owner, repo.repo, pr.number);
-      const newComments = comments.filter(
-        (c) => c.id > state.lastCommentId && c.user.login !== currentUser
-      );
-
-      if (newComments.length > 0) {
-        const commentCount = newComments.length;
-        const users = [...new Set(newComments.map((c) => c.user.login))];
-        await this.createInboxItem(workspaceId, {
-          type: 'pr_comment',
-          priority: 'low',
-          title: `${commentCount} new comment${commentCount > 1 ? 's' : ''} on ${pr.title}`,
-          summary: `${users.map((u) => `@${u}`).join(', ')} commented on ${repo.fullName}#${pr.number}`,
-          prUrl: pr.html_url,
-          actions: [
-            { label: 'View Comment', action: 'open_url', data: newComments[0].html_url },
-            { label: 'View PR', action: 'open_url', data: pr.html_url },
-          ],
-          data: {
-            repo: repo.fullName,
-            prNumber: pr.number,
-            prTitle: pr.title,
-            prUrl: pr.html_url,
-            commentCount,
-            commenters: users,
-          },
-        });
-      }
-
-      if (comments.length > 0) state.lastCommentId = Math.max(...comments.map((c) => c.id));
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      console.error(`Failed to check comments for ${repo.fullName}#${pr.number}:`, msg);
-    }
-  }
-
-  private async checkCIStatus(
-    workspaceId: string,
-    repo: WatchedRepo,
-    pr: { number: number; title: string; html_url: string; head: { sha: string } },
-    state: PRState
-  ): Promise<void> {
-    try {
-      const checks = await githubService.getCheckRuns(workspaceId, repo.owner, repo.repo, pr.head.sha);
-      const overallStatus = this.getOverallCheckStatus(checks.check_runs);
-
-      if (overallStatus === 'failure' && state.lastCheckStatus !== 'failure') {
-        const failedChecks = checks.check_runs.filter((c) => c.conclusion === 'failure');
-        await this.createInboxItem(workspaceId, {
-          type: 'ci_failure',
-          priority: 'high',
-          title: `CI failed: ${pr.title}`,
-          summary: `${failedChecks.length} check${failedChecks.length > 1 ? 's' : ''} failed on ${repo.fullName}#${pr.number}`,
-          prUrl: pr.html_url,
-          actions: [
-            { label: 'View Checks', action: 'open_url', data: `${pr.html_url}/checks` },
-            { label: 'View PR', action: 'open_url', data: pr.html_url },
-          ],
-          data: {
-            repo: repo.fullName,
-            prNumber: pr.number,
-            prTitle: pr.title,
-            prUrl: pr.html_url,
-            failedChecks: failedChecks.map((c) => ({ name: c.name, url: c.html_url })),
-          },
-        });
-      }
-
-      state.lastCheckStatus = overallStatus;
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'unknown error';
-      console.error(`Failed to check CI status for ${repo.fullName}#${pr.number}:`, msg);
-    }
-  }
-
-  private async checkMergeability(
-    workspaceId: string,
-    repo: WatchedRepo,
-    pr: {
-      number: number;
-      title: string;
-      html_url: string;
-      mergeable: boolean | null;
-      mergeable_state: string;
-    },
-    state: PRState
-  ): Promise<void> {
-    if (pr.mergeable === true && pr.mergeable_state === 'clean' && state.wasMergeable !== true) {
-      await this.createInboxItem(workspaceId, {
-        type: 'pr_ready',
-        priority: 'medium',
-        title: `Ready to merge: ${pr.title}`,
-        summary: `${repo.fullName}#${pr.number} has all checks passing and is ready to merge`,
-        prUrl: pr.html_url,
-        actions: [
-          { label: 'Merge PR', action: 'open_url', data: pr.html_url },
-          { label: 'View PR', action: 'open_url', data: pr.html_url },
-        ],
-        data: {
-          repo: repo.fullName,
-          prNumber: pr.number,
-          prTitle: pr.title,
-          prUrl: pr.html_url,
-        },
+    for (const result of results) {
+      if (!result.pr) continue;
+      await upsertFromBatchResult({
+        workspaceId,
+        repositoryId: repo.id,
+        summary: result.pr,
       });
     }
 
-    state.wasMergeable = pr.mergeable;
+    await this.sweepClosed(workspaceId, repo.id, ownPRs.map((p) => p.number));
   }
 
-  private getOverallCheckStatus(
-    checkRuns: Array<{ status: string; conclusion: string | null }>
-  ): string | null {
-    if (checkRuns.length === 0) return null;
-    const hasFailure = checkRuns.some((c) => c.conclusion === 'failure');
-    if (hasFailure) return 'failure';
-    const hasPending = checkRuns.some((c) => c.status !== 'completed');
-    if (hasPending) return 'pending';
-    const allSuccess = checkRuns.every(
-      (c) => c.conclusion === 'success' || c.conclusion === 'skipped' || c.conclusion === 'neutral'
-    );
-    if (allSuccess) return 'success';
-    return 'unknown';
-  }
-
-  private async createInboxItem(
+  private async filterStale(
     workspaceId: string,
-    item: {
-      type: string;
-      priority: string;
-      title: string;
-      summary: string;
-      /** The PR URL — used as the item's source id so dupes can be collapsed later. */
-      prUrl: string;
-      actions: Array<{ label: string; action: string; data: string }>;
-      data: Record<string, unknown>;
+    repositoryId: string,
+    prs: Array<{ number: number; head: { ref: string } }>
+  ): Promise<Array<{ number: number; head: { ref: string } }>> {
+    if (prs.length === 0) return [];
+    const numbers = prs.map((p) => p.number);
+    const rows = await this.db
+      .select({
+        number: pullRequestsTable.number,
+        lastPolledAt: pullRequestsTable.lastPolledAt,
+      })
+      .from(pullRequestsTable)
+      .where(
+        and(
+          eq(pullRequestsTable.workspaceId, workspaceId),
+          eq(pullRequestsTable.repositoryId, repositoryId)
+        )
+      );
+    const cached = new Map<number, Date>();
+    for (const row of rows) {
+      if (numbers.includes(row.number)) cached.set(row.number, row.lastPolledAt);
     }
-  ): Promise<void> {
-    const id = uuid();
-    const now = new Date();
-
-    // source is stored as jsonb; prMonitor used to pass a plain 'github'
-    // string which only worked under SQLite. Normalize to the same
-    // { type, id, name } shape the rest of the app uses.
-    const source = { type: 'github', id: item.prUrl, name: item.data.prTitle ?? 'GitHub' };
-
-    await this.db.insert(inboxItemsTable).values({
-      id,
-      workspaceId,
-      type: item.type,
-      status: 'unread',
-      priority: item.priority,
-      title: item.title,
-      summary: item.summary,
-      source,
-      actions: item.actions,
-      data: item.data,
-      createdAt: now,
+    const now = Date.now();
+    return prs.filter((p) => {
+      const polledAt = cached.get(p.number);
+      if (!polledAt) return true; // never seen; always stale
+      return now - polledAt.getTime() >= DEFAULT_TTL_MS;
     });
-
-    const inboxItem = {
-      id,
-      workspaceId,
-      type: item.type,
-      status: 'unread',
-      priority: item.priority,
-      title: item.title,
-      summary: item.summary,
-      source,
-      actions: item.actions,
-      data: item.data,
-      createdAt: now.toISOString(),
-    };
-
-    broadcastToWorkspace(workspaceId, {
-      type: 'inbox:new',
-      payload: { item: inboxItem },
-      timestamp: new Date().toISOString(),
-    });
-
-    this.emit('inbox_item_created', inboxItem);
   }
 
+  /**
+   * Mark any DB row we've been polling as closed/merged once it stops
+   * appearing in the open-PR list. Stops the row from being repolled
+   * but keeps the row around so the user can filter "merged PRs from
+   * my old tasks" on the GitHub page.
+   *
+   * Not strict about "merged" vs "closed" — the next time the user
+   * opens the detail panel a fresh GraphQL fetch will populate the
+   * exact state. We just need the row out of the active-poll set.
+   */
+  private async sweepClosed(
+    workspaceId: string,
+    repositoryId: string,
+    seenNumbers: number[]
+  ): Promise<void> {
+    const rows = await this.db
+      .select({ number: pullRequestsTable.number, id: pullRequestsTable.id })
+      .from(pullRequestsTable)
+      .where(
+        and(
+          eq(pullRequestsTable.workspaceId, workspaceId),
+          eq(pullRequestsTable.repositoryId, repositoryId),
+          eq(pullRequestsTable.state, 'open')
+        )
+      );
+    const seen = new Set(seenNumbers);
+    const stale = rows.filter((r) => !seen.has(r.number));
+    if (stale.length === 0) return;
+    for (const row of stale) {
+      await this.db
+        .update(pullRequestsTable)
+        .set({ state: 'closed', updatedAt: new Date() })
+        .where(eq(pullRequestsTable.id, row.id));
+    }
+  }
+
+  private async resolveCurrentUser(workspaceId: string): Promise<string | null> {
+    const cached = this.userLoginCache.get(workspaceId);
+    if (cached) return cached;
+    try {
+      const user = await githubService.getUser(workspaceId);
+      this.userLoginCache.set(workspaceId, user.login);
+      return user.login;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Test/admin entry point. Drains any in-flight tick before running a
+   * fresh one, so callers can rely on "after this resolves, every
+   * connected workspace's PRs were just refreshed".
+   */
   async forcePoll(): Promise<void> {
+    while (this.isPolling) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     await this.poll();
+  }
+
+  /**
+   * Drop a cached login — called when a workspace's GitHub OAuth token
+   * is removed (revoked / disconnected). Without this, the next poll
+   * would still try to use the previous user's login as a filter.
+   */
+  invalidateUserLogin(workspaceId: string): void {
+    this.userLoginCache.delete(workspaceId);
   }
 }
 
