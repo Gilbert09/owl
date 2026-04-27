@@ -14,6 +14,7 @@ import { daemonRegistry } from '../services/daemonRegistry.js';
 import { environmentService } from '../services/environment.js';
 import { gitService } from '../services/git.js';
 import * as ai from '../services/ai.js';
+import { drainTaskMetadata } from '../services/taskMetadataMutex.js';
 import { eq } from 'drizzle-orm';
 
 describe('services/gitContext — resolveTaskGitContext', () => {
@@ -401,5 +402,109 @@ describe('services/taskCommitSnapshot — autoCommitAndSnapshot', () => {
       expect(result.error).toContain('daemon dead');
       expect(result.advanceOk).toBe(false);
     }
+  });
+
+  it('persists every git command + the autoCommit + finalFiles fields after a full end-to-end run (regression: gitLog losing entries on restart)', async () => {
+    // The user-reported symptom: "open a completed task after a
+    // restart, the `git commit` entry is missing from metadata.gitLog."
+    //
+    // The other autoCommit tests stub `gitService` methods directly,
+    // so the fire-and-forget `void recordGitCommand(...)` inside
+    // `gitService.runGit` never fires — they validate the result type
+    // but can't reproduce the race.
+    //
+    // This test pokes one layer down: stub `environmentService.run`
+    // (the real RPC surface) and let the real `gitService` code run.
+    // Every git op flows through `runGit`, which fires the same
+    // `void recordGitCommand` calls production hits, racing against
+    // `writeFinalFilesSnapshot` and `persistAutoCommitStatus`. With
+    // the per-task mutex they all serialize; without it, the
+    // commit-step entry vanishes. Asserts the gitLog contains every
+    // expected command in order, AND that autoCommit + finalFiles
+    // both made it through unscathed.
+    const id = await insertTask({});
+    vi.restoreAllMocks();
+    // Re-seed the AI mock that the outer suite installed.
+    vi.spyOn(ai, 'generateCommitMessage').mockResolvedValue('fix: real-run commit');
+
+    // Drive the real `runGit` via a programmatic environmentService.run
+    // stub. Every git command exits 0 except the staged-check (which
+    // exits 1, signalling "there are staged changes" so commitAll
+    // proceeds to actually commit).
+    vi.spyOn(environmentService, 'run').mockImplementation(
+      async (_envId, binary, args) => {
+        const command = `${binary} ${args.join(' ')}`;
+        if (command.includes('rev-parse --abbrev-ref HEAD')) {
+          return { stdout: 'fastowl/abc\n', stderr: '', code: 0 };
+        }
+        if (command.includes('rev-parse HEAD')) {
+          return { stdout: 'newSha1234567890abcdef\n', stderr: '', code: 0 };
+        }
+        if (command.includes('status --porcelain')) {
+          return { stdout: '', stderr: '', code: 0 };
+        }
+        if (command.includes('diff --cached --quiet')) {
+          // Exit 1 = there ARE staged changes; commitAll proceeds.
+          return { stdout: '', stderr: '', code: 1 };
+        }
+        if (command.startsWith('git diff -M --name-status')) {
+          return { stdout: 'A\tsrc/a.ts\n', stderr: '', code: 0 };
+        }
+        if (command.startsWith('git diff -M --numstat')) {
+          return { stdout: '5\t0\tsrc/a.ts\n', stderr: '', code: 0 };
+        }
+        if (command.startsWith('git ls-files --others')) {
+          return { stdout: '', stderr: '', code: 0 };
+        }
+        if (command.startsWith('git rev-list --count')) {
+          return { stdout: '1\n', stderr: '', code: 0 };
+        }
+        // Default: success with empty stdout (covers add, commit, diff,
+        // diff-stat, file-diff, etc).
+        return { stdout: '', stderr: '', code: 0 };
+      }
+    );
+
+    const result = await autoCommitAndSnapshot(id);
+    expect(result).toMatchObject({
+      committed: true,
+      sha: 'newSha1234567890abcdef',
+      advanceOk: true,
+    });
+
+    // Drain the chain — `void recordGitCommand` calls don't block
+    // runGit, so a few may still be in flight when autoCommit returns.
+    await drainTaskMetadata(id);
+
+    const meta = await readMeta(id);
+
+    // The `git commit -F -` entry MUST be in the persisted log. This
+    // is the user's specific complaint — pre-mutex, this entry was
+    // exactly the kind that got eaten by writeFinalFilesSnapshot's
+    // stale-metadata UPDATE.
+    const log = (meta.gitLog as Array<{ command: string }> | undefined) ?? [];
+    const commands = log.map((e) => e.command);
+    expect(commands).toContain('git rev-parse --abbrev-ref HEAD');
+    expect(commands).toContain('git status --porcelain');
+    expect(commands).toContain('git add -A');
+    expect(commands).toContain('git diff --cached --quiet');
+    // `git commit -F -` is rewritten to `git commit -m "<subject>"`
+    // by `formatLoggedCommand` so the audit shows the actual message.
+    expect(
+      commands.some((c) => c.startsWith('git commit -m'))
+    ).toBe(true);
+    expect(commands).toContain('git rev-parse HEAD');
+    // Snapshot diffs from writeFinalFilesSnapshot also land in the log.
+    expect(commands.some((c) => c.startsWith('git diff -M --name-status'))).toBe(true);
+    expect(commands.some((c) => c.startsWith('git diff -M --numstat'))).toBe(true);
+
+    // And the metadata patches that race against gitLog appends — both
+    // survive end-to-end through the same chain.
+    expect(meta.autoCommit).toMatchObject({
+      committed: true,
+      sha: 'newSha1234567890abcdef',
+      advanceOk: true,
+    });
+    expect(Array.isArray(meta.finalFiles)).toBe(true);
   });
 });
