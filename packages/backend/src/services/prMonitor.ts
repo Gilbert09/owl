@@ -8,10 +8,8 @@ import {
 } from '../db/schema.js';
 import { githubService } from './github.js';
 import { batchPullRequests } from './githubGraphql.js';
-import {
-  upsertFromBatchResult,
-  DEFAULT_TTL_MS,
-} from './prCache.js';
+import { upsertFromBatchResult } from './prCache.js';
+import { ttlFor } from './prFocus.js';
 
 interface WatchedRepo {
   id: string;
@@ -28,7 +26,10 @@ interface WatchedRepo {
   defaultBranch: string;
 }
 
-const POLL_INTERVAL_MS = 60_000;
+// Tick at the focused TTL so a focused PR can be re-checked the
+// instant it ages past 30 s. Unfocused PRs hit a 60 s TTL inside
+// `filterStale` so they only get refetched every other tick.
+const POLL_INTERVAL_MS = 30_000;
 
 class PRMonitorService extends EventEmitter {
   private pollTimer: NodeJS.Timeout | null = null;
@@ -265,6 +266,7 @@ class PRMonitorService extends EventEmitter {
     const numbers = prs.map((p) => p.number);
     const rows = await this.db
       .select({
+        id: pullRequestsTable.id,
         number: pullRequestsTable.number,
         lastPolledAt: pullRequestsTable.lastPolledAt,
       })
@@ -275,15 +277,24 @@ class PRMonitorService extends EventEmitter {
           eq(pullRequestsTable.repositoryId, repositoryId)
         )
       );
-    const cached = new Map<number, Date>();
+    // Build (number → { id, lastPolledAt }) so we can ask prFocus
+    // whether each PR is focused/in-cooldown. The id matches the
+    // `pull_requests.id` we hand out in /pull-requests/:id/focus.
+    const cached = new Map<number, { id: string; lastPolledAt: Date }>();
     for (const row of rows) {
-      if (numbers.includes(row.number)) cached.set(row.number, row.lastPolledAt);
+      if (numbers.includes(row.number)) {
+        cached.set(row.number, { id: row.id, lastPolledAt: row.lastPolledAt });
+      }
     }
     const now = Date.now();
     return prs.filter((p) => {
-      const polledAt = cached.get(p.number);
-      if (!polledAt) return true; // never seen; always stale
-      return now - polledAt.getTime() >= DEFAULT_TTL_MS;
+      const entry = cached.get(p.number);
+      if (!entry) return true; // never seen; always stale
+      // Per-PR TTL: focused = 30 s, unfocused = 60 s, cooldown =
+      // effectively infinite. The poll tick fires every 30 s so a
+      // focused PR can refetch the moment it ages out.
+      const ttl = ttlFor(workspaceId, entry.id);
+      return now - entry.lastPolledAt.getTime() >= ttl;
     });
   }
 

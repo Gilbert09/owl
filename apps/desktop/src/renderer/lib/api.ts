@@ -489,8 +489,8 @@ export const pullRequests = {
     ),
   refresh: (id: string) =>
     request<PRRow>('POST', `/pull-requests/${id}/refresh`),
-  focus: (id: string) =>
-    request<null>('POST', `/pull-requests/${id}/focus`),
+  focus: (id: string, focused = true) =>
+    request<null>('POST', `/pull-requests/${id}/focus`, { focused }),
 };
 
 export const repositories = {

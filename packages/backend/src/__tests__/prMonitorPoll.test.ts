@@ -3,6 +3,12 @@ import { eq } from 'drizzle-orm';
 import { prMonitorService } from '../services/prMonitor.js';
 import { githubService } from '../services/github.js';
 import * as graphqlModule from '../services/githubGraphql.js';
+import {
+  setFocused,
+  markRefreshed,
+  _resetPrFocus,
+  PR_FOCUS_CONSTANTS,
+} from '../services/prFocus.js';
 import type { PRSummary } from '../services/githubGraphql.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
@@ -108,6 +114,8 @@ describe('prMonitor — poll orchestration', () => {
     // Drop any cached login from previous tests — the service is a
     // singleton so the cache survives across cases.
     prMonitorService.invalidateUserLogin('ws1');
+    // Same for the focus registry — singletons across tests.
+    _resetPrFocus();
   });
 
   afterEach(async () => {
@@ -352,6 +360,90 @@ describe('prMonitor — poll orchestration', () => {
     const inbox = await db.select().from(inboxItemsTable);
     expect(inbox).toHaveLength(1);
     expect(inbox[0].type).toBe('pr_review');
+  });
+
+  it('focused PRs refetch at 30s; unfocused stay quiet for 60s', async () => {
+    // Seed a row for #1 (focused) and #2 (unfocused), both polled
+    // 45 s ago — focused TTL has expired (30 s) but unfocused (60 s)
+    // hasn't.
+    const polledAt = new Date(Date.now() - 45_000);
+    await db.insert(pullRequestsTable).values([
+      {
+        id: 'pr-focused',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 1,
+        state: 'open',
+        lastPolledAt: polledAt,
+        lastSummary: { headBranch: 'feature/a' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'pr-unfocused',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 2,
+        state: 'open',
+        lastPolledAt: polledAt,
+        lastSummary: { headBranch: 'feature/b' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    setFocused('ws1', 'pr-focused');
+
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+      fakeRESTPullRequest({ number: 2, headRef: 'feature/b', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi
+      .spyOn(graphqlModule, 'batchPullRequests')
+      .mockResolvedValue([
+        { branch: 'feature/a', pr: fakeSummary({ number: 1, headBranch: 'feature/a' }) },
+      ]);
+
+    await prMonitorService.forcePoll();
+
+    // Only the focused PR's branch was batched — unfocused row is
+    // still inside its TTL.
+    expect(graphqlSpy).toHaveBeenCalledTimes(1);
+    expect(graphqlSpy.mock.calls[0][0].branches).toEqual(['feature/a']);
+  });
+
+  it('post-refresh cooldown skips a PR even when its TTL has expired', async () => {
+    const polledAt = new Date(Date.now() - 90_000); // 90 s ago — past every TTL
+    await db.insert(pullRequestsTable).values({
+      id: 'pr-cooldown',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'acme',
+      repo: 'widgets',
+      number: 1,
+      state: 'open',
+      lastPolledAt: polledAt,
+      lastSummary: { headBranch: 'feature/a' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    // User just hit /refresh — cooldown set.
+    markRefreshed('ws1', 'pr-cooldown');
+
+    vi.spyOn(githubService, 'listPullRequests').mockResolvedValue([
+      fakeRESTPullRequest({ number: 1, headRef: 'feature/a', userLogin: 'me' }),
+    ] as never);
+    const graphqlSpy = vi.spyOn(graphqlModule, 'batchPullRequests');
+
+    await prMonitorService.forcePoll();
+    // Cooldown overrode TTL — no GraphQL fetch despite 90 s of staleness.
+    expect(graphqlSpy).not.toHaveBeenCalled();
+
+    // Sanity: COOLDOWN_MS is 5 s; this poll should be inside the window.
+    expect(PR_FOCUS_CONSTANTS.COOLDOWN_MS).toBe(5_000);
   });
 
   it('does not double-fire when forcePoll runs twice with no new state', async () => {

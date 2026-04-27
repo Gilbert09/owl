@@ -4,6 +4,11 @@ import { getDbClient } from '../db/client.js';
 import { pullRequests as pullRequestsTable } from '../db/schema.js';
 import { forceFetchAndUpsert } from '../services/prCache.js';
 import { batchPullRequests } from '../services/githubGraphql.js';
+import {
+  setFocused,
+  clearFocused,
+  markRefreshed,
+} from '../services/prFocus.js';
 import { handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import type { ApiResponse } from '@fastowl/shared';
 
@@ -162,6 +167,9 @@ export function pullRequestRoutes(): Router {
         .status(404)
         .json({ success: false, error: 'PR not found on GitHub or has no head branch in cache' });
     }
+    // Cooldown: the next 5 s of poll-driven refetches skip this PR
+    // so a manual refresh doesn't get stomped by a racing tick.
+    markRefreshed(row.workspaceId, result.rowId);
 
     const fresh = await db
       .select()
@@ -171,10 +179,9 @@ export function pullRequestRoutes(): Router {
     res.json({ success: true, data: rowToPublicShape(fresh[0]) });
   });
 
-  // Focus signal — Phase 6 hooks this up to the adaptive scheduler.
-  // Endpoint exists now so the desktop can start emitting it without
-  // a follow-up release. Body shape: `{ focused: boolean }`. Returns
-  // 204.
+  // Focus signal. Body `{ focused: true }` (default) tightens this
+  // PR's poll TTL to 30 s; `{ focused: false }` reverts to 60 s.
+  // Idempotent — duplicate calls are no-ops.
   router.post('/:id/focus', async (req, res) => {
     const db = getDbClient();
     const rows = await db
@@ -191,8 +198,12 @@ export function pullRequestRoutes(): Router {
     } catch (err) {
       return handleAccessError(err, res);
     }
-    // No-op for now — Phase 6 implements the focus map. Returning 204
-    // keeps the desktop's contract stable.
+    const focused = (req.body as { focused?: boolean } | undefined)?.focused !== false;
+    if (focused) {
+      setFocused(row.workspaceId, req.params.id);
+    } else {
+      clearFocused(row.workspaceId, req.params.id);
+    }
     res.status(204).send();
   });
 

@@ -1241,6 +1241,16 @@ function PRStatusPillForTask({
     return unsubscribe;
   }, [pullRequestId]);
 
+  // Mark this PR focused while the task is on screen — backend
+  // tightens TTL to 30 s so the pill reflects upstream changes
+  // quickly. Cleared on unmount (task switch / panel close).
+  useEffect(() => {
+    api.pullRequests.focus(pullRequestId, true).catch(() => {});
+    return () => {
+      api.pullRequests.focus(pullRequestId, false).catch(() => {});
+    };
+  }, [pullRequestId]);
+
   if (!summary) return null;
   return (
     <PRStatusPill

@@ -89,6 +89,17 @@ export function PRDetailSheet({ pullRequestId, onClose }: PRDetailSheetProps) {
     return unsubscribe;
   }, [pullRequestId]);
 
+  // Adaptive polling: while this sheet is open the PR is "focused"
+  // and the backend tightens its TTL to 30 s. Cleared on close /
+  // unmount so unrelated PRs return to the normal cadence.
+  useEffect(() => {
+    if (!pullRequestId) return;
+    api.pullRequests.focus(pullRequestId, true).catch(() => {});
+    return () => {
+      api.pullRequests.focus(pullRequestId, false).catch(() => {});
+    };
+  }, [pullRequestId]);
+
   async function handleRefresh(): Promise<void> {
     if (!pullRequestId) return;
     setRefreshing(true);
