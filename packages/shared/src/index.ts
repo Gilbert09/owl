@@ -340,8 +340,9 @@ export type InboxItemType =
   | 'agent_completed'
   | 'agent_error'
   | 'pr_review'
-  | 'pr_ci_failure'
-  | 'pr_ready_to_merge'
+  | 'pr_comment'
+  | 'ci_failure'
+  | 'pr_ready'
   | 'slack_mention'
   | 'posthog_alert'
   | 'custom';

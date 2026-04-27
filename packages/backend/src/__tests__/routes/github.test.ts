@@ -297,72 +297,11 @@ describe('routes/github', () => {
     });
   });
 
-  describe('POST /api/v1/github/repos/:owner/:repo/pulls', () => {
-    it('forwards to createPullRequest with the body', async () => {
-      const spy = vi.spyOn(githubService, 'createPullRequest').mockResolvedValue({
-        id: 1, number: 42, title: 'feat', state: 'open', html_url: 'x',
-        user: { login: 'me', avatar_url: 'a' },
-        created_at: 'now', updated_at: 'now', draft: false,
-        mergeable: true, mergeable_state: 'clean',
-        head: { ref: 'fastowl/x', sha: 's' }, base: { ref: 'main' },
-      });
-
-      const res = await fetch(
-        `${serverUrl}/api/v1/github/repos/acme/widgets/pulls`,
-        {
-          method: 'POST',
-          headers: authHeaders,
-          body: JSON.stringify({
-            workspaceId: 'ws1',
-            title: 't',
-            head: 'fastowl/x',
-            base: 'main',
-          }),
-        }
-      );
-      expect(res.status).toBe(200);
-      expect(spy).toHaveBeenCalledWith('ws1', 'acme', 'widgets', expect.objectContaining({
-        title: 't', head: 'fastowl/x', base: 'main',
-      }));
-    });
-
-    it('404s a cross-tenant workspace', async () => {
-      const res = await fetch(
-        `${serverUrl}/api/v1/github/repos/acme/widgets/pulls`,
-        {
-          method: 'POST',
-          headers: authHeaders,
-          body: JSON.stringify({
-            workspaceId: 'ws2',
-            title: 't',
-            head: 'x',
-            base: 'main',
-          }),
-        }
-      );
-      expect(res.status).toBe(404);
-    });
-  });
-
-  describe('PUT /api/v1/github/repos/:owner/:repo/pulls/:number/merge', () => {
-    it('delegates to mergePullRequest', async () => {
-      const spy = vi.spyOn(githubService, 'mergePullRequest').mockResolvedValue({
-        sha: 'abcdef', merged: true, message: 'ok',
-      });
-      const res = await fetch(
-        `${serverUrl}/api/v1/github/repos/acme/widgets/pulls/42/merge`,
-        {
-          method: 'PUT',
-          headers: authHeaders,
-          body: JSON.stringify({ workspaceId: 'ws1', merge_method: 'squash' }),
-        }
-      );
-      expect(res.status).toBe(200);
-      expect(spy).toHaveBeenCalledWith('ws1', 'acme', 'widgets', 42, expect.objectContaining({
-        merge_method: 'squash',
-      }));
-    });
-  });
+  // The PR-management routes (list / get / create / merge /
+  // review / comment) were dropped in Phase 7. Those tests went
+  // with them. Coverage for createPullRequest still lives in
+  // githubService.test.ts since the service is invoked directly
+  // from openPullRequestForTask.
 
   describe('GET /api/v1/github/repos/:owner/:repo/branches', () => {
     it('delegates to listBranches', async () => {
