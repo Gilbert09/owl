@@ -378,6 +378,121 @@ export interface WatchedRepo {
   defaultBranch: string;
 }
 
+// PullRequests — read-only client for the Phase 1-3 backend surface.
+export type PRBlockingReason =
+  | 'mergeable'
+  | 'merge_conflicts'
+  | 'changes_requested'
+  | 'checks_failed'
+  | 'blocked'
+  | 'unknown';
+
+export type PRMergeable = 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN';
+export type PRReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
+export type PRState = 'open' | 'closed' | 'merged';
+
+export interface PRChecks {
+  total: number;
+  passed: number;
+  failed: number;
+  inProgress: number;
+  skipped: number;
+}
+
+/**
+ * The persisted lastSummary jsonb from `pull_requests`. Same shape the
+ * backend's `summaryToJsonb` writes — minimal columns for instant
+ * render without a round-trip.
+ */
+export interface PRSummaryShape {
+  title: string;
+  author: string;
+  draft: boolean;
+  headBranch: string;
+  baseBranch: string;
+  headSha: string;
+  updatedAt: string;
+  url: string;
+  mergeable: PRMergeable;
+  mergeStateStatus: string;
+  reviewDecision: PRReviewDecision;
+  blockingReason: PRBlockingReason;
+  checks: PRChecks;
+}
+
+export interface PRRow {
+  id: string;
+  workspaceId: string;
+  repositoryId: string;
+  taskId: string | null;
+  owner: string;
+  repo: string;
+  number: number;
+  state: PRState;
+  mergedAt: string | null;
+  lastPolledAt: string;
+  summary: PRSummaryShape;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Always-fresh GraphQL detail returned alongside the persisted row by
+ * GET /pull-requests/:id. recentReviews/comments are limited to the
+ * last 5 each — the Reviews tab paginates further on demand.
+ */
+export interface PRFreshDetail {
+  recentReviews: Array<{
+    id: string;
+    author: string;
+    state: string;
+    submittedAt: string | null;
+    url: string;
+  }>;
+  recentReviewComments: Array<{
+    id: string;
+    author: string;
+    createdAt: string;
+    url: string;
+  }>;
+  recentComments: Array<{
+    id: string;
+    author: string;
+    createdAt: string;
+    url: string;
+  }>;
+  // The fresh fetch returns the full PRSummary shape — include the
+  // body for the Overview tab.
+  body: string;
+}
+
+export const pullRequests = {
+  list: (params: {
+    workspaceId: string;
+    state?: 'open' | 'closed' | 'merged' | 'all';
+    repo?: string;
+    taskOnly?: boolean;
+    search?: string;
+  }) => {
+    const query = new URLSearchParams();
+    query.set('workspaceId', params.workspaceId);
+    if (params.state) query.set('state', params.state);
+    if (params.repo) query.set('repo', params.repo);
+    if (params.taskOnly) query.set('taskOnly', 'true');
+    if (params.search) query.set('search', params.search);
+    return request<PRRow[]>('GET', `/pull-requests?${query.toString()}`);
+  },
+  get: (id: string) =>
+    request<{ row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null }>(
+      'GET',
+      `/pull-requests/${id}`
+    ),
+  refresh: (id: string) =>
+    request<PRRow>('POST', `/pull-requests/${id}/refresh`),
+  focus: (id: string) =>
+    request<null>('POST', `/pull-requests/${id}/focus`),
+};
+
 export const repositories = {
   list: (workspaceId: string) =>
     request<WatchedRepo[]>('GET', `/repositories?workspaceId=${workspaceId}`),
@@ -588,6 +703,7 @@ export const api = {
   inbox,
   github,
   repositories,
+  pullRequests,
   backlog,
   ws: wsClient,
 };

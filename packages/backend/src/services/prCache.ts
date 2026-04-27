@@ -109,6 +109,82 @@ export async function getOrFetchPRSummary(opts: {
 }
 
 /**
+ * Insert a minimal pull_requests row for a freshly-opened task PR
+ * before the next poll has a chance to upsert it. Sets task_id so
+ * the task screen pill can render off the row, and so prMonitor
+ * (which preserves existing task_id) doesn't strip the linkage on
+ * its first refresh.
+ *
+ * Race-safe against a concurrent monitor tick that beats us to the
+ * insert: if (workspace, repo, number) already exists we UPDATE
+ * task_id on that row instead of inserting. Returns the row id.
+ *
+ * Summary fields are placeholders ('UNKNOWN' / zeroed checks) — the
+ * first prMonitor refresh fills in real data within seconds.
+ */
+export async function linkTaskToPullRequest(opts: {
+  workspaceId: string;
+  repositoryId: string;
+  taskId: string;
+  owner: string;
+  repo: string;
+  number: number;
+  url: string;
+  title: string;
+  author: string;
+  headBranch: string;
+  baseBranch: string;
+  headSha: string;
+}): Promise<string> {
+  const db = getDbClient();
+  const now = new Date();
+  const placeholderSummary = {
+    title: opts.title,
+    author: opts.author,
+    draft: false,
+    headBranch: opts.headBranch,
+    baseBranch: opts.baseBranch,
+    headSha: opts.headSha,
+    updatedAt: now.toISOString(),
+    url: opts.url,
+    mergeable: 'UNKNOWN' as const,
+    mergeStateStatus: 'UNKNOWN',
+    reviewDecision: null,
+    blockingReason: 'unknown' as const,
+    checks: { total: 0, passed: 0, failed: 0, inProgress: 0, skipped: 0 },
+  };
+  const existing = await readRow(db, opts.workspaceId, opts.repositoryId, opts.number);
+  if (existing) {
+    // Beat to the insert by the monitor — patch task_id in place,
+    // leaving the cached summary alone (it's freshest from GraphQL
+    // anyway).
+    if (!existing.taskId) {
+      await db
+        .update(pullRequestsTable)
+        .set({ taskId: opts.taskId, updatedAt: now })
+        .where(eq(pullRequestsTable.id, existing.id));
+    }
+    return existing.id;
+  }
+  const id = uuid();
+  await db.insert(pullRequestsTable).values({
+    id,
+    workspaceId: opts.workspaceId,
+    repositoryId: opts.repositoryId,
+    taskId: opts.taskId,
+    owner: opts.owner,
+    repo: opts.repo,
+    number: opts.number,
+    state: 'open',
+    lastPolledAt: now,
+    lastSummary: placeholderSummary,
+    createdAt: now,
+    updatedAt: now,
+  });
+  return id;
+}
+
+/**
  * Force-fetch a single PR and upsert it. Used by the focused-poll
  * path and the `/refresh` endpoint. Always hits GraphQL.
  */

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ListTodo,
   Plus,
@@ -35,6 +35,9 @@ import { TerminalHistory } from './TerminalHistory';
 import { TaskFilesPanel } from './TaskFilesPanel';
 import { TaskGitPanel } from './TaskGitPanel';
 import { useTaskGitLog } from '../../hooks/useTaskGitLog';
+import { PRStatusPill } from '../widgets/PRStatusPill';
+import { PRDetailSheet } from '../widgets/PRDetailSheet';
+import type { PRSummaryShape } from '../../lib/api';
 import { isAgentTask } from '@fastowl/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority, AgentStatus, AgentAttention } from '@fastowl/shared';
 
@@ -530,6 +533,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
   };
 
   const [activeTab, setActiveTab] = useState<'terminal' | 'files' | 'git'>('terminal');
+  // PR detail side-sheet — opened by clicking the PR status pill on
+  // the task header. Phase 4 ships the skeleton; Phase 5 fleshes the
+  // tabs out. Stays mounted at the TaskDetail root so it survives
+  // tab switches.
+  const [prSheetId, setPRSheetId] = useState<string | null>(null);
   const [retryingPr, setRetryingPr] = useState(false);
 
   const handleRetryPr = async () => {
@@ -803,19 +811,31 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 Unqueue
               </Button>
             )}
-            {task.status === 'completed' && (() => {
-              const pr = (task.metadata as { pullRequest?: { number: number; url: string } } | undefined)
-                ?.pullRequest;
+            {(() => {
+              // Show the PR pill + open-on-GitHub button on any task
+              // that has a PR linked (typically `completed` or
+              // `awaiting_review` after the approve flow opened one).
+              const pr = (task.metadata as
+                | { pullRequest?: { number: number; url: string; id?: string } }
+                | undefined)?.pullRequest;
               if (!pr) return null;
               return (
-                <Button
-                  size="sm"
-                  onClick={() => window.open(pr.url, '_blank', 'noopener,noreferrer')}
-                  title={pr.url}
-                >
-                  <GitPullRequest className="w-4 h-4 mr-1" />
-                  View PR #{pr.number}
-                </Button>
+                <>
+                  {pr.id && (
+                    <PRStatusPillForTask
+                      pullRequestId={pr.id}
+                      onOpen={() => setPRSheetId(pr.id ?? null)}
+                    />
+                  )}
+                  <Button
+                    size="sm"
+                    onClick={() => window.open(pr.url, '_blank', 'noopener,noreferrer')}
+                    title={pr.url}
+                  >
+                    <GitPullRequest className="w-4 h-4 mr-1" />
+                    View PR #{pr.number}
+                  </Button>
+                </>
               );
             })()}
             {task.status === 'failed' && (
@@ -1175,7 +1195,59 @@ function TaskDetail({ taskId }: TaskDetailProps) {
           </div>
         )}
       </div>
+      <PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} />
     </>
+  );
+}
+
+/**
+ * Wraps PRStatusPill with a fetch + WS subscription so the task header
+ * always shows the current state of the linked PR. Renders nothing
+ * (silently) until the first fetch resolves — pre-render placeholder
+ * would jitter the header layout for a fraction of a second.
+ */
+function PRStatusPillForTask({
+  pullRequestId,
+  onOpen,
+}: {
+  pullRequestId: string;
+  onOpen: () => void;
+}) {
+  const [summary, setSummary] = useState<PRSummaryShape | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.pullRequests
+      .get(pullRequestId)
+      .then((res) => {
+        if (cancelled) return;
+        setSummary(res.row.summary);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pullRequestId]);
+
+  useEffect(() => {
+    const unsubscribe = api.ws.on('pull_request:updated', (payload) => {
+      const p = payload as { id: string; lastSummary: unknown };
+      if (p.id !== pullRequestId) return;
+      setSummary(p.lastSummary as PRSummaryShape);
+    });
+    return unsubscribe;
+  }, [pullRequestId]);
+
+  if (!summary) return null;
+  return (
+    <PRStatusPill
+      blockingReason={summary.blockingReason}
+      checks={summary.checks}
+      onClick={onOpen}
+    />
   );
 }
 

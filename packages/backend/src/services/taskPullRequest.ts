@@ -9,6 +9,7 @@ import { gitService } from './git.js';
 import { githubService } from './github.js';
 import { generatePullRequestContent } from './ai.js';
 import { patchTaskMetadata } from './taskMetadataMutex.js';
+import { linkTaskToPullRequest } from './prCache.js';
 
 /**
  * Fire-and-forget: open a GitHub pull request for a just-pushed task
@@ -97,6 +98,24 @@ export async function openPullRequestForTask(taskId: string): Promise<void> {
           body: body || stampFastowlFooter(task.id),
         }
       );
+      // Seed the pull_requests row with task_id so the task screen pill
+      // can render off it immediately (the next prMonitor tick fills
+      // in real merge/check state). Race-safe against a monitor tick
+      // beating us to the insert.
+      const pullRequestRowId = await linkTaskToPullRequest({
+        workspaceId: task.workspaceId,
+        repositoryId: task.repositoryId!,
+        taskId: task.id,
+        owner: parsed.owner,
+        repo: parsed.repo,
+        number: pr.number,
+        url: pr.html_url,
+        title,
+        author: pr.user.login,
+        headBranch: task.branch,
+        baseBranch,
+        headSha: pr.head.sha,
+      });
       // Patch through the mutex so a concurrent gitLog append from
       // the surrounding approve flow doesn't clobber pullRequest,
       // and so finalFiles written elsewhere isn't lost.
@@ -104,6 +123,7 @@ export async function openPullRequestForTask(taskId: string): Promise<void> {
         const next = {
           ...existing,
           pullRequest: {
+            id: pullRequestRowId,
             number: pr.number,
             url: pr.html_url,
             createdAt: new Date().toISOString(),

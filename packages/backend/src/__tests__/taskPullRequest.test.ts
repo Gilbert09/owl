@@ -160,6 +160,8 @@ describe('openPullRequestForTask', () => {
     vi.spyOn(githubService, 'createPullRequest').mockResolvedValue({
       number: 42,
       html_url: 'https://github.com/acme/widgets/pull/42',
+      user: { login: 'me' },
+      head: { ref: 'fastowl/abc-login', sha: 'sha-x' },
     } as Awaited<ReturnType<typeof githubService.createPullRequest>>);
 
     await openPullRequestForTask(id);
@@ -179,9 +181,12 @@ describe('openPullRequestForTask', () => {
     const id = await insertTask(db, { branch: 'fastowl/abc-login' });
     const createPr = vi
       .spyOn(githubService, 'createPullRequest')
-      .mockResolvedValue({ number: 7, html_url: 'x' } as Awaited<
-        ReturnType<typeof githubService.createPullRequest>
-      >);
+      .mockResolvedValue({
+        number: 7,
+        html_url: 'x',
+        user: { login: 'me' },
+        head: { ref: 'fastowl/abc-login', sha: 'sha-x' },
+      } as Awaited<ReturnType<typeof githubService.createPullRequest>>);
 
     await openPullRequestForTask(id);
 
@@ -220,6 +225,8 @@ describe('openPullRequestForTask', () => {
     vi.spyOn(githubService, 'createPullRequest').mockResolvedValue({
       number: 13,
       html_url: 'https://github.com/acme/widgets/pull/13',
+      user: { login: 'me' },
+      head: { ref: 'fastowl/abc-login', sha: 'sha-x' },
     } as Awaited<ReturnType<typeof githubService.createPullRequest>>);
 
     await openPullRequestForTask(id);
@@ -237,6 +244,8 @@ describe('openPullRequestForTask', () => {
     vi.spyOn(githubService, 'createPullRequest').mockResolvedValue({
       number: 5,
       html_url: 'x',
+      user: { login: 'me' },
+      head: { ref: 'fastowl/abc-login', sha: 'sha-x' },
     } as Awaited<ReturnType<typeof githubService.createPullRequest>>);
 
     const runSpy = vi.spyOn(environmentService, 'run').mockImplementation(

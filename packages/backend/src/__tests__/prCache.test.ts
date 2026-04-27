@@ -5,6 +5,7 @@ import {
   upsertFromBatchResult,
   forceFetchAndUpsert,
   getOrFetchPRSummary,
+  linkTaskToPullRequest,
   DEFAULT_TTL_MS,
   type CursorState,
 } from '../services/prCache.js';
@@ -17,6 +18,7 @@ import {
   repositories as repositoriesTable,
   pullRequests as pullRequestsTable,
   inboxItems as inboxItemsTable,
+  tasks as tasksTable,
 } from '../db/schema.js';
 import * as websocketModule from '../services/websocket.js';
 
@@ -470,6 +472,123 @@ describe('prCache — DB integration', () => {
     expect(
       (spy.mock.calls[1][1].lastSummary as { title: string }).title
     ).toBe('Renamed');
+  });
+
+  describe('linkTaskToPullRequest', () => {
+    async function seedTask(): Promise<string> {
+      const id = `task-${Math.random().toString(36).slice(2, 8)}`;
+      await db.insert(tasksTable).values({
+        id,
+        workspaceId: 'ws1',
+        type: 'code_writing',
+        status: 'awaiting_review',
+        priority: 'medium',
+        title: 't',
+        description: 'd',
+      });
+      return id;
+    }
+
+    it('inserts a placeholder row with task_id when no row exists yet', async () => {
+      const taskId = await seedTask();
+      const id = await linkTaskToPullRequest({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        taskId,
+        owner: 'acme',
+        repo: 'widgets',
+        number: 99,
+        url: 'https://github.com/acme/widgets/pull/99',
+        title: 'Add login',
+        author: 'me',
+        headBranch: 'fastowl/abc-add-login',
+        baseBranch: 'main',
+        headSha: 'sha-x',
+      });
+      const rows = await db.select().from(pullRequestsTable);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(id);
+      expect(rows[0].taskId).toBe(taskId);
+      expect(rows[0].number).toBe(99);
+      expect((rows[0].lastSummary as { headBranch: string }).headBranch).toBe(
+        'fastowl/abc-add-login'
+      );
+      // Placeholder fields default to UNKNOWN — the next prMonitor
+      // tick fills in real values.
+      expect((rows[0].lastSummary as { mergeable: string }).mergeable).toBe('UNKNOWN');
+    });
+
+    it('patches task_id on an existing row when the monitor beat us to the insert', async () => {
+      // Simulate the race: a prMonitor tick inserts a row first.
+      await upsertFromBatchResult({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        summary: makeSummary({ number: 99 }),
+      });
+      const beforeRows = await db.select().from(pullRequestsTable);
+      expect(beforeRows[0].taskId).toBeNull();
+
+      // Now the approve flow tries to link the task.
+      const taskId = await seedTask();
+      const id = await linkTaskToPullRequest({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        taskId,
+        owner: 'acme',
+        repo: 'widgets',
+        number: 99,
+        url: 'https://github.com/acme/widgets/pull/99',
+        title: 'Add login',
+        author: 'me',
+        headBranch: 'feature/x',
+        baseBranch: 'main',
+        headSha: 'sha1',
+      });
+
+      const rows = await db.select().from(pullRequestsTable);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(id);
+      expect(rows[0].taskId).toBe(taskId);
+      // The cached summary stays as-is — the monitor's GraphQL data is
+      // freshest, we don't overwrite it with the placeholder.
+      expect((rows[0].lastSummary as { mergeable: string }).mergeable).toBe('MERGEABLE');
+    });
+
+    it('does NOT overwrite an existing task_id (linkage stays sticky once set)', async () => {
+      const taskA = await seedTask();
+      await linkTaskToPullRequest({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        taskId: taskA,
+        owner: 'acme',
+        repo: 'widgets',
+        number: 99,
+        url: 'https://github.com/acme/widgets/pull/99',
+        title: 'a',
+        author: 'me',
+        headBranch: 'feature/x',
+        baseBranch: 'main',
+        headSha: 'sha1',
+      });
+      // A second link with a different taskId is a no-op on task_id.
+      const taskB = await seedTask();
+      await linkTaskToPullRequest({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        taskId: taskB,
+        owner: 'acme',
+        repo: 'widgets',
+        number: 99,
+        url: 'https://github.com/acme/widgets/pull/99',
+        title: 'b',
+        author: 'me',
+        headBranch: 'feature/x',
+        baseBranch: 'main',
+        headSha: 'sha1',
+      });
+      const rows = await db.select().from(pullRequestsTable);
+      expect(rows[0].taskId).toBe(taskA);
+    });
   });
 
   it('cursors persist on disk so deltas keep working across simulated restart', async () => {
