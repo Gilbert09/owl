@@ -32,9 +32,56 @@ describe('Drizzle migration', () => {
       'settings',
       'backlog_sources',
       'backlog_items',
+      'pull_requests',
     ]) {
       expect(tables).toContain(expected);
     }
+  });
+
+  it('pull_requests has the expected columns + (workspace, repo, number) is unique', async () => {
+    const testDb = await createTestDb();
+    cleanup = testDb.cleanup;
+
+    const colsRes = await testDb.pglite.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'pull_requests'
+    `);
+    const cols = colsRes.rows.map((r) => r.column_name);
+    for (const c of [
+      'id',
+      'workspace_id',
+      'repository_id',
+      'task_id',
+      'owner',
+      'repo',
+      'number',
+      'state',
+      'merged_at',
+      'last_polled_at',
+      'last_summary',
+      'last_review_id',
+      'last_review_comment_id',
+      'last_comment_id',
+      'last_check_digest',
+    ]) {
+      expect(cols).toContain(c);
+    }
+
+    // Unique constraint on (workspace_id, repository_id, number) is the
+    // upsert key the poller relies on. Without it, the same PR seen
+    // twice in one tick would double-insert.
+    const idxRes = await testDb.pglite.query<{ indexname: string; indexdef: string }>(`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'pull_requests'
+    `);
+    const uq = idxRes.rows.find(
+      (r) => r.indexname === 'uq_pull_requests_workspace_repo_number'
+    );
+    expect(uq).toBeDefined();
+    expect(uq?.indexdef).toMatch(/UNIQUE/);
+    expect(uq?.indexdef).toMatch(/workspace_id/);
+    expect(uq?.indexdef).toMatch(/repository_id/);
+    expect(uq?.indexdef).toMatch(/number/);
   });
 
   it('workspaces and environments have owner_id columns', async () => {
@@ -100,6 +147,7 @@ describe('Drizzle migration', () => {
       'inbox_items',
       'backlog_sources',
       'backlog_items',
+      'pull_requests',
     ]) {
       expect(map.get(table)).toBe(true);
     }

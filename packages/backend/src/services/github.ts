@@ -576,6 +576,56 @@ class GitHubService extends EventEmitter {
   }>> {
     return this.apiRequest(workspaceId, `/repos/${owner}/${repo}/pulls/${number}/files`);
   }
+
+  /**
+   * Fire a GraphQL query against the v4 endpoint with the workspace's
+   * stored OAuth token. Used by the batched PR + checks fetcher in
+   * `services/githubGraphql.ts` — one query pulls a PR's reviews,
+   * statusCheckRollup, mergeable, and reviewDecision in one round-trip
+   * where REST would need 4–6.
+   *
+   * Throws if the workspace has no token (caller should surface
+   * "connect GitHub" UX). 401 → token revoked, dropped from the cache
+   * and a clear error thrown.
+   */
+  async executeGraphql<T>(
+    workspaceId: string,
+    query: string,
+    variables: Record<string, unknown> = {}
+  ): Promise<T> {
+    const token = this.tokens.get(workspaceId);
+    if (!token) {
+      throw new Error('GitHub not connected for this workspace');
+    }
+    const response = await fetch(`${GITHUB_API_URL}/graphql`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `${token.tokenType} ${token.accessToken}`,
+        'Content-Type': 'application/json',
+        'User-Agent': 'FastOwl',
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (!response.ok) {
+      if (response.status === 401) {
+        await this.removeToken(workspaceId);
+        throw new Error('GitHub token expired or revoked');
+      }
+      throw new Error(`GitHub GraphQL error: ${response.statusText}`);
+    }
+    const payload = (await response.json()) as { data?: T; errors?: Array<{ message: string }> };
+    if (payload.errors && payload.errors.length > 0) {
+      // Surface the first GraphQL error verbatim — callers want to see
+      // "Resource not accessible" or "Could not resolve to a Repository"
+      // rather than a generic 200-but-failed.
+      throw new Error(`GitHub GraphQL: ${payload.errors[0].message}`);
+    }
+    if (!payload.data) {
+      throw new Error('GitHub GraphQL response missing data');
+    }
+    return payload.data;
+  }
 }
 
 export const githubService = new GitHubService();

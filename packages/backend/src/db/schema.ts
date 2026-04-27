@@ -365,3 +365,99 @@ export const backlogItems = pgTable(
     claimedIdx: index('idx_backlog_items_claimed').on(t.claimedTaskId),
   })
 );
+
+// ---------- Pull requests (DB-as-cache) ----------
+
+/**
+ * One row per user-authored open PR in a watched repo, plus any PR ever
+ * opened by a task (kept after merge/close for filtering).
+ *
+ * This is a CACHE, not a source of truth — `last_polled_at` drives a
+ * TTL the prCache layer enforces. Fresh row → return it; stale → fetch
+ * from GitHub via the batched GraphQL helper, upsert, return.
+ *
+ * Only minimal fields are persisted. Per-check rows, file lists, and
+ * raw GraphQL payloads are NOT stored — the detail-view tabs always
+ * fetch fresh on open. Keeps row size bounded (~2 KB) and avoids an
+ * "out of date forever" failure mode if the polling loop ever stalls.
+ *
+ * Event-cursor columns (`last_review_id`, etc.) survive backend restart
+ * so review/comment/CI deltas don't false-fire after every deploy —
+ * the in-memory state map the old prMonitor used baseline-reset on
+ * boot, which is how a restart could lose unread events.
+ */
+export const pullRequests = pgTable(
+  'pull_requests',
+  {
+    id: text('id').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    repositoryId: text('repository_id')
+      .notNull()
+      .references(() => repositories.id, { onDelete: 'cascade' }),
+    /**
+     * Set when this PR was opened by a FastOwl task. Lets the task
+     * screen pill render off this row, and lets the user filter
+     * "merged PRs from my old tasks" on the GitHub page.
+     */
+    taskId: text('task_id').references(() => tasks.id, {
+      onDelete: 'set null',
+    }),
+    owner: text('owner').notNull(),
+    repo: text('repo').notNull(),
+    number: integer('number').notNull(),
+    state: text('state').notNull(), // 'open' | 'closed' | 'merged'
+    mergedAt: timestamp('merged_at', { withTimezone: true }),
+    /**
+     * Drives the TTL: prCache returns this row if `last_polled_at` is
+     * within the focused (30s) or unfocused (60s) window. Bumped on
+     * every successful poll, regardless of whether anything changed.
+     */
+    lastPolledAt: timestamp('last_polled_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * Lightweight summary for instant rendering on the GitHub page +
+     * task pill. Shape:
+     *   {
+     *     title, author, draft,
+     *     headBranch, baseBranch, headSha, updatedAt,
+     *     mergeable, mergeStateStatus, reviewDecision,
+     *     blockingReason: 'mergeable' | 'merge_conflicts'
+     *                   | 'changes_requested' | 'checks_failed'
+     *                   | 'blocked' | 'unknown',
+     *     checksTotal, checksPassed, checksFailed,
+     *     checksInProgress, checksSkipped
+     *   }
+     */
+    lastSummary: jsonb('last_summary').notNull().default({}),
+    // Event cursors — NULL until the first poll has populated them.
+    lastReviewId: text('last_review_id'),
+    lastReviewCommentId: text('last_review_comment_id'),
+    lastCommentId: text('last_comment_id'),
+    /**
+     * Hash of `head_sha + sorted check states` — bumps whenever a
+     * push lands or any check transitions. Cheaper than diffing the
+     * whole rollup payload.
+     */
+    lastCheckDigest: text('last_check_digest'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    // One row per (workspace, repo, number). Upsert key for the
+    // poller — same PR seen twice in one tick must not double-insert.
+    workspaceRepoNumberUq: uniqueIndex('uq_pull_requests_workspace_repo_number').on(
+      t.workspaceId,
+      t.repositoryId,
+      t.number
+    ),
+    workspaceIdx: index('idx_pull_requests_workspace').on(t.workspaceId),
+    repositoryIdx: index('idx_pull_requests_repository').on(t.repositoryId),
+    taskIdx: index('idx_pull_requests_task').on(t.taskId),
+    // Drives the scheduler's "fetch the stalest PR first" policy.
+    stateLastPolledIdx: index('idx_pull_requests_state_last_polled').on(
+      t.state,
+      t.lastPolledAt
+    ),
+  })
+);
