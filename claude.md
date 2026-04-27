@@ -24,6 +24,7 @@ After completing each task: stage relevant files, commit with a descriptive mess
 - **[`docs/SETUP.md`](./docs/SETUP.md)** — env vars / account setup
 - **[`docs/TESTING.md`](./docs/TESTING.md)** — testing strategy + coverage
 - **[`docs/AUTONOMOUS_BUILD.md`](./docs/AUTONOMOUS_BUILD.md)** — design doc for self-building loops
+- **[`docs/SUPACODE_COMPARISON.md`](./docs/SUPACODE_COMPARISON.md)** — internals comparison vs supabitapp/supacode (worktrees, gh-CLI auth, batched GraphQL, adaptive polling)
 
 When a session lands non-trivial work, append a note to `docs/SESSIONS.md`. When a phase item changes status, update `docs/ROADMAP.md`. When a decision is revisited, update `docs/ARCHITECTURE.md`.
 
