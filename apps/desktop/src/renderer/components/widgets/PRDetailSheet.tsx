@@ -1,5 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { ExternalLink, RefreshCw, X, Loader2 } from 'lucide-react';
+import {
+  ExternalLink,
+  RefreshCw,
+  X,
+  Loader2,
+  FileText,
+  CheckCircle2,
+  MessageSquare,
+  Layers,
+} from 'lucide-react';
 import { Button } from '../ui/button';
 import { ScrollArea } from '../ui/scroll-area';
 import { cn } from '../../lib/utils';
@@ -162,23 +171,314 @@ export function PRDetailSheet({ pullRequestId, onClose }: PRDetailSheetProps) {
         </div>
       </header>
 
+      {data && <DetailTabs data={data} error={error} />}
+    </div>
+  );
+}
+
+type TabKey = 'overview' | 'files' | 'checks' | 'reviews';
+
+function DetailTabs({
+  data,
+  error,
+}: {
+  data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
+  error: string | null;
+}) {
+  const [tab, setTab] = useState<TabKey>('overview');
+
+  return (
+    <>
+      <nav className="flex shrink-0 border-b text-xs">
+        <TabButton
+          active={tab === 'overview'}
+          onClick={() => setTab('overview')}
+          icon={<Layers className="h-3.5 w-3.5" />}
+        >
+          Overview
+        </TabButton>
+        <TabButton
+          active={tab === 'checks'}
+          onClick={() => setTab('checks')}
+          icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+          badge={
+            data.row.summary.checks.total > 0
+              ? `${data.row.summary.checks.passed}/${data.row.summary.checks.total}`
+              : undefined
+          }
+        >
+          Checks
+        </TabButton>
+        <TabButton
+          active={tab === 'reviews'}
+          onClick={() => setTab('reviews')}
+          icon={<MessageSquare className="h-3.5 w-3.5" />}
+          badge={
+            data.fresh?.recentReviews.length
+              ? String(data.fresh.recentReviews.length)
+              : undefined
+          }
+        >
+          Reviews
+        </TabButton>
+        <TabButton
+          active={tab === 'files'}
+          onClick={() => setTab('files')}
+          icon={<FileText className="h-3.5 w-3.5" />}
+        >
+          Files
+        </TabButton>
+      </nav>
+
       <ScrollArea className="flex-1">
         <div className="p-4">
           {error && (
-            <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-700 dark:text-red-400">
+            <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-700 dark:text-red-400">
               {error}
             </div>
           )}
-          {data?.fresh && (
-            <SkeletonBody fresh={data.fresh} />
-          )}
-          {data && !data.fresh && (
-            <p className="text-xs text-muted-foreground">
+          {!data.fresh && (
+            <p className="mb-4 text-xs text-muted-foreground">
               Detail fetch unavailable (env offline?). Showing cached state only.
             </p>
           )}
+          {tab === 'overview' && <OverviewTab data={data} />}
+          {tab === 'checks' && <ChecksTab data={data} />}
+          {tab === 'reviews' && <ReviewsTab data={data} />}
+          {tab === 'files' && <FilesTab data={data} />}
         </div>
       </ScrollArea>
+    </>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  icon,
+  children,
+  badge,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  badge?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        '-mb-[1px] flex items-center gap-1.5 border-b-2 px-3 py-2 transition-colors',
+        active
+          ? 'border-primary text-foreground'
+          : 'border-transparent text-muted-foreground hover:text-foreground'
+      )}
+    >
+      {icon}
+      <span>{children}</span>
+      {badge !== undefined && (
+        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+          {badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function OverviewTab({
+  data,
+}: {
+  data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
+}) {
+  const body = data.fresh?.body ?? '';
+  return (
+    <div className="space-y-4 text-sm">
+      {body ? (
+        <section>
+          <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Description
+          </h3>
+          <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">
+            {body}
+          </pre>
+        </section>
+      ) : (
+        <p className="text-xs text-muted-foreground">No description provided.</p>
+      )}
+      <section>
+        <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          Status
+        </h3>
+        <ul className="space-y-1 text-xs">
+          <li>
+            <span className="text-muted-foreground">Mergeable:</span>{' '}
+            {data.row.summary.mergeable.toLowerCase()}
+          </li>
+          <li>
+            <span className="text-muted-foreground">Merge state:</span>{' '}
+            {data.row.summary.mergeStateStatus.toLowerCase()}
+          </li>
+          <li>
+            <span className="text-muted-foreground">Review decision:</span>{' '}
+            {data.row.summary.reviewDecision
+              ? data.row.summary.reviewDecision.toLowerCase().replace('_', ' ')
+              : 'pending'}
+          </li>
+          <li>
+            <span className="text-muted-foreground">Head SHA:</span>{' '}
+            <span className="font-mono">{data.row.summary.headSha.slice(0, 10)}</span>
+          </li>
+        </ul>
+      </section>
+    </div>
+  );
+}
+
+function ChecksTab({
+  data,
+}: {
+  data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
+}) {
+  const checks = data.row.summary.checks;
+  if (checks.total === 0) {
+    return <p className="text-xs text-muted-foreground">No checks have run yet.</p>;
+  }
+  // Placeholder rendering — Phase 6/7 (or a follow-up) wires up a
+  // dedicated GraphQL fetch that returns the per-check rows. For
+  // now we surface the rolled-up counts and link to GitHub for the
+  // detailed view.
+  return (
+    <div className="space-y-3 text-sm">
+      <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+        <CheckCountTile label="Passed" value={checks.passed} tone="green" />
+        <CheckCountTile label="Failed" value={checks.failed} tone="red" />
+        <CheckCountTile label="Running" value={checks.inProgress} tone="blue" />
+        <CheckCountTile label="Skipped" value={checks.skipped} tone="grey" />
+      </div>
+      <p className="text-xs text-muted-foreground">
+        Per-check breakdown is on GitHub (the desktop wraps the rollup; the
+        per-check list is one round-trip away).
+      </p>
+      <a
+        href={`${data.row.summary.url}/checks`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-xs text-primary underline"
+      >
+        Open checks on GitHub
+        <ExternalLink className="h-3 w-3" />
+      </a>
+    </div>
+  );
+}
+
+function CheckCountTile({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: 'green' | 'red' | 'blue' | 'grey';
+}) {
+  const toneClass = {
+    green: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+    red: 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-400',
+    blue: 'border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-400',
+    grey: 'border-zinc-300 bg-zinc-100 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+  }[tone];
+  return (
+    <div className={cn('rounded-md border p-3', toneClass)}>
+      <div className="text-2xl font-semibold leading-none">{value}</div>
+      <div className="mt-1 text-[11px] uppercase tracking-wide opacity-75">{label}</div>
+    </div>
+  );
+}
+
+function ReviewsTab({
+  data,
+}: {
+  data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
+}) {
+  const fresh = data.fresh;
+  if (!fresh) {
+    return (
+      <p className="text-xs text-muted-foreground">Fresh fetch unavailable.</p>
+    );
+  }
+  if (fresh.recentReviews.length === 0 && fresh.recentReviewComments.length === 0) {
+    return <p className="text-xs text-muted-foreground">No reviews yet.</p>;
+  }
+  return (
+    <div className="space-y-4 text-sm">
+      <ActivityList
+        title="Recent reviews"
+        items={fresh.recentReviews.map((r) => ({
+          key: r.id,
+          author: r.author,
+          line: r.state.toLowerCase().replace('_', ' '),
+          at: r.submittedAt ?? '',
+          url: r.url,
+        }))}
+      />
+      <ActivityList
+        title="Inline comments"
+        items={fresh.recentReviewComments.map((c) => ({
+          key: c.id,
+          author: c.author,
+          line: 'commented on diff',
+          at: c.createdAt,
+          url: c.url,
+        }))}
+      />
+      <ActivityList
+        title="Top-level comments"
+        items={fresh.recentComments.map((c) => ({
+          key: c.id,
+          author: c.author,
+          line: 'commented',
+          at: c.createdAt,
+          url: c.url,
+        }))}
+      />
+      <a
+        href={`${data.row.summary.url}/files`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-xs text-primary underline"
+      >
+        View full review history on GitHub
+        <ExternalLink className="h-3 w-3" />
+      </a>
+    </div>
+  );
+}
+
+function FilesTab({
+  data,
+}: {
+  data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
+}) {
+  // Files content lives behind a separate GraphQL query that's
+  // worth its own follow-up commit (full diff fetch, paginated).
+  // For now the tab links to GitHub.
+  return (
+    <div className="space-y-3 text-sm">
+      <p className="text-xs text-muted-foreground">
+        File-by-file diffs are best viewed on GitHub for now — the desktop
+        will inline them in a follow-up.
+      </p>
+      <a
+        href={`${data.row.summary.url}/files`}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1 text-xs text-primary underline"
+      >
+        Open Files tab on GitHub
+        <ExternalLink className="h-3 w-3" />
+      </a>
     </div>
   );
 }
@@ -193,57 +493,6 @@ function BranchRef({ head, base }: { head: string; base: string }) {
   );
 }
 
-/**
- * Phase 4 placeholder for the body. Phase 5 replaces this with proper
- * tabs (Overview / Files / Checks / Reviews). For now we just dump the
- * recent activity lists from the fresh GraphQL fetch.
- */
-function SkeletonBody({ fresh }: { fresh: PRSummaryShape & PRFreshDetail }) {
-  return (
-    <div className="space-y-6 text-sm">
-      {fresh.body && (
-        <section>
-          <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Description
-          </h3>
-          <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-relaxed">
-            {fresh.body}
-          </pre>
-        </section>
-      )}
-      <ActivityList
-        title="Recent reviews"
-        items={fresh.recentReviews.map((r) => ({
-          key: r.id,
-          author: r.author,
-          line: r.state,
-          at: r.submittedAt ?? '',
-          url: r.url,
-        }))}
-      />
-      <ActivityList
-        title="Recent review comments"
-        items={fresh.recentReviewComments.map((c) => ({
-          key: c.id,
-          author: c.author,
-          line: 'commented inline',
-          at: c.createdAt,
-          url: c.url,
-        }))}
-      />
-      <ActivityList
-        title="Recent comments"
-        items={fresh.recentComments.map((c) => ({
-          key: c.id,
-          author: c.author,
-          line: 'commented',
-          at: c.createdAt,
-          url: c.url,
-        }))}
-      />
-    </div>
-  );
-}
 
 interface ActivityItem {
   key: string;
