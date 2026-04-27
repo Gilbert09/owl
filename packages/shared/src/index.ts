@@ -443,6 +443,7 @@ export type WSEventType =
   | 'inbox:new'
   | 'inbox:update'
   | 'inbox:remove'
+  | 'pull_request:updated'
   | 'environment:status'
   | 'connection:status';
 

@@ -6,6 +6,7 @@ import { agentRoutes } from './agents.js';
 import { inboxRoutes } from './inbox.js';
 import { githubRoutes, githubPublicRoutes } from './github.js';
 import { repositoryRoutes } from './repositories.js';
+import { pullRequestRoutes } from './pullRequests.js';
 import { backlogRoutes } from './backlog.js';
 import { daemonPublicRoutes } from './daemon.js';
 import { permissionHookRoutes, permissionDesktopRoutes } from './permission.js';
@@ -42,6 +43,7 @@ export function setupRoutes(app: Express): void {
   app.use(`${api}/inbox`, inboxRoutes());
   app.use(`${api}/github`, githubRoutes());
   app.use(`${api}/repositories`, repositoryRoutes());
+  app.use(`${api}/pull-requests`, pullRequestRoutes());
   app.use(`${api}/backlog`, backlogRoutes());
   app.use(`${api}`, permissionDesktopRoutes());
 

@@ -5,7 +5,7 @@ import {
   pullRequests as pullRequestsTable,
   inboxItems as inboxItemsTable,
 } from '../db/schema.js';
-import { broadcastToWorkspace } from './websocket.js';
+import { broadcastToWorkspace, emitPullRequestUpdated } from './websocket.js';
 import {
   batchPullRequests,
   type CheckBreakdown,
@@ -377,28 +377,49 @@ async function upsertRow(
         updatedAt: now,
       })
       .where(eq(pullRequestsTable.id, opts.existingId));
-    return opts.existingId;
+  } else {
+    await db.insert(pullRequestsTable).values({
+      id,
+      workspaceId: opts.workspaceId,
+      repositoryId: opts.repositoryId,
+      taskId: opts.taskId,
+      owner: opts.summary.owner,
+      repo: opts.summary.repo,
+      number: opts.summary.number,
+      state: opts.summary.state,
+      mergedAt: opts.summary.mergedAt ? new Date(opts.summary.mergedAt) : null,
+      lastPolledAt: now,
+      lastSummary,
+      lastReviewId: cursors.lastReviewId,
+      lastReviewCommentId: cursors.lastReviewCommentId,
+      lastCommentId: cursors.lastCommentId,
+      lastCheckDigest: cursors.lastCheckDigest,
+      createdAt: now,
+      updatedAt: now,
+    });
   }
-  await db.insert(pullRequestsTable).values({
+  // Read back the taskId — set on first insert and never modified after.
+  const taskId = await readRowTaskId(db, id);
+  emitPullRequestUpdated(opts.workspaceId, {
     id,
-    workspaceId: opts.workspaceId,
+    taskId,
     repositoryId: opts.repositoryId,
-    taskId: opts.taskId,
     owner: opts.summary.owner,
     repo: opts.summary.repo,
     number: opts.summary.number,
     state: opts.summary.state,
-    mergedAt: opts.summary.mergedAt ? new Date(opts.summary.mergedAt) : null,
-    lastPolledAt: now,
     lastSummary,
-    lastReviewId: cursors.lastReviewId,
-    lastReviewCommentId: cursors.lastReviewCommentId,
-    lastCommentId: cursors.lastCommentId,
-    lastCheckDigest: cursors.lastCheckDigest,
-    createdAt: now,
-    updatedAt: now,
   });
   return id;
+}
+
+async function readRowTaskId(db: Database, id: string): Promise<string | null> {
+  const rows = await db
+    .select({ taskId: pullRequestsTable.taskId })
+    .from(pullRequestsTable)
+    .where(eq(pullRequestsTable.id, id))
+    .limit(1);
+  return rows[0]?.taskId ?? null;
 }
 
 function nextCursors(summary: PRSummary): CursorState {

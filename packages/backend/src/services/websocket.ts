@@ -325,6 +325,39 @@ export function emitInboxNew(workspaceId: string, item: any): void {
   });
 }
 
+/**
+ * Fired after every prCache upsert. The payload carries enough for the
+ * GitHub page table + the task screen pill to patch in place without a
+ * round-trip:
+ *
+ *   - id (pull_requests.id)
+ *   - taskId (nullable)
+ *   - the full lastSummary jsonb shape
+ *   - state (open/closed/merged)
+ *
+ * Recent reviews/comments arrays are NOT included — those are
+ * delta-detection inputs and the detail panel paginates on demand.
+ */
+export function emitPullRequestUpdated(
+  workspaceId: string,
+  payload: {
+    id: string;
+    taskId: string | null;
+    repositoryId: string;
+    owner: string;
+    repo: string;
+    number: number;
+    state: string;
+    lastSummary: Record<string, unknown>;
+  }
+): void {
+  broadcastToWorkspace(workspaceId, {
+    type: 'pull_request:updated',
+    payload,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 export function emitInboxUpdate(
   workspaceId: string,
   itemId: string,

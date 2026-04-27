@@ -18,6 +18,7 @@ import {
   pullRequests as pullRequestsTable,
   inboxItems as inboxItemsTable,
 } from '../db/schema.js';
+import * as websocketModule from '../services/websocket.js';
 
 // ---------- Helpers ----------
 
@@ -446,6 +447,29 @@ describe('prCache — DB integration', () => {
     const rows = await db.select().from(pullRequestsTable);
     expect(rows).toHaveLength(1);
     expect((rows[0].lastSummary as { title: string }).title).toBe('Updated');
+  });
+
+  it('fires pull_request:updated on every upsert (insert AND update path)', async () => {
+    const spy = vi.spyOn(websocketModule, 'emitPullRequestUpdated');
+    await upsertFromBatchResult({
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      summary: makeSummary(),
+    });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toBe('ws1');
+    expect(spy.mock.calls[0][1].number).toBe(42);
+
+    // Second upsert exercises the update branch.
+    await upsertFromBatchResult({
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      summary: makeSummary({ title: 'Renamed' }),
+    });
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(
+      (spy.mock.calls[1][1].lastSummary as { title: string }).title
+    ).toBe('Renamed');
   });
 
   it('cursors persist on disk so deltas keep working across simulated restart', async () => {
