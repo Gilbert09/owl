@@ -272,7 +272,7 @@ function FilterBar({
       <select
         value={repoFilter}
         onChange={(e) => onRepoFilter(e.target.value)}
-        className="h-7 rounded-md border bg-background px-2 text-xs"
+        className="h-7 rounded-md border bg-background px-2 py-0 text-xs leading-7"
       >
         <option value="all">All repos</option>
         {repos.map((r) => (
