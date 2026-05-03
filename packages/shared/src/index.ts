@@ -378,6 +378,7 @@ export interface InboxAction {
   label: string;
   type: 'primary' | 'secondary' | 'danger';
   action: string; // Action identifier
+  data?: string; // Action payload (e.g. URL for `open_url`)
 }
 
 // ============================================================================

@@ -97,10 +97,10 @@ export function InboxPanel() {
   };
 
   /**
-   * Dispatch an inbox action. `view_task` + `view_agent` just
-   * navigate; they don't mark the item `actioned` (user might want
-   * to come back). Everything else falls through to "mark actioned"
-   * which hides the item from the "NEW" bucket.
+   * Dispatch an inbox action. `view_*` and `open_url` just navigate
+   * (mark read so the dot clears, but leave the item in "NEW" — the
+   * user might want to come back). Everything else falls through to
+   * "mark actioned" which hides the item from the "NEW" bucket.
    */
   const handleAction = async (item: InboxItem, action: InboxAction) => {
     if (action.action === 'view_task' || action.action === 'view_agent') {
@@ -114,6 +114,20 @@ export function InboxPanel() {
       if (sourceId) {
         selectTask(sourceId);
         setActivePanel('queue');
+      }
+      return;
+    }
+    if (action.action === 'open_url') {
+      if (action.data) {
+        window.open(action.data, '_blank', 'noopener,noreferrer');
+      } else {
+        console.warn('[inbox] open_url action missing data:', action);
+      }
+      if (item.status === 'unread') {
+        markInboxRead(item.id);
+        void api.inbox.markRead(item.id).catch((err) =>
+          console.error('[inbox] markRead failed:', err)
+        );
       }
       return;
     }
