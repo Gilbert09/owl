@@ -33,7 +33,17 @@ const headers = {
   'content-type': 'application/json',
   'x-talyn-client-version': '0.3.0-test',
 };
-const legacyHeaders = { ...internalProxyHeaders(TEST_USER_ID), 'content-type': 'application/json' };
+const headerlessHeaders = {
+  ...internalProxyHeaders(TEST_USER_ID),
+  'content-type': 'application/json',
+};
+// One below MIN_MERGE_QUEUE_PAYWALL_CLIENT — and deliberately ABOVE the task
+// floor, pinning the fact that the two gates have separate floors: this build
+// renders a task 402 but not a merge-queue one.
+const prePaywallHeaders = {
+  ...headerlessHeaders,
+  'x-talyn-client-version': '0.2.8',
+};
 const savedPolarToken = process.env.POLAR_ACCESS_TOKEN;
 
 async function makeServer(): Promise<{ url: string; close: () => Promise<void> }> {
@@ -202,10 +212,25 @@ describe('free-plan merge-queue limit at the route surface', () => {
     expect((await enqueue(pr)).status).toBe(200);
   });
 
-  it('legacy clients (no version header) bypass the gate', async () => {
+  it('headerless callers (CLI / MCP / curl) are enforced', async () => {
     await fillQueue();
     const pr = await insertPr({ queued: false });
-    expect((await enqueue(pr, legacyHeaders)).status).toBe(200);
+    const res = await enqueue(pr, headerlessHeaders);
+    expect(res.status).toBe(402);
+    expect((await res.json()).code).toBe(MERGE_QUEUE_LIMIT_ERROR_CODE);
+    // And the PR must NOT have been queued — the old code fell through to an
+    // ungated armQueue(), which uncapped the whole subsystem.
+    const rows = await db
+      .select({ mergeQueued: pullRequestsTable.mergeQueued })
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, pr));
+    expect(rows[0]?.mergeQueued).toBe(false);
+  });
+
+  it('pre-paywall builds (version below the floor) bypass the gate', async () => {
+    await fillQueue();
+    const pr = await insertPr({ queued: false });
+    expect((await enqueue(pr, prePaywallHeaders)).status).toBe(200);
   });
 
   it('no POLAR env → no enforcement (the kill switch)', async () => {

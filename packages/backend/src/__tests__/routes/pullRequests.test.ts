@@ -444,11 +444,29 @@ describe('routes/pullRequests', () => {
       expect(body.data.id).toBe('task-fix-1');
       expect(body.data.type).toBe('pr_response');
       // The route forwards the PR row + model to the canonical action. This
-      // caller sends no client-version header, so it's treated as a legacy
-      // (pre-billing) client and the task limit is bypassed.
+      // caller sends no client-version header, and the gate is fail-closed —
+      // headerless means enforce, not exempt.
       expect(spy).toHaveBeenCalledWith(
         expect.objectContaining({ id }),
-        { model: 'claude-opus-4-8', bypassTaskLimit: true }
+        { model: 'claude-opus-4-8', bypassTaskLimit: false }
+      );
+    });
+
+    it('bypasses the task limit for pre-paywall builds only', async () => {
+      const id = await insertPR(db);
+      const spy = vi
+        .spyOn(prCloudFixModule, 'startPrMergeableRun')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue({ ok: true, task: fakeTaskRow() as any });
+      const res = await fetch(`${serverUrl}/pull-requests/${id}/fix`, {
+        method: 'POST',
+        headers: { ...authMine, 'x-talyn-client-version': '0.2.2' },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(201);
+      expect(spy).toHaveBeenCalledWith(
+        expect.objectContaining({ id }),
+        expect.objectContaining({ bypassTaskLimit: true })
       );
     });
 

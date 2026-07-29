@@ -24,6 +24,7 @@ import {
 } from '../services/prFocus.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import { withMergeQueueLimitGate } from '../services/billing/entitlements.js';
+import { bypassesPaywall } from '../services/billing/clientGate.js';
 import { emitPullRequestUpdated } from '../services/websocket.js';
 import { mergeQueueProcessor } from '../services/mergeQueueProcessor.js';
 import {
@@ -457,11 +458,10 @@ export function pullRequestRoutes(): Router {
       typeof req.body?.model === 'string' && req.body.model.trim()
         ? req.body.model.trim()
         : undefined;
-    // Transitional billing rollout: headerless callers (pre-billing desktop
-    // builds, MCP/CLI) can't render the upgrade flow — don't enforce yet.
     const result = await startPrMergeableRun(row, {
       model,
-      bypassTaskLimit: !req.headers['x-talyn-client-version'],
+      // Transitional billing rollout — see services/billing/clientGate.ts.
+      bypassTaskLimit: bypassesPaywall(req, 'task'),
     });
     if (!result.ok) {
       return res.status(400).json({
@@ -567,12 +567,11 @@ export function pullRequestRoutes(): Router {
         })
         .where(eq(pullRequestsTable.id, row.id));
 
-    if (enabled && req.headers['x-talyn-client-version']) {
+    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
       // Free-plan queue cap — MergeQueueLimitError → 402 via the error
       // middleware. The PR itself is excluded from the count so re-arming an
-      // already-queued PR never self-blocks. Headerless callers (pre-billing
-      // desktop builds, MCP/CLI) can't render the upgrade flow — don't
-      // enforce yet, same transitional rule as task creation.
+      // already-queued PR never self-blocks. Pre-paywall builds skip the gate
+      // (they can't render the upgrade flow) — see billing/clientGate.ts.
       await withMergeQueueLimitGate(
         assertUser(req).id,
         { excludePrId: row.id },
