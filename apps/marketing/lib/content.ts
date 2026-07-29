@@ -29,7 +29,7 @@ export const hero = {
   titleLead: "Wake up to",
   titleAccent: "green PRs.",
   sub: "You live in GitHub PRs, and half of them are red, behind main, or stuck waiting on a review. Talyn ranks the whole queue by what's blocking you, then sends a cloud agent to clear each one. Flag the PRs you trust and they merge themselves the moment they go green, overnight included.",
-  primaryCta: "Download for Mac",
+  primaryCta: "Download for {platform}",
   secondaryCta: "See how it works",
   microtrust: "Apple silicon · macOS 13+",
 };
@@ -168,7 +168,7 @@ export const features = [
 export const midCta = {
   title: "Ready to stop babysitting CI?",
   sub: "Download Talyn, connect your repos, and clear the queue tonight.",
-  cta: "Download for Mac",
+  cta: "Download for {platform}",
   secondary: "See pricing",
 };
 
@@ -247,7 +247,7 @@ export const pricing = {
         "Skills, merge queue & auto-keep-mergeable",
         "Up to 3 tasks running and 3 PRs queued at once",
       ],
-      cta: "Download for Mac",
+      cta: "Download for {platform}",
       highlighted: false,
     },
     {
@@ -309,7 +309,7 @@ export const finalCta = {
   titleLead: "Stop babysitting CI.",
   titleAccent: "Let the talons out.",
   sub: "In public beta. Bring your own agent. Clear your PR backlog tonight.",
-  cta: "Download for Mac",
+  cta: "Download for {platform}",
   // Waitlist row (absorbed from the removed Beta section).
   emailLabel: "Not on a Mac? Get notified.",
   emailPlaceholder: "you@startup.dev",

@@ -19,36 +19,20 @@ on:
         type: string
 
 jobs:
-  publish:
-    # macOS is the only supported auto-update target for now.
-    runs-on: macos-latest
-    # Needed for GITHUB_TOKEN to create the GitHub Release + upload assets.
-    permissions:
-      contents: write
-
+  # Resolved ONCE and fanned out, so every platform bakes the identical
+  # version into release/app/package.json. Three legs each computing "the
+  # next patch above the latest release" would race — the first to publish
+  # would move the ceiling under the others.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - name: Checkout git repo
         uses: actions/checkout@v4
 
-      - name: Install Node and NPM
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Install dependencies
-        run: |
-          npm install
-
       - name: Resolve release version
-        # Build-time only — not committed. electron-builder packages from
-        # directories.app (release/app), so the version it bakes in (and what
-        # app.getVersion() / the update feed report) comes from
-        # release/app/package.json. Without this, every build would ship as
-        # the stale static version (0.1.0) and updaters would never take it.
-        # Source of truth: the pushed tag, or the dispatch input, or (empty
-        # input) the next patch above the highest version ever released —
-        # nightlies included, so stable always supersedes last night's build.
+        id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -73,14 +57,53 @@ jobs:
               console.log([max[0], max[1], max[2] + 1].join('.'));
             ")
           fi
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Version must be X.Y.Z, got: $VERSION" >&2
+            exit 1
+          fi
+          echo "Releasing $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  publish:
+    # macOS goes FIRST and alone: it's the leg that creates the GitHub Release
+    # (and, on the dispatch path, the tag). Windows/Linux then upload into the
+    # release it made — see publish-others. Running all three in parallel would
+    # race three electron-builder processes to create the same release.
+    needs: version
+    runs-on: macos-latest
+    # Needed for GITHUB_TOKEN to create the GitHub Release + upload assets.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Install Node and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Stamp the release version
+        # Build-time only — not committed. electron-builder packages from
+        # directories.app (release/app), so the version it bakes in (and what
+        # app.getVersion() / the update feed report) comes from
+        # release/app/package.json. Without this, every build would ship as
+        # the stale static version (0.1.0) and updaters would never take it.
+        # Resolved by the `version` job so all three platform legs agree.
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
           cd apps/desktop/release/app
           node -e "
             const fs = require('fs');
             const p = require('./package.json');
-            if (!/^\d+\.\d+\.\d+$/.test('$VERSION')) {
-              throw new Error('Version must be X.Y.Z, got: $VERSION');
-            }
-            p.version = '$VERSION';
+            p.version = process.env.VERSION;
             fs.writeFileSync('./package.json', JSON.stringify(p, null, 2) + '\n');
             console.log('Building release', p.version);
           "
@@ -145,6 +168,89 @@ jobs:
           # electron is hoisted to the monorepo root node_modules, so
           # electron-builder can't infer the version from this workspace —
           # resolve it explicitly and pass it in.
+          ELECTRON_VERSION=$(node -p "require('electron/package.json').version")
+          npm exec electron-builder -- --publish always \
+            -c.electronVersion="$ELECTRON_VERSION"
+
+  publish-others:
+    # Windows (NSIS) + Linux (AppImage). Targets were already declared in
+    # apps/desktop/package.json `build.win`/`build.linux` — the only thing
+    # keeping Talyn macOS-only was that nothing ever ran electron-builder on
+    # those runners.
+    #
+    # `needs: publish` is load-bearing, not just ordering: the macOS leg
+    # creates the GitHub Release (and the tag, on the dispatch path), and
+    # these legs upload into it. It also means a Windows/Linux failure can
+    # never take down a macOS release that already published cleanly.
+    #
+    # No notarization and no CSC_* here. macOS signing config lives under
+    # `build.mac`, so it simply doesn't apply. Windows ships UNSIGNED until
+    # an EV cert is bought — users get a SmartScreen "unknown publisher"
+    # prompt on first install. Set CSC_LINK/CSC_KEY_PASSWORD to fix that;
+    # electron-builder picks them up with no workflow change.
+    needs: [version, publish]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      # One platform failing must not cancel the other — a Linux toolchain
+      # hiccup shouldn't cost Windows users their build.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Install Node and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Stamp the release version
+        # Same version the macOS leg baked — from the shared `version` job,
+        # never recomputed (see that job's comment).
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd apps/desktop/release/app
+          node -e "
+            const fs = require('fs');
+            const p = require('./package.json');
+            p.version = process.env.VERSION;
+            fs.writeFileSync('./package.json', JSON.stringify(p, null, 2) + '\n');
+            console.log('Building release', p.version);
+          "
+
+      - name: Build shared package
+        run: npm run build -w @talyn/shared
+
+      - name: Build desktop app
+        env:
+          TALYN_API_URL: https://prod.talyn.dev
+          TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL }}
+          TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY }}
+          TALYN_POSTHOG_KEY: ${{ vars.TALYN_POSTHOG_KEY }}
+          TALYN_POSTHOG_HOST: https://us.i.posthog.com
+        run: npm run build -w @talyn/desktop
+
+      # Deliberately no PostHog sourcemap step: the renderer bundle is
+      # identical across platforms, so the macOS leg's upload already
+      # symbolicates Windows/Linux renderer exceptions.
+
+      - name: Publish platform artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # `shell: bash` so the one script works on the Windows runner too
+        # (its default is PowerShell, where this is a syntax error).
+        shell: bash
+        run: |
+          cd apps/desktop
           ELECTRON_VERSION=$(node -p "require('electron/package.json').version")
           npm exec electron-builder -- --publish always \
             -c.electronVersion="$ELECTRON_VERSION"
