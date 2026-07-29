@@ -157,6 +157,30 @@ export function queueBlocked(pr: PrSnapshot): boolean {
 }
 
 /**
+ * {@link queueBlocked}, made gate-aware — the version every rule inside
+ * `decide` uses.
+ *
+ * A branch behind an external merge queue reports `mergeStateStatus = BLOCKED`
+ * for **every** PR: the ruleset forbids updating the ref, so an approved,
+ * green, conflict-free PR reads exactly like a broken one. (Verified the day
+ * trunk.io went live on posthog/posthog: all 20 most-recently-updated open PRs
+ * came back MERGEABLE + BLOCKED, approved ones included.) Counting that as a
+ * blocker sent every ready PR down the remediation path and fired a paid cloud
+ * fix run that could never help — the "blocker" is the ruleset.
+ *
+ * With a gate present, a bare BLOCKED IS the gate, so it doesn't block: the PR
+ * is ready and belongs in the external queue. Everything else still counts —
+ * conflicts, requested changes, failing REQUIRED checks (`prNeedsFollowup`) and
+ * BEHIND are real work no matter who performs the merge. Pending CI and a
+ * missing required review are handled upstream (R7/R7b) and never reach here.
+ */
+function queueBlockedFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
+  if (prNeedsFollowup(pr.summary)) return true;
+  if (mergeStateOf(pr) === 'BEHIND') return true;
+  return mergeStateOf(pr) === 'BLOCKED' && ctx.externalGate === null;
+}
+
+/**
  * The head commit still has queued / in-progress checks reporting. GitHub
  * surfaces such a PR as `mergeStateStatus = BLOCKED` — the same status it uses
  * for a *failed* required check — so `needsUpdate`/`queueBlocked` can't tell
@@ -395,7 +419,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // pull_requests.taskId (a manual task, the keep-mergeable watcher) — which
   // v1 checked separately because taskId gets reassigned by other flows.
   const runActive = ctx.fixTaskState === 'active' || ctx.otherLinkedTaskActive;
-  if (runActive && queueBlocked(pr) && hasSettledBlocker(pr)) {
+  if (runActive && queueBlockedFor(pr, ctx) && hasSettledBlocker(pr)) {
     // An in-flight run only HOLDS BACK a PR with a SETTLED blocker — the
     // thing the run is actually fixing. A clean PR falls through to the merge
     // path, and a head whose only obstacle is in-flight CI falls through to
@@ -405,7 +429,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     d.ensure('fixing');
     return d.done('hold');
   }
-  if (runActive && !queueBlocked(pr) && checksFailing(pr.summary)) {
+  if (runActive && !queueBlockedFor(pr, ctx) && checksFailing(pr.summary)) {
     // The run is working a head whose only obstacle is a check the App won't
     // merge past (not a genuine queue blocker). Don't re-attempt the doomed
     // App merge on top; advance so ready PRs behind it keep draining.
@@ -444,7 +468,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     const wasBlocked = d.entry.status === 'blocked';
     let to: EntryStatus = d.entry.status;
     let attempts = d.entry.fixAttempts;
-    if (queueBlocked(pr)) {
+    if (queueBlockedFor(pr, ctx)) {
       attempts += 1;
       if (attempts >= ctx.maxAttempts) to = 'blocked';
     }
@@ -455,7 +479,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       set: { fixAttempts: attempts, fixTaskAccounted: true },
       event: {
         code: 'fix_run_accounted',
-        message: queueBlocked(pr)
+        message: queueBlockedFor(pr, ctx)
           ? `Fix run finished but the PR is still blocked (attempt ${attempts}/${ctx.maxAttempts}).`
           : 'Fix run finished; PR reads clean.',
         detail: { taskId: d.entry.fixTaskId },
@@ -481,7 +505,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   }
 
   // R10 — clean path: mergeable AND up-to-date → merge it.
-  if (!queueBlocked(pr)) {
+  if (!queueBlockedFor(pr, ctx)) {
     return decideCleanPath(d, pr, ctx, runActive);
   }
 
@@ -772,12 +796,12 @@ function decideBlockedGate(
     // auto-reset on a momentary clean reading (the transient-UNKNOWN trap): a
     // genuinely-clean blocked PR falls through to the merge path below and
     // leaves the queue; a still-blocked one waits here.
-    if (queueBlocked(pr)) return d.done('advance');
+    if (queueBlockedFor(pr, ctx)) return d.done('advance');
     return null; // clean → let it merge
   }
 
   // Unknown/legacy code with a live blocker — treat like attempts_exhausted.
-  if (queueBlocked(pr)) return d.done('advance');
+  if (queueBlockedFor(pr, ctx)) return d.done('advance');
   return null;
 }
 

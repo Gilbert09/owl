@@ -228,11 +228,17 @@ function PRTableRow({
     billingStatus.activeTaskLimit != null &&
     billingStatus.activeTasks >= billingStatus.activeTaskLimit;
   // Mergeable covers the clean case AND "mergeable, but only non-required
-  // checks are failing" — GitHub lets you merge both.
+  // checks are failing" — GitHub lets you merge both. `blocked` normally means
+  // don't offer it, with ONE exception: a branch behind an external merge queue
+  // reports BLOCKED for every PR (the ruleset forbids updating the ref), so an
+  // approved, green, conflict-free PR reads `blocked` too. Hiding the button
+  // there would hide it on every PR in the repo — instead offer it, and let the
+  // backend either merge or submit the PR to that queue.
   const canMerge =
     row.state === 'open' &&
     (summary.blockingReason === 'mergeable' ||
-      summary.blockingReason === 'checks_failed_optional');
+      summary.blockingReason === 'checks_failed_optional' ||
+      isHeldOnlyByBranchProtection(summary));
   const unresolved = summary.unresolvedReviewThreads ?? 0;
   const requested = variant === 'review' ? reviewRequestLabel(summary, viewerLogin) : null;
 
@@ -1017,11 +1023,41 @@ export function isAwaitingReview(r: PRRow): boolean {
  */
 export function isReadyToMerge(r: PRRow): boolean {
   if (r.summary.draft) return false;
+  // Already in an external merge queue → nothing for you to do; it isn't
+  // waiting on a merge click.
+  const ext = externalQueueStatusFromLabels(r.summary.labels);
+  if (ext && !['failed', 'cancelled'].includes(ext.state)) return false;
   const reason = r.summary.blockingReason;
-  if (reason !== 'mergeable' && reason !== 'checks_failed_optional') return false;
+  if (
+    reason !== 'mergeable' &&
+    reason !== 'checks_failed_optional' &&
+    !isHeldOnlyByBranchProtection(r.summary)
+  ) {
+    return false;
+  }
   if (r.summary.checks.inProgress > 0) return false;
   const decision = r.summary.effectiveReviewDecision ?? r.summary.reviewDecision;
   return decision !== 'REVIEW_REQUIRED';
+}
+
+/**
+ * The PR is otherwise ready and the ONLY thing GitHub reports is a bare
+ * `blocked`. That's what a branch behind an external merge queue reports for
+ * EVERY PR — its ruleset forbids updating the ref, so approved, green,
+ * conflict-free PRs read `blocked` alongside genuinely stuck ones. Without this,
+ * such a repo's "Ready to merge" bucket and every row's Merge button would go
+ * permanently empty.
+ */
+export function isHeldOnlyByBranchProtection(s: PRSummaryShape): boolean {
+  return (
+    s.blockingReason === 'blocked' &&
+    s.mergeable === 'MERGEABLE' &&
+    (s.checks?.failed ?? 0) === 0 &&
+    (s.checks?.inProgress ?? 0) === 0 &&
+    !['CHANGES_REQUESTED', 'REVIEW_REQUIRED'].includes(
+      s.effectiveReviewDecision ?? s.reviewDecision ?? ''
+    )
+  );
 }
 
 /**

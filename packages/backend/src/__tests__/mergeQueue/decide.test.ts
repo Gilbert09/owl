@@ -1025,6 +1025,68 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     });
   });
 
+  describe('the whole-repo BLOCKED state a gate creates', () => {
+    // The day trunk.io went live on posthog/posthog, EVERY open PR came back
+    // MERGEABLE + BLOCKED — approved, green, conflict-free ones included —
+    // because the ruleset forbids updating the ref. Reading that as a blocker
+    // fired a paid fix run at every ready PR.
+    const gateBlockedPr = (s: Partial<PRMergeableSummary> = {}) =>
+      pr({ mergeStateStatus: 'BLOCKED' }, { blockingReason: 'blocked', reviewDecision: 'APPROVED', ...s });
+
+    it('submits a ready-but-BLOCKED PR instead of firing a fix run at it', () => {
+      const d = decide(entry(), gateBlockedPr(), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).toEqual(['submit_external']);
+      expect(kinds(d)).not.toContain('fire_fix_run');
+    });
+
+    it('keeps firing fix runs for the same state when there is NO gate (unchanged)', () => {
+      const d = decide(entry(), gateBlockedPr(), ctx());
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it.each([
+      ['merge conflicts', { mergeable: 'CONFLICTING' as const, blockingReason: 'merge_conflicts' as const }],
+      ['requested changes', { reviewDecision: 'CHANGES_REQUESTED' as const }],
+      ['a failing required check', { blockingReason: 'checks_failed' as const, checks: { total: 3, failed: 1, inProgress: 0 } }],
+      ['unresolved review threads', { unresolvedReviewThreads: 2 }],
+    ])('still fixes %s under a gate — real work, whoever performs the merge', (_label, over) => {
+      const d = decide(entry(), gateBlockedPr(over), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('still updates a BEHIND branch before submitting', () => {
+      const d = decide(
+        entry(),
+        pr({ mergeStateStatus: 'BEHIND' }, { reviewDecision: 'APPROVED' }),
+        ctx({ externalGate: 'confirmed', updateBranchAvailable: true })
+      );
+      expect(kinds(d)).toEqual(['update_branch']);
+    });
+
+    it('still waits for a missing required review rather than submitting', () => {
+      const d = decide(
+        entry(),
+        gateBlockedPr({ reviewDecision: 'REVIEW_REQUIRED' }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(lastTransition(d)!.to).toBe('awaiting_review');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('does not count a fix run as failed when the PR only reads BLOCKED afterwards', () => {
+      const d = decide(
+        entry({ fixTaskId: 't1', fixTaskAccounted: false, fixAttempts: 0 }),
+        gateBlockedPr(),
+        ctx({ externalGate: 'confirmed', fixTaskState: 'terminal' })
+      );
+      const accounting = transitions(d)[0]!;
+      expect(accounting.set?.fixAttempts).toBe(0); // budget untouched
+      expect(accounting.event.message).toContain('reads clean');
+    });
+  });
+
   describe('submit aftermath', () => {
     it('records the submission, the door it used, and spends one submit attempt', () => {
       const d = decide(
