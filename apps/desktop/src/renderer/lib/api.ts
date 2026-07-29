@@ -22,6 +22,7 @@ import type {
   PlatformSkill,
   CreatePlatformSkillRequest,
   UpdatePlatformSkillRequest,
+  ExternalQueueState,
 } from '@talyn/shared';
 
 // Resolve the backend URL from the build-time env (see webpack configs).
@@ -607,9 +608,15 @@ export interface MergeQueuePublic {
     resigns: [number, number];
   };
   autoMerge?: { armed: boolean; armedBy?: 'talyn' | 'user' };
-  /** External merge queue: which door the PR was handed over through, and the
-   *  resubmit budget for the current head. Absent when not submitted. */
-  external?: { via: 'auto_merge' | 'label'; submits: [number, number] };
+  /** External merge queue: which door the PR was handed over through, the
+   *  resubmit budget for the current head, and where the provider itself says
+   *  the PR is (read off its own PR comment — the authoritative channel; the
+   *  PR's labels are only a fallback). Absent when neither is known. */
+  external?: {
+    via?: 'auto_merge' | 'label' | 'comment';
+    submits?: [number, number];
+    state?: ExternalQueueState;
+  };
 }
 
 /** One row of GET /pull-requests/:id/merge-queue/timeline. */

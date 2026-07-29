@@ -568,6 +568,7 @@ function PRTableRow({
               // 'blocked' (approved-but-protected must not read "Review").
               reviewDecision={summary.effectiveReviewDecision ?? summary.reviewDecision}
               labels={summary.labels}
+              externalQueueState={row.mergeQueue?.external?.state}
             />
           </td>
         </>
@@ -586,6 +587,7 @@ function PRTableRow({
               state={row.state}
               hideReviewState
               labels={summary.labels}
+              externalQueueState={row.mergeQueue?.external?.state}
             />
             {row.state === 'open' && unresolved > 0 && (
               <span
@@ -825,24 +827,39 @@ function QueueCell({ row }: { row: PRRow }) {
             </span>
           );
         case 'awaiting_external': {
-          // Submitted to the external queue; its own progress arrives as PR
-          // labels (trunk-queued → trunk-testing → …), so render that when it's
-          // there and a neutral "submitted" until the provider picks the PR up.
+          // Submitted to the external queue. Its progress comes from the
+          // backend, which reads the provider's own PR comment (`external.
+          // state`); the PR's labels are the fallback channel, since trunk
+          // applies them in some repo configurations and not others.
+          const state = v2.external?.state;
           const ext = externalQueueStatusFromLabels(row.summary.labels);
-          const provider = ext ? externalQueueProviderLabel(ext.provider) : 'the';
+          const provider = externalQueueProviderLabel(ext?.provider ?? 'trunk');
+          const where = state ?? ext?.state ?? null;
           const [submits, maxSubmits] = v2.external?.submits ?? [0, 3];
+          const via =
+            v2.external?.via === 'label'
+              ? 'by applying its submit label'
+              : v2.external?.via === 'comment'
+                ? 'by posting its submit command'
+                : v2.external?.via === 'auto_merge'
+                  ? 'by arming GitHub auto-merge'
+                  : null;
           return (
             <span
               className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400"
               title={
-                `In ${provider} merge queue` +
-                (ext ? ` — ${externalQueueStateLabel(ext.state).toLowerCase()} (${ext.label})` : ' — waiting for it to pick the PR up') +
-                `. Talyn submitted it ${v2.external?.via === 'label' ? 'by applying its submit label' : 'by arming GitHub auto-merge'}` +
-                ` (submission ${submits}/${maxSubmits} on this commit) and takes it back to fix if the queue rejects it.`
+                `In ${provider}'s merge queue` +
+                (where
+                  ? ` — ${externalQueueStateLabel(where).toLowerCase()}`
+                  : ' — waiting for it to pick the PR up') +
+                (via
+                  ? `. Talyn submitted it ${via} (submission ${submits}/${maxSubmits} on this ` +
+                    'commit) and takes it back to fix if the queue rejects it.'
+                  : '.')
               }
             >
               <GitMerge className="h-3 w-3" />
-              {ext ? `Queue: ${externalQueueStateLabel(ext.state).toLowerCase()}` : 'Submitted to queue'}
+              {where ? `Queue: ${externalQueueStateLabel(where).toLowerCase()}` : 'Submitted to queue'}
             </span>
           );
         }
@@ -1024,9 +1041,10 @@ export function isAwaitingReview(r: PRRow): boolean {
 export function isReadyToMerge(r: PRRow): boolean {
   if (r.summary.draft) return false;
   // Already in an external merge queue → nothing for you to do; it isn't
-  // waiting on a merge click.
-  const ext = externalQueueStatusFromLabels(r.summary.labels);
-  if (ext && !['failed', 'cancelled'].includes(ext.state)) return false;
+  // waiting on a merge click. The queue entry's own reading of the provider
+  // (off its PR comment) outranks the labels, which many repos never apply.
+  const state = r.mergeQueue?.external?.state ?? externalQueueStatusFromLabels(r.summary.labels)?.state;
+  if (state && !['failed', 'cancelled', 'not_submitted'].includes(state)) return false;
   const reason = r.summary.blockingReason;
   if (
     reason !== 'mergeable' &&

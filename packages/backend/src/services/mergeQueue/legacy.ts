@@ -77,10 +77,18 @@ export function toPublicMergeQueue(
       ? { armed: true, armedBy: entry.automergeArmedBy }
       : { armed: false },
     /** External merge queue (trunk.io / GitHub native): how the PR was handed
-     *  over and how many submissions this head has spent. The queue STATE
-     *  itself comes from the PR's labels, which the desktop already has. */
-    external: entry.externalSubmitVia
-      ? { via: entry.externalSubmitVia, submits: [entry.submitAttempts, 3] }
-      : undefined,
+     *  over, how many submissions this head has spent, and where the provider
+     *  itself says the PR is. `state` is the authoritative channel — read off
+     *  the provider's own comment — and is present even when the submission
+     *  bookkeeping isn't (a PR someone submitted outside Talyn). */
+    external:
+      entry.externalSubmitVia || entry.externalState
+        ? {
+            ...(entry.externalSubmitVia
+              ? { via: entry.externalSubmitVia, submits: [entry.submitAttempts, 3] }
+              : {}),
+            ...(entry.externalState ? { state: entry.externalState } : {}),
+          }
+        : undefined,
   };
 }

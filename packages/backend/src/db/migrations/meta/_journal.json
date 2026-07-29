@@ -260,6 +260,13 @@
 			"when": 1784160000020,
 			"tag": "0036_external_submitted_at",
 			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "7",
+			"when": 1784160000021,
+			"tag": "0037_external_queue_state",
+			"breakpoints": true
 		}
 	]
 }

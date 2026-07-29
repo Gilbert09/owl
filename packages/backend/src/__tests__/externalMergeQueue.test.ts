@@ -8,8 +8,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  externalQueueInstructionFromComments,
+  externalQueueStatusFromComment,
+  externalQueueStatusFromComments,
   externalQueueStatusFromLabels,
   isExternalQueueEjected,
+  isExternalQueueHolding,
   isExternalQueueSubmitLabel,
   TRUNK_SUBMIT_LABELS,
 } from '@talyn/shared';
@@ -41,7 +45,8 @@ describe('externalQueueStatusFromLabels', () => {
     expect(externalQueueStatusFromLabels([label, 'stamphog'])).toEqual({
       provider: 'trunk',
       state,
-      label,
+      source: 'label',
+      evidence: label,
     });
   });
 
@@ -55,7 +60,8 @@ describe('externalQueueStatusFromLabels', () => {
     expect(externalQueueStatusFromLabels([' Trunk-Testing '])).toEqual({
       provider: 'trunk',
       state: 'testing',
-      label: ' Trunk-Testing ',
+      source: 'label',
+      evidence: ' Trunk-Testing ',
     });
   });
 
@@ -84,8 +90,163 @@ describe('externalQueueStatusFromLabels', () => {
     ['passed', false],
     ['not_ready', false],
     ['merged', false],
+    ['not_submitted', false],
+    ['rejected', false],
   ] as const)('isExternalQueueEjected(%s) === %s', (state, ejected) => {
     expect(isExternalQueueEjected(state)).toBe(ejected);
+  });
+
+  it.each([
+    ['queued', true],
+    ['testing', true],
+    ['passed', true],
+    ['not_ready', true],
+    ['failed', false],
+    ['cancelled', false],
+    ['merged', false],
+    ['not_submitted', false],
+    ['rejected', false],
+  ] as const)('isExternalQueueHolding(%s) === %s', (state, holding) => {
+    expect(isExternalQueueHolding(state)).toBe(holding);
+  });
+});
+
+// ── The comment channel ──
+//
+// Trunk keeps ONE merge-queue comment per PR and rewrites its body in place as
+// the PR moves. Every body below is a VERBATIM capture from posthog/posthog on
+// 2026-07-29 — this is the corpus the parser was written against, and the
+// reason the queue no longer needs trunk's optional status labels.
+
+/** trunk's instruction body, submit box untouched (#74552 before submitting). */
+const TRUNK_UNSUBMITTED =
+  '<!-- Trunk Merge -->\nMerging to `master` in this repository is managed by Trunk.\n\n' +
+  '<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull ' +
+  'request, check the box to the left or comment `/trunk merge` below.\n\nAfter your PR is ' +
+  'submitted to the merge queue, this comment will be automatically updated with its status. ' +
+  'If the PR fails, failure details will also be posted here';
+/** The same comment after trunk accepted the submission (#74595). */
+const TRUNK_TICKED = TRUNK_UNSUBMITTED.replace('- [ ]', '- [x]');
+const LINK = '(https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/74552)';
+
+const trunk = (body: string) => ({ body, user: { login: 'trunk-io[bot]' } });
+
+describe('externalQueueStatusFromComment — trunk states, as trunk writes them', () => {
+  it.each([
+    ['testing', 'testing',
+      `\u{1F9EA} Running tests on this pull request (testing on PR [#74678](https://www.github.com/PostHog/posthog/pull/74678)) - [details]${LINK}.`],
+    ['waiting to start', 'queued',
+      `\u{23F3} Waiting to start tests on this pull request - [details]${LINK}.`],
+    ['waiting after a restart', 'queued',
+      `\u{23F3} Waiting to start tests on this pull request because its tests were restarted by Tom\u00E1s (a GitHub user) - [details]${LINK}.`],
+    ['submitted', 'queued',
+      `\u{2728} Submitted to Merge by @tatoalo. It will be added to the merge queue once all branch protection rules pass and there are no merge conflicts with the target branch. See more details [here]${LINK}.`],
+    ['tests passed', 'passed',
+      `\u{1F44D} Pull request will be merged soon because tests have passed on [#74640](https://www.github.com/PostHog/posthog/pull/74640) - [details]${LINK}.`],
+    ['merged', 'merged',
+      `\u{1F60E} Merged successfully - [details]${LINK}.`],
+    ['required check failed', 'failed',
+      `\u{26A0}\u{FE0F} The required check [\`LLM Services Tests Pass\`](https://github.com/PostHog/posthog/actions/runs/1) (Failure) has failed. Pull request failed tests and is waiting for other pull requests to finish testing. See more details [here]${LINK}.`],
+    ['merge conflict', 'failed',
+      `\u{274C} This pull request could not start testing because there was a merge conflict. See more details [here]${LINK}.\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`],
+    ['ejected by a push', 'cancelled',
+      `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by @dmarchuk. Please re-submit it in order to merge. See more details [here]${LINK}.\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`],
+  ])('reads %s as %s', (_name, state, body) => {
+    expect(externalQueueStatusFromComment(trunk(body))).toMatchObject({
+      provider: 'trunk',
+      state,
+      source: 'comment',
+    });
+  });
+
+  it('quotes the provider sentence that carried the state, without the link URL', () => {
+    const status = externalQueueStatusFromComment(
+      trunk(`\u{1F60E} Merged successfully - [details]${LINK}.`)
+    );
+    expect(status!.evidence).toBe('\u{1F60E} Merged successfully');
+  });
+
+  it("reads an untouched submit box as 'the provider does NOT have this PR'", () => {
+    // THE bug this channel exists for: on #74552 Talyn read only labels, saw
+    // none, and declared its `/trunk merge` ignored while trunk was testing.
+    expect(externalQueueStatusFromComment(trunk(TRUNK_UNSUBMITTED))?.state).toBe('not_submitted');
+  });
+
+  it('reads a ticked submit box as submitted, even before trunk writes a status', () => {
+    expect(externalQueueStatusFromComment(trunk(TRUNK_TICKED))?.state).toBe('queued');
+  });
+
+  it("reads trunk's refusal of a stacked PR as rejected, not as 'submitted'", () => {
+    // The box is TICKED here — reading the checkbox alone would park the PR
+    // forever on a queue that has already said it will never merge it.
+    const body =
+      TRUNK_TICKED +
+      '\nGitHub considers this PR to be a part of a stack - GitHub has not rolled out support ' +
+      'for Trunk to work with these stacks yet, so our merge queue will be unable to merge this ' +
+      'PR. Until GitHub does, you must tear down a PR\u2019s stack before submitting it.';
+    const status = externalQueueStatusFromComment(trunk(body));
+    expect(status?.state).toBe('rejected');
+    expect(status?.evidence).toContain('unable to merge this PR');
+  });
+
+  it("never reads trunk's flaky-test comment as a queue state", () => {
+    // Same author, same host, and full of the word "failed" — the only thing
+    // telling them apart is the marker and the /merge-queue/ link path.
+    const body =
+      '<!-- Trunk Test Analytics -->\n\n[![Static Badge](https://raster.shields.io/badge/4-failed-crimson)]' +
+      '(https://app.trunk.io/posthog-inc/flaky-tests/pr/70824)\n\n| Failed Test | Failure Summary |\n' +
+      '| --- | --- |\n| `Funnel insights` | The test failed because the tooltip was not found. |';
+    expect(externalQueueStatusFromComment(trunk(body))).toBeNull();
+  });
+
+  it('ignores a human quoting trunk, and any non-trunk bot', () => {
+    const body = `\u{1F9EA} Running tests on this pull request - [details]${LINK}.`;
+    expect(externalQueueStatusFromComment({ body, user: { login: 'Gilbert09' } })).toBeNull();
+    expect(externalQueueStatusFromComment({ body, user: { login: 'github-actions[bot]' } })).toBeNull();
+    expect(externalQueueStatusFromComment({ body: null })).toBeNull();
+    expect(externalQueueStatusFromComment({ body: 'lgtm!' })).toBeNull();
+  });
+
+  it('picks the queue comment out of a PR full of other comments', () => {
+    expect(
+      externalQueueStatusFromComments([
+        { body: 'lgtm', user: { login: 'Gilbert09' } },
+        trunk('<!-- Trunk Test Analytics -->\n\n| Failed Test |\n| --- |'),
+        trunk(`\u{1F9EA} Running tests on this pull request - [details]${LINK}.`),
+        { body: '/trunk merge', user: { login: 'talyn-app[bot]' } },
+      ])?.state
+    ).toBe('testing');
+    expect(externalQueueStatusFromComments([])).toBeNull();
+  });
+});
+
+describe('externalQueueInstructionFromComments', () => {
+  it('finds the command door in the instruction body', () => {
+    expect(externalQueueInstructionFromComments([trunk(TRUNK_UNSUBMITTED)])).toEqual({
+      provider: 'trunk',
+      command: '/trunk merge',
+    });
+  });
+
+  it('still finds it after an ejection, when trunk has dropped its own marker', () => {
+    // Trunk's post-ejection body re-offers the command but carries no
+    // `<!-- Trunk Merge -->` marker — insisting on the marker made exactly the
+    // RESUBMIT path unable to find its own door.
+    const ejected =
+      `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by ` +
+      `@dmarchuk. Please re-submit it in order to merge. See more details [here]${LINK}.\n` +
+      '<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull ' +
+      'request, check the box to the left or comment `/trunk merge` below.';
+    expect(externalQueueInstructionFromComments([trunk(ejected)])?.command).toBe('/trunk merge');
+  });
+
+  it('claims no door when trunk offers none, and none for an ordinary PR', () => {
+    expect(
+      externalQueueInstructionFromComments([
+        trunk('<!-- Trunk Merge -->\nMerging is managed by Trunk. Check the box above.'),
+      ])
+    ).toBeNull();
+    expect(externalQueueInstructionFromComments([{ body: 'ship it' }])).toBeNull();
   });
 });
 

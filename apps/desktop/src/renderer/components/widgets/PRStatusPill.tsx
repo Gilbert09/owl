@@ -14,6 +14,7 @@ import {
   externalQueueProviderLabel,
   externalQueueStateLabel,
   externalQueueStatusFromLabels,
+  type ExternalQueueState,
 } from '@talyn/shared';
 import { cn } from '../../lib/utils';
 import type { PRBlockingReason, PRChecks, PRState } from '../../lib/api';
@@ -77,8 +78,18 @@ interface PRStatusPillProps {
    * PR's state as labels, and once it holds the PR that state is what the
    * reader actually wants — "Queue: testing" beats "Ready" on a PR nobody but
    * the queue can merge. Ranked below merged/closed, above every open verdict.
+   *
+   * Only the FALLBACK channel: trunk applies these labels in some repo
+   * configurations and not others. Prefer `externalQueueState` when the caller
+   * has it.
    */
   labels?: string[];
+  /**
+   * The external queue's own answer, as the backend read it off the provider's
+   * PR comment (`mergeQueue.external.state`). Authoritative — it wins over
+   * whatever the labels say, and is often the only channel there is.
+   */
+  externalQueueState?: ExternalQueueState;
   className?: string;
 }
 
@@ -102,10 +113,12 @@ export function PRStatusPill({
   hideReviewState = false,
   reviewDecision,
   labels,
+  externalQueueState,
   className,
 }: PRStatusPillProps) {
   const terminal = terminalVariant(state);
-  const external = terminal || state !== 'open' ? null : externalQueueVariant(labels);
+  const external =
+    terminal || state !== 'open' ? null : externalQueueVariant(labels, externalQueueState);
   const variant =
     terminal ??
     external?.variant ??
@@ -162,23 +175,34 @@ function terminalVariant(state?: PRState): PillVariant | null {
  * amber so it stands out — it's back in the author's court.
  */
 function externalQueueVariant(
-  labels: string[] | undefined
+  labels: string[] | undefined,
+  observed: ExternalQueueState | undefined
 ): { variant: PillVariant; title: string } | null {
-  const ext = externalQueueStatusFromLabels(labels);
+  const ext = observed
+    ? ({ provider: 'trunk', state: observed, source: 'comment', evidence: 'its own comment' } as const)
+    : externalQueueStatusFromLabels(labels);
   if (!ext) return null;
+  // The provider does NOT have the PR — nothing to say; the normal open-state
+  // verdicts describe it better than a queue pill would.
+  if (ext.state === 'not_submitted') return null;
   const provider = externalQueueProviderLabel(ext.provider);
   const state = externalQueueStateLabel(ext.state);
   const base = { label: `Queue: ${state.toLowerCase()}`, tone: 'blue' as const };
   switch (ext.state) {
+    case 'rejected':
+      return {
+        variant: { ...base, label: 'Queue: refused', icon: XCircle, tone: 'red' },
+        title: `${provider}'s merge queue says it cannot merge this PR (${ext.evidence}).`,
+      };
     case 'failed':
       return {
         variant: { ...base, icon: XCircle, tone: 'red' },
-        title: `${provider}'s merge queue rejected this PR (${ext.label}) — its tests fail merging with the base.`,
+        title: `${provider}'s merge queue rejected this PR (${ext.evidence}) — its tests fail merging with the base.`,
       };
     case 'cancelled':
       return {
         variant: { ...base, icon: AlertTriangle, tone: 'amber' },
-        title: `This PR was cancelled in ${provider}'s merge queue (${ext.label}).`,
+        title: `This PR was cancelled in ${provider}'s merge queue (${ext.evidence}).`,
       };
     case 'merged':
       return {
@@ -188,17 +212,17 @@ function externalQueueVariant(
     case 'not_ready':
       return {
         variant: { ...base, icon: Clock, tone: 'amber' },
-        title: `${provider}'s merge queue is holding this PR until it meets the merge requirements (${ext.label}).`,
+        title: `${provider}'s merge queue is holding this PR until it meets the merge requirements (${ext.evidence}).`,
       };
     case 'passed':
       return {
         variant: { ...base, icon: CheckCircle2, tone: 'green' },
-        title: `${provider}'s merge queue passed this PR (${ext.label}) — merging shortly.`,
+        title: `${provider}'s merge queue passed this PR (${ext.evidence}) — merging shortly.`,
       };
     default:
       return {
         variant: { ...base, icon: Loader2, spin: ext.state === 'testing' },
-        title: `This PR is in ${provider}'s merge queue (${ext.label}) — it merges when the queue's tests pass.`,
+        title: `This PR is in ${provider}'s merge queue (${ext.evidence}) — it merges when the queue's tests pass.`,
       };
   }
 }

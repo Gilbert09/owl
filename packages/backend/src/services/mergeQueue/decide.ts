@@ -20,6 +20,7 @@ import {
   externalQueueStatusFromLabels,
   isExternalQueueSubmitLabel,
   isExternalQueueEjected,
+  isExternalQueueHolding,
   type ExternalQueueStatus,
   type PRMergeableSummary,
 } from '@talyn/shared';
@@ -51,14 +52,24 @@ export function externalQueueRejectedReason(
   const provider = externalQueueProviderLabel(status.provider);
   if (status.state === 'cancelled') {
     return (
-      `${provider}'s merge queue cancelled this PR (\`${status.label}\`). Talyn won't ` +
+      `${provider}'s merge queue cancelled this PR (${status.evidence}). Talyn won't ` +
       `resubmit a cancelled PR automatically — push a fix, or re-queue the PR to submit it again.`
     );
   }
   return (
     `${provider}'s merge queue rejected this PR ${maxAttempts}× on this commit ` +
-    `(\`${status.label}\`) — its tests fail when the PR is merged with the base. ` +
+    `(${status.evidence}) — its tests fail when the PR is merged with the base. ` +
     `Push a fix (the queue resubmits automatically on a new commit), or re-queue to retry now.`
+  );
+}
+
+/** The provider refuses to merge this PR at all — no fix run can move it. */
+export function externalQueueRefusedReason(status: ExternalQueueStatus): string {
+  const provider = externalQueueProviderLabel(status.provider);
+  return (
+    `${provider}'s merge queue says it cannot merge this PR: "${status.evidence}". ` +
+    `That isn't something a fix run or a resubmit can change — resolve it in ${provider}, ` +
+    `or remove the PR from the queue.`
   );
 }
 
@@ -233,55 +244,69 @@ function checksFailing(summary: PRMergeableSummary): boolean {
 }
 
 /**
- * Where the external merge queue says this PR is, read off its labels — the
- * only channel trunk.io reports on. Null means no external queue has touched
- * the PR (the answer for every PR in a repo that doesn't use one, and for a
- * just-submitted PR in the ~30s before the provider labels it).
+ * Where the external merge queue says this PR is.
+ *
+ * TWO channels, and the ORDER is the whole point. `ctx.externalQueue` is read
+ * off the provider's own PR comment, which trunk edits in place through the
+ * lifecycle; labels are a config-dependent mirror of it. On posthog/posthog the
+ * labels turned out to be neither reliable nor timely — seven PRs trunk was
+ * actively testing carried no queue label at all, while PRs merged hours
+ * earlier still carried `trunk-testing` — so reading labels FIRST made the
+ * queue declare "never picked up" for PRs sitting happily in trunk's queue
+ * (2026-07-29). Null from both means no external queue has said anything: the
+ * answer for every PR in a repo that doesn't use one, and for a just-submitted
+ * PR in the seconds before the provider reacts.
  */
-export function externalQueueOf(pr: PrSnapshot): ExternalQueueStatus | null {
-  return externalQueueStatusFromLabels(pr.summary.labels);
+export function externalQueueOf(pr: PrSnapshot, ctx?: DecisionContext): ExternalQueueStatus | null {
+  return ctx?.externalQueue ?? externalQueueStatusFromLabels(pr.summary.labels);
 }
 
 /**
  * How long a submission may go unacknowledged before the queue stops believing
- * it. trunk labels a PR within ~30s of accepting it (observed: 30s on #74353);
- * 10 minutes is far beyond that while still bounding how long a PR can sit on
- * a submission the provider silently ignored.
+ * it, when the provider has said NOTHING either way. trunk reacts within ~30s
+ * of accepting a PR (observed: 30s on #74353); 10 minutes is far beyond that
+ * while still bounding how long a PR can sit on a submission that vanished.
  */
 export const EXTERNAL_PICKUP_GRACE_MS = 10 * 60_000;
 
 /**
- * Is the PR still in the external queue's hands? A live provider state answers
- * it directly. Otherwise it depends on the door we used, because each leaves a
- * different trace:
+ * Is the PR still in the external queue's hands?
  *
- * - `auto_merge` / `label` leave state ON GitHub we can re-read, so their
- *   absence means the submission was undone outside Talyn.
- * - `comment` leaves nothing re-readable (a posted command is fire-and-forget),
- *   so we trust it for a grace window and then treat silence as "not picked up"
- *   — which is the honest reading, and the only way a provider that ignores
- *   Talyn's command surfaces instead of parking the PR forever.
+ * The provider's own answer settles it whenever there is one — including the
+ * negative answer (`not_submitted`: trunk's submit checkbox is untouched, so it
+ * does NOT have the PR). Only within the grace window is that negative treated
+ * as "not yet", since we may be reading the comment between our command landing
+ * and trunk reacting to it.
+ *
+ * With no provider answer at all it falls back to the door we used, because
+ * each leaves a different trace: `auto_merge`/`label` leave state ON GitHub we
+ * can re-read, so their absence means the submission was undone outside Talyn;
+ * `comment` leaves nothing re-readable, so it's believed for the grace window
+ * and no longer.
  */
 function stillSubmitted(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContext): boolean {
-  const ext = externalQueueOf(pr);
-  if (ext) return !isExternalQueueEjected(ext.state);
+  const ext = externalQueueOf(pr, ctx);
+  if (ext && ext.state !== 'not_submitted') return !isExternalQueueEjected(ext.state);
+  if (ext?.state === 'not_submitted') return withinPickupGrace(entry, ctx);
   if (entry.externalSubmitVia === 'auto_merge') return pr.autoMergeEnabledBy !== null;
   if (entry.externalSubmitVia === 'label') {
     return (pr.summary.labels ?? []).some(isExternalQueueSubmitLabel);
   }
-  if (entry.externalSubmitVia === 'comment') {
-    if (!entry.externalSubmittedAt) return false;
-    const age = Date.parse(ctx.nowIso) - Date.parse(entry.externalSubmittedAt);
-    return Number.isFinite(age) && age < EXTERNAL_PICKUP_GRACE_MS;
-  }
+  if (entry.externalSubmitVia === 'comment') return withinPickupGrace(entry, ctx);
   return false;
+}
+
+function withinPickupGrace(entry: EntrySnapshot, ctx: DecisionContext): boolean {
+  if (!entry.externalSubmittedAt) return false;
+  const age = Date.parse(ctx.nowIso) - Date.parse(entry.externalSubmittedAt);
+  return Number.isFinite(age) && age < EXTERNAL_PICKUP_GRACE_MS;
 }
 
 export const EXTERNAL_PICKUP_FAILED_REASON =
   "Talyn posted the merge queue's own submit command on this PR and the queue never " +
-  'picked it up (no queue label appeared). It may not accept commands from an app — ' +
-  "submit the PR in that system (e.g. tick the checkbox in its comment), or re-queue " +
-  'the PR to try again.';
+  'picked it up — its submit checkbox is still untouched. It may not accept commands ' +
+  'from an app — submit the PR in that system (e.g. tick the checkbox in its comment), ' +
+  'or re-queue the PR to try again.';
 
 // ── The decision function ──
 
@@ -410,18 +435,46 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   }
 
   // R5b — submitted to an external merge queue (trunk.io / GitHub's native
-  // queue). That system owns the merge moment now; we track it off the PR's
-  // labels. Three outcomes: it merges (R0 closes us out), it keeps working
-  // (wait), or it EJECTS the PR back to us — which is where Talyn earns its
+  // queue). That system owns the merge moment now; we track it off its own PR
+  // comment (falling back to labels). Four outcomes: it merges (R0 closes us
+  // out), it keeps working (wait), it REFUSES the PR outright (a human's
+  // problem), or it EJECTS the PR back to us — which is where Talyn earns its
   // keep: fix the PR and resubmit, bounded by a per-head budget.
   if (d.entry.status === 'awaiting_external') {
-    const ext = externalQueueOf(pr);
-    if (ext && isExternalQueueEjected(ext.state)) {
+    const ext = externalQueueOf(pr, ctx);
+    // An ejection seen within the grace window of OUR OWN submission is very
+    // likely the state we just resubmitted against — neither channel proves
+    // the provider has reacted yet (its comment is edited in place, its labels
+    // are relabelled in place), so a fresh read returns the pre-submit answer
+    // for as long as it takes the provider to act. Acting on it would eject →
+    // resubmit → eject, spending the whole per-head submit budget in a minute.
+    // Waiting costs at most one grace window on a genuinely fast ejection.
+    const staleEjection =
+      ext !== null && isExternalQueueEjected(ext.state) && withinPickupGrace(d.entry, ctx);
+    if (!staleEjection) d.observeExternalState(ext);
+    if (ext && ext.state === 'rejected') {
+      // The provider itself says it will never merge this PR (trunk on a
+      // stacked PR: "our merge queue will be unable to merge this PR"). A fix
+      // run can't unstack it and a resubmit would be ignored.
+      d.transition('blocked_manual', {
+        blockedCode: 'external_gate',
+        blockedReason: externalQueueRefusedReason(ext),
+        set: { externalSubmitVia: null, externalSubmittedAt: null },
+        event: {
+          code: 'external_queue_refused',
+          message: `${externalQueueProviderLabel(ext.provider)} refuses to merge this PR.`,
+          detail: { evidence: ext.evidence, source: ext.source },
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+      return d.done('advance');
+    }
+    if (ext && isExternalQueueEjected(ext.state) && !staleEjection) {
       const verdict = decideExternalEjection(d, ext, ctx);
       if (verdict) return verdict;
       // null → requeued for a resubmit; fall through to the normal rules so a
       // PR that came back broken gets remediated before it goes round again.
-    } else if (stillSubmitted(d.entry, pr, ctx)) {
+    } else if (staleEjection || stillSubmitted(d.entry, pr, ctx)) {
       // In the queue's hands. A settled blocker still deserves remediation —
       // the provider will hold a conflicting PR at "not ready" forever — so
       // only an unobstructed PR short-circuits here.
@@ -451,6 +504,34 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
           message: 'The external queue submission was removed outside Talyn — re-evaluating.',
         },
       });
+    }
+  }
+
+  // R5c — an external-queue block the provider itself now contradicts. The
+  // blocked states here are all "we believe the queue doesn't have this PR",
+  // and every one of them was reached from absent/ambiguous evidence: a
+  // submission the provider never acknowledged, or an ejection. Seeing the
+  // provider ACTIVELY holding the PR is stronger evidence than any of that, so
+  // hand it back and resume tracking. This is also what un-sticks the entries
+  // blocked by the label-only reading that predates the comment channel.
+  if (
+    (d.entry.status === 'blocked_manual' || d.entry.status === 'blocked') &&
+    (d.entry.blockedCode === 'external_gate' || d.entry.blockedCode === 'external_queue_rejected')
+  ) {
+    const ext = externalQueueOf(pr, ctx);
+    if (ext && isExternalQueueHolding(ext.state)) {
+      const provider = externalQueueProviderLabel(ext.provider);
+      d.transition('awaiting_external', {
+        set: { externalState: ext.state },
+        event: {
+          code: 'external_queue_holding',
+          message:
+            `${provider}'s merge queue has this PR after all ` +
+            `(${externalQueueStateLabel(ext.state).toLowerCase()}) — tracking it there.`,
+          detail: { evidence: ext.evidence, source: ext.source },
+        },
+      });
+      return d.done('advance');
     }
   }
 
@@ -691,25 +772,25 @@ function decideExternalEjection(
     d.transition('blocked', {
       blockedCode: 'external_queue_rejected',
       blockedReason: externalQueueRejectedReason(ext, ctx.maxAttempts),
-      set: { externalSubmitVia: null, externalSubmittedAt: null },
+      set: { externalSubmitVia: null, externalSubmittedAt: null, externalState: ext.state },
       event: {
         code: 'external_queue_rejected',
         message:
           ext.state === 'cancelled'
             ? `${provider} cancelled this PR in its merge queue.`
             : `${provider} rejected this PR ${d.entry.submitAttempts}× on this commit — giving up until a new push.`,
-        detail: { label: ext.label, state: ext.state },
+        detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
       },
     });
     d.act({ kind: 'notify_blocked' });
     return d.done('advance');
   }
   d.transition('queued', {
-    set: { externalSubmitVia: null, externalSubmittedAt: null },
+    set: { externalSubmitVia: null, externalSubmittedAt: null, externalState: ext.state },
     event: {
       code: 'external_queue_ejected',
       message: `${provider} ejected this PR (${externalQueueStateLabel(ext.state).toLowerCase()}) — re-evaluating before resubmitting.`,
-      detail: { label: ext.label, attempts: d.entry.submitAttempts },
+      detail: { evidence: ext.evidence, attempts: d.entry.submitAttempts },
     },
   });
   return null;
@@ -723,12 +804,16 @@ function decideSubmitAftermath(
 ): Decision {
   const outcome = ctx.submitOutcome!;
   if (outcome.kind === 'submitted') {
-    const ext = externalQueueOf(pr);
+    const ext = externalQueueOf(pr, ctx);
     d.transition('awaiting_external', {
       set: {
         submitAttempts: d.entry.submitAttempts + 1,
         externalSubmitVia: outcome.via,
         externalSubmittedAt: ctx.nowIso,
+        // Whatever the provider said BEFORE this submit is stale by definition
+        // — the next observation replaces it, and until then the grace window
+        // (externalSubmittedAt) is what holds the entry.
+        externalState: null,
         // Record whose auto-merge arm carries the submission: the disarm
         // invariant un-submits ours when the entry later blocks, and never
         // touches one the user armed on github.com.
@@ -1244,6 +1329,12 @@ class DecisionBuilder {
       if (opts.set.externalSubmitVia !== undefined) {
         this.entry.externalSubmitVia = opts.set.externalSubmitVia;
       }
+      if (opts.set.externalSubmittedAt !== undefined) {
+        this.entry.externalSubmittedAt = opts.set.externalSubmittedAt;
+      }
+      if (opts.set.externalState !== undefined) {
+        this.entry.externalState = opts.set.externalState;
+      }
       if (opts.set.automergeArmedBy !== undefined) {
         this.entry.automergeArmedBy = opts.set.automergeArmedBy;
       }
@@ -1255,6 +1346,32 @@ class DecisionBuilder {
       }
       if (opts.set.unsignedCount !== undefined) this.entry.unsignedCount = opts.set.unsignedCount;
     }
+  }
+
+  /**
+   * Record where the external queue says the PR is, when that has MOVED. One
+   * small write per provider transition (queued → testing → passed …), which
+   * is what makes the desktop badge and the entry timeline show the provider's
+   * real progress instead of a flat "submitted to queue".
+   *
+   * Never writes a null over a known state: "we didn't observe anything this
+   * evaluation" is not the same as "the provider dropped the PR", and the
+   * submission's own bookkeeping (externalSubmitVia/At) covers that case.
+   */
+  observeExternalState(ext: ExternalQueueStatus | null): void {
+    if (!ext || ext.state === this.entry.externalState) return;
+    this.transition(this.entry.status, {
+      blockedCode: this.entry.blockedCode,
+      blockedReason: this.entry.blockedReason,
+      set: { externalState: ext.state },
+      event: {
+        code: 'external_state',
+        message:
+          `${externalQueueProviderLabel(ext.provider)}: ` +
+          `${externalQueueStateLabel(ext.state).toLowerCase()} (${ext.evidence}).`,
+        detail: { state: ext.state, source: ext.source },
+      },
+    });
   }
 
   /** Persist `status` only if it differs (v1's ensureStatus). */
@@ -1283,8 +1400,10 @@ class DecisionBuilder {
     this.entry.signingCheckedSha = null;
     this.entry.unsignedCount = null;
     // New code invalidates any external-queue submission: the provider tests
-    // the commit it accepted, and it no longer exists as the head.
+    // the commit it accepted, and it no longer exists as the head. Its last
+    // reported state goes with it — it described the old commit.
     this.entry.externalSubmitVia = null;
+    this.entry.externalState = null;
     if (this.entry.status === 'blocked' || this.entry.status === 'awaiting_external') {
       this.entry.status = 'queued';
       this.entry.blockedCode = null;

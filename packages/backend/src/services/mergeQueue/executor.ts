@@ -32,6 +32,7 @@ import {
   markExternalMergeGate,
 } from '../repoMergeGate.js';
 import { submitToExternalQueue } from '../externalQueueSubmit.js';
+import { readExternalQueueState } from '../externalQueueState.js';
 import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
@@ -123,6 +124,39 @@ export function buildPrSnapshot(pr: PrEvalRow): PrSnapshot {
   };
 }
 
+/**
+ * How stale an external-queue observation may be for THIS entry, or null when
+ * the entry's decision doesn't depend on one. The webhook feed keeps the cache
+ * warm, so this only bounds how long a MISSED delivery can mislead us — and
+ * each case is bounded by how fast its answer can change:
+ *
+ * - Tracking a submission with no state yet (or an untouched submit box): the
+ *   provider is expected to react in ~30s, and the wrong answer here BLOCKS the
+ *   PR, so re-ask every minute until it speaks.
+ * - Tracking a live provider state: the provider's next move is minutes-to-an-
+ *   hour away (a trunk test cycle is ~40min) and every move edits its comment,
+ *   so a 10-minute backstop costs nothing and catches a dropped delivery.
+ * - Already blocked on the external queue: only a self-heal can come of it
+ *   (R5c), which is not urgent — the same 10-minute backstop.
+ */
+export function externalStateMaxAge(entry: EntrySnapshot): number | null {
+  const AWAITING_ANSWER_MS = 60_000;
+  const BACKSTOP_MS = 10 * 60_000;
+  if (entry.status === 'awaiting_external') {
+    return entry.externalState === null || entry.externalState === 'not_submitted'
+      ? AWAITING_ANSWER_MS
+      : BACKSTOP_MS;
+  }
+  if (entry.externalSubmitVia !== null) return AWAITING_ANSWER_MS;
+  if (
+    (entry.status === 'blocked' || entry.status === 'blocked_manual') &&
+    (entry.blockedCode === 'external_gate' || entry.blockedCode === 'external_queue_rejected')
+  ) {
+    return BACKSTOP_MS;
+  }
+  return null;
+}
+
 async function buildBaseContext(
   entry: EntrySnapshot,
   pr: PrEvalRow,
@@ -156,6 +190,21 @@ async function buildBaseContext(
     pr.repo,
     entry.baseBranch
   );
+  // What the external queue itself says about this PR. Only asked for when a
+  // gate exists AND the entry's fate depends on the answer; usually served from
+  // the webhook-fed cache (the provider's every state change edits its comment,
+  // which IS a delivery), so this is normally free.
+  const externalMaxAge = externalGate ? externalStateMaxAge(entry) : null;
+  const externalQueue =
+    externalMaxAge === null
+      ? undefined
+      : await readExternalQueueState(
+          pr.workspaceId,
+          pr.owner,
+          pr.repo,
+          pr.number,
+          externalMaxAge
+        ).catch(() => null);
   return {
     nowIso: new Date().toISOString(),
     isHead: input.isHead,
@@ -166,6 +215,7 @@ async function buildBaseContext(
     signingRequired,
     autoMergeCapability,
     externalGate,
+    ...(externalQueue !== undefined ? { externalQueue } : {}),
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),
@@ -568,6 +618,7 @@ async function applyTransition(
     ...(action.set?.externalSubmittedAt !== undefined
       ? { externalSubmittedAt: action.set.externalSubmittedAt }
       : {}),
+    ...(action.set?.externalState !== undefined ? { externalState: action.set.externalState } : {}),
     ...(action.set?.automergeArmedBy !== undefined
       ? { automergeArmedBy: action.set.automergeArmedBy }
       : {}),
@@ -605,6 +656,9 @@ async function applyTransition(
               ? new Date(action.set.externalSubmittedAt)
               : null,
           }
+        : {}),
+      ...(action.set?.externalState !== undefined
+        ? { externalState: action.set.externalState, externalStateAt: new Date() }
         : {}),
       ...(action.set?.automergeArmedBy !== undefined
         ? {
@@ -666,6 +720,7 @@ async function applyBudgetReset(
     submitAttempts: 0,
     externalSubmitVia: null,
     externalSubmittedAt: null,
+    externalState: null,
     signingCheckedSha: null,
     unsignedCount: null,
     ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
@@ -681,6 +736,7 @@ async function applyBudgetReset(
       submitAttempts: 0,
       externalSubmitVia: null,
       externalSubmittedAt: null,
+      externalState: null,
       signingCheckedSha: null,
       unsignedCount: null,
       ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),

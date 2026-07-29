@@ -2,6 +2,27 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 75 — Read trunk's state off its COMMENT, not its labels (2026-07-29)
+
+Same day as Session 74, from live use: seven PostHog PRs sat in the merge queue reading **"Needs you — Talyn posted the merge queue's own submit command and the queue never picked it up"**, while trunk was demonstrably testing every one of them (#74552's `/trunk merge` from `talyn-app[bot]` even carried a 👍 from trunk).
+
+**Root cause: the label channel is not the signal.** Session 74 read trunk's state exclusively from labels (`trunk-queued` / `trunk-testing` / …), which are optional in trunk's configuration. On posthog/posthog:
+
+- #74552 ran a full trunk test cycle with **no queue label ever applied** (its whole `labeled` timeline is one `stamphog`), and 6 sibling PRs were the same.
+- PRs merged hours earlier still carried a stale `trunk-testing`.
+
+So "no label" was read as "trunk ignored our comment", and `decide` blocked the entry (`blocked_manual`/`external_gate`) after the 10-minute grace window — sticky until a push or a requeue.
+
+**The reliable channel is trunk's own PR comment**, which it keeps as ONE comment and **edits in place** through the lifecycle. Captured verbatim off 100 recent PRs: instruction + submit checkbox → `✨ Submitted to Merge by @x` → `⏳ Waiting to start tests` → `🧪 Running tests on this pull request (testing on PR #x)` → `👍 will be merged soon because tests have passed` → `😎 Merged successfully`, with `🚫 removed from the merge queue because it was pushed to by @x`, `❌ could not start testing because there was a merge conflict`, and `⚠️ The required check … has failed` for the failure paths. Crucially, every edit is an `issue_comment` webhook — an event Talyn already processes — so the state arrives **free and in real time**.
+
+- **Parser** — `packages/shared/src/externalMergeQueue.ts`: `externalQueueStatusFromComment(s)` maps those bodies to `ExternalQueueState`, with the submit checkbox (`- [x]` / `- [ ]` between trunk's `Start/End PR Submit Checkbox` markers) as the fallback when there's no status line. Two new states: **`not_submitted`** (the box is untouched — trunk genuinely does NOT have the PR, the only honest basis for the "never picked it up" block) and **`rejected`** (trunk says it *cannot* merge this PR — e.g. a stacked PR — which no fix run or resubmit can move, so it blocks manually). `ExternalQueueStatus.label` became `source` + `evidence`, so a tooltip can quote trunk's own sentence. Identification is deliberately narrow: trunk's *other* comment (Test Analytics) is by the same bot, on the same host, and full of the word "failed" — only the `/merge-queue/` link path and the markers tell them apart.
+- **State cache** — `services/externalQueueState.ts`: webhook-fed (`webhookWorker` hands every `issue_comment` body to it) with a REST backstop for a cold cache. The merge-queue executor asks for it only when a gate exists AND the entry's fate depends on the answer, with a staleness bound matched to how fast the answer can change (`externalStateMaxAge`): 60s while waiting for trunk to say anything at all, 10min once it IS working the PR (that's purely a missed-delivery backstop). In practice this costs ~0 extra GitHub calls.
+- **`decide`** — the comment channel now outranks labels everywhere (`externalQueueOf(pr, ctx)`). "Not picked up" requires the provider *saying* so past the grace window, rather than the absence of a label. New **R5c**: an entry blocked on the external queue that is now *observed* being held by it (`isExternalQueueHolding`) goes straight back to `awaiting_external` — which is what un-stuck the seven live PRs on deploy, with no requeue.
+- **Persisted state** — `merge_queue_entries.external_state` / `external_state_at` (migration `0037`), written whenever the provider's state MOVES. Drives the entry timeline, survives a restart, and reaches the desktop as `mergeQueue.external.state` so the queue cell renders "Queue: testing" on a PR with no labels at all. `PRStatusPill` and `isReadyToMerge` prefer it over labels too.
+- **Latent bug found by the same corpus**: `externalQueueInstructionFromComments` required trunk's `<!-- Trunk Merge -->` marker, which trunk DROPS once it rewrites the comment — including in the post-ejection body that re-offers `/trunk merge`. Door 1 was therefore unavailable on exactly the resubmit path the queue exists for; it now identifies the comment structurally.
+
+Tests: 40 new cases pinned to the verbatim trunk bodies (`externalMergeQueue.test.ts`), `externalQueueState.test.ts` (cache/backstop/staleness policy), 11 new `decide.test.ts` cases for the comment channel + self-heal, and a `webhookWorker.test.ts` case proving a comment edit populates the cache with no GitHub call.
+
 ## Session 74 — External merge queues: submit to trunk.io instead of failing (2026-07-29)
 
 posthog/posthog moved `master` behind **Trunk Merge Queue**. A repo-level ruleset ("Trunk merge", active since 2026-07-22, enforcement flipped 07-28) adds `update`/`creation`/`deletion`/`non_fast_forward` rules to the default branch and exempts **only three GitHub Apps** (trunk-io is 120106); `current_user_can_bypass: never`. So Talyn's merge PUT 405s with "Cannot update this protected ref" — for every PR, forever.

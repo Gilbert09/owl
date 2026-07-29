@@ -11,6 +11,11 @@ import {
 import { refreshWebhookIndex, _resetWebhookIndex } from '../services/webhookIndex.js';
 import { checkCountCoalescer } from '../services/checkCounts.js';
 import { prMonitorService } from '../services/prMonitor.js';
+import { githubService } from '../services/github.js';
+import {
+  _resetExternalQueueState,
+  readExternalQueueState,
+} from '../services/externalQueueState.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
@@ -170,6 +175,31 @@ describe('processWebhookDelivery (fan-out + coalescing)', () => {
     checkCountCoalescer._reset();
     await cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("captures an external merge queue's state from its own comment edit", async () => {
+    // trunk.io reports where a PR is by EDITING one comment in place. That edit
+    // is a delivery we already process, so the state arrives free — without it
+    // the merge queue has to pay a REST read per evaluation (and, before the
+    // comment channel existed, misread "no label" as "trunk ignored us").
+    _resetExternalQueueState();
+    const body =
+      '\u{1F9EA} Running tests on this pull request - ' +
+      '[details](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/7).';
+    await processWebhookDelivery(
+      delivery({
+        eventType: 'issue_comment',
+        action: 'edited',
+        payload: {
+          issue: { number: 7, pull_request: {} },
+          comment: { body, user: { login: 'trunk-io[bot]' } },
+        },
+      }),
+      1_000,
+    );
+    const list = vi.spyOn(githubService, 'listIssueComments');
+    expect((await readExternalQueueState('wsA', 'acme', 'widget', 7, 60_000))?.state).toBe('testing');
+    expect(list).not.toHaveBeenCalled();
   });
 
   it('fans one PR event out to every workspace in a SINGLE shared refresh call', async () => {

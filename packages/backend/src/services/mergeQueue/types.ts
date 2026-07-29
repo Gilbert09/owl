@@ -6,7 +6,11 @@
 // (webhook-triggered evaluation + a slow reconciler). Everything in this file
 // is shared vocabulary between those layers, and none of it does I/O.
 
-import type { PRMergeableSummary } from '@talyn/shared';
+import type {
+  ExternalQueueState,
+  ExternalQueueStatus,
+  PRMergeableSummary,
+} from '@talyn/shared';
 
 /** Stop auto-firing a given remediation after this many attempts per head. */
 export const MAX_ATTEMPTS = 3;
@@ -127,11 +131,18 @@ export interface EntrySnapshot {
   /** How the current external submission was made; null when not submitted. */
   externalSubmitVia: ExternalSubmitVia | null;
   /**
-   * When that submission was made (ISO). The comment door leaves no state on
-   * GitHub we can re-read, so this + a grace window is how the queue tells
-   * "the provider hasn't labelled it yet" from "the provider ignored us".
+   * When that submission was made (ISO). Only a fallback now that the
+   * provider's comment is read directly (see `externalState`): it bounds how
+   * long a submission is believed while the provider has said NOTHING at all.
    */
   externalSubmittedAt: string | null;
+  /**
+   * The provider's own last-observed answer for this PR — read off its comment
+   * (authoritative) or its labels. Persisted so the desktop badge, the timeline
+   * and a restarted backend all see where the PR actually is, rather than only
+   * "we submitted it at some point".
+   */
+  externalState: ExternalQueueState | null;
   fixTaskId: string | null;
   /** Whether `fixTaskId`'s terminal result has been folded into fixAttempts. */
   fixTaskAccounted: boolean;
@@ -231,6 +242,15 @@ export interface DecisionContext {
    * services/repoMergeGate.ts.
    */
   externalGate: 'suspected' | 'confirmed' | null;
+  /**
+   * The external queue's own answer for this PR, freshly observed off its
+   * comment (services/externalQueueState.ts). Undefined when the executor
+   * didn't ask — no gate on this base, or the entry isn't tracking a
+   * submission — and null when it asked and the provider has said nothing.
+   * `decide` prefers it over the PR's labels, which trunk applies only in some
+   * configurations and leaves stale in others.
+   */
+  externalQueue?: ExternalQueueStatus | null;
   /** Whether githubService.updateBranch exists/is enabled (Push E). */
   updateBranchAvailable: boolean;
   /** A cloud provider is connected for this workspace. */
@@ -286,6 +306,7 @@ export type Action =
           | 'submitAttempts'
           | 'externalSubmitVia'
           | 'externalSubmittedAt'
+          | 'externalState'
           | 'automergeArmedBy'
           | 'fixTaskAccounted'
           | 'signingCheckedSha'

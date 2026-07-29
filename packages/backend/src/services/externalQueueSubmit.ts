@@ -22,6 +22,7 @@
 
 import { enableAutoMerge, getAutoMergeCapability } from './githubAutoMerge.js';
 import { externalQueueInstructionFromComments } from '@talyn/shared';
+import { noteIssueComments } from './externalQueueState.js';
 import { githubService } from './github.js';
 import { getExternalQueueSubmitLabel } from './repoMergeGate.js';
 import type { ExternalSubmitVia, MergeMethod } from './mergeQueue/types.js';
@@ -192,7 +193,10 @@ async function readSubmitInstruction(
 ): Promise<{ provider: string; command: string } | null> {
   try {
     const comments = await githubService.listIssueComments(workspaceId, owner, repo, number);
-    return externalQueueInstructionFromComments(comments.map((c) => c.body));
+    // The same fetch answers "where is this PR in the queue?" — seed the state
+    // cache so the post-submit evaluation doesn't pay for the list twice.
+    noteIssueComments(owner, repo, number, comments);
+    return externalQueueInstructionFromComments(comments);
   } catch (err) {
     console.warn(
       `[externalQueueSubmit] couldn't read submit instructions for ${owner}/${repo}#${number}:`,

@@ -11,6 +11,7 @@ import {
   parseCheckRunPayload,
   pruneChecksForSha,
 } from './checkCounts.js';
+import { noteIssueComment } from './externalQueueState.js';
 
 /**
  * Drains the GitHub webhook ingest stream and turns each delivery into the
@@ -229,6 +230,15 @@ export async function processWebhookDelivery(
       `PRs=[${numbers.join(',')}] → ${targets.length} workspace(s)`,
   );
 
+  // An external merge queue (trunk.io) reports a PR's state by EDITING its own
+  // comment, so every `issue_comment` created/edited delivery may carry the
+  // provider's current answer. Capture it here — for free, from the payload we
+  // already have — so the merge-queue evaluation this delivery is about to
+  // trigger reads a fresh state instead of paying a REST call for it.
+  if (delivery.eventType === 'issue_comment' && delivery.action !== 'deleted') {
+    noteExternalQueueComment(delivery, numbers[0]!);
+  }
+
   // check_suite carries no per-check data — the individual check_run events do —
   // so it's a no-op for the incremental count path. Skipping it removes a big
   // slice of the firehose; the per-check_run updates + the sweep keep counts live.
@@ -286,6 +296,17 @@ export async function processWebhookDelivery(
     );
   }
   return dispatched;
+}
+
+/** Hand an `issue_comment` payload's body to the external-queue state cache. */
+function noteExternalQueueComment(delivery: WebhookDelivery, number: number): void {
+  const [owner, repo] = delivery.repoFullName.split('/');
+  if (!owner || !repo) return;
+  const comment = delivery.payload.comment as
+    | { body?: string | null; user?: { login?: string | null } | null }
+    | undefined;
+  if (!comment?.body) return;
+  noteIssueComment(owner, repo, number, comment);
 }
 
 /**

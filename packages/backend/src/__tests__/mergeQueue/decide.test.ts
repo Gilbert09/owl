@@ -21,6 +21,7 @@ import type {
   EntrySnapshot,
   PrSnapshot,
 } from '../../services/mergeQueue/types.js';
+import type { ExternalQueueState } from '@talyn/shared';
 
 const NOW = '2026-07-16T12:00:00.000Z';
 
@@ -37,6 +38,7 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
     submitAttempts: 0,
     externalSubmitVia: null,
     externalSubmittedAt: null,
+    externalState: null,
     fixTaskId: null,
     fixTaskAccounted: true,
     fixKind: null,
@@ -981,6 +983,17 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       automergeArmedBy: 'talyn',
       ...o,
     });
+  /**
+   * Everything except the bookkeeping write that records where the provider
+   * says the PR is. That write happens whenever the observed state MOVES (it's
+   * what drives the desktop badge and the entry timeline) and is not itself
+   * queue work, so the "does the queue leave this PR alone?" assertions filter
+   * it out and check it separately.
+   */
+  const workActions = (d: Decision) =>
+    d.actions.filter((a) => !(a.kind === 'transition' && a.event.code === 'external_state'));
+  const recorded = (d: Decision) =>
+    transitions(d).find((t) => t.event.code === 'external_state')?.set?.externalState ?? null;
 
   describe('submitting instead of merging', () => {
     it.each([['suspected'], ['confirmed']] as const)(
@@ -1157,17 +1170,33 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
   });
 
   describe('while the provider holds the PR', () => {
-    it.each([['trunk-not-ready'], ['trunk-queued'], ['trunk-testing'], ['trunk-tests-passed']])(
+    it.each([
+      ['trunk-not-ready', 'not_ready'],
+      ['trunk-queued', 'queued'],
+      ['trunk-testing', 'testing'],
+      ['trunk-tests-passed', 'passed'],
+    ] as const)(
       'waits (no actions) while the provider reports %s',
-      (label) => {
+      (label, state) => {
         const d = decide(submitted(), trunkPr(label), ctx({ externalGate: 'confirmed' }));
-        expect(d.actions).toEqual([]);
+        expect(workActions(d)).toEqual([]);
+        expect(recorded(d)).toBe(state);
         expect(d.verdict).toBe('advance');
       }
     );
 
     it('treats a bisection variant as the same state', () => {
       const d = decide(submitted(), trunkPr('trunk-testing (bisection)'), ctx({ externalGate: 'confirmed' }));
+      expect(workActions(d)).toEqual([]);
+      expect(recorded(d)).toBe('testing');
+    });
+
+    it('records the provider state only when it MOVES', () => {
+      const d = decide(
+        submitted({ externalState: 'testing' }),
+        trunkPr('trunk-testing'),
+        ctx({ externalGate: 'confirmed' })
+      );
       expect(d.actions).toEqual([]);
     });
 
@@ -1288,7 +1317,7 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
         trunkPr('trunk-queued'),
         ctx({ externalGate: 'confirmed' })
       );
-      expect(d.actions).toEqual([]);
+      expect(workActions(d)).toEqual([]);
     });
 
     it('blocks — without re-posting — when the window passes with no acknowledgement', () => {
@@ -1302,19 +1331,179 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     });
   });
 
+  describe("the provider's own comment (the authoritative channel)", () => {
+    // 2026-07-29: trunk was testing seven PRs on posthog/posthog and had
+    // labelled none of them, so the label-only reading concluded its `/trunk
+    // merge` comment had been ignored and blocked all seven. The comment
+    // channel is what decide now believes.
+    const observed = (state: ExternalQueueState, evidence = 'trunk said so') =>
+      ({ provider: 'trunk', state, source: 'comment', evidence }) as const;
+    const commented = (submittedAt: string, o: Partial<EntrySnapshot> = {}) =>
+      entry({
+        status: 'awaiting_external',
+        externalSubmitVia: 'comment',
+        externalSubmittedAt: submittedAt,
+        submitAttempts: 1,
+        ...o,
+      });
+    const longAgo = new Date(Date.parse(NOW) - 60 * 60_000).toISOString();
+
+    it('keeps waiting on an UNLABELLED PR the provider says it is testing', () => {
+      const d = decide(
+        commented(longAgo),
+        cleanPr(), // no trunk labels at all — exactly #74552
+        ctx({ externalGate: 'confirmed', externalQueue: observed('testing') })
+      );
+      expect(workActions(d)).toEqual([]);
+      expect(recorded(d)).toBe('testing');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('outranks a stale label the provider has moved past', () => {
+      const d = decide(
+        submitted({ externalState: 'testing' }),
+        trunkPr('trunk-testing'),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('merged') })
+      );
+      expect(recorded(d)).toBe('merged');
+    });
+
+    it('blocks only on the provider SAYING it has no submission, past the grace window', () => {
+      const d = decide(
+        commented(longAgo),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('not_submitted') })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked_manual');
+      expect(t.blockedReason).toContain('never picked it up');
+      expect(kinds(d)).not.toContain('submit_external'); // no comment spam
+    });
+
+    it('still waits out the grace window on an untouched submit box', () => {
+      const d = decide(
+        commented(new Date(Date.parse(NOW) - 2 * 60_000).toISOString()),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('not_submitted') })
+      );
+      expect(workActions(d)).toEqual([]);
+    });
+
+    it("blocks manually when the provider refuses the PR outright — no fix run, no resubmit", () => {
+      const d = decide(
+        commented(longAgo),
+        cleanPr(),
+        ctx({
+          externalGate: 'confirmed',
+          externalQueue: observed('rejected', 'unable to merge this PR'),
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked_manual');
+      expect(t.blockedCode).toBe('external_gate');
+      expect(t.blockedReason).toContain('unable to merge this PR');
+      expect(kinds(d)).toContain('notify_blocked');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('does not re-eject on evidence that predates our own resubmission', () => {
+      // Both channels are edited IN PLACE, so for the ~30s it takes the
+      // provider to react, a fresh read still returns the state we already
+      // resubmitted against. Acting on it would eject → resubmit → eject and
+      // spend the whole per-head budget in a minute.
+      const d = decide(
+        commented(new Date(Date.parse(NOW) - 30_000).toISOString(), { submitAttempts: 1 }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('failed') })
+      );
+      expect(d.actions).toEqual([]);
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('DOES eject once the grace window has passed without the provider moving on', () => {
+      const d = decide(
+        commented(longAgo, { submitAttempts: 1 }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('cancelled') })
+      );
+      expect(lastTransition(d)!.blockedCode).toBe('external_queue_rejected');
+    });
+
+    it('ejects on a failure the provider reports in its comment, not in a label', () => {
+      const d = decide(
+        commented(longAgo),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('failed') })
+      );
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it.each([['blocked_manual'], ['blocked']] as const)(
+      'takes a %s entry back the moment the provider is seen holding the PR',
+      (status) => {
+        const d = decide(
+          entry({
+            status,
+            blockedCode: status === 'blocked' ? 'external_queue_rejected' : 'external_gate',
+            blockedReason: 'the old label-only reading gave up on this PR',
+            submitAttempts: 3,
+          }),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: observed('testing') })
+        );
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('awaiting_external');
+        expect(t.set?.externalState).toBe('testing');
+        expect(t.event.code).toBe('external_queue_holding');
+        expect(d.verdict).toBe('advance');
+      }
+    );
+
+    it('leaves an external block alone while the provider is NOT holding the PR', () => {
+      for (const state of ['not_submitted', 'failed', 'cancelled', 'rejected'] as const) {
+        const d = decide(
+          entry({ status: 'blocked_manual', blockedCode: 'external_gate', submitAttempts: 3 }),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: observed(state) })
+        );
+        expect(lastTransition(d)?.to).not.toBe('awaiting_external');
+      }
+    });
+
+    it('leaves an unrelated blocked_manual alone even while the provider holds the PR', () => {
+      const d = decide(
+        entry({ status: 'blocked_manual', blockedCode: 'app_refused_hard' }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('testing') })
+      );
+      expect(d.actions).toEqual([]);
+    });
+
+    it('clears the recorded state on a new head — it described the old commit', () => {
+      const d = decide(
+        submitted({ headSha: 'old', externalState: 'testing' }),
+        pr({ headSha: 'new' }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('reset_budgets');
+      expect(kinds(d)).toContain('submit_external');
+    });
+  });
+
   describe('ejection', () => {
     it('requeues and resubmits when the provider fails the PR within budget', () => {
       const d = decide(submitted(), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
-      const first = transitions(d)[0]!;
-      expect(first.to).toBe('queued');
-      expect(first.event.code).toBe('external_queue_ejected');
-      expect(first.set?.externalSubmitVia).toBeNull();
+      const eject = transitions(d).find((t) => t.event.code === 'external_queue_ejected')!;
+      expect(eject.to).toBe('queued');
+      expect(eject.set?.externalSubmitVia).toBeNull();
       expect(kinds(d)).toContain('submit_external');
     });
 
     it('treats a pending-failure label as an ejection too', () => {
       const d = decide(submitted(), trunkPr('trunk-pending-failure'), ctx({ externalGate: 'confirmed' }));
-      expect(transitions(d)[0]!.event.code).toBe('external_queue_ejected');
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
     });
 
     it('fixes the PR first when it comes back genuinely broken', () => {

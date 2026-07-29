@@ -8,32 +8,54 @@
 // Talyn's queue still does the valuable half: take the PR to green (fix runs,
 // branch updates, re-signs, check re-runs), SUBMIT it to that system, then
 // track it there and re-fix if it gets ejected. This module is the shared
-// vocabulary the backend pipeline and the desktop badges both read — trunk
-// publishes its per-PR state as labels, which is the only signal either side
-// gets.
+// vocabulary the backend pipeline and the desktop badges both read.
+//
+// TWO channels carry trunk's state, and the authoritative one is the comment:
+//
+//  - **Its own PR comment.** Trunk posts ONE comment per PR and EDITS IT IN
+//    PLACE through the whole lifecycle: the submit instruction becomes "✨
+//    Submitted to Merge", then "🧪 Running tests…", then "😎 Merged
+//    successfully" (or a 🚫/❌/⚠️ failure). This always exists — it's how trunk
+//    talks to humans — so it's the channel to trust.
+//  - **Status labels** (`trunk-queued`, `trunk-testing`, …). Configurable, and
+//    on posthog/posthog they're applied only sometimes: #74552 went through a
+//    full test cycle without ever being labelled, and PRs that merged hours ago
+//    still carry a stale `trunk-testing`. Reading state off labels alone made
+//    Talyn declare "the queue never picked it up" for seven PRs trunk was
+//    actively testing (2026-07-29) — hence the comment channel.
 
 /** Systems whose queue state we can read. */
 export type ExternalQueueProvider = 'trunk';
 
 /**
- * Where a submitted PR sits in the external queue. `failed`/`cancelled` are the
- * EJECTED states — the provider gave the PR back, and Talyn's queue takes over
- * again (fix run → resubmit).
+ * Where a submitted PR sits in the external queue.
+ *
+ * `failed`/`cancelled` are the EJECTED states — the provider gave the PR back,
+ * and Talyn's queue takes over again (fix run → resubmit). `not_submitted` and
+ * `rejected` are only ever read off the provider's comment: the first says its
+ * submit box is untouched (it does NOT have the PR), the second that it refuses
+ * to merge this PR at all — neither is something a fix run or a resubmit can
+ * move, so both need a human.
  */
 export type ExternalQueueState =
+  | 'not_submitted'
   | 'not_ready'
   | 'queued'
   | 'testing'
   | 'passed'
   | 'failed'
   | 'cancelled'
+  | 'rejected'
   | 'merged';
 
 export interface ExternalQueueStatus {
   provider: ExternalQueueProvider;
   state: ExternalQueueState;
-  /** The label the state was read off — shown verbatim in tooltips. */
-  label: string;
+  /** Which channel the state was read off. */
+  source: 'label' | 'comment';
+  /** What it was read off — the label name, or the provider's own status
+   *  sentence. Shown verbatim in tooltips. */
+  evidence: string;
 }
 
 /**
@@ -71,11 +93,182 @@ export const TRUNK_SUBMIT_LABELS = ['trunk-merge-queue-submit', 'trunk-merge'] a
  * in a repo it manages ("Merging to `master` in this repository is managed by
  * Trunk"). Its presence is the most direct evidence there is that a third-party
  * queue owns the branch — trunk itself said so, on this PR.
+ *
+ * NOTE: it survives only while the comment is still the instruction. Once trunk
+ * takes the PR it rewrites the body to a status line and the marker goes with
+ * it, so anything identifying "trunk's comment" must also accept the checkbox
+ * markers and the merge-queue link below.
  */
 export const TRUNK_COMMENT_MARKER = '<!-- Trunk Merge -->';
 
 /** The command trunk's instruction comment tells you to post. */
 export const TRUNK_MERGE_COMMAND = '/trunk merge';
+
+/**
+ * Markers wrapping the submit checkbox trunk offers in its comment:
+ *
+ *     <!-- Start PR Submit Checkbox -->
+ *     - [x] <!-- End PR Submit Checkbox -->To merge this pull request, check…
+ *
+ * The tick IS trunk's answer to "do you have this PR?" — it appears when trunk
+ * accepts a submission and is cleared when it hands the PR back. Trunk drops
+ * the checkbox entirely while it's actively working the PR (the body is a
+ * status line instead), so its absence is not "unsubmitted".
+ */
+const TRUNK_CHECKBOX_START = '<!-- Start PR Submit Checkbox -->';
+const TRUNK_CHECKBOX_END = '<!-- End PR Submit Checkbox -->';
+
+/**
+ * Fragments of the per-PR link every trunk merge-queue status line carries
+ * (`https://app.trunk.io/<org>/merge-queue/<id>/<pr>`). The path segment is
+ * load-bearing: trunk's OTHER comment on the same PR — Test Analytics — links
+ * to `/flaky-tests/` and is full of the words "failed"/"failed test", so
+ * matching on the host alone would read a flaky-test table as a queue failure.
+ */
+const TRUNK_QUEUE_LINK_HOST = 'app.trunk.io';
+const TRUNK_QUEUE_LINK_PATH = '/merge-queue/';
+
+/** Marker on trunk's unrelated flaky-test comment — never a queue signal. */
+const TRUNK_TEST_ANALYTICS_MARKER = '<!-- Trunk Test Analytics -->';
+
+/**
+ * Trunk's status sentences, most-decisive first. Verbatim shapes observed on
+ * posthog/posthog (2026-07-29); each is matched loosely enough to survive
+ * trunk's own interpolations (PR numbers, check names, usernames).
+ */
+const TRUNK_STATUS_PATTERNS: Array<{ re: RegExp; state: ExternalQueueState }> = [
+  // "😎 Merged successfully - [details](…)"
+  { re: /merged successfully/i, state: 'merged' },
+  // "🚫 This pull request was removed from the merge queue because it was
+  //  pushed to by @x. Please re-submit it in order to merge."
+  { re: /removed from the merge queue/i, state: 'cancelled' },
+  // "❌ This pull request could not start testing because there was a merge
+  //  conflict." — ejected, and exactly what Talyn's fix runs are for.
+  { re: /could not start testing/i, state: 'failed' },
+  // "⚠️ The required check `X` (Failure) has failed. Pull request failed tests
+  //  and is waiting for other pull requests to finish testing."
+  { re: /has failed|failed tests/i, state: 'failed' },
+  // "👍 Pull request will be merged soon because tests have passed on #x"
+  { re: /will be merged soon/i, state: 'passed' },
+  // "🧪 Running tests on this pull request (testing on PR #x)"
+  { re: /running tests on this pull request/i, state: 'testing' },
+  // "⏳ Waiting to start tests on this pull request[ because …]"
+  { re: /waiting to start tests/i, state: 'queued' },
+  // "✨ Submitted to Merge by @x. It will be added to the merge queue once all
+  //  branch protection rules pass…"
+  { re: /submitted to merge/i, state: 'queued' },
+  // "GitHub considers this PR to be a part of a stack — … our merge queue will
+  //  be unable to merge this PR." Appended to the instruction body, so it must
+  //  be read before the checkbox: the box is ticked and nothing will happen.
+  { re: /unable to merge this pr/i, state: 'rejected' },
+];
+
+/** One PR comment, as both the REST list and the webhook payload expose it. */
+export interface ExternalQueueComment {
+  body?: string | null;
+  user?: { login?: string | null } | null;
+}
+
+/**
+ * Is this trunk's merge-queue comment? Requires trunk's own structure — the
+ * instruction marker, the submit checkbox, or the per-PR merge-queue link — so
+ * a human quoting "running tests on this pull request" can't be mistaken for
+ * the provider. When the author is known it must be a trunk bot.
+ */
+function isTrunkQueueComment(comment: ExternalQueueComment): boolean {
+  const body = comment.body;
+  if (!body) return false;
+  const login = comment.user?.login;
+  if (login && !login.toLowerCase().startsWith('trunk')) return false;
+  if (body.includes(TRUNK_TEST_ANALYTICS_MARKER)) return false;
+  return (
+    body.includes(TRUNK_COMMENT_MARKER) ||
+    body.includes(TRUNK_CHECKBOX_START) ||
+    (body.includes(TRUNK_QUEUE_LINK_HOST) && body.includes(TRUNK_QUEUE_LINK_PATH))
+  );
+}
+
+/** Is trunk's submit checkbox ticked? Null when the comment has no checkbox. */
+function submitCheckboxTicked(body: string): boolean | null {
+  const start = body.indexOf(TRUNK_CHECKBOX_START);
+  if (start === -1) return null;
+  const end = body.indexOf(TRUNK_CHECKBOX_END, start);
+  const region = body.slice(start + TRUNK_CHECKBOX_START.length, end === -1 ? undefined : end);
+  if (/\[x\]/i.test(region)) return true;
+  if (/\[\s*\]/.test(region)) return false;
+  return null;
+}
+
+/**
+ * The sentence that carried the state, for tooltips — trunk's own words, with
+ * markdown links flattened to their text so "- [details](https://…)" doesn't
+ * paste a URL into a badge. Scoped to the matched sentence rather than the
+ * whole line: some of trunk's status lines run to a paragraph.
+ */
+function statusEvidence(body: string, re: RegExp): string {
+  const line = body
+    .split('\n')
+    .map((l) => l.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\s+/g, ' ').trim())
+    .find((l) => re.test(l));
+  if (!line) return 'its status comment';
+  const sentence = line.split(/(?<=\.)\s+/).find((s) => re.test(s)) ?? line;
+  return sentence.replace(/\s*[-–]\s*details\s*\.?$/i, '').trim();
+}
+
+/**
+ * Read the external-queue state off ONE provider comment body. Null when the
+ * comment isn't the provider's merge-queue comment, or when trunk has rewritten
+ * it into a shape this doesn't recognise — the caller then falls back to labels
+ * rather than inventing a state.
+ */
+export function externalQueueStatusFromComment(
+  comment: ExternalQueueComment
+): ExternalQueueStatus | null {
+  if (!isTrunkQueueComment(comment)) return null;
+  const body = comment.body!;
+  for (const { re, state } of TRUNK_STATUS_PATTERNS) {
+    if (re.test(body)) {
+      return { provider: 'trunk', state, source: 'comment', evidence: statusEvidence(body, re) };
+    }
+  }
+  // No status line — the comment is still the instruction, so the checkbox is
+  // the whole answer.
+  const ticked = submitCheckboxTicked(body);
+  if (ticked === true) {
+    return {
+      provider: 'trunk',
+      state: 'queued',
+      source: 'comment',
+      evidence: 'its submit checkbox is ticked',
+    };
+  }
+  if (ticked === false) {
+    return {
+      provider: 'trunk',
+      state: 'not_submitted',
+      source: 'comment',
+      evidence: 'its submit checkbox is untouched',
+    };
+  }
+  return null;
+}
+
+/**
+ * Read the external-queue state off a PR's comments. Trunk keeps ONE
+ * merge-queue comment per PR and edits it in place, but a repo can also have
+ * its unrelated comments (test analytics), so this scans for the queue one and
+ * takes the LAST match — a re-created comment supersedes an older one.
+ */
+export function externalQueueStatusFromComments(
+  comments: ExternalQueueComment[]
+): ExternalQueueStatus | null {
+  let found: ExternalQueueStatus | null = null;
+  for (const comment of comments) {
+    const status = externalQueueStatusFromComment(comment);
+    if (status) found = status;
+  }
+  return found;
+}
 
 export interface ExternalQueueInstruction {
   provider: ExternalQueueProvider;
@@ -92,16 +285,21 @@ export interface ExternalQueueInstruction {
  * its author should edit it), so the comment command is the one a third party
  * can safely use. Returns null when no provider has claimed the PR, which is
  * the answer for every repo that doesn't use one.
+ *
+ * Identification deliberately does NOT insist on `<!-- Trunk Merge -->`: trunk
+ * drops that marker when it rewrites the comment, and the body it leaves after
+ * EJECTING a PR ("🚫 … Please re-submit it in order to merge", checkbox
+ * unticked) still offers the command. Requiring the marker made exactly the
+ * resubmit path — the one Talyn exists for — unable to find its own door.
  */
 export function externalQueueInstructionFromComments(
-  bodies: Array<string | null | undefined>
+  comments: ExternalQueueComment[]
 ): ExternalQueueInstruction | null {
-  for (const body of bodies) {
-    if (!body) continue;
-    if (!body.includes(TRUNK_COMMENT_MARKER)) continue;
+  for (const comment of comments) {
+    if (!isTrunkQueueComment(comment)) continue;
     // Only claim the command door if trunk actually offered it in this repo's
     // configuration — some setups are label- or checkbox-only.
-    if (!body.toLowerCase().includes(TRUNK_MERGE_COMMAND)) continue;
+    if (!comment.body!.toLowerCase().includes(TRUNK_MERGE_COMMAND)) continue;
     return { provider: 'trunk', command: TRUNK_MERGE_COMMAND };
   }
   return null;
@@ -125,7 +323,7 @@ export function externalQueueStatusFromLabels(
   const normalized = labels.map((l) => ({ raw: l, lower: l.trim().toLowerCase() }));
   for (const { prefix, state } of TRUNK_STATE_LABELS) {
     const hit = normalized.find((l) => l.lower === prefix || l.lower.startsWith(`${prefix} `));
-    if (hit) return { provider: 'trunk', state, label: hit.raw };
+    if (hit) return { provider: 'trunk', state, source: 'label', evidence: hit.raw };
   }
   return null;
 }
@@ -135,9 +333,22 @@ export function isExternalQueueEjected(state: ExternalQueueState): boolean {
   return state === 'failed' || state === 'cancelled';
 }
 
+/**
+ * The provider has the PR and is working it — the states where Talyn's only
+ * job is to wait. Positive evidence: seeing one is enough to reopen an entry
+ * Talyn had given up on (its submit DID land after all).
+ */
+export function isExternalQueueHolding(state: ExternalQueueState): boolean {
+  return state === 'not_ready' || state === 'queued' || state === 'testing' || state === 'passed';
+}
+
 /** Short human label for a badge. */
 export function externalQueueStateLabel(state: ExternalQueueState): string {
   switch (state) {
+    case 'not_submitted':
+      return 'Not submitted';
+    case 'rejected':
+      return 'Refused by the queue';
     case 'not_ready':
       return 'Not ready';
     case 'queued':
