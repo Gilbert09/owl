@@ -20,6 +20,8 @@ import {
 } from '../middleware/auth.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 import { debugBus } from '../services/debugBus.js';
+import { getWebAppUrl, webAppUrl } from '../services/webApp.js';
+import type { Request } from 'express';
 import type { ApiResponse } from '@talyn/shared';
 
 // OAuth flows don't run more than a few times per user per hour. 20 per
@@ -36,8 +38,32 @@ const oauthRateLimit = rateLimit({
 // for which workspace so the public /callback can't be hijacked.
 const pendingOAuthStates = new Map<
   string,
-  { workspaceId: string; userId: string; expiresAt: number }
+  {
+    workspaceId: string;
+    userId: string;
+    expiresAt: number;
+    /**
+     * Which front end started the flow. Recorded server-side rather than
+     * encoded in the state string so it can't be tampered with — and it only
+     * ever selects between "render a page" and "redirect to the WEB_APP_URL
+     * constant", never a caller-supplied destination.
+     */
+    client: OAuthClient;
+  }
 >();
+
+type OAuthClient = 'web' | 'desktop';
+
+/**
+ * The desktop renderer loads from file://, so its requests carry either no
+ * Origin or an opaque one; the browser app's Origin is exactly WEB_APP_URL.
+ * That's enough to know where to send the user at the end of the flow, and
+ * it needs no cooperation from the client.
+ */
+function originClient(req: Request): OAuthClient {
+  const webApp = getWebAppUrl();
+  return webApp && req.headers.origin === webApp ? 'web' : 'desktop';
+}
 
 setInterval(() => {
   const now = Date.now();
@@ -61,27 +87,64 @@ export function githubPublicRoutes(): Router {
   // store the workspace integration, then kick a bulk refresh.
   router.get('/app/callback', oauthRateLimit, async (req, res) => {
     const { code, state, installation_id, error, error_description } = req.query;
+
+    /**
+     * End the flow in whichever way suits the client that started it.
+     *
+     * The desktop opened this in the system browser, so there's nowhere to
+     * send the user — render a page and let them close the tab (the app
+     * re-polls its GitHub status on focus). The browser app is in THIS tab,
+     * so leaving them on the API origin strands them; send them home.
+     *
+     * `status` only applies to the rendered page. A redirect is a successful
+     * hop regardless of what it's reporting, and carries the outcome in the
+     * query string for the app to surface.
+     */
+    const finish = (
+      client: OAuthClient,
+      opts: { ok: boolean; message: string; status?: number }
+    ) => {
+      if (client === 'web') {
+        // Path and origin are ours; only `message` comes from outside, and
+        // URL serialisation escapes it. Never a caller-supplied destination.
+        const target = webAppUrl('/settings', {
+          github: opts.ok ? 'connected' : 'error',
+          ...(opts.ok ? {} : { message: opts.message }),
+        });
+        if (target) return res.redirect(302, target);
+      }
+      return res
+        .status(opts.status ?? 200)
+        .type('html')
+        .send(renderCallbackPage({ ok: opts.ok, message: opts.message }));
+    };
+
     if (error) {
-      return res.status(400).type('html').send(
-        renderCallbackPage({
-          ok: false,
-          message: (error_description as string) || (error as string) || 'GitHub App error',
-        })
-      );
+      // No state yet (or it's unusable), so fall back to the Origin sniff.
+      return finish(originClient(req), {
+        ok: false,
+        status: 400,
+        message:
+          (error_description as string) || (error as string) || 'GitHub App error',
+      });
     }
     if (!code || !state) {
-      return res.status(400).type('html').send(
-        renderCallbackPage({ ok: false, message: 'Missing code or state' })
-      );
+      return finish(originClient(req), {
+        ok: false,
+        status: 400,
+        message: 'Missing code or state',
+      });
     }
     const [workspaceId, stateToken] = (state as string).split(':');
     const pendingState = pendingOAuthStates.get(stateToken);
     if (!pendingState || pendingState.workspaceId !== workspaceId) {
-      return res.status(400).type('html').send(
-        renderCallbackPage({ ok: false, message: 'Invalid install state — try again from FastOwl' })
-      );
+      return finish(originClient(req), {
+        ok: false,
+        status: 400,
+        message: 'Invalid install state — try again from Talyn',
+      });
     }
-    const { userId } = pendingState;
+    const { userId, client } = pendingState;
     pendingOAuthStates.delete(stateToken);
 
     try {
@@ -101,24 +164,24 @@ export function githubPublicRoutes(): Router {
           workspaceId,
           userId,
           expiresAt: Date.now() + 10 * 60 * 1000,
+          client,
         });
         return res.redirect(buildInstallUrl(`${workspaceId}:${newState}`));
       }
-      res.type('html').send(
-        renderCallbackPage(
-          installCount > 0
-            ? { ok: true, message: 'GitHub connected!' }
-            : {
-                ok: true,
-                message:
-                  'GitHub authorized, but no installation was completed. ' +
-                  `Install the FastOwl app (${appInstallationsPageUrl()}) on the org/user whose repos you want to track, then hit Connect again.`,
-              }
-        )
+      return finish(
+        client,
+        installCount > 0
+          ? { ok: true, message: 'GitHub connected!' }
+          : {
+              ok: true,
+              message:
+                'GitHub authorized, but no installation was completed. ' +
+                `Install the FastOwl app (${appInstallationsPageUrl()}) on the org/user whose repos you want to track, then hit Connect again.`,
+            }
       );
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Unknown error';
-      res.status(500).type('html').send(renderCallbackPage({ ok: false, message }));
+      return finish(client, { ok: false, status: 500, message });
     }
   });
 
@@ -231,7 +294,7 @@ function renderCallbackPage(opts: { ok: boolean; message: string }): string {
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>FastOwl — ${escapeHtml(title)}</title>
+  <title>Talyn — ${escapeHtml(title)}</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
            background: #0b0b0f; color: #e5e7eb; display: grid; place-items: center;
@@ -247,7 +310,7 @@ function renderCallbackPage(opts: { ok: boolean; message: string }): string {
   <div class="card">
     <h1>${escapeHtml(title)}</h1>
     <p>${safe}</p>
-    <p class="hint">You can close this tab and return to FastOwl.</p>
+    <p class="hint">You can close this tab and return to Talyn.</p>
   </div>
 </body>
 </html>`;
@@ -337,6 +400,7 @@ export function githubRoutes(): Router {
       workspaceId,
       userId: req.user!.id,
       expiresAt: Date.now() + 10 * 60 * 1000,
+      client: originClient(req),
     });
     try {
       // Two URLs, same single-use state:

@@ -134,6 +134,36 @@ describe('isStrongBase64Key', () => {
   });
 });
 
+describe('WEB_APP_URL', () => {
+  it('is optional — a desktop-only deployment sets nothing', () => {
+    expect(validateEnv(validEnv())).toEqual([]);
+    expect(validateEnv(validEnv({ WEB_APP_URL: '' }))).toEqual([]);
+    expect(validateEnv(validEnv({ WEB_APP_URL: '   ' }))).toEqual([]);
+  });
+
+  it.each([
+    'https://app.talyn.dev',
+    'https://app.talyn.dev/',
+    'http://localhost:5173',
+  ])('accepts %s', (url) => {
+    expect(validateEnv(validEnv({ WEB_APP_URL: url }))).toEqual([]);
+  });
+
+  it('rejects a malformed URL', () => {
+    expect(validateEnv(validEnv({ WEB_APP_URL: 'app.talyn.dev' }))).toEqual([
+      "WEB_APP_URL is not a valid URL: 'app.talyn.dev'",
+    ]);
+  });
+
+  it('rejects plain http on a non-localhost host', () => {
+    // It becomes a redirect target for the GitHub App callback — downgrading
+    // that hop to http would leak the flow to any network observer.
+    expect(validateEnv(validEnv({ WEB_APP_URL: 'http://app.talyn.dev' }))).toEqual([
+      "WEB_APP_URL must be https (or localhost), got 'http://app.talyn.dev'",
+    ]);
+  });
+});
+
 describe('tokenCrypto production fallback guard', () => {
   const savedKey = process.env.TALYN_TOKEN_KEY;
   const savedNodeEnv = process.env.NODE_ENV;

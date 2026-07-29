@@ -164,7 +164,15 @@ site_url = "http://127.0.0.1:3000"
 # "invalid redirect URL" error (see docs/SETUP.md). Dev builds use the
 # `fastowl-dev://` scheme so the callback doesn't open an installed prod app;
 # `fastowl://` is kept for running a packaged build against the local stack.
-additional_redirect_urls = ["fastowl-dev://auth-callback", "fastowl://auth-callback"]
+# The http entry is the browser app's callback route (Vite's default port) —
+# unlike the desktop it redirects in-tab rather than through a custom scheme.
+# The hosted equivalent (https://app.talyn.dev/auth/callback) lives in the
+# Supabase dashboard, not here.
+additional_redirect_urls = [
+  "fastowl-dev://auth-callback",
+  "fastowl://auth-callback",
+  "http://localhost:5173/auth/callback",
+]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.

@@ -18,6 +18,7 @@ import { handlePolarWebhook } from './services/billing/webhook.js';
 import { initDatabase } from './db/index.js';
 import { getDbClient, getPoolDbClient, closeDbClient } from './db/client.js';
 import { assertValidEnv } from './services/validateEnv.js';
+import { createOriginPolicy } from './services/originPolicy.js';
 import { billingEnabled } from './services/billing/entitlements.js';
 import { migrateLegacyPlaintextCredentials } from './services/credentialMigration.js';
 import { environments as environmentsTable } from './db/schema.js';
@@ -125,38 +126,35 @@ async function main() {
   // everyone). Exactly 1 hop — trusting more would let clients spoof
   // X-Forwarded-For.
   app.set('trust proxy', 1);
-  // Only real browser origins need CORS. Desktop/CLI/MCP clients send no
-  // Origin header (or `null`), so they're always allowed. Env-override
-  // `ALLOWED_ORIGINS` is a comma-separated allowlist — keep it empty in
-  // production if nothing legitimately runs in a browser against this API.
-  // Loopback origins (localhost / 127.0.0.1 on any port) are accepted
-  // unconditionally — the dev renderer on webpack-dev-server uses them,
-  // and a request from 127.0.0.1 already implies code running on the
-  // same host, which has other routes to the backend anyway.
-  const originAllowlist = (process.env.ALLOWED_ORIGINS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
-  // Single source of truth for "may this origin talk to us", shared by the
-  // REST CORS gate and the WebSocket upgrade. A missing Origin is allowed —
-  // native clients (the desktop app's main process, the CLI) send none; a
-  // present Origin must be loopback (dev renderer) or explicitly allowlisted.
-  const isOriginAllowed = (origin: string | undefined): boolean =>
-    !origin || LOOPBACK_ORIGIN.test(origin) || originAllowlist.includes(origin);
-  // The packaged desktop app's renderer loads from file://, so — unlike a
-  // truly native client — its WebSocket handshake DOES carry an Origin, which
-  // Chromium reports as the opaque `null` (or a `file://` URL). Recognise the
-  // first-party desktop client so its WS upgrade isn't rejected as foreign.
-  const isDesktopOrigin = (origin: string | undefined): boolean =>
-    origin === 'null' || (origin?.startsWith('file://') ?? false);
+  // Who may talk to us from a browser — see services/originPolicy.ts. Read
+  // once at boot: ALLOWED_ORIGINS is deployment config, not something that
+  // should change under a running process.
+  const originPolicy = createOriginPolicy();
+  const isOriginAllowed = (origin: string | undefined) => originPolicy.isAllowed(origin);
+  const isDesktopOrigin = (origin: string | undefined) => originPolicy.isDesktop(origin);
   app.use(
     cors({
       origin(origin, cb) {
         if (isOriginAllowed(origin)) return cb(null, true);
-        return cb(new Error(`Origin not allowed: ${origin}`));
+        // Deny by OMITTING the header, don't throw. Throwing lands in
+        // apiErrorHandler as a 500 (plus a stack trace), which reads as "the
+        // backend is broken" when the actual answer is "this origin isn't on
+        // the list" — a misconfigured ALLOWED_ORIGINS was undebuggable.
+        // Without the header the browser blocks the response itself, which
+        // is the correct CORS semantic.
+        console.warn(`CORS: rejected origin ${origin}`);
+        return cb(null, false);
       },
-      credentials: true,
+      // Bearer-only API — no cookie is read anywhere. Saying `true` here was
+      // vestigial, and would silently start sending any cookie introduced
+      // later cross-origin. Keeping it false makes CSRF-immunity structural
+      // rather than accidental.
+      credentials: false,
+      // X-Talyn-Client-Version is a non-safelisted header, so EVERY request
+      // is preflighted. Without this, a browser client doubles its request
+      // count against the per-IP limiter below and pays an extra RTT on
+      // every call. 24h is the maximum Chrome honours.
+      maxAge: 86400,
     })
   );
   // GitHub webhook receiver. MUST be mounted before express.json so the handler

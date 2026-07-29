@@ -80,6 +80,24 @@ export function validateEnv(env: NodeJS.ProcessEnv = process.env): string[] {
     errors.push(`POLAR_ENVIRONMENT must be 'sandbox' or 'production', got '${env.POLAR_ENVIRONMENT}'`);
   }
 
+  // Optional (unset = desktop-only deployment). When set it becomes a
+  // redirect target for the GitHub App callback, so a malformed or non-https
+  // value is a boot error rather than something we discover mid-OAuth — and
+  // validating it here means services/webApp.ts can never silently ignore a
+  // typo'd production value.
+  const webAppUrl = env.WEB_APP_URL?.trim();
+  if (webAppUrl) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(webAppUrl);
+    } catch {
+      errors.push(`WEB_APP_URL is not a valid URL: '${webAppUrl}'`);
+    }
+    if (parsed && parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') {
+      errors.push(`WEB_APP_URL must be https (or localhost), got '${webAppUrl}'`);
+    }
+  }
+
   return errors;
 }
 

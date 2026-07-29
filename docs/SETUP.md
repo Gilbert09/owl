@@ -397,7 +397,44 @@ POSTHOG_HOST=https://us.i.posthog.com
 # POLAR_PRODUCT_ID_MONTHLY=<uuid of the $15/mo product>
 # POLAR_PRODUCT_ID_ANNUAL=<uuid of the $150/yr product>
 # POLAR_SUCCESS_URL=https://www.talyn.dev/checkout-success   # optional
+
+# --- Browser app (app.talyn.dev) -------------------------------------------
+# All three are unset for a desktop-only deployment, which is the default.
+#
+# ALLOWED_ORIGINS: comma-separated CORS/WS allowlist, EXACT string match (no
+# globs — a pattern rule is how "https://app.talyn.dev.evil.com" gets in).
+# Loopback and a missing Origin are always allowed, so the desktop app, the
+# CLI, and the MCP server never need an entry. Set this the moment a browser
+# client exists, or every one of its requests is blocked.
+# ALLOWED_ORIGINS=https://app.talyn.dev
+#
+# WEB_APP_URL: where the browser app lives. Must be https (localhost is
+# allowed for dev); a malformed or http:// value is a BOOT error, because it
+# becomes the GitHub App callback's redirect target and a bad one strands the
+# user on the API origin. Only ever read from env, never from a request.
+# WEB_APP_URL=https://app.talyn.dev
+#
+# TALYN_ALLOW_NULL_ORIGIN_WS: kill switch, defaults ON. The packaged desktop
+# renderer loads from file://, whose WS handshake Chromium reports as the
+# opaque `null`, so the upgrade accepts it. `null` is forgeable by ANY page
+# (sandboxed iframe, data: URL), which is harmless while WS auth is a Bearer
+# JWT in the first frame — there are no ambient credentials to hijack. Set to
+# 0 the same day anything moves to cookie auth, or it becomes a live
+# cross-site WebSocket hijack.
+# TALYN_ALLOW_NULL_ORIGIN_WS=0
 ```
+
+### Supabase redirect URLs for the browser app
+
+Client-side OAuth means Supabase — not the backend — owns the allowed
+redirects. In the dashboard (Authentication → URL Configuration) add
+`https://app.talyn.dev/auth/callback` to **Redirect URLs** and keep
+`fastowl://auth-callback` there for the desktop. Locally the same list lives
+in `supabase/config.toml` (`additional_redirect_urls`).
+
+Vercel preview deployments get random hostnames, so they can't be allowlisted
+without a glob — point previews at a staging backend or accept that sign-in
+only works on the production hostname. Don't add a wildcard.
 
 To comp an account onto Unlimited without paying (e.g. your own):
 

@@ -72,6 +72,30 @@ export function setupRoutes(app: Express): void {
   // and refuses requests without a valid Supabase JWT.
   app.use(`${api}`, asyncHandler(requireAuth));
 
+  // Per-USER fair-use limit, on top of the per-IP ceiling above. IP alone
+  // gets both directions wrong once there's a browser client: a whole office
+  // behind one NAT egress shares a bucket they didn't individually fill,
+  // while a single runaway user on a home connection never touches it. Same
+  // 1000/min budget, now applied to the entity it was reasoned about — one
+  // client peaks around 100 req/min, so this is ~10x headroom for a user
+  // with several windows or tabs open.
+  //
+  // NOTE: the per-IP ceiling above is still 1000/min and is deliberately
+  // NOT raised here. It bounds UNAUTHENTICATED work, and the expensive path
+  // it protects is the legacy HS256 branch in verifyTokenAndGetUser, which
+  // makes an outbound Supabase call per attempt. Revisit it (together with
+  // that branch) when app.talyn.dev actually has NAT'd users — raising it
+  // speculatively would widen that hole for no present gain.
+  app.use(
+    `${api}`,
+    rateLimit({
+      windowMs: 60_000,
+      max: 1000,
+      keyFn: (req) => req.user?.id ?? req.ip ?? 'unknown',
+      message: 'Too many API requests — slow down.',
+    })
+  );
+
   // Developer-only internals view (requests, polling, WebSocket). Global,
   // not workspace-scoped — see routes/debug.ts. Mounted BEFORE the owner-scope
   // middleware so it stays a cross-tenant operator surface (and so it never
