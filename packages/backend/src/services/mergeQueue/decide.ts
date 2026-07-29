@@ -243,20 +243,45 @@ export function externalQueueOf(pr: PrSnapshot): ExternalQueueStatus | null {
 }
 
 /**
- * Is the PR still in the external queue's hands? True while the provider
- * reports a non-ejected state, while our submit label is still on the PR, or
- * while the auto-merge we submitted with is still armed — the last covers the
- * window between submitting and the provider picking the PR up.
+ * How long a submission may go unacknowledged before the queue stops believing
+ * it. trunk labels a PR within ~30s of accepting it (observed: 30s on #74353);
+ * 10 minutes is far beyond that while still bounding how long a PR can sit on
+ * a submission the provider silently ignored.
  */
-function stillSubmitted(entry: EntrySnapshot, pr: PrSnapshot): boolean {
+export const EXTERNAL_PICKUP_GRACE_MS = 10 * 60_000;
+
+/**
+ * Is the PR still in the external queue's hands? A live provider state answers
+ * it directly. Otherwise it depends on the door we used, because each leaves a
+ * different trace:
+ *
+ * - `auto_merge` / `label` leave state ON GitHub we can re-read, so their
+ *   absence means the submission was undone outside Talyn.
+ * - `comment` leaves nothing re-readable (a posted command is fire-and-forget),
+ *   so we trust it for a grace window and then treat silence as "not picked up"
+ *   — which is the honest reading, and the only way a provider that ignores
+ *   Talyn's command surfaces instead of parking the PR forever.
+ */
+function stillSubmitted(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContext): boolean {
   const ext = externalQueueOf(pr);
   if (ext) return !isExternalQueueEjected(ext.state);
   if (entry.externalSubmitVia === 'auto_merge') return pr.autoMergeEnabledBy !== null;
   if (entry.externalSubmitVia === 'label') {
     return (pr.summary.labels ?? []).some(isExternalQueueSubmitLabel);
   }
+  if (entry.externalSubmitVia === 'comment') {
+    if (!entry.externalSubmittedAt) return false;
+    const age = Date.parse(ctx.nowIso) - Date.parse(entry.externalSubmittedAt);
+    return Number.isFinite(age) && age < EXTERNAL_PICKUP_GRACE_MS;
+  }
   return false;
 }
+
+export const EXTERNAL_PICKUP_FAILED_REASON =
+  "Talyn posted the merge queue's own submit command on this PR and the queue never " +
+  'picked it up (no queue label appeared). It may not accept commands from an app — ' +
+  "submit the PR in that system (e.g. tick the checkbox in its comment), or re-queue " +
+  'the PR to try again.';
 
 // ── The decision function ──
 
@@ -396,16 +421,31 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       if (verdict) return verdict;
       // null → requeued for a resubmit; fall through to the normal rules so a
       // PR that came back broken gets remediated before it goes round again.
-    } else if (stillSubmitted(d.entry, pr)) {
+    } else if (stillSubmitted(d.entry, pr, ctx)) {
       // In the queue's hands. A settled blocker still deserves remediation —
       // the provider will hold a conflicting PR at "not ready" forever — so
       // only an unobstructed PR short-circuits here.
       if (!hasSettledBlocker(pr)) return d.done('advance');
+    } else if (d.entry.externalSubmitVia === 'comment') {
+      // We posted the provider's own submit command and it never acknowledged
+      // the PR. Resubmitting would just post the same comment again on someone
+      // else's repo, so stop and say so — a human ticks the box, or re-queues.
+      d.transition('blocked_manual', {
+        blockedCode: 'external_gate',
+        blockedReason: EXTERNAL_PICKUP_FAILED_REASON,
+        set: { externalSubmitVia: null, externalSubmittedAt: null },
+        event: {
+          code: 'external_submit_ignored',
+          message: 'The external merge queue never picked up the submit command Talyn posted.',
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+      return d.done('advance');
     } else {
       // Neither a provider label nor our submission survives: the arm was
       // disabled or the label removed outside Talyn. Take the PR back.
       d.transition('queued', {
-        set: { externalSubmitVia: null },
+        set: { externalSubmitVia: null, externalSubmittedAt: null },
         event: {
           code: 'external_submission_lost',
           message: 'The external queue submission was removed outside Talyn — re-evaluating.',
@@ -651,7 +691,7 @@ function decideExternalEjection(
     d.transition('blocked', {
       blockedCode: 'external_queue_rejected',
       blockedReason: externalQueueRejectedReason(ext, ctx.maxAttempts),
-      set: { externalSubmitVia: null },
+      set: { externalSubmitVia: null, externalSubmittedAt: null },
       event: {
         code: 'external_queue_rejected',
         message:
@@ -665,7 +705,7 @@ function decideExternalEjection(
     return d.done('advance');
   }
   d.transition('queued', {
-    set: { externalSubmitVia: null },
+    set: { externalSubmitVia: null, externalSubmittedAt: null },
     event: {
       code: 'external_queue_ejected',
       message: `${provider} ejected this PR (${externalQueueStateLabel(ext.state).toLowerCase()}) — re-evaluating before resubmitting.`,
@@ -688,6 +728,7 @@ function decideSubmitAftermath(
       set: {
         submitAttempts: d.entry.submitAttempts + 1,
         externalSubmitVia: outcome.via,
+        externalSubmittedAt: ctx.nowIso,
         // Record whose auto-merge arm carries the submission: the disarm
         // invariant un-submits ours when the entry later blocks, and never
         // touches one the user armed on github.com.
@@ -696,12 +737,15 @@ function decideSubmitAftermath(
       event: {
         code: 'external_submitted',
         message:
-          outcome.via === 'auto_merge'
-            ? 'Submitted to the external merge queue by arming GitHub auto-merge.'
-            : 'Submitted to the external merge queue by applying its submit label.',
+          outcome.via === 'comment'
+            ? `Submitted to the external merge queue by posting \`${outcome.detail ?? 'its submit command'}\`.`
+            : outcome.via === 'label'
+              ? 'Submitted to the external merge queue by applying its submit label.'
+              : 'Submitted to the external merge queue by arming GitHub auto-merge.',
         detail: {
           via: outcome.via,
           attempt: d.entry.submitAttempts + 1,
+          ...(outcome.detail ? { command: outcome.detail } : {}),
           ...(ext ? { providerState: ext.state } : {}),
         },
       },

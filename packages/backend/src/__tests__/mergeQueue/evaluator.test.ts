@@ -277,7 +277,13 @@ describe('mergeQueue v2 pipeline', () => {
     mockGetGate.mockReset().mockResolvedValue(null);
     mockMarkGate.mockReset();
     mockClearGate.mockReset();
-    mockSubmitLabel.mockReset().mockResolvedValue('trunk-merge-queue-submit');
+    // External-queue submit doors, all off by default: no provider instruction
+    // comment, no submit label — so the auto-merge door is what runs unless a
+    // test opts into another one.
+    mockSubmitLabel.mockReset().mockResolvedValue(null);
+    vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([]);
+    vi.spyOn(githubService, 'createIssueComment').mockResolvedValue(undefined);
+    vi.spyOn(githubService, 'addPullRequestLabels').mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
@@ -515,10 +521,37 @@ describe('mergeQueue v2 pipeline', () => {
       expect((await eventsOf(db, entryId)).map((e) => e.code)).toContain('external_submitted');
     });
 
-    it('applies the submit label when GitHub refuses to arm a clean PR', async () => {
+    it("posts the provider's own submit command when its instruction comment is on the PR", async () => {
       gated();
       mockCapability.mockResolvedValue('available');
-      mockEnableAutoMerge.mockResolvedValue({ armed: false, reason: 'clean_status' });
+      vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([
+        {
+          body:
+            '<!-- Trunk Merge -->\\nMerging to `master` in this repository is managed by Trunk. ' +
+            'To merge this pull request, check the box to the left or comment `/trunk merge` below.',
+        },
+      ]);
+      const comment = vi.spyOn(githubService, 'createIssueComment').mockResolvedValue(undefined);
+      const { prId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(comment).toHaveBeenCalledWith('ws1', 'a', 'b', expect.any(Number), '/trunk merge');
+      // Arming auto-merge does NOT submit to trunk, so the command door must
+      // not also arm it (verified live on #74354).
+      expect(mockEnableAutoMerge).not.toHaveBeenCalled();
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.externalSubmitVia).toBe('comment');
+      expect(entry?.externalSubmittedAt).not.toBeNull();
+    });
+
+    it("applies the repo's submit label when there is no instruction comment", async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      mockSubmitLabel.mockResolvedValue('trunk-merge-queue-submit');
       const addLabels = vi
         .spyOn(githubService, 'addPullRequestLabels')
         .mockResolvedValue(undefined);

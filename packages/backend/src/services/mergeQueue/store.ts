@@ -50,6 +50,7 @@ export const ENTRY_COLUMNS = {
   resignAttempts: mergeQueueEntries.resignAttempts,
   submitAttempts: mergeQueueEntries.submitAttempts,
   externalSubmitVia: mergeQueueEntries.externalSubmitVia,
+  externalSubmittedAt: mergeQueueEntries.externalSubmittedAt,
   fixTaskId: mergeQueueEntries.fixTaskId,
   fixTaskAccounted: mergeQueueEntries.fixTaskAccounted,
   fixKind: mergeQueueEntries.fixKind,
@@ -82,6 +83,7 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     resignAttempts: row.resignAttempts,
     submitAttempts: row.submitAttempts,
     externalSubmitVia: (row.externalSubmitVia as ExternalSubmitVia | null) ?? null,
+    externalSubmittedAt: row.externalSubmittedAt ? row.externalSubmittedAt.toISOString() : null,
     fixTaskId: row.fixTaskId,
     fixTaskAccounted: row.fixTaskAccounted,
     fixKind: (row.fixKind as FixKind | null) ?? null,
@@ -186,6 +188,7 @@ export async function ensureActiveEntry(
           resignAttempts: 0,
           submitAttempts: 0,
           externalSubmitVia: null,
+          externalSubmittedAt: null,
           signingCheckedSha: null,
           unsignedCount: null,
           fixTaskAccounted: true,
@@ -275,6 +278,7 @@ export interface CasPatch {
   resignAttempts?: number;
   submitAttempts?: number;
   externalSubmitVia?: ExternalSubmitVia | null;
+  externalSubmittedAt?: Date | null;
   fixTaskId?: string | null;
   fixTaskAccounted?: boolean;
   fixKind?: FixKind | null;

@@ -553,8 +553,12 @@ export const mergeQueueEntries = pgTable(
      * fix runs.
      */
     submitAttempts: integer('submit_attempts').notNull().default(0),
-    /** How the live external submission was made: 'auto_merge' | 'label'. */
+    /** How the live external submission was made: 'comment' | 'label' | 'auto_merge'. */
     externalSubmitVia: text('external_submit_via'),
+    /** When it was made — the comment door leaves nothing re-readable on
+     *  GitHub, so this + a grace window is how "not picked up yet" is told
+     *  apart from "the provider ignored us". */
+    externalSubmittedAt: timestamp('external_submitted_at', { withTimezone: true }),
     /** The queue's own most-recent fix run (replaces lastFixTaskId in the blob). */
     fixTaskId: text('fix_task_id').references(() => tasks.id, { onDelete: 'set null' }),
     fixTaskAccounted: boolean('fix_task_accounted').notNull().default(true),

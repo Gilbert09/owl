@@ -104,8 +104,12 @@ export type BlockedCode =
 
 export type FixKind = 'blockers' | 'resign';
 
-/** How a PR was handed to an external merge queue. */
-export type ExternalSubmitVia = 'auto_merge' | 'label';
+/**
+ * How a PR was handed to an external merge queue: the provider's own submit
+ * command posted as a comment (trunk.io's `/trunk merge`), a submit label, or
+ * GitHub native auto-merge (GitHub's own queue).
+ */
+export type ExternalSubmitVia = 'comment' | 'label' | 'auto_merge';
 
 /** Mirror of a merge_queue_entries row, as the decision function sees it. */
 export interface EntrySnapshot {
@@ -122,6 +126,12 @@ export interface EntrySnapshot {
   submitAttempts: number;
   /** How the current external submission was made; null when not submitted. */
   externalSubmitVia: ExternalSubmitVia | null;
+  /**
+   * When that submission was made (ISO). The comment door leaves no state on
+   * GitHub we can re-read, so this + a grace window is how the queue tells
+   * "the provider hasn't labelled it yet" from "the provider ignored us".
+   */
+  externalSubmittedAt: string | null;
   fixTaskId: string | null;
   /** Whether `fixTaskId`'s terminal result has been folded into fixAttempts. */
   fixTaskAccounted: boolean;
@@ -167,7 +177,7 @@ export type SubmitOutcome =
    * auto-merge door and says whose arm carried the submission — we only ever
    * disarm (un-submit) one we armed ourselves.
    */
-  | { kind: 'submitted'; via: ExternalSubmitVia; armedBy?: 'talyn' | 'user' }
+  | { kind: 'submitted'; via: ExternalSubmitVia; armedBy?: 'talyn' | 'user'; detail?: string }
   /**
    * GitHub refused to arm auto-merge because the PR is immediately mergeable
    * ("clean status") and the gate is only SUSPECTED — so the direct merge is
@@ -275,6 +285,7 @@ export type Action =
           | 'resignAttempts'
           | 'submitAttempts'
           | 'externalSubmitVia'
+          | 'externalSubmittedAt'
           | 'automergeArmedBy'
           | 'fixTaskAccounted'
           | 'signingCheckedSha'

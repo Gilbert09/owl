@@ -5,26 +5,36 @@
 // order — a PR submitted from the UI is indistinguishable from one the queue
 // submitted, which is what makes the queue's tracking work either way.
 //
-// Two doors, in order:
+// Three doors, most authoritative first:
 //
-//  1. **GitHub native auto-merge.** trunk.io watches for it and pulls the PR
-//     into its queue (~30s later it applies `trunk-not-ready`/`trunk-queued`);
-//     GitHub's own merge queue treats it as "merge when ready" directly. Needs
-//     no extra App permission, so it goes first.
-//  2. **The repo's submit label.** GitHub REFUSES to arm auto-merge on a PR
-//     that is already immediately mergeable ("Pull request is in clean status")
-//     — exactly the state a gated PR reaches once its checks pass — so without
-//     this fallback the readiest PRs would be the ones we couldn't submit.
-//     Needs the App's `issues: write`.
+//  1. **The provider's own submit command.** trunk.io posts an instruction
+//     comment on every PR in a repo it manages: "To merge this pull request,
+//     check the box to the left or comment `/trunk merge` below." That comment
+//     IS the contract — it names the door and proves the queue owns the branch.
+//     The checkbox lives inside trunk's own comment (only its author should edit
+//     it), so Talyn posts the command instead. Needs `issues: write`.
+//  2. **The repo's submit label**, for configurations that use one.
+//  3. **GitHub native auto-merge** — the door for GitHub's OWN merge queue
+//     ("merge when ready"), and the only one needing no extra permission. It is
+//     last because a third-party queue does not necessarily watch it: on
+//     posthog/posthog, arming auto-merge does nothing at all (verified on
+//     #74354 — trunk ignored it and the PR sat untouched).
 
 import { enableAutoMerge, getAutoMergeCapability } from './githubAutoMerge.js';
+import { externalQueueInstructionFromComments } from '@talyn/shared';
 import { githubService } from './github.js';
 import { getExternalQueueSubmitLabel } from './repoMergeGate.js';
 import type { ExternalSubmitVia, MergeMethod } from './mergeQueue/types.js';
 
 export type ExternalSubmitAttempt =
   /** The PR is in the external queue's hands. */
-  | { kind: 'submitted'; via: ExternalSubmitVia; armedBy?: 'talyn' | 'user'; label?: string }
+  | {
+      kind: 'submitted';
+      via: ExternalSubmitVia;
+      armedBy?: 'talyn' | 'user';
+      label?: string;
+      command?: string;
+    }
   /**
    * GitHub won't arm auto-merge because the PR is immediately mergeable, and the
    * caller asked us not to fall back to the label. Only returned when
@@ -57,10 +67,56 @@ export async function submitToExternalQueue(
 ): Promise<ExternalSubmitAttempt> {
   const { workspaceId, owner, repo, number } = input;
 
+  // Door 1 — the provider told us, on this PR, how to submit it.
+  const instruction = await readSubmitInstruction(workspaceId, owner, repo, number);
+  if (instruction) {
+    try {
+      await githubService.createIssueComment(
+        workspaceId,
+        owner,
+        repo,
+        number,
+        instruction.command
+      );
+      return { kind: 'submitted', via: 'comment', command: instruction.command };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Posting the submit command failed';
+      if (/not accessible by integration|resource not accessible|403/i.test(message)) {
+        return {
+          kind: 'no_mechanism',
+          message:
+            `Talyn couldn't post "${instruction.command}" — the GitHub App needs the ` +
+            `"Issues: Read & write" permission. (${message})`,
+        };
+      }
+      return { kind: 'retry', message };
+    }
+  }
+
   // Already armed on GitHub's side (the user hit "merge when ready", or our own
-  // arm outlived a status drift) — that IS the submission; adopt it.
+  // arm outlived a status drift) — that IS the submission for a native queue.
   if (input.autoMergeArmedBy !== null) {
     return { kind: 'submitted', via: 'auto_merge', armedBy: input.autoMergeArmedBy };
+  }
+
+  // Door 2 — a submit label the repo defines.
+  const label = await getExternalQueueSubmitLabel(workspaceId, owner, repo);
+  if (label) {
+    try {
+      await githubService.addPullRequestLabels(workspaceId, owner, repo, number, [label]);
+      return { kind: 'submitted', via: 'label', label };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Applying the submit label failed';
+      if (/not accessible by integration|resource not accessible|403/i.test(message)) {
+        return {
+          kind: 'no_mechanism',
+          message:
+            `Talyn couldn't apply the "${label}" submit label — the GitHub App needs the ` +
+            `"Issues: Read & write" permission. (${message})`,
+        };
+      }
+      return { kind: 'retry', message };
+    }
   }
 
   let cleanStatus = false;
@@ -92,33 +148,39 @@ export async function submitToExternalQueue(
         break; // recorded sticky by enableAutoMerge; fall through to the label
     }
   }
+  // Doors 1 and 2 are already exhausted by here, so a clean-status refusal has
+  // nowhere left to go — unless the caller still wants to try a direct merge.
   if (cleanStatus && !input.labelFallback) return { kind: 'clean_status' };
 
-  const label = await getExternalQueueSubmitLabel(workspaceId, owner, repo);
-  if (!label) {
-    return {
-      kind: 'no_mechanism',
-      message:
-        'The base branch is behind an external merge queue, but this repo neither allows ' +
-        'GitHub auto-merge on this PR nor defines a submit label Talyn recognises ' +
-        '(trunk-merge-queue-submit / trunk-merge).',
-    };
-  }
+  return {
+    kind: 'no_mechanism',
+    message:
+      'The base branch is behind an external merge queue, but nothing on this PR says ' +
+      'how to submit it: no provider instruction comment, no submit label the repo ' +
+      'defines (trunk-merge-queue-submit / trunk-merge), and GitHub auto-merge is ' +
+      'unavailable here. Submit it in that system, or remove it from the queue.',
+  };
+}
+
+/**
+ * The provider's submit instruction for THIS PR, or null. One REST call, made
+ * only at submit time. A failure reads as "no instruction" — the remaining doors
+ * still apply, and the caller's block reason stays honest either way.
+ */
+async function readSubmitInstruction(
+  workspaceId: string,
+  owner: string,
+  repo: string,
+  number: number
+): Promise<{ provider: string; command: string } | null> {
   try {
-    await githubService.addPullRequestLabels(workspaceId, owner, repo, number, [label]);
+    const comments = await githubService.listIssueComments(workspaceId, owner, repo, number);
+    return externalQueueInstructionFromComments(comments.map((c) => c.body));
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Applying the submit label failed';
-    // A permissions refusal is static per install — surface it as actionable
-    // rather than retrying forever.
-    if (/not accessible by integration|resource not accessible|403/i.test(message)) {
-      return {
-        kind: 'no_mechanism',
-        message:
-          `Talyn couldn't apply the "${label}" submit label — the GitHub App needs the ` +
-          `"Issues: Read & write" permission. (${message})`,
-      };
-    }
-    return { kind: 'retry', message };
+    console.warn(
+      `[externalQueueSubmit] couldn't read submit instructions for ${owner}/${repo}#${number}:`,
+      err instanceof Error ? err.message : err
+    );
+    return null;
   }
-  return { kind: 'submitted', via: 'label', label };
 }

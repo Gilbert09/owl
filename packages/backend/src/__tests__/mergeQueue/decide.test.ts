@@ -36,6 +36,7 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
     resignAttempts: 0,
     submitAttempts: 0,
     externalSubmitVia: null,
+    externalSubmittedAt: null,
     fixTaskId: null,
     fixTaskAccounted: true,
     fixKind: null,
@@ -1207,6 +1208,59 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     it('closes the entry out when the provider merges it', () => {
       const d = decide(submitted(), pr({ state: 'merged' }, { labels: ['trunk-merged'] }), ctx({ externalGate: 'confirmed' }));
       expect(lastTransition(d)!.to).toBe('merged');
+    });
+  });
+
+  describe('the comment door (the provider must acknowledge it)', () => {
+    // A posted command leaves nothing on GitHub to re-read, so "submitted" is
+    // believed for a grace window and then has to be proven by a queue label.
+    const commented = (submittedAt: string) =>
+      entry({
+        status: 'awaiting_external',
+        externalSubmitVia: 'comment',
+        externalSubmittedAt: submittedAt,
+        submitAttempts: 1,
+      });
+    const minutesBefore = (n: number) => new Date(Date.parse(NOW) - n * 60_000).toISOString();
+
+    it('records the command and when it was posted', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({
+          externalGate: 'confirmed',
+          submitOutcome: { kind: 'submitted', via: 'comment', detail: '/trunk merge' },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_external');
+      expect(t.set?.externalSubmitVia).toBe('comment');
+      expect(t.set?.externalSubmittedAt).toBe(NOW);
+      expect(t.event.message).toContain('/trunk merge');
+    });
+
+    it('waits inside the grace window while the provider has not labelled the PR yet', () => {
+      const d = decide(commented(minutesBefore(2)), cleanPr(), ctx({ externalGate: 'confirmed' }));
+      expect(d.actions).toEqual([]);
+    });
+
+    it('keeps waiting past the window once the provider HAS acknowledged the PR', () => {
+      const d = decide(
+        commented(minutesBefore(60)),
+        trunkPr('trunk-queued'),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(d.actions).toEqual([]);
+    });
+
+    it('blocks — without re-posting — when the window passes with no acknowledgement', () => {
+      const d = decide(commented(minutesBefore(30)), cleanPr(), ctx({ externalGate: 'confirmed' }));
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked_manual');
+      expect(t.blockedCode).toBe('external_gate');
+      expect(t.blockedReason).toContain('never picked it up');
+      expect(kinds(d)).not.toContain('submit_external'); // no comment spam
+      expect(kinds(d)).toContain('notify_blocked');
     });
   });
 

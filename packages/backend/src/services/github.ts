@@ -1636,6 +1636,38 @@ class GitHubService extends EventEmitter {
     );
   }
 
+  /**
+   * A PR's issue-level comments (first 100, oldest first). The merge queue reads
+   * them to find an external queue's own submit instruction — trunk.io posts one
+   * on every PR in a repo it manages, and it names the exact command to post.
+   */
+  async listIssueComments(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number
+  ): Promise<Array<{ body?: string | null; user?: { login?: string } | null }>> {
+    return this.apiRequest<Array<{ body?: string | null; user?: { login?: string } | null }>>(
+      workspaceId,
+      `/repos/${owner}/${repo}/issues/${number}/comments?per_page=100`
+    );
+  }
+
+  /** Post a comment on a PR (issue resource — needs `issues: write`). */
+  async createIssueComment(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    body: string
+  ): Promise<void> {
+    await this.apiRequest(workspaceId, `/repos/${owner}/${repo}/issues/${number}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body }),
+    });
+  }
+
   /** Label names defined on a repo (first 100 — enough to spot a submit label). */
   async listRepoLabelNames(workspaceId: string, owner: string, repo: string): Promise<string[]> {
     const labels = await this.apiRequest<Array<{ name?: string }>>(

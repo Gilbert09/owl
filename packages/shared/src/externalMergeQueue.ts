@@ -66,6 +66,47 @@ const TRUNK_STATE_LABELS: Array<{ prefix: string; state: ExternalQueueState }> =
  */
 export const TRUNK_SUBMIT_LABELS = ['trunk-merge-queue-submit', 'trunk-merge'] as const;
 
+/**
+ * Marker trunk puts at the top of the instruction comment it posts on every PR
+ * in a repo it manages ("Merging to `master` in this repository is managed by
+ * Trunk"). Its presence is the most direct evidence there is that a third-party
+ * queue owns the branch — trunk itself said so, on this PR.
+ */
+export const TRUNK_COMMENT_MARKER = '<!-- Trunk Merge -->';
+
+/** The command trunk's instruction comment tells you to post. */
+export const TRUNK_MERGE_COMMAND = '/trunk merge';
+
+export interface ExternalQueueInstruction {
+  provider: ExternalQueueProvider;
+  /** Comment body that submits the PR to the queue. */
+  command: string;
+}
+
+/**
+ * Read the provider's own submit instruction off a PR's comments.
+ *
+ * This is the authoritative door, and it beats guessing: on posthog/posthog
+ * trunk posts "To merge this pull request, check the box to the left or comment
+ * `/trunk merge` below" — the checkbox lives inside trunk's own comment (only
+ * its author should edit it), so the comment command is the one a third party
+ * can safely use. Returns null when no provider has claimed the PR, which is
+ * the answer for every repo that doesn't use one.
+ */
+export function externalQueueInstructionFromComments(
+  bodies: Array<string | null | undefined>
+): ExternalQueueInstruction | null {
+  for (const body of bodies) {
+    if (!body) continue;
+    if (!body.includes(TRUNK_COMMENT_MARKER)) continue;
+    // Only claim the command door if trunk actually offered it in this repo's
+    // configuration — some setups are label- or checkbox-only.
+    if (!body.toLowerCase().includes(TRUNK_MERGE_COMMAND)) continue;
+    return { provider: 'trunk', command: TRUNK_MERGE_COMMAND };
+  }
+  return null;
+}
+
 /** Is `name` a label Talyn may apply to submit a PR to an external queue? */
 export function isExternalQueueSubmitLabel(name: string): boolean {
   const n = name.trim().toLowerCase();

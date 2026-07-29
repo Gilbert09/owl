@@ -355,17 +355,32 @@ async function submitExternal(ctx: ActionContext): Promise<ActionOutcome> {
   });
 
   switch (attempt.kind) {
-    case 'submitted':
+    case 'submitted': {
+      const how =
+        attempt.via === 'comment'
+          ? `"${attempt.command}"`
+          : attempt.via === 'label'
+            ? `"${attempt.label}"`
+            : 'auto-merge';
       debugBus.recordEvent({
         service: 'merge_queue',
         action: 'external-queue:submitted',
-        summary:
-          `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} submitted via ` +
-          (attempt.via === 'label' ? `"${attempt.label}"` : 'auto-merge'),
+        summary: `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} submitted via ${how}`,
         workspaceId: ctx.pr.workspaceId,
-        meta: { entryId: ctx.entry.id, via: attempt.via, ...(attempt.label ? { label: attempt.label } : {}) },
+        meta: {
+          entryId: ctx.entry.id,
+          via: attempt.via,
+          ...(attempt.label ? { label: attempt.label } : {}),
+          ...(attempt.command ? { command: attempt.command } : {}),
+        },
       });
-      return settle({ kind: 'submitted', via: attempt.via, armedBy: attempt.armedBy });
+      return settle({
+        kind: 'submitted',
+        via: attempt.via,
+        armedBy: attempt.armedBy,
+        detail: attempt.command ?? attempt.label,
+      });
+    }
     case 'clean_status':
       return settle({ kind: 'try_direct_merge' });
     case 'no_mechanism':
@@ -550,6 +565,9 @@ async function applyTransition(
     ...(action.set?.externalSubmitVia !== undefined
       ? { externalSubmitVia: action.set.externalSubmitVia }
       : {}),
+    ...(action.set?.externalSubmittedAt !== undefined
+      ? { externalSubmittedAt: action.set.externalSubmittedAt }
+      : {}),
     ...(action.set?.automergeArmedBy !== undefined
       ? { automergeArmedBy: action.set.automergeArmedBy }
       : {}),
@@ -580,6 +598,13 @@ async function applyTransition(
         : {}),
       ...(action.set?.externalSubmitVia !== undefined
         ? { externalSubmitVia: action.set.externalSubmitVia }
+        : {}),
+      ...(action.set?.externalSubmittedAt !== undefined
+        ? {
+            externalSubmittedAt: action.set.externalSubmittedAt
+              ? new Date(action.set.externalSubmittedAt)
+              : null,
+          }
         : {}),
       ...(action.set?.automergeArmedBy !== undefined
         ? {
@@ -640,6 +665,7 @@ async function applyBudgetReset(
     resignAttempts: 0,
     submitAttempts: 0,
     externalSubmitVia: null,
+    externalSubmittedAt: null,
     signingCheckedSha: null,
     unsignedCount: null,
     ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
@@ -654,6 +680,7 @@ async function applyBudgetReset(
       resignAttempts: 0,
       submitAttempts: 0,
       externalSubmitVia: null,
+      externalSubmittedAt: null,
       signingCheckedSha: null,
       unsignedCount: null,
       ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
