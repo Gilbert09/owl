@@ -462,6 +462,7 @@ export function PRDetailSheet({
                   mergeStateStatus={view.row.summary.mergeStateStatus}
                   state={view.row.state}
                   hideReviewState
+                  labels={view.row.summary.labels}
                 />
               </div>
             ) : (

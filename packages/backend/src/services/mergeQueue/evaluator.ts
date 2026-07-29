@@ -19,6 +19,7 @@ import { getPoolDbClient, runWithoutScope } from '../../db/client.js';
 import { pullRequests as pullRequestsTable } from '../../db/schema.js';
 import { githubService } from '../github.js';
 import { githubRateGate } from '../githubRateGate.js';
+import { getExternalMergeGate } from '../repoMergeGate.js';
 import { debugBus } from '../debugBus.js';
 import {
   closeActiveEntry,
@@ -205,7 +206,15 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
   // walk never stops early. The decision engine is untouched; eager is purely
   // "evaluate each entry as a group of one".
   const mode = await getMergeQueueMode(workspaceId, db);
-  const eager = mode === 'eager';
+  // A base behind an external merge queue is ALWAYS eager, whatever the
+  // workspace mode says: that system does the ordering and batching, so holding
+  // sibling PRs behind our own head just adds its whole test cycle (~40min on
+  // posthog/posthog) to every PR in the group for no serialization benefit.
+  const sample = prRows[0];
+  const externalGate = sample
+    ? await getExternalMergeGate(workspaceId, sample.owner, sample.repo, baseBranch)
+    : null;
+  const eager = mode === 'eager' || externalGate !== null;
   const accountKey = githubService.accountKeyFor(workspaceId);
   if (githubRateGate.isBlocked(accountKey, 'rest')) {
     debugBus.recordEvent({

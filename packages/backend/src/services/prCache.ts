@@ -800,6 +800,10 @@ function summaryToJsonb(s: PRSummary): Record<string, unknown> {
     // (if anyone) has GitHub native auto-merge armed.
     nodeId: s.nodeId ?? null,
     autoMergeBy: s.autoMergeBy ?? null,
+    // Labels — small (names only) and the ONLY channel an external merge queue
+    // (trunk.io) reports a submitted PR's state on. The `labeled`/`unlabeled`
+    // webhook patches this in place without a GitHub fetch.
+    labels: s.labels ?? [],
   };
 }
 
@@ -822,6 +826,7 @@ function rowToSummary(row: PullRequestRow, owner: string, repo: string): PRSumma
     headSha: (meta.headSha as string) ?? '',
     nodeId: (meta.nodeId as string | undefined) ?? undefined,
     autoMergeBy: (meta.autoMergeBy as string | null | undefined) ?? null,
+    labels: (meta.labels as string[] | undefined) ?? [],
     createdAt: (meta.createdAt as string) ?? '',
     updatedAt: (meta.updatedAt as string) ?? '',
     mergeable: (meta.mergeable as PRSummary['mergeable']) ?? 'UNKNOWN',

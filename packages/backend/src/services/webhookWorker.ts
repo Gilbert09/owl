@@ -306,16 +306,18 @@ async function pruneOnPullRequest(delivery: WebhookDelivery): Promise<void> {
 
 /**
  * Handle `pull_request` actions whose effect is fully contained in the payload —
- * a persisted field we copy verbatim (title, draft) or nothing we track at all
- * (labels) — without a GitHub fetch. Returns the rows-updated count when handled,
- * or `null` to signal "this action needs the full `refreshPr`".
+ * a persisted field we copy verbatim (title, draft, labels) — without a GitHub
+ * fetch. Returns the rows-updated count when handled, or `null` to signal "this
+ * action needs the full `refreshPr`".
  *
  * Deliberately NOT shortcut (→ refreshPr): `opened`/`reopened`/`synchronize`
  * (new/changed head → checks + mergeability), `closed`/merged (flows through the
  * cursor/delta + merge-queue path), `review_requested*` (recomputes the
  * viewer-relative `reviewRequestVia`), and `edited` that changed the base branch
- * (mergeability). Validated against `summaryToJsonb`: labels aren't persisted and
- * `draft`/`title` feed no derived field (mergeable/reviewDecision/blockingReason).
+ * (mergeability). Validated against `summaryToJsonb`: `draft`/`title`/`labels`
+ * feed no derived field (mergeable/reviewDecision/blockingReason) — labels are
+ * read only by the external-merge-queue logic, which wants exactly this verbatim
+ * copy.
  */
 async function tryIncrementalPrMetadata(
   delivery: WebhookDelivery,
@@ -323,10 +325,16 @@ async function tryIncrementalPrMetadata(
   numbers: number[],
 ): Promise<number | null> {
   const action = delivery.action;
-  const pr = delivery.payload.pull_request as { title?: string; draft?: boolean } | undefined;
+  const pr = delivery.payload.pull_request as
+    | { title?: string; draft?: boolean; labels?: Array<{ name?: string }> }
+    | undefined;
   const changes = delivery.payload.changes as Record<string, unknown> | undefined;
 
-  const patchAll = async (patch: { title?: string; draft?: boolean }): Promise<number> => {
+  const patchAll = async (patch: {
+    title?: string;
+    draft?: boolean;
+    labels?: string[];
+  }): Promise<number> => {
     let n = 0;
     for (const number of numbers) n += await prMonitorService.patchOpenPrSummary(targets, number, patch);
     return n;
@@ -334,10 +342,21 @@ async function tryIncrementalPrMetadata(
 
   switch (action) {
     case 'labeled':
-    case 'unlabeled':
-      // Labels are neither persisted nor read by any FastOwl logic — no-op.
-      whTrace(`  pull_request/${action} ${delivery.repoFullName}: labels not tracked — no refresh`);
-      return 0;
+    case 'unlabeled': {
+      // Labels ARE tracked now: an external merge queue (trunk.io) reports a
+      // submitted PR's state only as labels, and the merge queue re-evaluates on
+      // each change (patchOpenPrSummary emits pr:snapshot). The payload carries
+      // the PR's full post-change label set, so no GitHub fetch is needed.
+      const labels = pr?.labels
+        ?.map((l) => l?.name)
+        .filter((n): n is string => typeof n === 'string');
+      if (!labels) return null; // malformed payload — fall back to a real refresh
+      const n = await patchAll({ labels });
+      whTrace(
+        `  pull_request/${action} ${delivery.repoFullName}: labels patched → ${n} row(s) (no refresh)`,
+      );
+      return n;
+    }
     case 'edited': {
       // A base-branch edit changes mergeability → needs the full refresh.
       if (changes?.base !== undefined) return null;

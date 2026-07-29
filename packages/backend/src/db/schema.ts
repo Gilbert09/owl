@@ -546,6 +546,15 @@ export const mergeQueueEntries = pgTable(
     fixAttempts: integer('fix_attempts').notNull().default(0),
     rerunAttempts: integer('rerun_attempts').notNull().default(0),
     resignAttempts: integer('resign_attempts').notNull().default(0),
+    /**
+     * Submissions to an EXTERNAL merge queue (trunk.io / GitHub native) spent
+     * on this head. The provider can eject a PR (its tests fail merging with
+     * the base); this bounds the resubmit loop the same way fixAttempts bounds
+     * fix runs.
+     */
+    submitAttempts: integer('submit_attempts').notNull().default(0),
+    /** How the live external submission was made: 'auto_merge' | 'label'. */
+    externalSubmitVia: text('external_submit_via'),
     /** The queue's own most-recent fix run (replaces lastFixTaskId in the blob). */
     fixTaskId: text('fix_task_id').references(() => tasks.id, { onDelete: 'set null' }),
     fixTaskAccounted: boolean('fix_task_accounted').notNull().default(true),

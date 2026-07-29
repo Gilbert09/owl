@@ -26,6 +26,12 @@ import { fetchUnsignedCommitCount } from '../githubGraphql.js';
 import { githubRateGate } from '../githubRateGate.js';
 import { graphqlBudget } from '../graphqlBudget.js';
 import { requiresSignedCommits, markSigningRequired } from '../repoSigning.js';
+import {
+  clearExternalMergeGate,
+  getExternalMergeGate,
+  markExternalMergeGate,
+} from '../repoMergeGate.js';
+import { submitToExternalQueue } from '../externalQueueSubmit.js';
 import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
@@ -51,6 +57,7 @@ import {
   type MergeOutcome,
   type PrSnapshot,
   type RerunOutcome,
+  type SubmitOutcome,
 } from './types.js';
 
 // Only the pull_requests columns an evaluation touches (egress rules — never
@@ -109,6 +116,9 @@ export function buildPrSnapshot(pr: PrEvalRow): PrSnapshot {
       checks: summary.checks ?? { total: 0, failed: 0, inProgress: 0 },
       unresolvedReviewThreads: summary.unresolvedReviewThreads ?? 0,
       draft: summary.draft,
+      // Load-bearing for external merge queues: trunk.io reports a submitted
+      // PR's state ONLY as labels, so decide can't see the queue without them.
+      labels: summary.labels ?? [],
     },
   };
 }
@@ -137,6 +147,15 @@ async function buildBaseContext(
     input.isHead && !graphqlGateBlocked && !graphqlBudgetLow
       ? await getAutoMergeCapability(pr.workspaceId, pr.owner, pr.repo, entry.mergeMethod)
       : 'unknown';
+  // Is the base behind an external merge queue? Cached 1h (REST, no GraphQL
+  // points) and sticky once an observed 405 confirms it — so this is a map
+  // lookup on all but the first evaluation per repo+base per process.
+  const externalGate = await getExternalMergeGate(
+    pr.workspaceId,
+    pr.owner,
+    pr.repo,
+    entry.baseBranch
+  );
   return {
     nowIso: new Date().toISOString(),
     isHead: input.isHead,
@@ -146,6 +165,7 @@ async function buildBaseContext(
     otherLinkedTaskActive: otherFix !== null && ACTIVE_STATUSES.has(otherFix),
     signingRequired,
     autoMergeCapability,
+    externalGate,
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),
@@ -180,6 +200,7 @@ export async function evaluateEntry(input: EvaluateEntryInput): Promise<Evaluate
         prSnap,
         position,
         trigger,
+        base,
         extras,
       });
       if (applied.casLost) return { verdict: 'advance', casLost: true };
@@ -206,6 +227,8 @@ interface ActionContext {
   prSnap: PrSnapshot;
   position: number;
   trigger: string;
+  /** The evaluation's base context (probe results, capabilities, gates). */
+  base: DecisionContext;
   extras: Partial<DecisionContext>;
 }
 
@@ -276,6 +299,86 @@ async function performAction(action: Action, ctx: ActionContext): Promise<Action
       return armAutoMerge(ctx);
     case 'disarm_automerge':
       return disarmAutoMerge(ctx);
+    case 'submit_external':
+      return submitExternal(ctx);
+    case 'mark_external_gate': {
+      markExternalMergeGate(ctx.pr.workspaceId, ctx.pr.owner, ctx.pr.repo, ctx.entry.baseBranch);
+      // decide already asked for a submit in the same round; make sure it sees
+      // the confirmed gate rather than the 'suspected' the context was built
+      // with (which would send the submit back to the direct merge).
+      ctx.extras.externalGate = 'confirmed';
+      debugBus.recordEvent({
+        service: 'merge_queue',
+        action: 'external-gate:confirmed',
+        summary: `${ctx.pr.owner}/${ctx.pr.repo}@${ctx.entry.baseBranch} is behind an external merge queue`,
+        workspaceId: ctx.pr.workspaceId,
+        meta: { entryId: ctx.entry.id },
+      });
+      return {};
+    }
+  }
+}
+
+/**
+ * Hand the PR to the external merge queue that owns its base branch (see
+ * services/externalQueueSubmit.ts for the two doors and why they're ordered
+ * that way).
+ *
+ * The one piece of policy that lives here: when the gate is only SUSPECTED and
+ * GitHub refuses to arm because the PR is immediately mergeable, we take the
+ * direct merge rather than the label. It's the cheapest way to find out whether
+ * the gate applies to Talyn at all — and it lands the PR when it doesn't.
+ */
+async function submitExternal(ctx: ActionContext): Promise<ActionOutcome> {
+  const settle = (outcome: SubmitOutcome): ActionOutcome => {
+    ctx.extras.submitOutcome = outcome;
+    // One aftermath at a time — a submit supersedes whatever merge attempt led
+    // here (decide checks submitOutcome first).
+    delete ctx.extras.mergeOutcome;
+    return { redecide: true };
+  };
+  // `extras` wins: a mark_external_gate earlier in THIS evaluation upgrades the
+  // base context's 'suspected' to 'confirmed'.
+  const gate = ctx.extras.externalGate ?? ctx.base.externalGate;
+  const nodeId = (ctx.pr.lastSummary as { nodeId?: string } | null)?.nodeId ?? null;
+
+  const attempt = await submitToExternalQueue({
+    workspaceId: ctx.pr.workspaceId,
+    owner: ctx.pr.owner,
+    repo: ctx.pr.repo,
+    number: ctx.pr.number,
+    nodeId,
+    headSha: ctx.prSnap.headSha,
+    mergeMethod: ctx.entry.mergeMethod,
+    autoMergeArmedBy: ctx.prSnap.autoMergeEnabledBy,
+    labelFallback: gate === 'confirmed',
+  });
+
+  switch (attempt.kind) {
+    case 'submitted':
+      debugBus.recordEvent({
+        service: 'merge_queue',
+        action: 'external-queue:submitted',
+        summary:
+          `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} submitted via ` +
+          (attempt.via === 'label' ? `"${attempt.label}"` : 'auto-merge'),
+        workspaceId: ctx.pr.workspaceId,
+        meta: { entryId: ctx.entry.id, via: attempt.via, ...(attempt.label ? { label: attempt.label } : {}) },
+      });
+      return settle({ kind: 'submitted', via: attempt.via, armedBy: attempt.armedBy });
+    case 'clean_status':
+      return settle({ kind: 'try_direct_merge' });
+    case 'no_mechanism':
+      return settle({ kind: 'unavailable', message: attempt.message });
+    case 'retry':
+      if (!nodeId) {
+        // Row cached before nodeId shipped — refresh so the next evaluation can
+        // arm. (The direct-merge path never needed it, so old rows lack it.)
+        await prMonitorService
+          .refreshPr(ctx.pr.workspaceId, ctx.pr.owner, ctx.pr.repo, ctx.pr.number)
+          .catch(() => undefined);
+      }
+      return settle({ kind: 'retry', message: attempt.message });
   }
 }
 
@@ -441,6 +544,15 @@ async function applyTransition(
     ...(action.set?.resignAttempts !== undefined
       ? { resignAttempts: action.set.resignAttempts }
       : {}),
+    ...(action.set?.submitAttempts !== undefined
+      ? { submitAttempts: action.set.submitAttempts }
+      : {}),
+    ...(action.set?.externalSubmitVia !== undefined
+      ? { externalSubmitVia: action.set.externalSubmitVia }
+      : {}),
+    ...(action.set?.automergeArmedBy !== undefined
+      ? { automergeArmedBy: action.set.automergeArmedBy }
+      : {}),
     ...(action.set?.fixTaskAccounted !== undefined
       ? { fixTaskAccounted: action.set.fixTaskAccounted }
       : {}),
@@ -462,6 +574,18 @@ async function applyTransition(
         : {}),
       ...(action.set?.resignAttempts !== undefined
         ? { resignAttempts: action.set.resignAttempts }
+        : {}),
+      ...(action.set?.submitAttempts !== undefined
+        ? { submitAttempts: action.set.submitAttempts }
+        : {}),
+      ...(action.set?.externalSubmitVia !== undefined
+        ? { externalSubmitVia: action.set.externalSubmitVia }
+        : {}),
+      ...(action.set?.automergeArmedBy !== undefined
+        ? {
+            automergeArmedBy: action.set.automergeArmedBy,
+            automergeArmedAt: action.set.automergeArmedBy ? new Date() : null,
+          }
         : {}),
       ...(action.set?.fixTaskAccounted !== undefined
         ? { fixTaskAccounted: action.set.fixTaskAccounted }
@@ -504,16 +628,21 @@ async function applyBudgetReset(
   action: Extract<Action, { kind: 'reset_budgets' }>,
   ctx: ActionContext
 ): Promise<ActionOutcome> {
-  const wasBlocked = ctx.entry.status === 'blocked';
+  // A new head invalidates a `blocked` gate AND any external-queue submission
+  // (the provider tested a commit that is no longer the head) — both funnel
+  // back to `queued` for a fresh decision. Mirrors DecisionBuilder.resetBudgets.
+  const reopens = ctx.entry.status === 'blocked' || ctx.entry.status === 'awaiting_external';
   const next: EntrySnapshot = {
     ...ctx.entry,
     headSha: action.newHeadSha,
     fixAttempts: 0,
     rerunAttempts: 0,
     resignAttempts: 0,
+    submitAttempts: 0,
+    externalSubmitVia: null,
     signingCheckedSha: null,
     unsignedCount: null,
-    ...(wasBlocked ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
+    ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
   };
   const ok = await casTransition(
     ctx.entry.id,
@@ -523,9 +652,11 @@ async function applyBudgetReset(
       fixAttempts: 0,
       rerunAttempts: 0,
       resignAttempts: 0,
+      submitAttempts: 0,
+      externalSubmitVia: null,
       signingCheckedSha: null,
       unsignedCount: null,
-      ...(wasBlocked ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
+      ...(reopens ? { status: 'queued' as const, blockedCode: null, blockedReason: null } : {}),
       lastEvaluatedAt: new Date(),
     },
     {
@@ -646,6 +777,14 @@ async function verifyLiveThenMerge(ctx: ActionContext): Promise<ActionOutcome> {
         : { kind: 'error', message: err instanceof Error ? err.message : 'Merge failed' };
   }
   ctx.extras.mergeOutcome = outcome;
+  // One aftermath at a time: this merge may have been the fallback for a submit
+  // that couldn't arm, and decide checks submitOutcome first.
+  delete ctx.extras.submitOutcome;
+  if (outcome.kind === 'merged') {
+    // The branch let us merge after all — drop any gate we'd recorded for it so
+    // a relaxed ruleset doesn't leave the queue submitting forever.
+    clearExternalMergeGate(ctx.pr.workspaceId, ctx.pr.owner, ctx.pr.repo, entry.baseBranch);
+  }
   // The merging transition consumed one CAS version; the merge itself writes
   // no entry state (the aftermath rules do, next round).
   return { entry, versionDelta: 1, redecide: true };

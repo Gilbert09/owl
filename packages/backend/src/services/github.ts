@@ -1619,6 +1619,54 @@ class GitHubService extends EventEmitter {
   }
 
   /**
+   * Rules (from every ruleset, org- and repo-level) that apply to one branch.
+   * Needs no admin scope — unlike the rulesets API — and is how the merge queue
+   * spots a branch it can't update directly (an external merge queue's `update`
+   * rule). See repoMergeGate.ts.
+   */
+  async getBranchRules(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    branch: string
+  ): Promise<Array<{ type?: string; ruleset_id?: number }>> {
+    return this.apiRequest<Array<{ type?: string; ruleset_id?: number }>>(
+      workspaceId,
+      `/repos/${owner}/${repo}/rules/branches/${encodeURIComponent(branch)}`
+    );
+  }
+
+  /** Label names defined on a repo (first 100 — enough to spot a submit label). */
+  async listRepoLabelNames(workspaceId: string, owner: string, repo: string): Promise<string[]> {
+    const labels = await this.apiRequest<Array<{ name?: string }>>(
+      workspaceId,
+      `/repos/${owner}/${repo}/labels?per_page=100`
+    );
+    return labels.map((l) => l.name).filter((n): n is string => typeof n === 'string');
+  }
+
+  /**
+   * Add labels to a PR (labels live on the issue resource, so this needs the
+   * App's `issues: write` permission). The merge queue uses it for exactly one
+   * thing: applying an external queue's SUBMIT label — the only way to hand a
+   * clean PR to trunk.io, since GitHub refuses to arm auto-merge on a PR that
+   * is already immediately mergeable. Additive — GitHub keeps existing labels.
+   */
+  async addPullRequestLabels(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number,
+    labels: string[]
+  ): Promise<void> {
+    await this.apiRequest(workspaceId, `/repos/${owner}/${repo}/issues/${number}/labels`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ labels }),
+    });
+  }
+
+  /**
    * Re-run every failed check on a PR's head commit, routed by which app
    * CREATED each check — GitHub has no single cross-app re-run API:
    *

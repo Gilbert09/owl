@@ -230,16 +230,46 @@ describe('processWebhookDelivery (fan-out + coalescing)', () => {
     expect(refreshSpy).not.toHaveBeenCalled();
   });
 
-  it('treats labeled/unlabeled as a no-op (labels are not tracked)', async () => {
+  it('patches labels from the payload on labeled/unlabeled — no refreshPr', async () => {
+    // Labels carry an external merge queue's per-PR state (trunk.io posts
+    // `trunk-queued`/`trunk-testing`/… and nothing else), so they're tracked —
+    // but the payload carries the full post-change set, so no fetch is needed.
     await seedTrackedPr('rA', 'wsA', 7, 'sha-1');
-    const before = await summaryOf();
     const n = await processWebhookDelivery(
+      delivery({
+        action: 'labeled',
+        payload: {
+          pull_request: { number: 7, labels: [{ name: 'trunk-queued' }, { name: 'stamphog' }] },
+          label: { name: 'trunk-queued' },
+        },
+      }),
+      1_000,
+    );
+    expect(n).toBe(1);
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect((await summaryOf()).labels).toEqual(['trunk-queued', 'stamphog']);
+
+    await processWebhookDelivery(
+      delivery({
+        action: 'unlabeled',
+        payload: {
+          pull_request: { number: 7, labels: [{ name: 'stamphog' }] },
+          label: { name: 'trunk-queued' },
+        },
+      }),
+      1_000,
+    );
+    expect((await summaryOf()).labels).toEqual(['stamphog']);
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a full refreshPr when a label delivery carries no label set', async () => {
+    await seedTrackedPr('rA', 'wsA', 7, 'sha-1');
+    await processWebhookDelivery(
       delivery({ action: 'labeled', payload: { pull_request: { number: 7 }, label: { name: 'bug' } } }),
       1_000,
     );
-    expect(n).toBe(0);
-    expect(refreshSpy).not.toHaveBeenCalled();
-    expect(await summaryOf()).toEqual(before); // untouched
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
   });
 
   it('still does a full refreshPr when an edited delivery changed the base branch', async () => {

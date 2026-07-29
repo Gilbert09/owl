@@ -20,8 +20,8 @@ export function toLegacyStatus(status: EntryStatus): LegacyQueueStatus {
     case 'blocked_manual':
       return 'blocked';
     default:
-      // queued / awaiting_ci / awaiting_review / automerge_armed — all "waiting"
-      // to a v1-era desktop.
+      // queued / awaiting_ci / awaiting_review / automerge_armed /
+      // awaiting_external — all "waiting" to a v1-era desktop.
       return 'waiting';
   }
 }
@@ -76,5 +76,11 @@ export function toPublicMergeQueue(
     autoMerge: entry.automergeArmedBy
       ? { armed: true, armedBy: entry.automergeArmedBy }
       : { armed: false },
+    /** External merge queue (trunk.io / GitHub native): how the PR was handed
+     *  over and how many submissions this head has spent. The queue STATE
+     *  itself comes from the PR's labels, which the desktop already has. */
+    external: entry.externalSubmitVia
+      ? { via: entry.externalSubmitVia, submits: [entry.submitAttempts, 3] }
+      : undefined,
   };
 }

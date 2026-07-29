@@ -124,6 +124,20 @@ export function useGitHubActions() {
     async (row: PRRow) => {
       const ref = `${row.owner}/${row.repo}#${row.number}`;
       const result = await api.pullRequests.merge(row.id);
+      // The base branch may be behind an external merge queue (trunk.io,
+      // GitHub's native queue) — nobody but that system can merge it, so the
+      // backend submits the PR to it instead. The PR stays open until the queue
+      // merges it, so keep the row and just say what happened.
+      if (result.submitted) {
+        trackEvent('pr_submitted_external_queue', {
+          repo: `${row.owner}/${row.repo}`,
+          pr_number: row.number,
+          via: result.via ?? 'auto_merge',
+        });
+        toast.success(`Submitted ${ref} to the merge queue`, result.message);
+        await refreshPullRequests();
+        return;
+      }
       // GitHub can 200 with `merged: false` — treat that as failure so we
       // don't claim success and wrongly drop the row.
       if (!result.merged) {

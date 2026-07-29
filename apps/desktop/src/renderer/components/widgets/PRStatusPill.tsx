@@ -8,7 +8,13 @@ import {
   Eye,
   HelpCircle,
   ShieldAlert,
+  Clock,
 } from 'lucide-react';
+import {
+  externalQueueProviderLabel,
+  externalQueueStateLabel,
+  externalQueueStatusFromLabels,
+} from '@talyn/shared';
 import { cn } from '../../lib/utils';
 import type { PRBlockingReason, PRChecks, PRState } from '../../lib/api';
 
@@ -66,6 +72,13 @@ interface PRStatusPillProps {
    * would be a lie — it renders as "Protected" instead.
    */
   reviewDecision?: string | null;
+  /**
+   * The PR's labels. An external merge queue (trunk.io) publishes a submitted
+   * PR's state as labels, and once it holds the PR that state is what the
+   * reader actually wants — "Queue: testing" beats "Ready" on a PR nobody but
+   * the queue can merge. Ranked below merged/closed, above every open verdict.
+   */
+  labels?: string[];
   className?: string;
 }
 
@@ -88,11 +101,14 @@ export function PRStatusPill({
   compact = false,
   hideReviewState = false,
   reviewDecision,
+  labels,
   className,
 }: PRStatusPillProps) {
   const terminal = terminalVariant(state);
+  const external = terminal || state !== 'open' ? null : externalQueueVariant(labels);
   const variant =
     terminal ??
+    external?.variant ??
     pickVariant(blockingReason, checks, hideReviewState, mergeStateStatus, reviewDecision);
   const Icon = variant.icon;
   // A merged/closed PR's check rollup is no longer meaningful.
@@ -102,7 +118,11 @@ export function PRStatusPill({
     <button
       type="button"
       onClick={onClick}
-      title={terminal ? terminal.label : titleFor(blockingReason, checks, reviewDecision)}
+      title={
+        terminal
+          ? terminal.label
+          : (external?.title ?? titleFor(blockingReason, checks, reviewDecision))
+      }
       className={cn(
         'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors',
         toneClass(variant.tone),
@@ -133,6 +153,54 @@ function terminalVariant(state?: PRState): PillVariant | null {
     return { icon: XCircle, label: 'Closed', tone: 'grey' };
   }
   return null;
+}
+
+/**
+ * An external merge queue (trunk.io) holding the PR outranks every open-state
+ * verdict: on a branch only that system can merge, "Ready" is misleading and
+ * "Queue: testing" is the answer. An ejected PR (failed/cancelled) reads red or
+ * amber so it stands out — it's back in the author's court.
+ */
+function externalQueueVariant(
+  labels: string[] | undefined
+): { variant: PillVariant; title: string } | null {
+  const ext = externalQueueStatusFromLabels(labels);
+  if (!ext) return null;
+  const provider = externalQueueProviderLabel(ext.provider);
+  const state = externalQueueStateLabel(ext.state);
+  const base = { label: `Queue: ${state.toLowerCase()}`, tone: 'blue' as const };
+  switch (ext.state) {
+    case 'failed':
+      return {
+        variant: { ...base, icon: XCircle, tone: 'red' },
+        title: `${provider}'s merge queue rejected this PR (${ext.label}) — its tests fail merging with the base.`,
+      };
+    case 'cancelled':
+      return {
+        variant: { ...base, icon: AlertTriangle, tone: 'amber' },
+        title: `This PR was cancelled in ${provider}'s merge queue (${ext.label}).`,
+      };
+    case 'merged':
+      return {
+        variant: { icon: GitMerge, label: 'Merged', tone: 'purple' },
+        title: `${provider} merged this PR.`,
+      };
+    case 'not_ready':
+      return {
+        variant: { ...base, icon: Clock, tone: 'amber' },
+        title: `${provider}'s merge queue is holding this PR until it meets the merge requirements (${ext.label}).`,
+      };
+    case 'passed':
+      return {
+        variant: { ...base, icon: CheckCircle2, tone: 'green' },
+        title: `${provider}'s merge queue passed this PR (${ext.label}) — merging shortly.`,
+      };
+    default:
+      return {
+        variant: { ...base, icon: Loader2, spin: ext.state === 'testing' },
+        title: `This PR is in ${provider}'s merge queue (${ext.label}) — it merges when the queue's tests pass.`,
+      };
+  }
 }
 
 /**

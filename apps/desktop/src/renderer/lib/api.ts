@@ -524,6 +524,10 @@ export interface PRSummaryShape {
    *  `teams` lists the viewer's own requested teams (`org/team`). Drives the
    *  Review tab's "Requested" column. Absent on older cached rows. */
   reviewRequestVia?: { direct: boolean; teams: string[] };
+  /** The PR's labels. An external merge queue (trunk.io) publishes a submitted
+   *  PR's state ONLY as labels — `externalQueueStatusFromLabels` reads them.
+   *  Absent on rows cached before labels shipped in the summary. */
+  labels?: string[];
 }
 
 export interface PRRow {
@@ -580,6 +584,9 @@ export interface MergeQueuePublic {
     | 'awaiting_ci'
     | 'awaiting_review'
     | 'automerge_armed'
+    /** Submitted to an external merge queue (trunk.io / GitHub native), which
+     *  owns the merge from here; its progress shows up in the PR's labels. */
+    | 'awaiting_external'
     | 'fixing'
     | 'merging'
     | 'blocked'
@@ -600,6 +607,9 @@ export interface MergeQueuePublic {
     resigns: [number, number];
   };
   autoMerge?: { armed: boolean; armedBy?: 'talyn' | 'user' };
+  /** External merge queue: which door the PR was handed over through, and the
+   *  resubmit budget for the current head. Absent when not submitted. */
+  external?: { via: 'auto_merge' | 'label'; submits: [number, number] };
 }
 
 /** One row of GET /pull-requests/:id/merge-queue/timeline. */
@@ -760,12 +770,20 @@ export const pullRequests = {
     request<PRFile[]>('GET', `/pull-requests/${id}/files`),
   reviews: (id: string) =>
     request<PRReviewDetail>('GET', `/pull-requests/${id}/reviews`),
+  /**
+   * Merge the PR — or, when its base branch is behind an external merge queue
+   * (trunk.io / GitHub native), SUBMIT it to that queue instead and answer
+   * `{ merged: false, submitted: true }`. Talyn can't merge such a branch: its
+   * ruleset exempts only that system's App.
+   */
   merge: (id: string, method: 'merge' | 'squash' | 'rebase' = 'squash') =>
-    request<{ sha: string; merged: boolean; message: string }>(
-      'POST',
-      `/pull-requests/${id}/merge`,
-      { method }
-    ),
+    request<{
+      sha?: string;
+      merged: boolean;
+      message: string;
+      submitted?: boolean;
+      via?: 'auto_merge' | 'label';
+    }>('POST', `/pull-requests/${id}/merge`, { method }),
 };
 
 export const repositories = {

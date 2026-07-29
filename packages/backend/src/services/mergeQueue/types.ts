@@ -13,11 +13,13 @@ export const MAX_ATTEMPTS = 3;
 
 /**
  * Upper bound on decide→execute rounds within one evaluation of one entry.
- * The longest legitimate chain is the App-refused merge:
- * merge → verify-merged → signature probe → check re-run → final block = 5.
- * Anything past this indicates a decide/executor bug, not real work.
+ * The longest legitimate chain is a suspected external gate settling itself:
+ * submit → direct-merge fallback → verify-merged → gate confirmed + resubmit →
+ * submitted = 5, and the App-refused ladder (merge → verify-merged → signature
+ * probe → check re-run → final block) is also 5. Anything past this indicates a
+ * decide/executor bug, not real work.
  */
-export const MAX_DECIDE_ROUNDS = 6;
+export const MAX_DECIDE_ROUNDS = 8;
 
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
 
@@ -34,6 +36,11 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase';
  * - `automerge_armed`  — head; clean-but-awaiting-CI with GitHub native
  *                        auto-merge enabled. GitHub merges the instant checks
  *                        pass; we observe it via the closed webhook.
+ * - `awaiting_external`— the base branch is behind an external merge gate
+ *                        (trunk.io / GitHub's native queue) and the PR has been
+ *                        SUBMITTED to it. That system owns the merge now; we
+ *                        track its state off the PR's labels and take the PR
+ *                        back if it gets ejected.
  * - `fixing`           — a cloud fix run (blockers or re-sign) is in flight.
  * - `merging`          — a direct REST merge call is in flight. Persisted
  *                        BEFORE the call so a crash mid-merge is recoverable
@@ -49,6 +56,7 @@ export type EntryStatus =
   | 'awaiting_ci'
   | 'awaiting_review'
   | 'automerge_armed'
+  | 'awaiting_external'
   | 'fixing'
   | 'merging'
   | 'blocked'
@@ -78,16 +86,26 @@ export type BlockedCode =
    */
   | 'app_refused_hard'
   /**
-   * The base branch is governed by an EXTERNAL merge gate Talyn can't bypass —
-   * GitHub's native merge queue, a third-party queue (trunk.io), or a
-   * protected-ref ruleset. GitHub 405s the direct merge with "Cannot update
-   * this protected ref". `blocked_manual` only: retrying or firing a fix run
-   * can never satisfy it — the PR must be merged through that system. Only
-   * dequeue/requeue clears it.
+   * The base branch is governed by an EXTERNAL merge gate Talyn can't bypass
+   * (GitHub's native merge queue, trunk.io, a protected-ref ruleset) AND no
+   * submit mechanism is available: the repo refuses auto-merge and defines no
+   * submit label. `blocked_manual` only — retrying or fixing can never satisfy
+   * it; the PR must be handed to that system by a human. Only dequeue/requeue
+   * clears it. When a submit mechanism DOES exist the queue submits instead,
+   * and this code is never reached.
    */
-  | 'external_gate';
+  | 'external_gate'
+  /**
+   * The external queue took the PR and gave it back (trunk's `trunk-failed` /
+   * `trunk-cancelled`) more times than the per-head budget allows. Self-heals
+   * on a new head, like every other budget — a fresh push earns fresh submits.
+   */
+  | 'external_queue_rejected';
 
 export type FixKind = 'blockers' | 'resign';
+
+/** How a PR was handed to an external merge queue. */
+export type ExternalSubmitVia = 'auto_merge' | 'label';
 
 /** Mirror of a merge_queue_entries row, as the decision function sees it. */
 export interface EntrySnapshot {
@@ -100,6 +118,10 @@ export interface EntrySnapshot {
   fixAttempts: number;
   rerunAttempts: number;
   resignAttempts: number;
+  /** External-queue submissions spent on this head (ejected → resubmit). */
+  submitAttempts: number;
+  /** How the current external submission was made; null when not submitted. */
+  externalSubmitVia: ExternalSubmitVia | null;
   fixTaskId: string | null;
   /** Whether `fixTaskId`'s terminal result has been folded into fixAttempts. */
   fixTaskAccounted: boolean;
@@ -139,6 +161,24 @@ export type MergeOutcome =
   /** Any other rejection (405 conflicts, network, …). */
   | { kind: 'error'; message: string };
 
+export type SubmitOutcome =
+  /**
+   * The PR is now in the external queue's hands. `armedBy` is set for the
+   * auto-merge door and says whose arm carried the submission — we only ever
+   * disarm (un-submit) one we armed ourselves.
+   */
+  | { kind: 'submitted'; via: ExternalSubmitVia; armedBy?: 'talyn' | 'user' }
+  /**
+   * GitHub refused to arm auto-merge because the PR is immediately mergeable
+   * ("clean status") and the gate is only SUSPECTED — so the direct merge is
+   * still worth one attempt (it settles whether the gate is real).
+   */
+  | { kind: 'try_direct_merge' }
+  /** Gate is real and nothing can submit: no auto-merge, no submit label. */
+  | { kind: 'unavailable'; message: string }
+  /** Transient (head moved, API error) — retry on a later evaluation. */
+  | { kind: 'retry'; message: string };
+
 export type RerunOutcome =
   | {
       requested: number;
@@ -172,6 +212,15 @@ export interface DecisionContext {
   signingRequired: boolean | null;
   /** Whether GitHub native auto-merge can be armed on this repo (Push E). */
   autoMergeCapability: 'available' | 'unavailable' | 'unknown';
+  /**
+   * The base branch is behind an external merge gate (trunk.io / GitHub's
+   * native queue / a restrictive ruleset). 'confirmed' = learned from an
+   * observed 405, so the direct merge is provably doomed and is skipped;
+   * 'suspected' = a branch-rules probe saw an `update` rule, which can't see
+   * bypass actors — so the queue still tries the direct merge once. See
+   * services/repoMergeGate.ts.
+   */
+  externalGate: 'suspected' | 'confirmed' | null;
   /** Whether githubService.updateBranch exists/is enabled (Push E). */
   updateBranchAvailable: boolean;
   /** A cloud provider is connected for this workspace. */
@@ -193,6 +242,8 @@ export interface DecisionContext {
   mergeOutcome?: MergeOutcome;
   /** Result of `rerequest_failed_checks`. */
   rerunOutcome?: RerunOutcome;
+  /** Result of `submit_external`. */
+  submitOutcome?: SubmitOutcome;
   /** Result of `update_branch`. */
   updateBranchOutcome?: 'ok' | 'conflict' | 'error';
 }
@@ -222,6 +273,9 @@ export type Action =
           | 'fixAttempts'
           | 'rerunAttempts'
           | 'resignAttempts'
+          | 'submitAttempts'
+          | 'externalSubmitVia'
+          | 'automergeArmedBy'
           | 'fixTaskAccounted'
           | 'signingCheckedSha'
           | 'unsignedCount'
@@ -266,6 +320,15 @@ export type Action =
   | { kind: 'fire_fix_run'; resign: boolean }
   /** Enable GitHub auto-merge on the head (expectedHeadOid-guarded; Push E). */
   | { kind: 'arm_automerge' }
+  /**
+   * Hand the PR to the external merge queue governing the base branch: arm
+   * GitHub auto-merge (trunk.io treats that as a submit, as does GitHub's own
+   * queue) and, when GitHub refuses because the PR is already clean, apply the
+   * repo's submit label instead. Outcome → ctx.submitOutcome.
+   */
+  | { kind: 'submit_external' }
+  /** Learn-from-405: persist that this base is behind an external merge gate. */
+  | { kind: 'mark_external_gate' }
   /** Disable a Talyn-armed auto-merge (never a user-armed one; Push E). */
   | { kind: 'disarm_automerge' }
   /** Learn-from-403: persist that this base requires signed commits. */

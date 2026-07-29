@@ -68,6 +68,12 @@ export interface PRSummary {
   body: string;
   url: string;
   author: string;
+  /**
+   * The PR's labels. Load-bearing for external merge queues: trunk.io publishes
+   * a submitted PR's queue state ONLY as labels (`trunk-queued`,
+   * `trunk-testing`, `trunk-failed`, …) — see `externalQueueStatusFromLabels`.
+   */
+  labels: string[];
   draft: boolean;
   state: PRState;
   mergedAt: string | null;
@@ -962,6 +968,7 @@ function prFieldsSelection(numberExpr: string | null): string {
   viewerCanEnableAutoMerge
   autoMergeRequest { enabledAt enabledBy { login } mergeMethod }
   author { login }
+  labels(first: 30) { nodes { name } }
   reviewRequests(first: 50) {
     nodes {
       requestedReviewer {
@@ -1112,6 +1119,7 @@ interface RawPullRequest {
     mergeMethod: string | null;
   } | null;
   author: { login: string } | null;
+  labels?: { nodes: Array<{ name: string }> } | null;
   reviewRequests: {
     nodes: Array<{
       requestedReviewer:
@@ -1304,6 +1312,7 @@ function rawToSummary(raw: RawPullRequest, owner: string, repo: string): PRSumma
     body: raw.body ?? '',
     url: raw.url,
     author: raw.author?.login ?? '',
+    labels: (raw.labels?.nodes ?? []).map((l) => l.name),
     draft: raw.isDraft,
     state,
     mergedAt: raw.mergedAt,

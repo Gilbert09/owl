@@ -3,6 +3,10 @@
 // PR mergeable helpers (shared by the desktop button + backend watcher).
 export * from './prMergeable';
 
+// External merge queues (trunk.io / GitHub native) — label vocabulary shared by
+// the backend pipeline and the desktop badges.
+export * from './externalMergeQueue';
+
 // Agent skills (SKILL.md) + the run-skill-on-PR prompt builder.
 export * from './skills';
 export * from './skillPrompt';

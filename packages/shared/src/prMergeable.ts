@@ -47,6 +47,13 @@ export interface PRMergeableSummary {
    *  path for one (it 405s). Persisted in the summary; also reflected as
    *  `mergeStateStatus === 'DRAFT'`. */
   draft?: boolean;
+  /**
+   * The PR's GitHub labels. Tracked because an external merge queue (trunk.io)
+   * publishes its per-PR state as labels and that is the ONLY signal we get —
+   * see `externalQueueStatusFromLabels`. Absent on rows cached before labels
+   * shipped in the summary.
+   */
+  labels?: string[];
 }
 
 /**

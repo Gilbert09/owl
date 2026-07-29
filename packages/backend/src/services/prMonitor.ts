@@ -1096,7 +1096,7 @@ class PRMonitorService extends EventEmitter {
   async patchOpenPrSummary(
     targets: Array<{ repositoryId: string }>,
     number: number,
-    patch: { title?: string; draft?: boolean }
+    patch: { title?: string; draft?: boolean; labels?: string[] }
   ): Promise<number> {
     const repoIds = [...new Set(targets.map((t) => t.repositoryId))];
     if (repoIds.length === 0) return 0;
@@ -1105,7 +1105,11 @@ class PRMonitorService extends EventEmitter {
       expr = sql`jsonb_set(${expr}, '{title}', ${JSON.stringify(patch.title)}::jsonb)`;
     if (patch.draft !== undefined)
       expr = sql`jsonb_set(${expr}, '{draft}', ${JSON.stringify(patch.draft)}::jsonb)`;
-    if (patch.title === undefined && patch.draft === undefined) return 0;
+    if (patch.labels !== undefined)
+      expr = sql`jsonb_set(${expr}, '{labels}', ${JSON.stringify(patch.labels)}::jsonb)`;
+    if (patch.title === undefined && patch.draft === undefined && patch.labels === undefined) {
+      return 0;
+    }
 
     const rows = await this.db
       .update(pullRequestsTable)
@@ -1130,6 +1134,7 @@ class PRMonitorService extends EventEmitter {
     const partial: Record<string, unknown> = {};
     if (patch.title !== undefined) partial.title = patch.title;
     if (patch.draft !== undefined) partial.draft = patch.draft;
+    if (patch.labels !== undefined) partial.labels = patch.labels;
     for (const row of rows) {
       emitPullRequestUpdated(row.workspaceId, {
         id: row.id,
@@ -1142,16 +1147,18 @@ class PRMonitorService extends EventEmitter {
         lastSummary: partial,
       });
       // Merge-queue v2 trigger: a draft flip is exactly the self-heal signal a
-      // blocked(draft) entry waits for. baseBranch isn't at hand on this
-      // incremental path — the trigger resolves the entry's stored group.
-      if (patch.draft !== undefined) {
+      // blocked(draft) entry waits for, and a label change is how an external
+      // merge queue (trunk.io) reports progress on a PR we submitted — queued →
+      // testing → failed. baseBranch isn't at hand on this incremental path —
+      // the trigger resolves the entry's stored group.
+      if (patch.draft !== undefined || patch.labels !== undefined) {
         domainEvents.emit('pr:snapshot', {
           workspaceId: row.workspaceId,
           repositoryId: row.repositoryId,
           prId: row.id,
           baseBranch: '',
           state: 'open',
-          trigger: 'webhook:draft-patch',
+          trigger: patch.labels !== undefined ? 'webhook:label-patch' : 'webhook:draft-patch',
         });
       }
     }

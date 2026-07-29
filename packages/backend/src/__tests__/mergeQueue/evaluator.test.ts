@@ -63,6 +63,22 @@ vi.mock('../../services/githubAutoMerge.js', async (importOriginal) => ({
   enableAutoMerge: mockEnableAutoMerge,
   disableAutoMerge: mockDisableAutoMerge,
 }));
+// External merge gate (trunk.io / GitHub native queue). Mocked so the probe
+// never reaches out, and so a test can put a group behind a gate explicitly.
+const { mockGetGate, mockMarkGate, mockClearGate, mockSubmitLabel } = vi.hoisted(() => ({
+  mockGetGate: vi.fn(),
+  mockMarkGate: vi.fn(),
+  mockClearGate: vi.fn(),
+  mockSubmitLabel: vi.fn(),
+}));
+vi.mock('../../services/repoMergeGate.js', () => ({
+  getExternalMergeGate: mockGetGate,
+  markExternalMergeGate: mockMarkGate,
+  clearExternalMergeGate: mockClearGate,
+  getExternalQueueSubmitLabel: mockSubmitLabel,
+  _resetMergeGateCache: vi.fn(),
+  _resetSubmitLabelCache: vi.fn(),
+}));
 
 process.env.TALYN_TOKEN_KEY ??= randomBytes(32).toString('base64');
 registerCloudProvider(postHogCodeProvider);
@@ -257,6 +273,11 @@ describe('mergeQueue v2 pipeline', () => {
     mockCapability.mockReset().mockResolvedValue('unavailable');
     mockEnableAutoMerge.mockReset().mockResolvedValue({ armed: true });
     mockDisableAutoMerge.mockReset().mockResolvedValue(true);
+    // No external merge gate by default — the ordinary direct-merge world.
+    mockGetGate.mockReset().mockResolvedValue(null);
+    mockMarkGate.mockReset();
+    mockClearGate.mockReset();
+    mockSubmitLabel.mockReset().mockResolvedValue('trunk-merge-queue-submit');
   });
 
   afterEach(async () => {
@@ -470,6 +491,158 @@ describe('mergeQueue v2 pipeline', () => {
     expect(entry?.status).toBe('queued');
     expect(entry?.lastError).toContain('merge conflicts');
     expect(refreshSpy).toHaveBeenCalled();
+  });
+
+  describe('external merge queue (trunk.io / GitHub native)', () => {
+    /** posthog/posthog's world: `master` is behind trunk's ruleset. */
+    const gated = () => mockGetGate.mockResolvedValue('confirmed');
+
+    it('submits a clean head to the queue instead of merging it', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(mergeSpy).not.toHaveBeenCalled(); // the doomed call is never made
+      expect(mockEnableAutoMerge).toHaveBeenCalledTimes(1);
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.externalSubmitVia).toBe('auto_merge');
+      expect(entry?.submitAttempts).toBe(1);
+      expect((await eventsOf(db, entryId)).map((e) => e.code)).toContain('external_submitted');
+    });
+
+    it('applies the submit label when GitHub refuses to arm a clean PR', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      mockEnableAutoMerge.mockResolvedValue({ armed: false, reason: 'clean_status' });
+      const addLabels = vi
+        .spyOn(githubService, 'addPullRequestLabels')
+        .mockResolvedValue(undefined);
+      const { prId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', expect.any(Number), [
+        'trunk-merge-queue-submit',
+      ]);
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.externalSubmitVia).toBe('label');
+    });
+
+    it('learns the gate from a protected-ref 405 and submits in the same evaluation', async () => {
+      mockGetGate.mockResolvedValue(null); // not known yet — the merge finds out
+      mockCapability.mockResolvedValue('available');
+      mergeSpy.mockRejectedValue(new Error('405: Cannot update this protected ref'));
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(mockMarkGate).toHaveBeenCalledWith('ws1', 'a', 'b', 'main');
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      expect(codes).toContain('external_merge_gate');
+      expect(codes).toContain('external_submitted');
+      expect(await countTasks(db)).toBe(0); // never burns a fix run on a gate
+    });
+
+    it('blocks manually only when no door exists (no auto-merge, no submit label)', async () => {
+      gated();
+      mockCapability.mockResolvedValue('unavailable');
+      mockSubmitLabel.mockResolvedValue(null);
+      const { prId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('blocked_manual');
+      expect(entry?.blockedCode).toBe('external_gate');
+      expect(blockedSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes an ejected PR back and resubmits it', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node', labels: ['trunk-failed'], autoMergeBy: null },
+        entry: { status: 'awaiting_external' },
+      });
+      await db
+        .update(mergeQueueEntries)
+        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 1 } as never)
+        .where(eq(mergeQueueEntries.id, entryId));
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.submitAttempts).toBe(2);
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      expect(codes).toContain('external_queue_ejected');
+    });
+
+    it('gives up (self-healing block) once the resubmit budget is spent', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node', labels: ['trunk-failed'] },
+        entry: { status: 'awaiting_external' },
+      });
+      await db
+        .update(mergeQueueEntries)
+        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3 } as never)
+        .where(eq(mergeQueueEntries.id, entryId));
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('blocked');
+      expect(entry?.blockedCode).toBe('external_queue_rejected');
+      expect(mockEnableAutoMerge).not.toHaveBeenCalled();
+    });
+
+    it('waits, doing nothing, while the provider is testing the PR', async () => {
+      gated();
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node', labels: ['trunk-testing'] },
+        entry: { status: 'awaiting_external' },
+      });
+      await db
+        .update(mergeQueueEntries)
+        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 1 } as never)
+        .where(eq(mergeQueueEntries.id, entryId));
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(mockEnableAutoMerge).not.toHaveBeenCalled();
+      expect(mergeSpy).not.toHaveBeenCalled();
+      expect((await entryOf(db, prId))?.status).toBe('awaiting_external');
+    });
+
+    it('submits every entry in the group in one walk — the provider does the ordering', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      const first = await insertQueuedPr(db, { summary: { ...cleanSummary(), nodeId: 'PR_1' } });
+      const second = await insertQueuedPr(db, { summary: { ...cleanSummary(), nodeId: 'PR_2' } });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      // Ordered mode would have stopped after the head's `hold`; a gated group
+      // is always eager, so both PRs are in the external queue after one walk.
+      expect((await entryOf(db, first.prId))?.status).toBe('awaiting_external');
+      expect((await entryOf(db, second.prId))?.status).toBe('awaiting_external');
+    });
   });
 
   it('hard-blocks (blocked_manual) on an App refusal with no failing check, notifying once', async () => {

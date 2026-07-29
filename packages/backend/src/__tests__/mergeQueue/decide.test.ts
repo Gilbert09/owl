@@ -34,6 +34,8 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
     fixAttempts: 0,
     rerunAttempts: 0,
     resignAttempts: 0,
+    submitAttempts: 0,
+    externalSubmitVia: null,
     fixTaskId: null,
     fixTaskAccounted: true,
     fixKind: null,
@@ -92,6 +94,7 @@ function ctx(o: Partial<DecisionContext> = {}): DecisionContext {
     otherLinkedTaskActive: false,
     signingRequired: false,
     autoMergeCapability: 'unavailable',
+    externalGate: null,
     updateBranchAvailable: false,
     cloudEnvAvailable: true,
     restGateBlocked: false,
@@ -197,7 +200,7 @@ describe('decide — merge aftermath', () => {
     expect(kinds(d)).toEqual(['record_merged']);
   });
 
-  it('terminal-blocks (blocked_manual/external_gate) on a "Cannot update this protected ref" refusal', () => {
+  it('learns the gate and submits (never retries/fixes) on a "Cannot update this protected ref" refusal', () => {
     const d = decide(
       entry({ status: 'merging' }),
       cleanPr(),
@@ -207,14 +210,15 @@ describe('decide — merge aftermath', () => {
       })
     );
     const t = lastTransition(d)!;
-    expect(t.to).toBe('blocked_manual');
-    expect(t.blockedCode).toBe('external_gate');
+    expect(t.to).toBe('queued');
     expect(t.set?.lastError).toContain('protected ref');
-    // Never retries or refetches to loop again — it just blocks + notifies once.
-    expect(kinds(d)).toContain('notify_blocked');
+    // Records the gate so no later evaluation burns another doomed merge, then
+    // hands the PR to the system that owns the branch.
+    expect(kinds(d)).toEqual(['mark_external_gate', 'transition', 'submit_external']);
+    // Retrying or fixing can never satisfy a protected-ref refusal.
     expect(kinds(d)).not.toContain('refresh_snapshot');
     expect(kinds(d)).not.toContain('fire_fix_run');
-    expect(d.verdict).toBe('advance');
+    expect(d.verdict).toBe('hold');
   });
 
   it('treats a native/third-party merge-queue refusal the same way', () => {
@@ -226,7 +230,8 @@ describe('decide — merge aftermath', () => {
         verifiedMerged: false,
       })
     );
-    expect(lastTransition(d)!.blockedCode).toBe('external_gate');
+    expect(kinds(d)).toContain('mark_external_gate');
+    expect(kinds(d)).toContain('submit_external');
   });
 
   it('still verifies-merged first — a protected-ref message on an already-merged PR records the merge', () => {
@@ -960,6 +965,260 @@ describe('decide — GitHub native auto-merge', () => {
       ctx()
     );
     expect(kinds(d)).not.toContain('disarm_automerge');
+  });
+});
+
+describe('decide — external merge queue (trunk.io / GitHub native)', () => {
+  /** A PR carrying trunk's status labels. */
+  const trunkPr = (label: string, o: Partial<PrSnapshot> = {}, s: Partial<PRMergeableSummary> = {}) =>
+    pr(o, { labels: [label, 'stamphog'], ...s });
+  const submitted = (o: Partial<EntrySnapshot> = {}) =>
+    entry({
+      status: 'awaiting_external',
+      externalSubmitVia: 'auto_merge',
+      submitAttempts: 1,
+      automergeArmedBy: 'talyn',
+      ...o,
+    });
+
+  describe('submitting instead of merging', () => {
+    it.each([['suspected'], ['confirmed']] as const)(
+      'submits a clean PR to the external queue (%s gate) instead of merging it',
+      (gate) => {
+        const d = decide(entry(), cleanPr(), ctx({ externalGate: gate }));
+        expect(kinds(d)).toEqual(['submit_external']);
+        expect(kinds(d)).not.toContain('verify_live_then_merge');
+      }
+    );
+
+    it('submits a PR whose only obstacle is in-flight CI, without waiting for auto-merge capability', () => {
+      const d = decide(entry(), ciRunningPr(), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).toEqual(['submit_external']);
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('submits even when it is NOT the group head and a sibling is in flight — the queue orders, not us', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', isHead: false, groupMergeInFlight: true })
+      );
+      expect(kinds(d)).toEqual(['submit_external']);
+    });
+
+    it('still gates on signed commits before submitting (the provider merges, and the ruleset still applies)', () => {
+      const d = decide(entry(), cleanPr(), ctx({ externalGate: 'confirmed', signingRequired: true }));
+      expect(kinds(d)).toEqual(['probe_signatures']);
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('never submits a blocked PR — it fixes it first', () => {
+      const d = decide(entry(), conflictingPr(), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('never submits a draft', () => {
+      const d = decide(entry(), draftPr(), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).not.toContain('submit_external');
+      expect(lastTransition(d)!.blockedCode).toBe('draft');
+    });
+  });
+
+  describe('submit aftermath', () => {
+    it('records the submission, the door it used, and spends one submit attempt', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', submitOutcome: { kind: 'submitted', via: 'auto_merge', armedBy: 'talyn' } })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_external');
+      expect(t.set?.externalSubmitVia).toBe('auto_merge');
+      expect(t.set?.submitAttempts).toBe(1);
+      expect(t.set?.automergeArmedBy).toBe('talyn');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('adopts a USER-armed auto-merge as the submission without claiming it as ours', () => {
+      const d = decide(
+        entry(),
+        pr({ autoMergeEnabledBy: 'user' }),
+        ctx({ externalGate: 'confirmed', submitOutcome: { kind: 'submitted', via: 'auto_merge', armedBy: 'user' } })
+      );
+      expect(lastTransition(d)!.set?.automergeArmedBy).toBe('user');
+    });
+
+    it('records a label submission without touching auto-merge bookkeeping', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', submitOutcome: { kind: 'submitted', via: 'label' } })
+      );
+      const t = lastTransition(d)!;
+      expect(t.set?.externalSubmitVia).toBe('label');
+      expect(t.set?.automergeArmedBy).toBeUndefined();
+    });
+
+    it('falls back to one real merge attempt when the gate is only suspected', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({ externalGate: 'suspected', submitOutcome: { kind: 'try_direct_merge' } })
+      );
+      expect(kinds(d)).toEqual(['verify_live_then_merge']);
+      expect(d.verdict).toBe('hold');
+    });
+
+    it('holds as queued (no attempt spent) on a transient submit failure', () => {
+      const d = decide(
+        entry({ status: 'awaiting_ci' }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', submitOutcome: { kind: 'retry', message: 'Head moved while submitting.' } })
+      );
+      expect(lastTransition(d)!.to).toBe('queued');
+      expect(lastTransition(d)!.set?.submitAttempts).toBeUndefined();
+    });
+
+    it('blocks manually only when nothing can submit the PR', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', submitOutcome: { kind: 'unavailable', message: 'no auto-merge, no label' } })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked_manual');
+      expect(t.blockedCode).toBe('external_gate');
+      expect(kinds(d)).toContain('notify_blocked');
+    });
+  });
+
+  describe('while the provider holds the PR', () => {
+    it.each([['trunk-not-ready'], ['trunk-queued'], ['trunk-testing'], ['trunk-tests-passed']])(
+      'waits (no actions) while the provider reports %s',
+      (label) => {
+        const d = decide(submitted(), trunkPr(label), ctx({ externalGate: 'confirmed' }));
+        expect(d.actions).toEqual([]);
+        expect(d.verdict).toBe('advance');
+      }
+    );
+
+    it('treats a bisection variant as the same state', () => {
+      const d = decide(submitted(), trunkPr('trunk-testing (bisection)'), ctx({ externalGate: 'confirmed' }));
+      expect(d.actions).toEqual([]);
+    });
+
+    it('waits in the gap before the provider has labelled the PR (auto-merge still armed)', () => {
+      const d = decide(
+        submitted(),
+        pr({ autoMergeEnabledBy: 'talyn' }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(d.actions).toEqual([]);
+    });
+
+    it('still remediates a settled blocker while submitted — the provider would hold it forever', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-not-ready', { mergeStateStatus: 'DIRTY' }, {
+          mergeable: 'CONFLICTING',
+          blockingReason: 'merge_conflicts',
+        }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+    });
+
+    it('takes the PR back when the submission disappears outside Talyn', () => {
+      const d = decide(
+        submitted({ automergeArmedBy: null }),
+        pr({ autoMergeEnabledBy: null }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      const t = transitions(d)[0]!;
+      expect(t.to).toBe('queued');
+      expect(t.event.code).toBe('external_submission_lost');
+      // …and immediately resubmits, since the PR is clean.
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('closes the entry out when the provider merges it', () => {
+      const d = decide(submitted(), pr({ state: 'merged' }, { labels: ['trunk-merged'] }), ctx({ externalGate: 'confirmed' }));
+      expect(lastTransition(d)!.to).toBe('merged');
+    });
+  });
+
+  describe('ejection', () => {
+    it('requeues and resubmits when the provider fails the PR within budget', () => {
+      const d = decide(submitted(), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
+      const first = transitions(d)[0]!;
+      expect(first.to).toBe('queued');
+      expect(first.event.code).toBe('external_queue_ejected');
+      expect(first.set?.externalSubmitVia).toBeNull();
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('treats a pending-failure label as an ejection too', () => {
+      const d = decide(submitted(), trunkPr('trunk-pending-failure'), ctx({ externalGate: 'confirmed' }));
+      expect(transitions(d)[0]!.event.code).toBe('external_queue_ejected');
+    });
+
+    it('fixes the PR first when it comes back genuinely broken', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-failed', {}, { blockingReason: 'checks_failed', checks: { total: 3, failed: 1, inProgress: 0 } }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('blocks (self-healing) once the resubmit budget is spent', () => {
+      const d = decide(submitted({ submitAttempts: 3 }), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('external_queue_rejected');
+      expect(t.blockedReason).toContain('rejected this PR 3×');
+      expect(kinds(d)).toContain('notify_blocked');
+      // A Talyn-armed auto-merge must not survive the block — it would re-submit
+      // the PR behind the queue's back.
+      expect(kinds(d)).toContain('disarm_automerge');
+    });
+
+    it('does NOT resubmit a cancelled PR — someone pulled it out on purpose', () => {
+      const d = decide(submitted(), trunkPr('trunk-cancelled'), ctx({ externalGate: 'confirmed' }));
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('external_queue_rejected');
+      expect(t.blockedReason).toContain('cancelled');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('never resubmits from the blocked gate, even when the PR itself reads clean', () => {
+      const d = decide(
+        entry({ status: 'blocked', blockedCode: 'external_queue_rejected', submitAttempts: 3 }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(d.actions).toEqual([]);
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('a new head clears the block and earns a fresh submit budget', () => {
+      const d = decide(
+        entry({
+          status: 'blocked',
+          blockedCode: 'external_queue_rejected',
+          submitAttempts: 3,
+          headSha: 'old',
+        }),
+        pr({ headSha: 'new' }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      const reset = d.actions.find((a) => a.kind === 'reset_budgets');
+      expect(reset).toBeDefined();
+      expect(kinds(d)).toContain('submit_external');
+    });
   });
 });
 

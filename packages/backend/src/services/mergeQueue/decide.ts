@@ -12,7 +12,17 @@
 // context, and decide runs again — bounded by MAX_DECIDE_ROUNDS. The final
 // round's verdict is the group-walk verdict.
 
-import { prNeedsFollowup, mergeBlockerReason, type PRMergeableSummary } from '@talyn/shared';
+import {
+  prNeedsFollowup,
+  mergeBlockerReason,
+  externalQueueProviderLabel,
+  externalQueueStateLabel,
+  externalQueueStatusFromLabels,
+  isExternalQueueSubmitLabel,
+  isExternalQueueEjected,
+  type ExternalQueueStatus,
+  type PRMergeableSummary,
+} from '@talyn/shared';
 import type {
   Action,
   BlockedCode,
@@ -29,8 +39,28 @@ export const DRAFT_BLOCK_REASON =
 
 export const EXTERNAL_GATE_BLOCK_REASON =
   'This branch is governed by an external merge queue or protected-ref rule Talyn ' +
-  "can't bypass (GitHub's native merge queue, trunk.io, or a restrictive ruleset). " +
-  'Merge it through that system, or remove it from the queue.';
+  "can't bypass (GitHub's native merge queue, trunk.io, or a restrictive ruleset), " +
+  'and there is no way to submit the PR to it automatically: the repo refuses ' +
+  'GitHub auto-merge and defines no submit label. Merge it through that system, ' +
+  'or remove it from the queue.';
+
+export function externalQueueRejectedReason(
+  status: ExternalQueueStatus,
+  maxAttempts: number
+): string {
+  const provider = externalQueueProviderLabel(status.provider);
+  if (status.state === 'cancelled') {
+    return (
+      `${provider}'s merge queue cancelled this PR (\`${status.label}\`). Talyn won't ` +
+      `resubmit a cancelled PR automatically — push a fix, or re-queue the PR to submit it again.`
+    );
+  }
+  return (
+    `${provider}'s merge queue rejected this PR ${maxAttempts}× on this commit ` +
+    `(\`${status.label}\`) — its tests fail when the PR is merged with the base. ` +
+    `Push a fix (the queue resubmits automatically on a new commit), or re-queue to retry now.`
+  );
+}
 
 /**
  * A merge refusal Talyn can never satisfy by retrying or fixing: the base
@@ -178,6 +208,32 @@ function checksFailing(summary: PRMergeableSummary): boolean {
   return (summary.checks?.failed ?? 0) > 0;
 }
 
+/**
+ * Where the external merge queue says this PR is, read off its labels — the
+ * only channel trunk.io reports on. Null means no external queue has touched
+ * the PR (the answer for every PR in a repo that doesn't use one, and for a
+ * just-submitted PR in the ~30s before the provider labels it).
+ */
+export function externalQueueOf(pr: PrSnapshot): ExternalQueueStatus | null {
+  return externalQueueStatusFromLabels(pr.summary.labels);
+}
+
+/**
+ * Is the PR still in the external queue's hands? True while the provider
+ * reports a non-ejected state, while our submit label is still on the PR, or
+ * while the auto-merge we submitted with is still armed — the last covers the
+ * window between submitting and the provider picking the PR up.
+ */
+function stillSubmitted(entry: EntrySnapshot, pr: PrSnapshot): boolean {
+  const ext = externalQueueOf(pr);
+  if (ext) return !isExternalQueueEjected(ext.state);
+  if (entry.externalSubmitVia === 'auto_merge') return pr.autoMergeEnabledBy !== null;
+  if (entry.externalSubmitVia === 'label') {
+    return (pr.summary.labels ?? []).some(isExternalQueueSubmitLabel);
+  }
+  return false;
+}
+
 // ── The decision function ──
 
 /**
@@ -206,7 +262,10 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   if (entry.status === 'merged' || entry.status === 'removed') return d.done('advance');
 
   // R1 — merge aftermath: this evaluation's own merge attempt already ran.
-  // Handled before everything else because the entry is mid-flow.
+  // Handled before everything else because the entry is mid-flow. The submit
+  // aftermath comes first: a submit that fell back to the direct merge clears
+  // its own outcome, so at most one of the two is ever live (see the executor).
+  if (ctx.submitOutcome) return decideSubmitAftermath(d, pr, ctx);
   if (ctx.mergeOutcome) return decideMergeAftermath(d, pr, ctx);
 
   // R2 — a new head appeared: zero every per-head budget. THE self-healing
@@ -299,6 +358,36 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       return d.done('advance'); // armed and unobstructed — GitHub will merge it
     }
     // armed WITH a settled blocker: fall through so the remediation rules run.
+  }
+
+  // R5b — submitted to an external merge queue (trunk.io / GitHub's native
+  // queue). That system owns the merge moment now; we track it off the PR's
+  // labels. Three outcomes: it merges (R0 closes us out), it keeps working
+  // (wait), or it EJECTS the PR back to us — which is where Talyn earns its
+  // keep: fix the PR and resubmit, bounded by a per-head budget.
+  if (d.entry.status === 'awaiting_external') {
+    const ext = externalQueueOf(pr);
+    if (ext && isExternalQueueEjected(ext.state)) {
+      const verdict = decideExternalEjection(d, ext, ctx);
+      if (verdict) return verdict;
+      // null → requeued for a resubmit; fall through to the normal rules so a
+      // PR that came back broken gets remediated before it goes round again.
+    } else if (stillSubmitted(d.entry, pr)) {
+      // In the queue's hands. A settled blocker still deserves remediation —
+      // the provider will hold a conflicting PR at "not ready" forever — so
+      // only an unobstructed PR short-circuits here.
+      if (!hasSettledBlocker(pr)) return d.done('advance');
+    } else {
+      // Neither a provider label nor our submission survives: the arm was
+      // disabled or the label removed outside Talyn. Take the PR back.
+      d.transition('queued', {
+        set: { externalSubmitVia: null },
+        event: {
+          code: 'external_submission_lost',
+          message: 'The external queue submission was removed outside Talyn — re-evaluating.',
+        },
+      });
+    }
   }
 
   // R6 — active-run guard. Never fire a NEW run while one is already working
@@ -480,6 +569,22 @@ function decideCleanButWaitingOnCi(
   // even mid-run. If the run pushes again, the new head resets budgets and
   // the arm follows the PR (GitHub keeps it for write-access pushers; a
   // disarm re-arms via the snapshot event).
+  // Gated base: arming auto-merge IS the submit primitive for both trunk.io and
+  // GitHub's native queue, so route through submit_external — which also owns
+  // the fallback when GitHub refuses to arm. No isHead / groupMergeInFlight
+  // gating: the external queue does the ordering, and holding siblings behind
+  // our own head would add its entire test cycle (~40min at PostHog) per PR.
+  if (ctx.externalGate) {
+    const signing = signingGateFor(d, pr, ctx, runActive);
+    if (signing === 'clear') {
+      d.act({ kind: 'submit_external' });
+      return d.done('advance');
+    }
+    if (signing !== 'defer') return signing; // resign dispatched / blocked
+    d.ensure('awaiting_ci');
+    return d.done('advance');
+  }
+
   const armable =
     ctx.isHead &&
     !ctx.groupMergeInFlight &&
@@ -502,6 +607,113 @@ function decideCleanButWaitingOnCi(
 }
 
 /**
+ * The external queue handed the PR back. Returns a Decision when the entry
+ * settles here (budget spent / cancelled), or null when it was requeued for
+ * another attempt and evaluation should continue into the normal rules.
+ *
+ * `cancelled` is deliberately terminal-ish: someone (or the provider's own
+ * operator flow) pulled the PR out on purpose, and immediately shoving it back
+ * in would fight them. `failed` — the provider's tests went red merging this PR
+ * with the base — is exactly what Talyn's fix runs exist for, so it resubmits
+ * within the per-head budget.
+ */
+function decideExternalEjection(
+  d: DecisionBuilder,
+  ext: ExternalQueueStatus,
+  ctx: DecisionContext
+): Decision | null {
+  const provider = externalQueueProviderLabel(ext.provider);
+  if (ext.state === 'cancelled' || d.entry.submitAttempts >= ctx.maxAttempts) {
+    d.transition('blocked', {
+      blockedCode: 'external_queue_rejected',
+      blockedReason: externalQueueRejectedReason(ext, ctx.maxAttempts),
+      set: { externalSubmitVia: null },
+      event: {
+        code: 'external_queue_rejected',
+        message:
+          ext.state === 'cancelled'
+            ? `${provider} cancelled this PR in its merge queue.`
+            : `${provider} rejected this PR ${d.entry.submitAttempts}× on this commit — giving up until a new push.`,
+        detail: { label: ext.label, state: ext.state },
+      },
+    });
+    d.act({ kind: 'notify_blocked' });
+    return d.done('advance');
+  }
+  d.transition('queued', {
+    set: { externalSubmitVia: null },
+    event: {
+      code: 'external_queue_ejected',
+      message: `${provider} ejected this PR (${externalQueueStateLabel(ext.state).toLowerCase()}) — re-evaluating before resubmitting.`,
+      detail: { label: ext.label, attempts: d.entry.submitAttempts },
+    },
+  });
+  return null;
+}
+
+/** Aftermath of this evaluation's own external-queue submit (ctx.submitOutcome). */
+function decideSubmitAftermath(
+  d: DecisionBuilder,
+  pr: PrSnapshot,
+  ctx: DecisionContext
+): Decision {
+  const outcome = ctx.submitOutcome!;
+  if (outcome.kind === 'submitted') {
+    const ext = externalQueueOf(pr);
+    d.transition('awaiting_external', {
+      set: {
+        submitAttempts: d.entry.submitAttempts + 1,
+        externalSubmitVia: outcome.via,
+        // Record whose auto-merge arm carries the submission: the disarm
+        // invariant un-submits ours when the entry later blocks, and never
+        // touches one the user armed on github.com.
+        ...(outcome.via === 'auto_merge' ? { automergeArmedBy: outcome.armedBy ?? 'talyn' } : {}),
+      },
+      event: {
+        code: 'external_submitted',
+        message:
+          outcome.via === 'auto_merge'
+            ? 'Submitted to the external merge queue by arming GitHub auto-merge.'
+            : 'Submitted to the external merge queue by applying its submit label.',
+        detail: {
+          via: outcome.via,
+          attempt: d.entry.submitAttempts + 1,
+          ...(ext ? { providerState: ext.state } : {}),
+        },
+      },
+    });
+    return d.done('advance');
+  }
+
+  if (outcome.kind === 'try_direct_merge') {
+    // The gate is only SUSPECTED (a branch-rules probe saw an `update` rule,
+    // which can't tell whether Talyn's App is exempt) and GitHub says the PR is
+    // immediately mergeable. One real merge settles it: it either lands, or the
+    // 405 confirms the gate and the aftermath submits instead.
+    d.act({ kind: 'verify_live_then_merge' });
+    return d.done('hold');
+  }
+
+  if (outcome.kind === 'retry') {
+    d.ensure('queued');
+    return d.done('advance');
+  }
+
+  // No mechanism can submit this PR — the one case that still needs a human.
+  d.transition('blocked_manual', {
+    blockedCode: 'external_gate',
+    blockedReason: EXTERNAL_GATE_BLOCK_REASON,
+    set: { lastError: outcome.message, lastErrorAt: ctx.nowIso },
+    event: {
+      code: 'external_gate',
+      message: 'Blocked by an external merge queue with no way to submit automatically.',
+    },
+  });
+  d.act({ kind: 'notify_blocked' });
+  return d.done('advance');
+}
+
+/**
  * Gates on the `blocked` status. Returns the Decision when the entry stays
  * gated, or null when the gate self-healed and evaluation should continue.
  */
@@ -515,6 +727,14 @@ function decideBlockedGate(
   if (code === 'unsigned_commits') {
     // Re-sign budget spent. Only a new head (R2) or requeue re-arms it — don't
     // re-poll signatures or re-attempt the doomed merge on every evaluation.
+    return d.done('advance');
+  }
+
+  if (code === 'external_queue_rejected') {
+    // The external queue kept rejecting this commit (or a human cancelled it).
+    // A clean-looking snapshot means nothing here — the PR's OWN checks are
+    // green; it's the merge WITH the base that fails — so never fall through to
+    // a resubmit. Only a new head (R2) or a requeue re-arms it.
     return d.done('advance');
   }
 
@@ -687,8 +907,10 @@ function decideCleanPath(
   runActive: boolean
 ): Decision {
   // One merge in flight per (repo, base): if a sibling is merging or armed,
-  // wait our turn — merging past an armed head would invalidate its CI.
-  if (ctx.groupMergeInFlight) {
+  // wait our turn — merging past an armed head would invalidate its CI. Not
+  // when an external queue owns the base: it serializes (and batches) the
+  // merges itself, so making PRs queue twice is pure latency.
+  if (ctx.groupMergeInFlight && !ctx.externalGate) {
     d.ensure('queued');
     return d.done('hold');
   }
@@ -703,6 +925,14 @@ function decideCleanPath(
   if (signing === 'defer') {
     d.ensure('queued');
     return d.done('advance');
+  }
+  // Gated base — the direct merge is doomed (confirmed) or unproven
+  // (suspected). Hand the PR to the system that owns the branch instead; the
+  // submit action falls back to the direct merge when the gate is only
+  // suspected and GitHub says the PR could merge right now.
+  if (ctx.externalGate) {
+    d.act({ kind: 'submit_external' });
+    return d.done('hold');
   }
   // The executor re-reads the entry + PR row live inside the group lock,
   // persists `merging` + merge_started_at, then attempts the REST merge —
@@ -737,15 +967,14 @@ function decideMergeAftermath(d: DecisionBuilder, pr: PrSnapshot, ctx: DecisionC
     return decideAppRefusal(d, pr, ctx, outcome.message);
   }
 
-  // External merge gate (native merge queue, trunk.io, restrictive ruleset):
-  // GitHub 405s with "Cannot update this protected ref". Retrying or firing a
-  // fix run can NEVER satisfy it, and the generic re-queue below would loop it
-  // forever (burning fix runs). Terminal-block manually — keeps it listed, no
-  // more attempts; dequeue/requeue is the only exit.
+  // External merge gate (trunk.io, GitHub's native queue, a restrictive
+  // ruleset): GitHub 405s with "Cannot update this protected ref". Retrying or
+  // firing a fix run can NEVER satisfy it — but SUBMITTING the PR to that
+  // system can. Record the gate (sticky, so no later evaluation wastes another
+  // doomed merge call), requeue, and submit in this same evaluation.
   if (isExternalMergeGateError(outcome.message)) {
-    d.transition('blocked_manual', {
-      blockedCode: 'external_gate',
-      blockedReason: EXTERNAL_GATE_BLOCK_REASON,
+    d.act({ kind: 'mark_external_gate' });
+    d.transition('queued', {
       set: {
         lastError: outcome.message || 'Cannot update this protected ref',
         lastErrorAt: ctx.nowIso,
@@ -753,11 +982,11 @@ function decideMergeAftermath(d: DecisionBuilder, pr: PrSnapshot, ctx: DecisionC
       event: {
         code: 'external_merge_gate',
         message:
-          'Merge blocked by an external merge queue / protected ref — Talyn cannot merge this PR.',
+          'This branch is governed by an external merge queue — submitting the PR to it instead of merging.',
       },
     });
-    d.act({ kind: 'notify_blocked' });
-    return d.done('advance');
+    d.act({ kind: 'submit_external' });
+    return d.done('hold');
   }
 
   // not_merged (bounced: lost a race, now behind) or a real rejection (405
@@ -924,6 +1153,13 @@ class DecisionBuilder {
       if (opts.set.fixAttempts !== undefined) this.entry.fixAttempts = opts.set.fixAttempts;
       if (opts.set.rerunAttempts !== undefined) this.entry.rerunAttempts = opts.set.rerunAttempts;
       if (opts.set.resignAttempts !== undefined) this.entry.resignAttempts = opts.set.resignAttempts;
+      if (opts.set.submitAttempts !== undefined) this.entry.submitAttempts = opts.set.submitAttempts;
+      if (opts.set.externalSubmitVia !== undefined) {
+        this.entry.externalSubmitVia = opts.set.externalSubmitVia;
+      }
+      if (opts.set.automergeArmedBy !== undefined) {
+        this.entry.automergeArmedBy = opts.set.automergeArmedBy;
+      }
       if (opts.set.fixTaskAccounted !== undefined) {
         this.entry.fixTaskAccounted = opts.set.fixTaskAccounted;
       }
@@ -956,9 +1192,13 @@ class DecisionBuilder {
     this.entry.fixAttempts = 0;
     this.entry.rerunAttempts = 0;
     this.entry.resignAttempts = 0;
+    this.entry.submitAttempts = 0;
     this.entry.signingCheckedSha = null;
     this.entry.unsignedCount = null;
-    if (this.entry.status === 'blocked') {
+    // New code invalidates any external-queue submission: the provider tests
+    // the commit it accepted, and it no longer exists as the head.
+    this.entry.externalSubmitVia = null;
+    if (this.entry.status === 'blocked' || this.entry.status === 'awaiting_external') {
       this.entry.status = 'queued';
       this.entry.blockedCode = null;
       this.entry.blockedReason = null;

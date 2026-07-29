@@ -21,6 +21,7 @@ import type {
   EntrySnapshot,
   EntryStatus,
   EventDraft,
+  ExternalSubmitVia,
   FixKind,
   MergeMethod,
 } from './types.js';
@@ -47,6 +48,8 @@ export const ENTRY_COLUMNS = {
   fixAttempts: mergeQueueEntries.fixAttempts,
   rerunAttempts: mergeQueueEntries.rerunAttempts,
   resignAttempts: mergeQueueEntries.resignAttempts,
+  submitAttempts: mergeQueueEntries.submitAttempts,
+  externalSubmitVia: mergeQueueEntries.externalSubmitVia,
   fixTaskId: mergeQueueEntries.fixTaskId,
   fixTaskAccounted: mergeQueueEntries.fixTaskAccounted,
   fixKind: mergeQueueEntries.fixKind,
@@ -77,6 +80,8 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     fixAttempts: row.fixAttempts,
     rerunAttempts: row.rerunAttempts,
     resignAttempts: row.resignAttempts,
+    submitAttempts: row.submitAttempts,
+    externalSubmitVia: (row.externalSubmitVia as ExternalSubmitVia | null) ?? null,
     fixTaskId: row.fixTaskId,
     fixTaskAccounted: row.fixTaskAccounted,
     fixKind: (row.fixKind as FixKind | null) ?? null,
@@ -179,6 +184,8 @@ export async function ensureActiveEntry(
           fixAttempts: 0,
           rerunAttempts: 0,
           resignAttempts: 0,
+          submitAttempts: 0,
+          externalSubmitVia: null,
           signingCheckedSha: null,
           unsignedCount: null,
           fixTaskAccounted: true,
@@ -266,6 +273,8 @@ export interface CasPatch {
   fixAttempts?: number;
   rerunAttempts?: number;
   resignAttempts?: number;
+  submitAttempts?: number;
+  externalSubmitVia?: ExternalSubmitVia | null;
   fixTaskId?: string | null;
   fixTaskAccounted?: boolean;
   fixKind?: FixKind | null;

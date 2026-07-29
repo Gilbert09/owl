@@ -24,6 +24,9 @@ import {
   type TaskStatus,
   type CloudProviderType,
   type SkillSummary,
+  externalQueueProviderLabel,
+  externalQueueStateLabel,
+  externalQueueStatusFromLabels,
   prHasFixableIssues,
 } from '@talyn/shared';
 import { SkillPickerModal } from './SkillPickerModal';
@@ -558,6 +561,7 @@ function PRTableRow({
               // carries the review verdict too — the decision disambiguates
               // 'blocked' (approved-but-protected must not read "Review").
               reviewDecision={summary.effectiveReviewDecision ?? summary.reviewDecision}
+              labels={summary.labels}
             />
           </td>
         </>
@@ -575,6 +579,7 @@ function PRTableRow({
               mergeStateStatus={summary.mergeStateStatus}
               state={row.state}
               hideReviewState
+              labels={summary.labels}
             />
             {row.state === 'open' && unresolved > 0 && (
               <span
@@ -648,7 +653,7 @@ function PRTableRow({
                   setConfirmMerge(true);
                 }}
                 className="rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-emerald-500/10 hover:text-emerald-600 focus:opacity-100 group-hover:opacity-100"
-                title="Merge this PR"
+                title="Merge this PR — or, when an external merge queue owns the base branch, submit it to that queue"
               >
                 <GitMerge className="h-3.5 w-3.5" />
               </button>
@@ -813,6 +818,28 @@ function QueueCell({ row }: { row: PRRow }) {
               Auto-merge armed
             </span>
           );
+        case 'awaiting_external': {
+          // Submitted to the external queue; its own progress arrives as PR
+          // labels (trunk-queued → trunk-testing → …), so render that when it's
+          // there and a neutral "submitted" until the provider picks the PR up.
+          const ext = externalQueueStatusFromLabels(row.summary.labels);
+          const provider = ext ? externalQueueProviderLabel(ext.provider) : 'the';
+          const [submits, maxSubmits] = v2.external?.submits ?? [0, 3];
+          return (
+            <span
+              className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400"
+              title={
+                `In ${provider} merge queue` +
+                (ext ? ` — ${externalQueueStateLabel(ext.state).toLowerCase()} (${ext.label})` : ' — waiting for it to pick the PR up') +
+                `. Talyn submitted it ${v2.external?.via === 'label' ? 'by applying its submit label' : 'by arming GitHub auto-merge'}` +
+                ` (submission ${submits}/${maxSubmits} on this commit) and takes it back to fix if the queue rejects it.`
+              }
+            >
+              <GitMerge className="h-3 w-3" />
+              {ext ? `Queue: ${externalQueueStateLabel(ext.state).toLowerCase()}` : 'Submitted to queue'}
+            </span>
+          );
+        }
         case 'awaiting_ci':
           return (
             <span

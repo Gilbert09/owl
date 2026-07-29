@@ -34,7 +34,14 @@ import {
   rowToEntrySnapshot,
 } from '../services/mergeQueue/store.js';
 import { toPublicMergeQueue } from '../services/mergeQueue/legacy.js';
-import { disableAutoMerge, markReadyForReview } from '../services/githubAutoMerge.js';
+import {
+  classifyAutoMergeActor,
+  disableAutoMerge,
+  markReadyForReview,
+} from '../services/githubAutoMerge.js';
+import { getExternalMergeGate, markExternalMergeGate } from '../services/repoMergeGate.js';
+import { submitToExternalQueue } from '../services/externalQueueSubmit.js';
+import { isExternalMergeGateError } from '../services/mergeQueue/decide.js';
 import { prMonitorService } from '../services/prMonitor.js';
 import { onQueueMembershipChanged } from '../services/mergeQueue/triggers.js';
 import type { MergeMethod } from '../services/mergeQueue/types.js';
@@ -818,6 +825,14 @@ export function pullRequestRoutes(): Router {
   // merge (405) if the PR isn't actually mergeable, and we surface that
   // as a 400. On success we force a refetch so the row flips to `merged`
   // immediately instead of waiting for the next poll tick.
+  //
+  // When the base branch is behind an external merge queue (trunk.io, GitHub's
+  // native queue) the merge can't succeed for ANYONE but that system, so this
+  // route SUBMITS to it instead and answers `{ merged: false, submitted: true }`
+  // — which the desktop renders as "Submitted to the merge queue". The gate is
+  // detected up front when known, and learned from the 405 otherwise, so the
+  // first click on a newly-gated repo still ends in a submission rather than an
+  // error toast.
   router.post('/:id/merge', async (req, res) => {
     const db = getDbClient();
     const rows = await db
@@ -827,6 +842,7 @@ export function pullRequestRoutes(): Router {
         owner: pullRequestsTable.owner,
         repo: pullRequestsTable.repo,
         number: pullRequestsTable.number,
+        lastSummary: pullRequestsTable.lastSummary,
       })
       .from(pullRequestsTable)
       .where(eq(pullRequestsTable.id, req.params.id))
@@ -846,6 +862,66 @@ export function pullRequestRoutes(): Router {
       method === 'squash' || method === 'rebase' || method === 'merge'
         ? method
         : 'squash';
+    const summary = (row.lastSummary ?? {}) as {
+      nodeId?: string;
+      headSha?: string;
+      baseBranch?: string;
+      autoMergeBy?: string | null;
+    };
+    const baseBranch = summary.baseBranch ?? '';
+
+    // Hand the PR to the external queue and answer with what happened. Shared
+    // by the "gate already known" path and the "learned from the 405" path.
+    // Returns false (never throws) when it couldn't answer, so the caller falls
+    // through to the ordinary merge / error path.
+    const submitInstead = async (): Promise<boolean> => {
+      let attempt: Awaited<ReturnType<typeof submitToExternalQueue>>;
+      try {
+        attempt = await submitToExternalQueue({
+          workspaceId: row.workspaceId,
+          owner: row.owner,
+          repo: row.repo,
+          number: row.number,
+          nodeId: summary.nodeId ?? null,
+          headSha: summary.headSha ?? '',
+          mergeMethod,
+          autoMergeArmedBy: classifyAutoMergeActor(summary.autoMergeBy),
+          labelFallback: true,
+        });
+      } catch (err) {
+        console.warn(
+          `[pullRequests] external-queue submit failed for ${row.owner}/${row.repo}#${row.number}:`,
+          err instanceof Error ? err.message : err
+        );
+        return false;
+      }
+      if (attempt.kind === 'submitted') {
+        res.json({
+          success: true,
+          data: {
+            merged: false,
+            submitted: true,
+            via: attempt.via,
+            message:
+              attempt.via === 'label'
+                ? `Submitted to the merge queue (applied "${attempt.label}") — it merges the PR when its tests pass.`
+                : 'Submitted to the merge queue (auto-merge armed) — it merges the PR when its tests pass.',
+          },
+        });
+        return true;
+      }
+      if (attempt.kind === 'no_mechanism') {
+        res.status(400).json({ success: false, error: attempt.message });
+        return true;
+      }
+      return false; // clean_status can't happen (labelFallback) / retry → fall through
+    };
+
+    if (
+      (await getExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch)) === 'confirmed'
+    ) {
+      if (await submitInstead()) return;
+    }
 
     try {
       const result = await githubService.mergePullRequest(
@@ -875,6 +951,13 @@ export function pullRequestRoutes(): Router {
       res.json({ success: true, data: result } as ApiResponse<typeof result>);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Merge failed';
+      // "Cannot update this protected ref" — the branch is behind an external
+      // merge queue we hadn't recorded yet. Learn it (so the queue and every
+      // later click skip the doomed call) and submit instead of erroring.
+      if (isExternalMergeGateError(message)) {
+        markExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch);
+        if (await submitInstead()) return;
+      }
       res.status(400).json({ success: false, error: message });
     }
   });
