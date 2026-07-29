@@ -14,7 +14,7 @@ import {
   fetchPRReviewDetail,
   type PRSummary,
 } from '../services/githubGraphql.js';
-import { githubService } from '../services/github.js';
+import { githubService, MergeNotPermittedForAppError } from '../services/github.js';
 import {
   setFocused,
   clearFocused,
@@ -870,11 +870,21 @@ export function pullRequestRoutes(): Router {
     };
     const baseBranch = summary.baseBranch ?? '';
 
-    // Hand the PR to the external queue and answer with what happened. Shared
-    // by the "gate already known" path and the "learned from the 405" path.
-    // Returns false (never throws) when it couldn't answer, so the caller falls
-    // through to the ordinary merge / error path.
-    const submitInstead = async (): Promise<boolean> => {
+    // Hand the PR to the external queue and answer with what happened. Returns
+    // false (never throws) when it couldn't answer, so the caller falls through
+    // to the ordinary merge / error path.
+    //
+    // `allowAutoMerge` is the confidence dial. On a merely SUSPECTED gate we
+    // only submit through a door the provider itself put on the PR (its
+    // instruction comment) or on the repo (a submit label) — arming auto-merge
+    // there would turn a merge Talyn could actually do into an open-ended wait.
+    // Once the gate is CONFIRMED (or GitHub has just refused the merge), every
+    // door is fair game.
+    const submitInstead = async (opts: {
+      allowAutoMerge: boolean;
+      /** Answer with the block reason when no door exists, instead of falling through. */
+      reportNoMechanism: boolean;
+    }): Promise<'submitted' | 'reported' | 'none'> => {
       let attempt: Awaited<ReturnType<typeof submitToExternalQueue>>;
       try {
         attempt = await submitToExternalQueue({
@@ -887,13 +897,14 @@ export function pullRequestRoutes(): Router {
           mergeMethod,
           autoMergeArmedBy: classifyAutoMergeActor(summary.autoMergeBy),
           labelFallback: true,
+          allowAutoMerge: opts.allowAutoMerge,
         });
       } catch (err) {
         console.warn(
           `[pullRequests] external-queue submit failed for ${row.owner}/${row.repo}#${row.number}:`,
           err instanceof Error ? err.message : err
         );
-        return false;
+        return 'none';
       }
       if (attempt.kind === 'submitted') {
         res.json({
@@ -903,24 +914,30 @@ export function pullRequestRoutes(): Router {
             submitted: true,
             via: attempt.via,
             message:
-              attempt.via === 'label'
-                ? `Submitted to the merge queue (applied "${attempt.label}") — it merges the PR when its tests pass.`
-                : 'Submitted to the merge queue (auto-merge armed) — it merges the PR when its tests pass.',
+              attempt.via === 'comment'
+                ? `Submitted to the merge queue (posted \`${attempt.command}\`) — it merges the PR when its tests pass.`
+                : attempt.via === 'label'
+                  ? `Submitted to the merge queue (applied "${attempt.label}") — it merges the PR when its tests pass.`
+                  : 'Submitted to the merge queue (auto-merge armed) — it merges the PR when its tests pass.',
           },
         });
-        return true;
+        return 'submitted';
       }
-      if (attempt.kind === 'no_mechanism') {
+      if (attempt.kind === 'no_mechanism' && opts.reportNoMechanism) {
         res.status(400).json({ success: false, error: attempt.message });
-        return true;
+        return 'reported';
       }
-      return false; // clean_status can't happen (labelFallback) / retry → fall through
+      return 'none'; // no door / clean_status / retry → fall through
     };
 
-    if (
-      (await getExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch)) === 'confirmed'
-    ) {
-      if (await submitInstead()) return;
+    const gate = await getExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch);
+    if (gate !== null) {
+      const confirmed = gate === 'confirmed';
+      const outcome = await submitInstead({
+        allowAutoMerge: confirmed,
+        reportNoMechanism: confirmed,
+      });
+      if (outcome !== 'none') return;
     }
 
     try {
@@ -951,12 +968,32 @@ export function pullRequestRoutes(): Router {
       res.json({ success: true, data: result } as ApiResponse<typeof result>);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Merge failed';
-      // "Cannot update this protected ref" — the branch is behind an external
-      // merge queue we hadn't recorded yet. Learn it (so the queue and every
-      // later click skip the doomed call) and submit instead of erroring.
-      if (isExternalMergeGateError(message)) {
-        markExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch);
-        if (await submitInstead()) return;
+      // The branch is behind an external merge queue we hadn't recorded yet.
+      // GitHub says so in one of two ways, and BOTH have been seen on
+      // posthog/posthog: a 405 "Cannot update this protected ref", or — the
+      // actual response there — a 403 refusing every App token, because the
+      // ruleset exempts only trunk's App. On a suspected gate the 403 is
+      // decisive; without one it stays what it always was (a failing check the
+      // App won't merge past). Either way: learn the gate, then submit.
+      const refused =
+        isExternalMergeGateError(message) || err instanceof MergeNotPermittedForAppError;
+      if (refused) {
+        // Doors 1 and 2 need explicit provider evidence (its instruction comment
+        // on THIS PR, or a submit label the repo defines), so trying them is
+        // safe even when the branch-rules probe saw nothing — which is the case
+        // whenever the App can't read the repo's rulesets. Only a refusal we can
+        // positively attribute to a gate opens the auto-merge door as well.
+        const attributable = isExternalMergeGateError(message) || gate !== null;
+        const outcome = await submitInstead({
+          allowAutoMerge: attributable,
+          reportNoMechanism: attributable,
+        });
+        if (outcome === 'submitted') {
+          // Only now is the gate proven: something else owns merging this branch.
+          markExternalMergeGate(row.workspaceId, row.owner, row.repo, baseBranch);
+          return;
+        }
+        if (outcome === 'reported') return;
       }
       res.status(400).json({ success: false, error: message });
     }

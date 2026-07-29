@@ -1211,6 +1211,44 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     });
   });
 
+  describe('GitHub refuses the App merge (how a gated branch actually answers)', () => {
+    // posthog/posthog doesn't 405 "protected ref" — it 403s every App token,
+    // because its ruleset exempts only trunk's App. Before this, that refusal
+    // went down the App-refusal ladder and ended in blocked_manual.
+    const refusal = { kind: 'refused_app' as const, message: 'GitHub refused to let the Talyn App merge' };
+
+    it('learns the gate and submits, instead of running the App-refusal ladder', () => {
+      const d = decide(
+        entry({ status: 'merging' }),
+        cleanPr(),
+        ctx({ externalGate: 'suspected', mergeOutcome: refusal, verifiedMerged: false })
+      );
+      expect(kinds(d)).toEqual(['mark_external_gate', 'transition', 'submit_external']);
+      expect(lastTransition(d)!.to).toBe('queued');
+      expect(kinds(d)).not.toContain('probe_signatures');
+      expect(kinds(d)).not.toContain('rerequest_failed_checks');
+    });
+
+    it('still runs the App-refusal ladder when no gate is suspected', () => {
+      const d = decide(
+        entry({ status: 'merging' }),
+        cleanPr(),
+        ctx({ mergeOutcome: refusal, verifiedMerged: false })
+      );
+      expect(kinds(d)).toContain('probe_signatures');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('still records a merge that actually landed, before anything else', () => {
+      const d = decide(
+        entry({ status: 'merging' }),
+        cleanPr(),
+        ctx({ externalGate: 'suspected', mergeOutcome: refusal, verifiedMerged: true })
+      );
+      expect(kinds(d)).toEqual(['record_merged']);
+    });
+  });
+
   describe('the comment door (the provider must acknowledge it)', () => {
     // A posted command leaves nothing on GitHub to re-read, so "submitted" is
     // believed for a grace window and then has to be proven by a queue label.

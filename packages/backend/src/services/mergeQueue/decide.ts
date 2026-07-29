@@ -1031,6 +1031,25 @@ function decideMergeAftermath(d: DecisionBuilder, pr: PrSnapshot, ctx: DecisionC
     return d.done('hold');
   }
 
+  // An App-refused merge on a base we already suspect is gated IS the gate.
+  // posthog/posthog answers Talyn's merge with a 403 refusing every App token
+  // (its ruleset exempts only trunk's App) rather than the 405 "protected ref"
+  // below — so without this, the refusal ladder (re-run checks → blocked_manual
+  // app_refused_hard) swallowed a PR that just needed submitting.
+  if (outcome.kind === 'refused_app' && ctx.externalGate !== null) {
+    d.act({ kind: 'mark_external_gate' });
+    d.transition('queued', {
+      set: { lastError: outcome.message, lastErrorAt: ctx.nowIso },
+      event: {
+        code: 'external_merge_gate',
+        message:
+          'GitHub refused the App merge on a branch governed by an external merge queue — submitting the PR to it instead.',
+      },
+    });
+    d.act({ kind: 'submit_external' });
+    return d.done('hold');
+  }
+
   if (outcome.kind === 'refused_app') {
     return decideAppRefusal(d, pr, ctx, outcome.message);
   }

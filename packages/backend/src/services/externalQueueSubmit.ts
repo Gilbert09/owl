@@ -60,6 +60,14 @@ export interface SubmitToExternalQueueInput {
   autoMergeArmedBy: 'talyn' | 'user' | null;
   /** Whether to fall back to the submit label when GitHub refuses to arm. */
   labelFallback: boolean;
+  /**
+   * Whether the auto-merge door (3) may be used. Callers acting on a merely
+   * SUSPECTED gate pass false: doors 1 and 2 rest on explicit provider evidence
+   * (its own instruction comment, a submit label the repo defines), whereas
+   * arming auto-merge on a repo where Talyn can actually merge would replace a
+   * merge with a wait. Default true.
+   */
+  allowAutoMerge?: boolean;
 }
 
 export async function submitToExternalQueue(
@@ -117,6 +125,15 @@ export async function submitToExternalQueue(
       }
       return { kind: 'retry', message };
     }
+  }
+
+  if (input.allowAutoMerge === false) {
+    return {
+      kind: 'no_mechanism',
+      message:
+        'No external merge queue has claimed this PR: no provider instruction comment, ' +
+        'and no submit label the repo defines.',
+    };
   }
 
   let cleanStatus = false;
