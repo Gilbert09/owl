@@ -26,6 +26,11 @@ jobs:
       - name: Build shared package
         run: npm run build -w @talyn/shared
 
+      # The desktop renderer imports @talyn/client from dist, so it has to be
+      # compiled before the desktop build, the typecheck, and jest.
+      - name: Build client package
+        run: npm run build -w @talyn/client
+
       - name: Build backend
         run: npm run build -w @talyn/backend
 

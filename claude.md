@@ -126,6 +126,7 @@ fastowl/
 ├── packages/
 │   ├── backend/                  # Express + WS server, DB, services
 │   ├── cli/                      # @talyn/cli — `fastowl` binary
+│   ├── client/                   # @talyn/client — REST + WS transport, shared by every front end
 │   ├── mcp-server/               # @talyn/mcp-server — stdio MCP for child Claudes
 │   └── shared/                   # Shared TS types
 │   # (packages/daemon removed in the cloud-only refactor)
@@ -140,3 +141,5 @@ fastowl/
 Inside `packages/backend/src/`: `db/` (migrations + Drizzle schema/client), `routes/` (REST), `services/` (`taskQueue`, `cloudProviders/` (registry + poller + posthog/claude providers), `posthogCode/` (client/executor/streamer/converter), `claudeCode/` (client/credentials/executor/poller/converter — Anthropic Managed Agents, poll-based transcript), `github`, `prMonitor`, `prCache`, `taskPullRequest`, `events`, `websocket`), `__tests__/` (Vitest).
 
 Inside `apps/desktop/src/renderer/components/`: `layout/`, `modals/`, `panels/`, `terminal/`, `widgets/`, `ui/` (shadcn).
+
+**`packages/client` is the single definition of the backend contract** — every route signature, every WS event type, the 401-refresh-and-replay, the reconnect backoff. Anything that talks to the backend imports it, so a route change can't be applied to one front end and forgotten in the other. It knows nothing about how a host stores a session or where its build-time env came from: hosts call `configureApiClient({ baseUrl, clientVersion, getAccessToken, recoverSession })` once at module scope. The desktop's binding is `apps/desktop/src/renderer/lib/api.ts` — ~50 lines of Supabase/`process.env` glue plus `export * from '@talyn/client'`, so the ~40 files importing `'../lib/api'` never had to move. **Add new endpoints here, not in a host app**, and remember it compiles to `dist` (`lib: ["ES2022", "DOM"]`), so it must be built before the desktop build, the typecheck, or jest.

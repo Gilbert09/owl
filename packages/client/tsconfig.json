@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Node16",
+    // Unlike @talyn/shared this package IS browser code — fetch, WebSocket,
+    // window, navigator — so it needs the DOM lib. It stays Node16/CJS on
+    // output so bundlers and the existing workspace tooling resolve it the
+    // same way they resolve @talyn/shared.
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "sourceMap": true,
+    "moduleResolution": "Node16",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "declaration": true,
+    "declarationMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

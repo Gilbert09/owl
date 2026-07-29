@@ -21,6 +21,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/backend/package.json ./packages/backend/
 COPY packages/shared/package.json ./packages/shared/
+# @talyn/client is front-end only, but npm ci needs every workspace manifest
+# present or it refuses to install against the lockfile.
+COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/mcp-server/package.json ./packages/mcp-server/
 COPY apps/desktop/package.json ./apps/desktop/
@@ -60,6 +63,7 @@ ENV NODE_ENV=production
 COPY --from=builder /app/package.json /app/package-lock.json ./
 COPY --from=builder /app/packages/backend/package.json ./packages/backend/
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/
+COPY --from=builder /app/packages/client/package.json ./packages/client/
 COPY --from=builder /app/packages/cli/package.json ./packages/cli/
 COPY --from=builder /app/packages/mcp-server/package.json ./packages/mcp-server/
 COPY --from=builder /app/apps/desktop/package.json ./apps/desktop/
