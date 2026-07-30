@@ -3,13 +3,21 @@
   "version": "0.1.0",
   "description": "Shared types and utilities for FastOwl",
   "private": true,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "types": "./dist/cjs/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.esm.json && node ./scripts/write-type-markers.mjs",
+    "dev": "tsc -p tsconfig.json --watch"
   },
   "devDependencies": {
     "typescript": "^5.8.2"
+  },
+  "module": "./dist/esm/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
   }
 }

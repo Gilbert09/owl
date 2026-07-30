@@ -27,3 +27,37 @@ export const CLIENT_VERSION = `web/${import.meta.env.VITE_TALYN_BUILD_SHA ?? 'de
 export function isSupabaseConfigured(): boolean {
   return Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 }
+
+/** A local dev build rather than the deployed app. See hooks/useIsDevBuild. */
+export const IS_DEV_BUILD = import.meta.env.DEV;
+
+/**
+ * The version string surfaced in Settings → About. The desktop gets a real
+ * semver from the packaged app; the web app is continuously deployed, so the
+ * build SHA is the only meaningful identifier.
+ */
+export const APP_VERSION = CLIENT_VERSION;
+
+/**
+ * The `LocalSkillFile` shape the desktop reads from `~/.claude/skills`.
+ * Declared here rather than imported from the desktop's `main/preload`, which
+ * imports `electron`. The web app can never populate these — there is no
+ * filesystem — but the type is still referenced by the shared skills code
+ * paths, which always receive an empty list here.
+ */
+/**
+ * False on the web: reading `~/.claude/skills` needs a filesystem. The UI
+ * uses this to omit the "On this machine" group entirely rather than render a
+ * group that is permanently empty. Platform and repo skills work normally.
+ */
+export const HAS_LOCAL_SKILLS = false;
+
+export interface LocalSkillFile {
+  dirName: string;
+  /** Absolute path of SKILL.md on this machine. */
+  path: string;
+  size: number;
+  mtimeMs: number;
+  /** Raw file text; null when the file exceeds the size guard. */
+  content: string | null;
+}

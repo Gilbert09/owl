@@ -1,19 +1,28 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './components/auth/AuthProvider';
+import { MainLayout } from './components/layout/MainLayout';
+import { OnboardingWizard } from './components/onboarding/OnboardingWizard';
 import { Toaster } from './components/ui/toaster';
+import { useApiConnection, useInitialDataLoad } from './hooks/useApi';
+import { useWorkspaceStore } from './stores/workspace';
 import { AuthCallback } from './routes/AuthCallback';
 import { Login } from './routes/Login';
-import { Shell } from './routes/Shell';
 import { PANEL_PATHS } from './lib/routes';
 
 /**
  * BrowserRouter, not the desktop's MemoryRouter.
  *
- * The desktop declares exactly one route and does all navigation through a
- * zustand `activePanel` enum, which is fine when there's no URL bar. In a
- * browser that costs you shareable links, the back button, and Cmd-R (which
- * would otherwise reset the whole app), so the panels get real paths — see
- * lib/routes.ts.
+ * The desktop declares a single route and navigates entirely through the
+ * store's `activePanel`, which is fine without an address bar. Here the panels
+ * get real paths (lib/routes.ts) kept in step with the store by
+ * hooks/usePanelUrlSync — so links are shareable, the back button works, and
+ * Cmd-R (one keystroke away in a browser) doesn't reset the app.
+ *
+ * There is no MacDragOverlay and no backend-availability gate. The former is
+ * for the macOS frameless title bar; the latter existed because the desktop
+ * talks to a backend the user has to start themselves — here the backend is
+ * simply a deployed service, and a failed request surfaces through the normal
+ * error paths.
  */
 export default function App() {
   return (
@@ -31,24 +40,39 @@ export default function App() {
   );
 }
 
+function StartingSpinner({ label = 'Loading…' }: { label?: string }) {
+  return (
+    <div className="grid min-h-screen place-items-center bg-background">
+      <p className="text-sm text-muted-foreground">{label}</p>
+    </div>
+  );
+}
+
 function RequireAuth() {
   const { session, loading } = useAuth();
-
-  if (loading) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-background">
-        <p className="text-sm text-muted-foreground">Loading…</p>
-      </div>
-    );
-  }
+  if (loading) return <StartingSpinner label="Signing you in…" />;
   if (!session) return <Navigate to="/login" replace />;
+  return <AuthedApp />;
+}
 
+function AuthedApp() {
+  useApiConnection();
+  const { loaded } = useInitialDataLoad();
+  const onboardingComplete = useWorkspaceStore((s) => s.onboardingComplete);
+
+  // Wait for the first data load to settle before deciding. Otherwise a
+  // returning user on fresh localStorage (flag still false) would briefly
+  // flash the wizard before the migration in useInitialDataLoad flips it.
+  if (!loaded) return <StartingSpinner />;
+  if (!onboardingComplete) return <OnboardingWizard />;
+
+  // Every panel path renders the same layout; which panel shows is the
+  // store's call, mirrored to the URL by usePanelUrlSync inside MainLayout.
   return (
     <Routes>
-      {/* The desktop's default panel after onboarding. */}
       <Route index element={<Navigate to={PANEL_PATHS.my_prs} replace />} />
       {Object.values(PANEL_PATHS).map((path) => (
-        <Route key={path} path={path.slice(1)} element={<Shell />} />
+        <Route key={path} path={path.slice(1)} element={<MainLayout />} />
       ))}
       <Route path="*" element={<Navigate to={PANEL_PATHS.my_prs} replace />} />
     </Routes>

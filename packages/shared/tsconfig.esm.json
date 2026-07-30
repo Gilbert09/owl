@@ -1,0 +1,19 @@
+{
+  // ESM output, for the bundlers.
+  //
+  // `export *` re-exports compile to `Object.defineProperty(exports, …)`
+  // getters in CommonJS, which Rollup cannot statically see — Vite fails with
+  // "X is not exported by dist/index.js". The CJS build still has to exist for
+  // the backend, CLI, MCP server and the desktop's jest suite, so the package
+  // ships both and lets the `exports` map pick. Same arrangement as
+  // @talyn/client.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist/esm",
+    // Declarations are emitted once, by the CJS build.
+    "declaration": false,
+    "declarationMap": false
+  }
+}
