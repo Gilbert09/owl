@@ -1,17 +1,17 @@
 // Core types for FastOwl
 
 // PR mergeable helpers (shared by the desktop button + backend watcher).
-export * from './prMergeable';
+export * from './prMergeable.js';
 
 // External merge queues (trunk.io / GitHub native) — label vocabulary shared by
 // the backend pipeline and the desktop badges.
-export * from './externalMergeQueue';
+export * from './externalMergeQueue.js';
 
 // Agent skills (SKILL.md) + the run-skill-on-PR prompt builder.
-export * from './skills';
-export * from './skillPrompt';
+export * from './skills.js';
+export * from './skillPrompt.js';
 
-import type { SkillKey, SkillSource, SkillSummary, SkillUsageEntry } from './skills';
+import type { SkillKey, SkillSource, SkillSummary, SkillUsageEntry } from './skills.js';
 
 // ============================================================================
 // Workspace
