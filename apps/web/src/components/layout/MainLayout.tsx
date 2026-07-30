@@ -1,12 +1,29 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { Sidebar } from './Sidebar';
+
+/**
+ * Code-split the panels that are not the landing screen. On the desktop the
+ * whole bundle loads from local disk, so this bought nothing; on the web
+ * every visitor downloads it, and Settings + Debug + Tasks are ~4k lines a
+ * first-time visitor looking at their PRs never touches.
+ *
+ * The three GitHub panels stay eager: one of them IS the landing screen, and
+ * they share prTableShared, so splitting them would mostly move the same
+ * bytes into a chunk fetched immediately anyway.
+ */
+const QueuePanel = lazy(() =>
+  import('../panels/QueuePanel').then((m) => ({ default: m.QueuePanel }))
+);
+const SettingsPanel = lazy(() =>
+  import('../panels/SettingsPanel').then((m) => ({ default: m.SettingsPanel }))
+);
+const DebugPanel = lazy(() =>
+  import('../panels/DebugPanel').then((m) => ({ default: m.DebugPanel }))
+);
 import { SystemStatusBanner } from './SystemStatusBanner';
-import { QueuePanel } from '../panels/QueuePanel';
 import { MyPRsPanel } from '../panels/github/MyPRsPanel';
 import { ReviewsPanel } from '../panels/github/ReviewsPanel';
 import { MergeQueuePanel } from '../panels/github/MergeQueuePanel';
-import { SettingsPanel } from '../panels/SettingsPanel';
-import { DebugPanel } from '../panels/DebugPanel';
 import { CreateWorkspaceModal } from '../modals/CreateWorkspaceModal';
 import { UpgradeModal } from '../modals/UpgradeModal';
 import { ConnectAgentModal } from '../modals/ConnectAgentModal';
@@ -36,12 +53,14 @@ export function MainLayout() {
         <main className="flex-1 flex flex-col overflow-hidden">
           <SystemStatusBanner />
           <div className="flex-1 overflow-hidden">
-            {activePanel === 'queue' && <QueuePanel />}
-            {activePanel === 'my_prs' && <MyPRsPanel />}
-            {activePanel === 'reviews' && <ReviewsPanel />}
-            {activePanel === 'merge_queue' && <MergeQueuePanel />}
-            {activePanel === 'settings' && <SettingsPanel />}
-            {activePanel === 'debug' && <DebugPanel />}
+            <Suspense fallback={<PanelLoading />}>
+              {activePanel === 'queue' && <QueuePanel />}
+              {activePanel === 'my_prs' && <MyPRsPanel />}
+              {activePanel === 'reviews' && <ReviewsPanel />}
+              {activePanel === 'merge_queue' && <MergeQueuePanel />}
+              {activePanel === 'settings' && <SettingsPanel />}
+              {activePanel === 'debug' && <DebugPanel />}
+            </Suspense>
           </div>
         </main>
       </div>
@@ -51,6 +70,17 @@ export function MainLayout() {
       />
       <UpgradeModal open={upgradeModalOpen} onOpenChange={setUpgradeModalOpen} />
       <ConnectAgentModal />
+    </div>
+  );
+}
+
+/** Brief placeholder while a split panel chunk loads. */
+function PanelLoading() {
+  return (
+    <div className="flex h-full items-center justify-center">
+      <div className="h-px w-44 overflow-hidden rounded-full bg-border/60">
+        <div className="owl-scan-bar h-full w-1/3 bg-gradient-to-r from-transparent via-primary to-transparent" />
+      </div>
     </div>
   );
 }

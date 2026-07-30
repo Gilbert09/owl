@@ -13,22 +13,38 @@ import { api, type GitHubInstallation } from './api';
  * connection); `manage` opens the installations page to add the App to
  * another org or change which repos it can access.
  *
- * Navigates the CURRENT tab rather than opening one. The desktop opens the
- * system browser, because its own window can't host GitHub's cookies — but
- * here `window.open` would be popup-blocked: the URL has to be fetched first,
- * and that `await` spends the user activation the browser was going to grant.
+ * Runs in a SEPARATE tab, because callers depend on this page staying alive.
+ * ConnectGitHubStep is the reason: the onboarding wizard shows the flow
+ * inline and waits for `useGithubConnection` to re-check on window focus.
+ * Navigating this tab away unmounts the wizard mid-onboarding and — since the
+ * backend sends browser clients to /settings — drops the user out of setup
+ * entirely.
  *
- * Same-tab also closes the loop properly. The backend's callback recognises a
- * browser client by Origin and 302s back to `/settings?github=connected`
- * (routes/github.ts), instead of the desktop's "you can close this tab" page —
- * which, in-tab, would strand the user on the API origin.
+ * The tab is opened SYNCHRONOUSLY, before awaiting the install URL. Browsers
+ * grant `window.open` only while user activation is live, and the fetch below
+ * would spend it — so we claim the tab first and point it somewhere once we
+ * know where. If the popup is blocked anyway, fall back to this tab: losing
+ * wizard position beats the button doing nothing.
+ *
+ * The opened tab lands on the backend callback, which 302s browser clients to
+ * /settings?github=connected. useClosePopupAfterGithub (App.tsx) notices it
+ * is a popup and closes it, returning focus here — which is exactly the
+ * signal the wizard is waiting for.
  */
 export async function openGithubAppFlow(
   workspaceId: string,
   mode: 'connect' | 'manage'
 ): Promise<void> {
-  const { installUrl, manageUrl } = await api.github.installViaApp(workspaceId);
-  window.location.assign(mode === 'manage' ? manageUrl : installUrl);
+  const opened = window.open('', '_blank', 'noopener=no');
+  try {
+    const { installUrl, manageUrl } = await api.github.installViaApp(workspaceId);
+    const url = mode === 'manage' ? manageUrl : installUrl;
+    if (opened && !opened.closed) opened.location.href = url;
+    else window.location.assign(url);
+  } catch (err) {
+    opened?.close();
+    throw err;
+  }
 }
 
 /** Lowercased account logins with an active (non-suspended) installation. */

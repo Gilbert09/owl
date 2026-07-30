@@ -1,12 +1,14 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './components/auth/AuthProvider';
+import { LoginScreen } from './components/auth/LoginScreen';
 import { MainLayout } from './components/layout/MainLayout';
 import { OnboardingWizard } from './components/onboarding/OnboardingWizard';
+import { StartingSpinner } from './components/StartingSpinner';
 import { Toaster } from './components/ui/toaster';
 import { useApiConnection, useInitialDataLoad } from './hooks/useApi';
+import { useClosePopupAfterGithub } from './hooks/useClosePopupAfterGithub';
 import { useWorkspaceStore } from './stores/workspace';
 import { AuthCallback } from './routes/AuthCallback';
-import { Login } from './routes/Login';
 import { PANEL_PATHS } from './lib/routes';
 
 /**
@@ -25,11 +27,16 @@ import { PANEL_PATHS } from './lib/routes';
  * error paths.
  */
 export default function App() {
+  // Before anything else: if this window is the GitHub-connect popup coming
+  // back from the callback, close it rather than booting a second app inside
+  // it. Outside the router — it depends only on the URL.
+  useClosePopupAfterGithub();
+
   return (
     <BrowserRouter>
       <AuthProvider>
         <Routes>
-          <Route path="/login" element={<Login />} />
+          <Route path="/login" element={<LoginScreen />} />
           <Route path="/auth/callback" element={<AuthCallback />} />
           <Route path="/*" element={<RequireAuth />} />
         </Routes>
@@ -40,17 +47,9 @@ export default function App() {
   );
 }
 
-function StartingSpinner({ label = 'Loading…' }: { label?: string }) {
-  return (
-    <div className="grid min-h-screen place-items-center bg-background">
-      <p className="text-sm text-muted-foreground">{label}</p>
-    </div>
-  );
-}
-
 function RequireAuth() {
   const { session, loading } = useAuth();
-  if (loading) return <StartingSpinner label="Signing you in…" />;
+  if (loading) return <StartingSpinner />;
   if (!session) return <Navigate to="/login" replace />;
   return <AuthedApp />;
 }

@@ -12,6 +12,7 @@ import { useTaskActions } from '../../../hooks/useApi';
 import { refreshPullRequests } from '../../../hooks/usePullRequestSync';
 import { toast } from '../../../stores/toast';
 import { maybeHandleBillingLimit } from '../../../stores/billing';
+import { openGithubAppFlow } from '../../../lib/githubInstall';
 import { trackEvent } from '../../../lib/analytics';
 import { copyRich } from '../../../lib/prClipboard';
 import { buildCopyListPayload, type StackMeta } from './stacks';
@@ -328,12 +329,11 @@ export function useGitHubActions() {
   // Connect GitHub for the workspace via the GitHub App install flow.
   const connect = useCallback(async () => {
     if (!currentWorkspaceId) return;
-    const { installUrl } = await api.github.installViaApp(currentWorkspaceId);
     trackEvent('github_connect_started');
-    // Navigate this tab, don't open one — see lib/githubInstall for why
-    // (the await above has already spent the popup's user activation, and
-    // the backend callback 302s back to /settings for a browser client).
-    window.location.assign(installUrl);
+    // Shared helper: opens a separate tab (claimed synchronously, before the
+    // fetch spends user activation) so this page survives — see
+    // lib/githubInstall.
+    await openGithubAppFlow(currentWorkspaceId, 'connect');
   }, [currentWorkspaceId]);
 
   // Copy the given PRs as a list for pasting into Slack (etc.). Writes a rich

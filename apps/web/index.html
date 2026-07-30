@@ -4,6 +4,19 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Talyn</title>
+
+    <!--
+      The app icon, shared with the desktop build
+      (apps/desktop/assets/icon-small.svg — 800 bytes, so it costs nothing).
+      SVG first for crisp rendering at any DPI and automatic dark-mode
+      handling; the PNGs are the fallback for browsers that don't take an SVG
+      favicon (notably Safari before 17).
+    -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#1a2542" />
     <!--
       The real CSP ships as a RESPONSE HEADER from vercel.json — only a header
       is honoured for frame-ancestors, and headers can't be stripped by an
@@ -15,10 +28,16 @@
       recorder — a choice originally made for the desktop's file:// CSP that
       pays off again here. 'unsafe-inline' on style-src is unavoidable (React
       inline styles); img-src data: is required by the base64 provider logos.
+
+      connect-src lists BOTH localhost and 127.0.0.1: `supabase start` serves
+      on 127.0.0.1:54321 while Vite serves on localhost, and the two are
+      distinct origins to CSP. Allowing only localhost silently broke local
+      auth — every Supabase call failed as an opaque "TypeError: Failed to
+      fetch" and the app sat on the boot screen forever.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.githubusercontent.com; font-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* https://*.supabase.co wss://*.supabase.co https://prod.talyn.dev wss://prod.talyn.dev https://us.i.posthog.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.githubusercontent.com; font-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* https://*.supabase.co wss://*.supabase.co https://prod.talyn.dev wss://prod.talyn.dev https://us.i.posthog.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'"
     />
   </head>
   <body class="bg-background text-foreground">

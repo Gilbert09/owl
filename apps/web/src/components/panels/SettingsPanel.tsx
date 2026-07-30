@@ -55,6 +55,7 @@ import { useGithubInstallations } from '../../hooks/useGithubInstallations';
 import { useIsDevBuild } from '../../hooks/useIsDevBuild';
 import { isOwnerCovered } from '../../lib/githubInstall';
 import { openExternal } from '../../lib/openExternal';
+import { openGithubAppFlow } from '../../lib/githubInstall';
 import { APP_VERSION } from '../../lib/env';
 import type {
   WorkspaceLogo as WorkspaceLogoData,
@@ -759,10 +760,9 @@ function IntegrationsSettings() {
     setError(null);
 
     try {
-      const { installUrl } = await api.github.installViaApp(currentWorkspaceId);
-      // Navigate this tab — see lib/githubInstall for why a popup would be
-      // blocked here, and how the backend callback returns the user.
-      window.location.assign(installUrl);
+      // Shared helper — separate tab, so this panel stays mounted and its
+      // focus-based status re-check still fires. See lib/githubInstall.
+      await openGithubAppFlow(currentWorkspaceId, 'connect');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to start GitHub App install');
     } finally {

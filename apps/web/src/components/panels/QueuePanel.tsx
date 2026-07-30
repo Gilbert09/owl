@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, Suspense, lazy } from 'react';
 import {
   ListTodo,
   Play,
@@ -27,7 +27,6 @@ import { useTaskActions, loadMoreTasks } from '../../hooks/useApi';
 import { api } from '../../lib/api';
 import { TaskTerminal } from './TaskTerminal';
 import { PRStatusPill } from '../widgets/PRStatusPill';
-import { PRDetailSheet } from '../widgets/PRDetailSheet';
 import type { PRSummaryShape, PRState } from '../../lib/api';
 import {
   getCachedPRStatus,
@@ -37,6 +36,17 @@ import {
 import { isAgentTask, readCloudTaskMeta } from '@talyn/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority } from '@talyn/shared';
 import { ProviderIcon, providerLabel, taskCloudProvider } from '../../lib/providerMeta';
+
+/**
+ * Lazy: it only mounts when a PR row is clicked, and it is the sole importer
+ * of @pierre/diffs — which drags in the syntax grammars (the emacs-lisp / cpp
+ * / wasm chunks in the build output). Keeping it out of the entry chunk keeps
+ * all of that off the first load.
+ */
+const PRDetailSheet = lazy(() =>
+  import('../widgets/PRDetailSheet').then((m) => ({ default: m.PRDetailSheet }))
+);
+
 
 const taskTypeConfig: Record<TaskType, { label: string; icon: React.ElementType }> = {
   code_writing: { label: 'Code', icon: Sparkles },
@@ -508,7 +518,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             <TaskTerminal task={task} />
           </div>
         </div>
-        <PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} />
+        <Suspense fallback={null}><PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} /></Suspense>
       </>
     );
   }
@@ -746,7 +756,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       <div className="flex-1 overflow-hidden">
         <TaskTerminal task={task} />
       </div>
-      <PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} />
+      <Suspense fallback={null}><PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} /></Suspense>
     </>
   );
 }

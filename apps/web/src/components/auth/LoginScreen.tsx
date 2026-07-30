@@ -32,8 +32,9 @@ export function LoginScreen() {
 
         {!configured && (
           <div className="p-3 rounded-md border border-destructive/50 bg-destructive/10 text-sm text-destructive">
-            Supabase isn't configured in this build. Set <code>TALYN_SUPABASE_URL</code> and
-            <code>TALYN_SUPABASE_ANON_KEY</code> then rebuild the desktop app.
+            Supabase isn't configured in this build. Set{' '}
+            <code>VITE_TALYN_SUPABASE_URL</code> and{' '}
+            <code>VITE_TALYN_SUPABASE_ANON_KEY</code> and redeploy.
           </div>
         )}
 

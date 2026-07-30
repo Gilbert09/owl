@@ -1,15 +1,25 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, Suspense, lazy } from 'react';
 import { Github, Settings, Search, RefreshCw, Copy, X, GitPullRequest, Loader2 } from 'lucide-react';
 import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 import { ScrollArea } from '../../ui/scroll-area';
-import { PRDetailSheet } from '../../widgets/PRDetailSheet';
 import { api, type PRRow } from '../../../lib/api';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
 import { useGitHubActions } from './useGitHubActions';
 import type { StackMeta } from './stacks';
 import { refreshPullRequests } from '../../../hooks/usePullRequestSync';
+
+/**
+ * Lazy: it only mounts when a PR row is clicked, and it is the sole importer
+ * of @pierre/diffs — which drags in the syntax grammars (the emacs-lisp / cpp
+ * / wasm chunks in the build output). Keeping it out of the entry chunk keeps
+ * all of that off the first load.
+ */
+const PRDetailSheet = lazy(() =>
+  import('../../widgets/PRDetailSheet').then((m) => ({ default: m.PRDetailSheet }))
+);
+
 
 /**
  * Shared chrome for the three GitHub pages (My PRs, Reviews, Merge Queue):
@@ -213,12 +223,14 @@ export function GitHubPageShell({
           )}
         </div>
 
-        <PRDetailSheet
-          pullRequestId={selectedId}
-          onClose={() => setSelectedId(null)}
-          layout="contained"
-          seedRow={allRows.find((r) => r.id === selectedId) ?? null}
-        />
+        <Suspense fallback={null}>
+          <PRDetailSheet
+            pullRequestId={selectedId}
+            onClose={() => setSelectedId(null)}
+            layout="contained"
+            seedRow={allRows.find((r) => r.id === selectedId) ?? null}
+          />
+        </Suspense>
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth, takeReturnPath } from '../components/auth/AuthProvider';
+import { StartingSpinner } from '../components/StartingSpinner';
 
 /**
  * Landing route for Supabase's OAuth redirect.
@@ -17,7 +18,7 @@ import { useAuth, takeReturnPath } from '../components/auth/AuthProvider';
  * indefinite spinner.
  */
 export function AuthCallback() {
-  const { session, loading } = useAuth();
+  const { session } = useAuth();
   const navigate = useNavigate();
   const [error, setError] = useState<string | null>(null);
   const [timedOut, setTimedOut] = useState(false);
@@ -56,13 +57,9 @@ export function AuthCallback() {
     );
   }
 
-  return (
-    <Centered>
-      <p className="text-sm text-muted-foreground">
-        {loading ? 'Signing you in…' : 'Finishing sign-in…'}
-      </p>
-    </Centered>
-  );
+  // Same boot screen as everywhere else, so the OAuth round-trip doesn't
+  // flash a different-looking interstitial.
+  return <StartingSpinner />;
 }
 
 function Centered({ children }: { children: React.ReactNode }) {
