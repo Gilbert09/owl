@@ -52,6 +52,21 @@ pipeline. Keep `script-src 'self'` intact — it works only because
 
 ## Deploy
 
-Its own Vercel project (`VERCEL_PROJECT_ID_WEB` — **not** marketing's
-`VERCEL_PROJECT_ID`) via `.github/workflows/deploy-web.yml`. Build-time
-`VITE_TALYN_*` values live as Vercel project environment variables.
+Its own Vercel project via `.github/workflows/deploy-app.yml`.
+
+**Naming.** The two Vercel deploys are *web* — the marketing WEBSITE,
+www.talyn.dev, `VERCEL_PROJECT_ID_WEB` — and *app*, the APPLICATION,
+app.talyn.dev, `VERCEL_PROJECT_ID_APP`. This directory is `apps/web` but ships
+to the **app** project, which reads backwards; the secret, not the folder, is
+what decides where a build lands.
+
+**The Vercel project's Root Directory must be the repo root**, not `apps/web`.
+The build has to run npm workspace commands (`@talyn/shared` and
+`@talyn/client` are compiled first), and those only work from the workspace
+root. That's also why `vercel.json` lives at the repo root — Vercel reads it
+from the project's Root Directory. Marketing is unaffected: its Root Directory
+is `apps/marketing`, so it never sees that file.
+
+Build-time `VITE_TALYN_*` values are Vercel project environment variables.
+`vite.config.ts` fails the build if any required one is missing, so a
+half-configured project fails loudly rather than shipping a white screen.

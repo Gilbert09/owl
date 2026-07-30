@@ -47,7 +47,17 @@ jobs:
     if: github.repository == 'Gilbert09/talyn'
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      # The two Vercel deploys are now named for what they are: "web" is this,
+      # the marketing WEBSITE (www.talyn.dev); "app" is the APPLICATION
+      # (app.talyn.dev, deploy-app.yml, VERCEL_PROJECT_ID_APP).
+      #
+      # The fallback is transitional. VERCEL_PROJECT_ID_WEB has to be created
+      # by hand — GitHub never exposes an existing secret's value, so the old
+      # id can't be copied across automatically. Until it exists this keeps
+      # using VERCEL_PROJECT_ID, so the rename cannot break a working deploy
+      # midway. Drop the fallback (and delete VERCEL_PROJECT_ID) once
+      # VERCEL_PROJECT_ID_WEB is set.
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_WEB || secrets.VERCEL_PROJECT_ID }}
     steps:
       - name: Check out Git repository
         uses: actions/checkout@v4

@@ -1,13 +1,17 @@
-name: Deploy web
+name: Deploy app
 
-# Deploy the Talyn browser app (apps/web) to Vercel on every push to main that
-# touches it. Unlike apps/marketing this app IS an npm workspace member — it
-# depends on @talyn/client and @talyn/shared — so everything installs from the
-# ROOT lockfile, not a private one.
+# Deploy the Talyn application — app.talyn.dev — to Vercel on every push to
+# main that touches it. Unlike apps/marketing this IS an npm workspace member
+# (it depends on @talyn/client and @talyn/shared), so everything installs from
+# the ROOT lockfile, not a private one.
 #
-# NOTE ON SECRETS: VERCEL_PROJECT_ID_WEB is a DIFFERENT project from
-# marketing's. Do not point this at marketing's id or a push here will
-# overwrite www.talyn.dev.
+# NAMING: the two Vercel deploys are "web" (the marketing WEBSITE,
+# www.talyn.dev, deploy-marketing.yml, VERCEL_PROJECT_ID_WEB) and "app" (the
+# APPLICATION, app.talyn.dev, this file, VERCEL_PROJECT_ID_APP). The source
+# directory is still apps/web, which reads backwards against that — the
+# secret, not the folder, is what decides where a build lands, so check the
+# secret. Pointing this at the website's project id would publish the app's
+# bundle over www.talyn.dev.
 on:
   push:
     branches: [main]
@@ -15,7 +19,7 @@ on:
       - 'apps/web/**'
       - 'packages/client/**'
       - 'packages/shared/**'
-      - '.github/workflows/deploy-web.yml'
+      - '.github/workflows/deploy-app.yml'
   workflow_dispatch: {}
 
 jobs:
@@ -50,7 +54,7 @@ jobs:
     if: github.repository == 'Gilbert09/talyn'
     env:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_WEB }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_APP }}
     steps:
       - name: Check out Git repository
         uses: actions/checkout@v4
@@ -69,8 +73,8 @@ jobs:
       - name: Is the Vercel project configured?
         id: gate
         run: |
-          if [ -z "${{ secrets.VERCEL_PROJECT_ID_WEB }}" ]; then
-            echo "VERCEL_PROJECT_ID_WEB not set — skipping deploy."
+          if [ -z "${{ secrets.VERCEL_PROJECT_ID_APP }}" ]; then
+            echo "VERCEL_PROJECT_ID_APP not set — skipping deploy."
             echo "configured=false" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
