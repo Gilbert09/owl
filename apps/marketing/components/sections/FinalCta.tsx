@@ -1,8 +1,9 @@
 import { Reveal } from "@/components/ui/Reveal";
+import { Button } from "@/components/ui/button";
 import { DownloadButton } from "@/components/ui/DownloadButton";
 import { EmailCapture } from "@/components/ui/EmailCapture";
 import { OwlMark } from "@/components/brand/Logo";
-import { finalCta } from "@/lib/content";
+import { site, finalCta } from "@/lib/content";
 
 /** The closing conversion section. Carries id="download" (footer links to it)
  *  and the non-Mac waitlist — both absorbed from the removed Beta section,
@@ -23,8 +24,13 @@ export function FinalCta() {
             <span className="text-clay">{finalCta.titleAccent}</span>
           </h2>
           <p className="mx-auto mt-5 max-w-md text-ink-500">{finalCta.sub}</p>
-          <div className="mt-8 flex justify-center">
+          <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <DownloadButton size="lg">{finalCta.cta}</DownloadButton>
+            <a href={site.appUrl}>
+              <Button variant="secondary" size="lg">
+                Open in browser
+              </Button>
+            </a>
           </div>
           <div className="mx-auto mt-10 max-w-sm border-t border-line pt-6">
             <p className="text-sm text-ink-500">{finalCta.emailLabel}</p>

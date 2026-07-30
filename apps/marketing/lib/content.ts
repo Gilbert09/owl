@@ -12,6 +12,8 @@ export const site = {
   description:
     "Talyn ranks your whole PR queue by what's blocking you, then sends cloud agents to fix the checks, clear the conflicts, and reply to reviews, so your PRs land without you babysitting them.",
   githubUrl: "https://github.com/Gilbert09/talyn",
+  /** The browser app — same product, nothing to install. */
+  appUrl: "https://app.talyn.dev",
   /** Support/contact channel — every Talyn user has a GitHub account. */
   supportUrl: "https://github.com/Gilbert09/talyn/issues",
 };
@@ -31,7 +33,8 @@ export const hero = {
   sub: "You live in GitHub PRs, and half of them are red, behind main, or stuck waiting on a review. Talyn ranks the whole queue by what's blocking you, then sends a cloud agent to clear each one. Flag the PRs you trust and they merge themselves the moment they go green, overnight included.",
   primaryCta: "Download for {platform}",
   secondaryCta: "See how it works",
-  microtrust: "Apple silicon · macOS 13+",
+  webCta: "Open in browser",
+  microtrust: "macOS, Windows & Linux — or run it in your browser",
 };
 
 export const poweredBy = {
@@ -167,7 +170,7 @@ export const features = [
  *  no action to take without scrolling to the bottom. */
 export const midCta = {
   title: "Ready to stop babysitting CI?",
-  sub: "Download Talyn, connect your repos, and clear the queue tonight.",
+  sub: "Open it in your browser or download the app, connect your repos, and clear the queue tonight.",
   cta: "Download for {platform}",
   secondary: "See pricing",
 };
@@ -301,7 +304,7 @@ export const faq = [
   },
   {
     q: "What platforms are supported?",
-    a: "The beta ships for macOS (Apple silicon) first. Not on a Mac? Drop your email and we'll ping you the moment other builds land.",
+    a: "All of them. There are desktop builds for macOS (Apple silicon), Windows and Linux, and a web app at app.talyn.dev that needs no install at all — same product, same account, your workspaces and PR queue follow you between them. The desktop app adds two things a browser can't: it reads skills from ~/.claude/skills on your machine, and it keeps your session in the OS keychain.",
   },
 ];
 
@@ -311,7 +314,7 @@ export const finalCta = {
   sub: "In public beta. Bring your own agent. Clear your PR backlog tonight.",
   cta: "Download for {platform}",
   // Waitlist row (absorbed from the removed Beta section).
-  emailLabel: "Not on a Mac? Get notified.",
+  emailLabel: "Want release notes? Get notified.",
   emailPlaceholder: "you@startup.dev",
   emailCta: "Notify me",
 };
@@ -328,6 +331,7 @@ export const footer = {
         { label: "Providers", href: "/#providers" },
         { label: "Pricing", href: "/#pricing" },
         { label: "Download", href: "/#download" },
+        { label: "Open the web app", href: site.appUrl },
       ],
     },
     {

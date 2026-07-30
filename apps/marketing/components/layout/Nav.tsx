@@ -53,6 +53,11 @@ export function Nav() {
               GitHub
             </Button>
           </a>
+          <a href={site.appUrl}>
+            <Button variant="secondary" size="sm">
+              Open app
+            </Button>
+          </a>
           <DownloadButton size="sm">Download</DownloadButton>
         </div>
 
@@ -78,10 +83,15 @@ export function Nav() {
                 {item.label}
               </a>
             ))}
-            <div onClick={() => setOpen(false)} className="mt-2">
-              <DownloadButton size="md" className="w-full">
-                Download for Mac
-              </DownloadButton>
+            <div onClick={() => setOpen(false)} className="mt-2 flex flex-col gap-2">
+              <a href={site.appUrl} className="w-full">
+                <Button variant="secondary" size="md" className="w-full">
+                  Open app
+                </Button>
+              </a>
+              {/* No hardcoded platform — DownloadButton resolves it at runtime
+                  now that macOS, Windows and Linux all ship. */}
+              <DownloadButton size="md" className="w-full" />
             </div>
           </div>
         </div>

@@ -32,6 +32,20 @@ const IS_DEV = IS_DEV_BUILD;
 // event, and there is nothing to fall back to in a browser anyway.
 const APP_VERSION = BUILD_VERSION;
 
+/**
+ * Super properties that describe the BUILD rather than the user, so they must
+ * survive a reset. app_version segments by release; environment separates
+ * dev-server sessions from real usage in the same project; client
+ * distinguishes the two front ends now reporting into it — without it every
+ * funnel silently merges web and desktop, and "web users don't convert"
+ * becomes indistinguishable from "we can't tell them apart".
+ */
+const BUILD_SUPER_PROPERTIES: Record<string, unknown> = {
+  ...(APP_VERSION ? { app_version: APP_VERSION } : {}),
+  environment: IS_DEV ? 'development' : 'production',
+  client: 'web',
+};
+
 let initialized = false;
 
 // Mirror of the user's analytics opt-out. posthog-js persists its own
@@ -131,23 +145,27 @@ export function initAnalytics(): void {
       return event;
     },
     loaded: (ph) => {
+      // Super properties on every event, registered HERE rather than straight
+      // after init(). posthog-js only has its persistence layer ready by the
+      // time `loaded` fires, and props registered before that are dropped when
+      // it initialises — verified in the browser: `workspace_id` (registered
+      // later, from components/Analytics) persisted while these did not.
+      //
+      // app_version segments by release; environment separates dev-server
+      // sessions from real usage in the same project; client distinguishes the
+      // two front ends now reporting into it — without it every funnel
+      // silently merges web and desktop, and "web users don't convert" becomes
+      // indistinguishable from "we can't tell them apart".
+      ph.register(BUILD_SUPER_PROPERTIES);
+
       // Session replay is on by default but respects the opt-out toggle
       // (Settings → Account → Privacy).
       if (!getAnalyticsOptOut()) ph.startSessionRecording();
+
+      // After register, so the first event carries the super properties.
+      trackEvent('app_opened');
     },
   });
-
-  // Super properties on every event. Registered synchronously BEFORE the
-  // first capture — app_version segments by release, environment separates
-  // dev-server sessions from packaged usage in the same project.
-  posthog.register({
-    ...(APP_VERSION ? { app_version: APP_VERSION } : {}),
-    environment: IS_DEV ? 'development' : 'production',
-  });
-  // No version fallback: APP_VERSION is always set here (derived from the
-  // commit SHA at build time), and there is no main process to ask.
-
-  trackEvent('app_opened');
 }
 
 /**
@@ -168,9 +186,21 @@ export function identifyAnalyticsUser(
   if (initialized) posthog.identify(distinctId, properties);
 }
 
-/** Clear identity + start a fresh session. Call on logout. */
+/**
+ * Clear identity + start a fresh session. Call on logout.
+ *
+ * `posthog.reset()` also clears SUPER PROPERTIES, so the build-time ones are
+ * re-registered immediately. Without this they vanish on the very first
+ * render: Analytics runs its identify effect before auth resolves, sees no
+ * user, and calls this — silently wiping app_version, environment and client
+ * from every subsequent event. Confirmed in the browser by finding
+ * `$last_posthog_reset` set and those three properties absent while
+ * `workspace_id` (registered later) survived.
+ */
 export function resetAnalyticsUser(): void {
-  if (initialized) posthog.reset();
+  if (!initialized) return;
+  posthog.reset();
+  posthog.register(BUILD_SUPER_PROPERTIES);
 }
 
 /** Capture a custom product-analytics event. */

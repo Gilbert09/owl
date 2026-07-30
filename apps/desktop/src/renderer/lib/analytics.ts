@@ -26,6 +26,19 @@ const IS_DEV = process.env.NODE_ENV !== 'production';
 // getVersion round-trip silently never landed on any event.
 const APP_VERSION = process.env.TALYN_APP_VERSION || '';
 
+/**
+ * Super properties describing the BUILD rather than the user: app_version
+ * segments by release, environment separates dev-server sessions from
+ * packaged usage in the same project.
+ *
+ * Held as a constant because they must be re-applied after every
+ * posthog.reset() — see resetAnalyticsUser.
+ */
+const BUILD_SUPER_PROPERTIES: Record<string, unknown> = {
+  ...(APP_VERSION ? { app_version: APP_VERSION } : {}),
+  environment: IS_DEV ? 'development' : 'production',
+};
+
 let initialized = false;
 
 // Mirror of the user's analytics opt-out. posthog-js persists its own
@@ -125,18 +138,15 @@ export function initAnalytics(): void {
       return event;
     },
     loaded: (ph) => {
+      // Super properties, registered here rather than after init() so they
+      // land once persistence is ready. See BUILD_SUPER_PROPERTIES for why
+      // they also have to survive reset().
+      ph.register(BUILD_SUPER_PROPERTIES);
+
       // Session replay is on by default but respects the opt-out toggle
       // (Settings → Account → Privacy).
       if (!getAnalyticsOptOut()) ph.startSessionRecording();
     },
-  });
-
-  // Super properties on every event. Registered synchronously BEFORE the
-  // first capture — app_version segments by release, environment separates
-  // dev-server sessions from packaged usage in the same project.
-  posthog.register({
-    ...(APP_VERSION ? { app_version: APP_VERSION } : {}),
-    environment: IS_DEV ? 'development' : 'production',
   });
   // Fallback when no version was baked (e.g. a config drift): best-effort
   // async resolve from the main process.
@@ -170,7 +180,15 @@ export function identifyAnalyticsUser(
 
 /** Clear identity + start a fresh session. Call on logout. */
 export function resetAnalyticsUser(): void {
-  if (initialized) posthog.reset();
+  if (!initialized) return;
+  posthog.reset();
+  // reset() also clears SUPER PROPERTIES. Without re-registering, app_version
+  // and environment vanish from every event on a normal cold start: the
+  // Analytics component runs its identify effect before auth resolves, sees no
+  // user, and calls this. Diagnosed on the web port, where the same code
+  // dropped them — `$last_posthog_reset` was set and the properties absent,
+  // while a later-registered workspace_id survived.
+  posthog.register(BUILD_SUPER_PROPERTIES);
 }
 
 /** Capture a custom product-analytics event. */

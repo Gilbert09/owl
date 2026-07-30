@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { Analytics } from './components/Analytics';
 import { AuthProvider, useAuth } from './components/auth/AuthProvider';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { MainLayout } from './components/layout/MainLayout';
@@ -42,6 +43,8 @@ export default function App() {
         </Routes>
         {/* Outside <Routes> so a toast survives navigation. */}
         <Toaster />
+        {/* Inside AuthProvider — it identifies off the session. */}
+        <Analytics />
       </AuthProvider>
     </BrowserRouter>
   );

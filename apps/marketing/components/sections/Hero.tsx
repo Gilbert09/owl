@@ -7,7 +7,7 @@ import { DownloadButton } from "@/components/ui/DownloadButton";
 import { Badge } from "@/components/ui/badge";
 import { GridBackground } from "@/components/ui/GridBackground";
 import { ScreenshotPlaceholder } from "@/components/ui/ScreenshotPlaceholder";
-import { hero } from "@/lib/content";
+import { site, hero } from "@/lib/content";
 
 export function Hero() {
   return (
@@ -43,15 +43,25 @@ export function Hero() {
 
           <div className="mt-7 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <DownloadButton size="lg">{hero.primaryCta}</DownloadButton>
-            <a href="#how">
+            {/* The browser app is a peer of the download, not a footnote:
+                it is the whole product with nothing to install, and the
+                only option for anyone who can't or won't install one. */}
+            <a href={site.appUrl}>
               <Button variant="secondary" size="lg">
-                {hero.secondaryCta}
+                {hero.webCta}
                 <ArrowRight className="h-4 w-4" />
               </Button>
             </a>
           </div>
 
           <p className="mt-3 font-mono text-xs text-ink-400">{hero.microtrust}</p>
+
+          <a
+            href="#how"
+            className="mt-4 inline-block text-sm text-ink-500 underline underline-offset-4 hover:text-ink"
+          >
+            {hero.secondaryCta}
+          </a>
         </motion.div>
 
         {/* mt-10 (was 16): keep the top of the screenshot above the fold on a
