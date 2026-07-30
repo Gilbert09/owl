@@ -70,10 +70,18 @@ whatever the project's Root Directory says — marketing picked up the app's
 config and failed with *"Invalid vercel.json"*. One config at the root cannot
 serve two projects.
 
-The workspace build works from `apps/web` because the build command starts
-with `cd ../..`; `npm run build -w …` then resolves against the workspace root
-as normal. (`//` is also not a legal key in `vercel.json` — the CLI rejects
-unknown properties outright, so explanations go here, not in the JSON.)
+The workspace build works from `apps/web` because both the install and build
+commands start with `cd ../..`; `npm …  -w` then resolves against the
+workspace root as normal. (`//` is also not a legal key in `vercel.json` — the
+CLI rejects unknown properties outright, so explanations go here, not in the
+JSON.)
+
+The install is `--ignore-scripts`, matching what the backend `Dockerfile`
+already does. Without it `npm install` runs the root `prepare` → `husky`,
+which isn't present on a Vercel builder and exits 127, and drags in
+`apps/desktop`'s `ts-node` postinstall for a build that has nothing to do with
+Electron. Nothing in this build chain (tsc + vite, pure JS) needs an install
+script.
 
 Build-time `VITE_TALYN_*` values are Vercel project environment variables.
 `vite.config.ts` fails the build if any required one is missing, so a
