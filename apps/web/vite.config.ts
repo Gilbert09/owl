@@ -43,8 +43,26 @@ export default defineConfig(({ mode, command }) => {
     }
   }
 
+  // Identify the build without needing another env var set by hand. Vite's
+  // config runs in Node, so process.env is genuinely available HERE (unlike
+  // in browser code, which is the whole reason the app reads import.meta.env).
+  // Vercel sets VERCEL_GIT_COMMIT_SHA; Actions sets GITHUB_SHA.
+  const sha = (
+    process.env.VITE_TALYN_BUILD_SHA ??
+    process.env.VERCEL_GIT_COMMIT_SHA ??
+    process.env.GITHUB_SHA ??
+    env.VITE_TALYN_BUILD_SHA ??
+    'dev'
+  ).slice(0, 7);
+
   return {
     plugins: [react()],
+    define: {
+      // Feeds CLIENT_VERSION → X-Talyn-Client-Version → the backend's
+      // paywall gate. `web/<sha>` can never parse as an old desktop semver,
+      // so the fail-closed gate always enforces for this client.
+      'import.meta.env.VITE_TALYN_BUILD_SHA': JSON.stringify(sha),
+    },
     build: {
       outDir: 'dist',
       // Emitted for PostHog symbolication but never served — see deploy-web.yml.
