@@ -2,6 +2,20 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 77 — The external merge gate decays instead of needing a restart (2026-07-30)
+
+trunk.io was switched off for `posthog/posthog` and the queue kept submitting PRs to a merge system that no longer existed. The cause was one line of ranking in `repoMergeGate.ts`: `if (cached?.confirmed) return 'confirmed'` sat *above* the TTL check, so a gate learned from an observed 405/403 was sticky for the life of the process. `clearExternalMergeGate()` existed for exactly this case but was unreachable — it only fires after a **successful direct merge**, and a confirmed gate never attempts one (`decideCleanPath` routes straight to `submit_external`). The only cure was a Railway redeploy.
+
+**Every reading now expires and must re-earn itself from a fresh probe**, decaying one confidence level at a time: `confirmed` → (probe finds no rule) → `suspected` → (probe finds no rule) → `null`, with any observed refusal jumping straight back to `confirmed`. `PROBE_TTL_MS` / `CONFIRMED_TTL_MS` are 5min (down from a 1h TTL that `confirmed` ignored anyway); the submit-label cache keeps its own 1h constant, since repo labels are not what goes stale here.
+
+The step down to `suspected` rather than straight to `null` is load-bearing. The probe hits `/repos/{o}/{r}/rules/branches/{b}`, which reports **rulesets only** — a classic protected branch, or a repo whose rulesets the App can't read, gates merges while probing clean. Dropping to `null` on that evidence would resume doomed merges every window. `suspected` is the right landing spot: it lets the queue try exactly one direct merge, which either lands the PR (firing the clear path that was previously unreachable) or re-confirms the gate. A probe that *throws* never decays anything — a failed call is not evidence.
+
+Worst case is now ~10min to fully un-gate a branch with no restart, and usually faster: the first `suspected` evaluation merges and clears it outright.
+
+**Still manual after the gate clears**: entries already parked in `awaiting_external` via the `comment` door land in `blocked_manual` ("the external merge queue never picked up the submit command") once the pickup grace expires, and R5c only un-sticks an `external_gate` block when the provider is seen *actively holding* the PR — which a switched-off queue never will. Those need a re-queue (`SELECT * FROM merge_queue_entries WHERE status='awaiting_external' OR blocked_code='external_gate'`). **Related sharp edge, not fixed here**: door 1 of the submit ladder is the provider's instruction comment *on the PR*, and those comments outlive the queue — so a `suspected` gate on a repo with stale trunk comments can still post a dead `/trunk merge` instead of falling through to the merge.
+
+Tests: `externalMergeQueue.test.ts` gains a `gate decay` block on fake timers covering the full ladder, the still-gated hold, mid-decay re-confirmation, suspected→null on its own, and the failed-probe hold.
+
 ## Session 76 — Groundwork for a browser app (app.talyn.dev) + cross-platform desktop (2026-07-29)
 
 Scoping "what would it take to run Talyn in a browser" turned up a stronger reason to do it than the browser itself: **`publish.yml` ran on `macos-latest` only**, and marketing's download button resolved a `.dmg` and nothing else — so Windows and Linux users could not use Talyn at all. Four preparatory pushes; the `apps/web` fork itself is not started.

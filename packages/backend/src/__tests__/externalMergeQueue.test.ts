@@ -22,9 +22,11 @@ import {
   _resetMergeGateCache,
   _resetSubmitLabelCache,
   clearExternalMergeGate,
+  CONFIRMED_TTL_MS,
   getExternalMergeGate,
   getExternalQueueSubmitLabel,
   markExternalMergeGate,
+  PROBE_TTL_MS,
 } from '../services/repoMergeGate.js';
 import { submitToExternalQueue } from '../services/externalQueueSubmit.js';
 import * as autoMerge from '../services/githubAutoMerge.js';
@@ -293,18 +295,82 @@ describe('repoMergeGate', () => {
     expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBeNull();
   });
 
-  it('markExternalMergeGate confirms a gate stickily, without any probe', async () => {
+  it('markExternalMergeGate confirms a gate without any probe, and holds it for its TTL', async () => {
     markExternalMergeGate('ws', 'o', 'r', 'main');
     expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
     expect(rules).not.toHaveBeenCalled();
   });
 
-  it('a confirmed gate outranks a probe that says otherwise, until explicitly cleared', async () => {
+  it('a confirmed gate outranks a probe that says otherwise, within its TTL', async () => {
     markExternalMergeGate('ws', 'o', 'r', 'main');
     rules.mockResolvedValue([]); // ruleset relaxed / probe can't see it
     expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
     clearExternalMergeGate('ws', 'o', 'r', 'main');
     expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBeNull();
+  });
+
+  // The decay ladder. Before this, `confirmed` was sticky for the life of the
+  // process: when trunk.io was switched off on posthog/posthog the queue kept
+  // submitting PRs to a queue that no longer existed, and the only cure was a
+  // backend redeploy (a confirmed gate never attempts the merge whose success
+  // would clear it).
+  describe('gate decay — no restart required', () => {
+    beforeEach(() => vi.useFakeTimers());
+    afterEach(() => vi.useRealTimers());
+
+    const past = (ms: number) => vi.advanceTimersByTime(ms);
+
+    it('decays confirmed → suspected → null across probe windows once the rule is gone', async () => {
+      markExternalMergeGate('ws', 'o', 'r', 'main');
+      rules.mockResolvedValue([{ type: 'pull_request' }]); // ruleset relaxed
+
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
+      past(CONFIRMED_TTL_MS + 1);
+      // One level down, not straight to null — a false probe doesn't disprove a
+      // gate we watched GitHub enforce, but `suspected` still tries the merge.
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('suspected');
+      past(PROBE_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBeNull();
+      // Settled: no further probes needed within the window.
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBeNull();
+    });
+
+    it('keeps confirming while the rule is still on the branch', async () => {
+      markExternalMergeGate('ws', 'o', 'r', 'main');
+      rules.mockResolvedValue([{ type: 'update' }]);
+      past(CONFIRMED_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
+      past(PROBE_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
+    });
+
+    it('re-confirms immediately when a refusal is observed again mid-decay', async () => {
+      markExternalMergeGate('ws', 'o', 'r', 'main');
+      rules.mockResolvedValue([]);
+      past(CONFIRMED_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('suspected');
+      markExternalMergeGate('ws', 'o', 'r', 'main'); // the direct merge 405'd
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
+    });
+
+    it('a suspected gate decays to null on its own once the rule goes away', async () => {
+      rules.mockResolvedValue([{ type: 'update' }]);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('suspected');
+      rules.mockResolvedValue([]);
+      past(PROBE_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBeNull();
+    });
+
+    it('a failed probe never decays a gate we already hold, and is re-asked sooner', async () => {
+      markExternalMergeGate('ws', 'o', 'r', 'main');
+      rules.mockRejectedValue(new Error('Resource not accessible by integration'));
+      past(CONFIRMED_TTL_MS + 1);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('confirmed');
+      // Held on the shorter failure TTL, so the next real answer lands quickly.
+      past(60_000 + 1);
+      rules.mockResolvedValue([]);
+      expect(await getExternalMergeGate('ws', 'o', 'r', 'main')).toBe('suspected');
+    });
   });
 
   it('finds only known submit labels the repo actually defines, preferring the specific one', async () => {

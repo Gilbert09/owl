@@ -10,30 +10,64 @@
 // mergeQueue/decide.ts). This module answers "is there a gate?" with two
 // signals, deliberately ranked:
 //
-//   'confirmed' — learned from an observed 405 (markExternalMergeGate). Sticky
-//                 for the process: unambiguous, and the only signal that lets
-//                 the queue skip the direct merge entirely.
+//   'confirmed' — learned from an observed 405 (markExternalMergeGate). The only
+//                 signal that lets the queue skip the direct merge entirely.
 //   'suspected' — a branch-rules probe found an `update`/`creation` rule on the
-//                 base. Cheap (one REST call, cached 1h) and it makes the
-//                 evaluator go eager immediately, but it CANNOT see bypass
-//                 actors: a repo where Talyn's App *is* exempt looks identical.
-//                 So a suspected gate never skips the direct merge — the queue
-//                 still tries it once and lets the 405 (or the merge landing)
-//                 settle the question.
+//                 base. Cheap (one REST call) and it makes the evaluator go
+//                 eager immediately, but it CANNOT see bypass actors: a repo
+//                 where Talyn's App *is* exempt looks identical. So a suspected
+//                 gate never skips the direct merge — the queue still tries it
+//                 once and lets the 405 (or the merge landing) settle it.
+//
+// **Every gate decays.** `confirmed` used to be sticky for the life of the
+// process, which meant a branch whose ruleset was later relaxed (trunk.io was
+// switched off on posthog/posthog in July 2026) kept getting submitted to a
+// queue that no longer existed until someone redeployed the backend — the
+// clear path (clearExternalMergeGate on a successful merge) was unreachable,
+// because a confirmed gate never attempts the merge that would fire it. So a
+// gate now expires and must re-earn itself from a fresh probe, one confidence
+// level at a time:
+//
+//   confirmed --probe finds no rule--> suspected --probe finds no rule--> null
+//
+// and any observed refusal jumps straight back to `confirmed`. The step down to
+// `suspected` rather than straight to `null` matters because a false probe does
+// NOT prove there's no gate: this endpoint reports *rulesets*, so a classic
+// protected branch (or a repo whose rulesets the App can't read) gates merges
+// while probing clean. `suspected` is exactly the right landing spot for that —
+// it lets the queue try one direct merge and learn the truth, which either
+// lands the PR or re-confirms the gate.
 //
 // Peer of repoSigning.ts: same cache shape, same learn-from-failure discipline.
 
 import { TRUNK_SUBMIT_LABELS } from '@talyn/shared';
 import { githubService } from './github.js';
 
-const CACHE_TTL_MS = 60 * 60_000; // 1h — ruleset config changes rarely.
+/**
+ * How long a probe result is trusted. Short because the cost of being wrong is
+ * asymmetric and paid by the user: a stale "gated" reading parks every PR on a
+ * queue that may be gone, while a stale "not gated" reading costs one merge
+ * call that 405s and immediately corrects itself. One REST call per (repo,
+ * base) per window, on an endpoint that costs no GraphQL points.
+ */
+export const PROBE_TTL_MS = 5 * 60_000;
+/** A failed probe is re-asked sooner — it taught us nothing to hold onto. */
+const PROBE_FAILURE_TTL_MS = 60_000;
+/**
+ * How long an observed refusal holds before it must re-earn itself. Same window
+ * as a probe: a confirmed gate is better evidence, but it ages the same way.
+ */
+export const CONFIRMED_TTL_MS = 5 * 60_000;
+/** Submit labels are repo config that changes far more rarely than a ruleset. */
+const LABEL_CACHE_TTL_MS = 60 * 60_000;
 
 export type MergeGateConfidence = 'suspected' | 'confirmed';
 
 interface CacheEntry {
   gated: boolean;
-  at: number;
-  /** Learned from an observed protected-ref 405 — never re-probed back to false. */
+  /** Wall-clock ms after which this reading must be re-earned from a probe. */
+  expiresAt: number;
+  /** Learned from an observed protected-ref 405 / App refusal. */
   confirmed?: boolean;
 }
 
@@ -71,8 +105,10 @@ async function probe(
 
 /**
  * Is `baseBranch` on `owner/repo` governed by an external merge gate, and how
- * sure are we? `null` = no gate known. Cached ~1h; a probe failure reads as
- * "no gate" (the merge path's 405 handler still catches a real one).
+ * sure are we? `null` = no gate known. Every reading expires (see the decay
+ * ladder up top), so a relaxed ruleset heals itself within a couple of probe
+ * windows with no restart. A probe failure never downgrades what we already
+ * believe — the merge path's 405 handler is the safety net either way.
  */
 export async function getExternalMergeGate(
   workspaceId: string,
@@ -82,31 +118,53 @@ export async function getExternalMergeGate(
 ): Promise<MergeGateConfidence | null> {
   if (!baseBranch) return null;
   const key = cacheKey(workspaceId, owner, repo, baseBranch);
+  const now = Date.now();
   const cached = cache.get(key);
-  if (cached?.confirmed) return 'confirmed';
-  if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+  if (cached && now < cached.expiresAt) {
+    if (cached.confirmed) return 'confirmed';
     return cached.gated ? 'suspected' : null;
   }
   try {
     const gated = await probe(workspaceId, owner, repo, baseBranch);
-    cache.set(key, { gated, at: Date.now() });
-    return gated ? 'suspected' : null;
+    if (gated) {
+      // The rule that justifies the gate is still on the branch. A gate we'd
+      // confirmed keeps its confidence — nothing here contradicts it.
+      const confirmed = cached?.confirmed === true;
+      cache.set(key, { gated: true, expiresAt: now + PROBE_TTL_MS, confirmed });
+      return confirmed ? 'confirmed' : 'suspected';
+    }
+    if (cached?.confirmed) {
+      // One level down, not straight to null: the probe only sees rulesets, so
+      // "no rule" doesn't disprove a gate we watched GitHub enforce. As
+      // `suspected` the queue will try one direct merge, which either lands the
+      // PR (clearExternalMergeGate) or re-confirms the gate.
+      cache.set(key, { gated: true, expiresAt: now + PROBE_TTL_MS });
+      return 'suspected';
+    }
+    cache.set(key, { gated: false, expiresAt: now + PROBE_TTL_MS });
+    return null;
   } catch (err) {
-    // Permissions / transient — don't guess a gate into existence. Cache a
-    // short-lived negative so we retry in 5 minutes rather than every tick.
+    // Permissions / transient — don't guess a gate into existence, and don't
+    // decay one we already hold on the strength of a call that failed. Re-ask
+    // in a minute rather than every tick.
     console.warn(
       `[repoMergeGate] probe failed for ${owner}/${repo}@${baseBranch}:`,
       err instanceof Error ? err.message : err
     );
-    cache.set(key, { gated: false, at: Date.now() - CACHE_TTL_MS + 5 * 60_000 });
-    return null;
+    const held: CacheEntry = cached?.gated
+      ? { ...cached, expiresAt: now + PROBE_FAILURE_TTL_MS }
+      : { gated: false, expiresAt: now + PROBE_FAILURE_TTL_MS };
+    cache.set(key, held);
+    return held.gated ? (held.confirmed ? 'confirmed' : 'suspected') : null;
   }
 }
 
 /**
  * Record — from an observed "Cannot update this protected ref" 405 — that this
- * base branch is behind an external merge gate. Sticky: from here on the queue
- * submits to that system instead of burning a doomed merge call per evaluation.
+ * base branch is behind an external merge gate. For the next
+ * {@link CONFIRMED_TTL_MS} the queue submits to that system instead of burning
+ * a doomed merge call per evaluation; after that it re-probes and decays a
+ * level at a time, so a gate that goes away doesn't outlive the ruleset.
  */
 export function markExternalMergeGate(
   workspaceId: string,
@@ -117,7 +175,7 @@ export function markExternalMergeGate(
   if (!baseBranch) return;
   cache.set(cacheKey(workspaceId, owner, repo, baseBranch), {
     gated: true,
-    at: Date.now(),
+    expiresAt: Date.now() + CONFIRMED_TTL_MS,
     confirmed: true,
   });
 }
@@ -153,7 +211,7 @@ export async function getExternalQueueSubmitLabel(
 ): Promise<string | null> {
   const key = `${workspaceId}:${owner.toLowerCase()}/${repo.toLowerCase()}`;
   const cached = submitLabelCache.get(key);
-  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.label;
+  if (cached && Date.now() - cached.at < LABEL_CACHE_TTL_MS) return cached.label;
   try {
     const names = await githubService.listRepoLabelNames(workspaceId, owner, repo);
     const lower = new Map(names.map((n) => [n.trim().toLowerCase(), n]));
@@ -170,7 +228,7 @@ export async function getExternalQueueSubmitLabel(
       `[repoMergeGate] submit-label probe failed for ${owner}/${repo}:`,
       err instanceof Error ? err.message : err
     );
-    submitLabelCache.set(key, { label: null, at: Date.now() - CACHE_TTL_MS + 5 * 60_000 });
+    submitLabelCache.set(key, { label: null, at: Date.now() - LABEL_CACHE_TTL_MS + 5 * 60_000 });
     return null;
   }
 }
@@ -181,9 +239,9 @@ export function _resetSubmitLabelCache(): void {
 }
 
 /**
- * Clear a confirmed gate — used when a direct merge unexpectedly SUCCEEDS on a
- * branch we'd marked (the ruleset was relaxed, or we were wrong). Keeps the
- * sticky flag from outliving the config that justified it.
+ * Clear a gate outright — used when a direct merge unexpectedly SUCCEEDS on a
+ * branch we'd marked (the ruleset was relaxed, or we were wrong). Proof beats
+ * the decay ladder: a merge that landed settles the question in one step.
  */
 export function clearExternalMergeGate(
   workspaceId: string,
