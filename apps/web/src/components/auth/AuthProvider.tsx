@@ -14,6 +14,17 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 /** Where to send the user back after sign-in, stashed across the redirect. */
 const RETURN_TO_KEY = 'talyn:post-login-path';
+/**
+ * Marks that a sign-in is in flight across the OAuth redirect.
+ *
+ * The desktop can tell a fresh login from a restored session by watching its
+ * userId go null → set, because its OAuth happens in the system browser and
+ * the app never reloads. On web the redirect is a full page navigation, so
+ * that in-memory transition is destroyed — without this marker `logged_in`
+ * would never be captured at all. sessionStorage (not local) so it dies with
+ * the tab rather than mislabelling a later session restore.
+ */
+const PENDING_LOGIN_KEY = 'talyn:pending-login';
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -50,6 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (pathname !== '/login' && pathname !== '/auth/callback') {
       sessionStorage.setItem(RETURN_TO_KEY, pathname + search);
     }
+    sessionStorage.setItem(PENDING_LOGIN_KEY, '1');
 
     const { error } = await getSupabase().auth.signInWithOAuth({
       provider: 'github',
@@ -89,6 +101,17 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>');
   return ctx;
+}
+
+/**
+ * True exactly once, on the first identify after a sign-in this tab started.
+ * A restored session returns false, so `logged_in` counts logins rather than
+ * page loads.
+ */
+export function takePendingLogin(): boolean {
+  const pending = sessionStorage.getItem(PENDING_LOGIN_KEY) === '1';
+  if (pending) sessionStorage.removeItem(PENDING_LOGIN_KEY);
+  return pending;
 }
 
 export function takeReturnPath(): string | null {
