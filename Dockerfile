@@ -27,6 +27,7 @@ COPY packages/client/package.json ./packages/client/
 COPY packages/cli/package.json ./packages/cli/
 COPY packages/mcp-server/package.json ./packages/mcp-server/
 COPY apps/desktop/package.json ./apps/desktop/
+COPY apps/web/package.json ./apps/web/
 
 # Install everything. --ignore-scripts skips apps/desktop's electron
 # devtools postinstall (we don't ship the desktop binary here).
@@ -67,6 +68,7 @@ COPY --from=builder /app/packages/client/package.json ./packages/client/
 COPY --from=builder /app/packages/cli/package.json ./packages/cli/
 COPY --from=builder /app/packages/mcp-server/package.json ./packages/mcp-server/
 COPY --from=builder /app/apps/desktop/package.json ./apps/desktop/
+COPY --from=builder /app/apps/web/package.json ./apps/web/
 
 # Pre-built, pre-pruned node_modules. npm workspaces hoist most deps to
 # the root; the backend ends up with its own node_modules only for

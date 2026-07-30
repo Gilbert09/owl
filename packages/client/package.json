@@ -3,11 +3,19 @@
   "version": "0.1.0",
   "description": "Talyn backend client — REST + WebSocket transport shared by every front end",
   "private": true,
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/cjs/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/cjs/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    }
+  },
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.esm.json && node ./scripts/write-type-markers.mjs",
+    "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
     "@talyn/shared": "*"

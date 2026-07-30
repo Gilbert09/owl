@@ -1,0 +1,20 @@
+{
+  // ESM output, for the bundlers.
+  //
+  // Rollup (Vite) cannot statically see the re-exports that tsc's CommonJS
+  // output emits as `Object.defineProperty(exports, …)` getters — importing
+  // `configureApiClient` from the CJS build fails with "not exported by". The
+  // CJS build still has to exist for the desktop's jest suite, which runs
+  // ts-jest in CommonJS, so the package ships both and lets the `exports` map
+  // pick.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist/esm",
+    // Declarations are emitted once, by the CJS build, and `exports.types`
+    // points at them.
+    "declaration": false,
+    "declarationMap": false
+  }
+}

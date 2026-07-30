@@ -1,0 +1,78 @@
+name: Deploy web
+
+# Deploy the Talyn browser app (apps/web) to Vercel on every push to main that
+# touches it. Unlike apps/marketing this app IS an npm workspace member — it
+# depends on @talyn/client and @talyn/shared — so everything installs from the
+# ROOT lockfile, not a private one.
+#
+# NOTE ON SECRETS: VERCEL_PROJECT_ID_WEB is a DIFFERENT project from
+# marketing's. Do not point this at marketing's id or a push here will
+# overwrite www.talyn.dev.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'packages/client/**'
+      - 'packages/shared/**'
+      - '.github/workflows/deploy-web.yml'
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Skip on forks — no secrets there and nothing to deploy.
+    if: github.repository == 'Gilbert09/talyn'
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build workspace deps
+        run: |
+          npm run build -w @talyn/shared
+          npm run build -w @talyn/client
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p apps/web/tsconfig.json
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.repository == 'Gilbert09/talyn'
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_WEB }}
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Vercel CLI
+        run: npm i -g vercel
+
+      # Run from the repo root — the Vercel project's Root Directory
+      # (apps/web) is pulled with the project settings, same as marketing.
+      # TALYN_* build values live as Vercel project environment variables so
+      # `vercel build` sees them; vite.config.ts fails the build if any is
+      # missing, so a misconfigured project can't ship a white screen.
+      - name: Pull Vercel environment
+        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Build
+        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy
+        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Talyn</title>
+    <!--
+      The real CSP ships as a RESPONSE HEADER from vercel.json — only a header
+      is honoured for frame-ancestors, and headers can't be stripped by an
+      injected tag. This meta is the dev-server equivalent so a violation
+      shows up locally instead of at deploy time.
+
+      script-src 'self' with no CDN allowance works because lib/analytics
+      imports posthog-js/dist/module.full.no-external plus the inlined
+      recorder — a choice originally made for the desktop's file:// CSP that
+      pays off again here. 'unsafe-inline' on style-src is unavoidable (React
+      inline styles); img-src data: is required by the base64 provider logos.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.githubusercontent.com; font-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* https://*.supabase.co wss://*.supabase.co https://prod.talyn.dev wss://prod.talyn.dev https://us.i.posthog.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'"
+    />
+  </head>
+  <body class="bg-background text-foreground">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

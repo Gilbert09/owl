@@ -119,10 +119,11 @@ When in doubt, add a `.toSQL()` assertion (`expect(query.toSQL().sql).not.toCont
 ```
 fastowl/
 ├── apps/
-│   └── desktop/                  # Electron desktop app
-│       └── src/
-│           ├── main/             # main + preload
-│           └── renderer/         # React frontend (components, hooks, stores, lib)
+│   ├── desktop/                  # Electron desktop app
+│   │   └── src/
+│   │       ├── main/             # main + preload
+│   │       └── renderer/         # React frontend (components, hooks, stores, lib)
+│   └── web/                      # @talyn/web — browser app (app.talyn.dev), Vite + React 19
 ├── packages/
 │   ├── backend/                  # Express + WS server, DB, services
 │   ├── cli/                      # @talyn/cli — `fastowl` binary
@@ -141,6 +142,13 @@ fastowl/
 Inside `packages/backend/src/`: `db/` (migrations + Drizzle schema/client), `routes/` (REST), `services/` (`taskQueue`, `cloudProviders/` (registry + poller + posthog/claude providers), `posthogCode/` (client/executor/streamer/converter), `claudeCode/` (client/credentials/executor/poller/converter — Anthropic Managed Agents, poll-based transcript), `github`, `prMonitor`, `prCache`, `taskPullRequest`, `events`, `websocket`), `__tests__/` (Vitest).
 
 Inside `apps/desktop/src/renderer/components/`: `layout/`, `modals/`, `panels/`, `terminal/`, `widgets/`, `ui/` (shadcn).
+
+**`apps/web` is a deliberate FORK of the desktop renderer, not a shared build of it.** Tom's call: every UI feature gets built twice from here on, in exchange for the two clients being able to diverge freely. What is NOT forked is the backend contract — both import `@talyn/client` — because two copies of that drift into runtime bugs rather than type errors. Three things the fork must keep straight, all verified with a spike before the app existed:
+- **Env is `import.meta.env.VITE_*`, never `process.env.*`.** Vite's `define` entries are *"defined as globals during dev and statically replaced during build"*, so mirroring webpack's `EnvironmentPlugin` with a `define` of `process.env.TALYN_API_URL` serves the dev browser an unsubstituted expression that throws on the missing `process` global. `vite.config.ts` fails a production build outright when a required key is empty (a white screen on a public URL is much worse than the desktop's runtime throw) and refuses any value containing `service_role`.
+- **OAuth is a full-page redirect** — `signInWithOAuth` with no `skipBrowserRedirect`, plus `detectSessionInUrl: true`. The desktop's `openExternal(data.url)` fires after two `await`s, so its `window.open` fallback has lost user activation and Safari/Firefox block it, silently, on the sign-in screen.
+- **Never carry `migrateLegacyAuthFromLocalStorage` across.** On web the "bridge" IS localStorage, so its `setItem`-then-`removeItem` on the same key wipes the session every page load.
+
+`packages/client` ships **dual-format** (`dist/cjs` + `dist/esm`, picked by the `exports` map) because Rollup cannot statically see the re-exports `tsc`'s CommonJS output emits as `Object.defineProperty(exports, …)` getters — Vite fails with *"not exported by"* — while the desktop's jest suite still needs CJS. Don't collapse it to one format without checking both.
 
 **Browser-origin surface** (all inert until `app.talyn.dev` exists): `services/originPolicy.ts` is the one answer to "may this origin talk to us", shared by the REST CORS gate and the WS upgrade — **exact string match, never a pattern** (`ALLOWED_ORIGINS`), because a prefix/suffix rule is how `https://app.talyn.dev.evil.com` gets in. A rejected origin now denies by *omitting* the header (`cb(null, false)`) instead of throwing a 500, CORS is `credentials: false` (the API is Bearer-only, so CSRF-immunity is structural) with `maxAge: 86400` (the non-safelisted client-version header preflights every request). The `null`-origin concession for the packaged renderer's `file://` WS handshake is forgeable by any page and sits behind `TALYN_ALLOW_NULL_ORIGIN_WS` — **flip it to `0` the day anything moves to cookie auth**, or it becomes a live cross-site WebSocket hijack. `services/webApp.ts` owns `WEB_APP_URL`: read only from env, validated at boot, and `webAppUrl()` refuses any path that isn't single-slash-relative — it's the GitHub App callback's redirect target, and an open redirect there turns a login flow into a phishing hop. The callback ends per-client (browser → 302 home, desktop → close-this-tab page), decided by the Origin recorded server-side when the state was minted.
 

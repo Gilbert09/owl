@@ -40,6 +40,20 @@ jobs:
       - name: Build desktop app
         run: npm run build -w @talyn/desktop
 
+      # A browser bundle is OS-independent, so this doesn't need the 3-OS
+      # matrix — but it's cheap (~2s) and running it here keeps one gate
+      # rather than a second workflow. The env vars are the same publishable
+      # repo variables the desktop build uses; vite.config.ts refuses to build
+      # a production bundle without them, which is the point.
+      - name: Build web app
+        env:
+          VITE_TALYN_API_URL: https://prod.talyn.dev
+          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL }}
+          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY }}
+          VITE_TALYN_POSTHOG_KEY: ${{ vars.TALYN_POSTHOG_KEY }}
+          VITE_TALYN_BUILD_SHA: ${{ github.sha }}
+        run: npm run build -w @talyn/web
+
       - name: Typecheck
         run: npm run typecheck
 

@@ -1,0 +1,131 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* Talyn — warm light theme (paper + ink + clay), carried over from the
+     marketing site. Status colours (emerald/red/amber/blue) stay as-is. */
+  :root {
+    /* Content surfaces (background/popover) are the LIGHTER warm white; the
+       sidebar + panels (card) are the DARKER paper — matching the marketing
+       mock where the sidebar is paper and the content is white. */
+    --background: 40 43% 98%; /* content — warm white #fcfbf8 */
+    --foreground: 36 13% 12%; /* ink #23201b */
+    --card: 37 32% 93%; /* sidebar + panels — paper #f2ede3 (darker) */
+    --card-foreground: 36 13% 12%;
+    --popover: 40 44% 99%; /* menus — white, elevated */
+    --popover-foreground: 36 13% 12%;
+    --primary: 16 54% 49%; /* clay #c25e3a */
+    --primary-foreground: 40 40% 98%;
+    --secondary: 38 27% 90%;
+    --secondary-foreground: 36 13% 18%;
+    --muted: 38 27% 90%;
+    --muted-foreground: 36 9% 46%; /* ink-500 #7a7264 */
+    --accent: 38 27% 90%;
+    --accent-foreground: 36 13% 18%;
+    --destructive: 0 72% 51%; /* red #dc2626 */
+    --destructive-foreground: 0 0% 100%;
+    --border: 37 22% 85%; /* line #ddd4c6 */
+    --input: 37 22% 85%;
+    --ring: 16 54% 49%; /* clay focus ring */
+    --radius: 0.625rem;
+  }
+
+  /* Warm dark variant — warm-black surfaces with the same clay accent. The
+     sidebar/panels (card) sit DARKER than the content (background), mirroring
+     the light theme's layering. */
+  .dark {
+    --background: 32 16% 11%; /* content (lighter) */
+    --foreground: 40 33% 96%;
+    --card: 30 16% 8%; /* sidebar + panels (darker) */
+    --card-foreground: 40 33% 96%;
+    --popover: 32 15% 14%; /* menus — elevated lighter */
+    --popover-foreground: 40 33% 96%;
+    --primary: 18 58% 58%; /* clay-400 #cf7553 */
+    --primary-foreground: 32 18% 9%;
+    --secondary: 33 14% 17%;
+    --secondary-foreground: 40 33% 96%;
+    --muted: 33 14% 17%;
+    --muted-foreground: 38 15% 62%;
+    --accent: 33 14% 17%;
+    --accent-foreground: 40 33% 96%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 33 13% 18%;
+    --input: 33 13% 18%;
+    --ring: 18 58% 58%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings: "rlig" 1, "calt" 1, "ss01", "cv11";
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-muted-foreground/20 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-muted-foreground/40;
+}
+
+/* Remove focus outline globally, use ring instead */
+*:focus {
+  outline: none;
+}
+
+/* Startup screen — the booting owl. A sweeping "scan" bar and a hard-blinking
+   terminal caret give the loading state a techy, on-brand feel. */
+@keyframes owl-scan {
+  0% {
+    transform: translateX(-160%);
+  }
+  100% {
+    transform: translateX(360%);
+  }
+}
+
+@keyframes owl-caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.owl-scan-bar {
+  animation: owl-scan 1.6s ease-in-out infinite;
+}
+
+.owl-caret {
+  animation: owl-caret 1s steps(1) infinite;
+}
+
+.owl-glow {
+  filter: drop-shadow(0 0 14px hsl(var(--primary) / 0.35));
+}
+
+
+/* NOTE: the desktop App.css ends with .app-region-drag/.app-region-no-drag
+   (-webkit-app-region, macOS frameless title bar). Deliberately not copied —
+   they are inert in a browser, and the elements that used them are dropped
+   from the fork rather than left as dead vertical space. */
