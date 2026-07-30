@@ -815,6 +815,21 @@ type EventHandler<T = unknown> = (payload: T) => void;
 // How often the client pings the server to prove the socket is alive.
 // The backend replies to `{type:'ping'}` with `connection:status {pong}`.
 const HEARTBEAT_INTERVAL_MS = 25_000;
+/**
+ * How long a ping may go unanswered before the socket is considered dead.
+ *
+ * The server answers `{type:'ping'}` synchronously on receipt, so a healthy
+ * round trip is milliseconds — this is ~1000x that. It sits just under one
+ * heartbeat interval so a genuine miss is caught on the very next tick rather
+ * than the one after.
+ */
+const PONG_TIMEOUT_MS = 20_000;
+/**
+ * A tick arriving later than this multiple of the interval means the timer was
+ * throttled or frozen, not that the socket is slow — browsers clamp background
+ * timers to ~1/min and freeze them outright for a bfcached page.
+ */
+const THROTTLED_TICK_FACTOR = 1.5;
 // Backoff cap. We retry forever (a dev backend restart shouldn't leave the
 // list permanently frozen until app relaunch) but never wait longer than this.
 const MAX_RECONNECT_DELAY_MS = 30_000;
@@ -831,6 +846,10 @@ class WebSocketClient {
   // the next heartbeat tick fires while still awaiting, the socket is a
   // zombie (half-open after sleep / killed backend) and we force a reconnect.
   private awaitingPong = false;
+  /** When the outstanding ping was sent — wall clock, not tick count. */
+  private pingSentAt = 0;
+  /** When the previous heartbeat tick ran, to detect a throttled/frozen gap. */
+  private lastTickAt = 0;
   private lifecycleBound = false;
   private subscribedWorkspaces: Set<string> = new Set();
   // Admin Debug-panel owner filter, re-sent on (re)connect so the server keeps
@@ -1028,15 +1047,37 @@ class WebSocketClient {
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.awaitingPong = false;
+    this.lastTickAt = Date.now();
     this.heartbeatTimer = window.setInterval(() => {
+      const now = Date.now();
+      const sinceLastTick = now - this.lastTickAt;
+      this.lastTickAt = now;
       if (this.ws?.readyState !== WebSocket.OPEN) return;
+
+      // A tick that arrived far too late tells us the TIMER was suspended,
+      // not that the socket is unhealthy — so it must not be used as
+      // evidence either way. Re-ping and judge on the next one. Without
+      // this, returning to a backgrounded tab reliably killed a perfectly
+      // good socket and started reconnect churn: the old check simply read
+      // "a tick fired while awaitingPong" as proof of death.
+      if (sinceLastTick > HEARTBEAT_INTERVAL_MS * THROTTLED_TICK_FACTOR) {
+        this.awaitingPong = true;
+        this.pingSentAt = now;
+        this.send({ type: 'ping' });
+        return;
+      }
+
       if (this.awaitingPong) {
+        // Wall clock, not "one tick has passed".
+        if (now - this.pingSentAt < PONG_TIMEOUT_MS) return;
         console.warn('WebSocket heartbeat missed; reconnecting');
         this.awaitingPong = false;
         this.ws.close();
         return;
       }
+
       this.awaitingPong = true;
+      this.pingSentAt = now;
       this.send({ type: 'ping' });
     }, HEARTBEAT_INTERVAL_MS);
   }
@@ -1113,6 +1154,7 @@ class WebSocketClient {
     }
     this.startHeartbeat();
     this.awaitingPong = true;
+    this.pingSentAt = Date.now();
     this.send({ type: 'ping' });
   }
 }
