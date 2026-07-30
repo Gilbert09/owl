@@ -1,27 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-
-  "//": [
-    "Config for the APPLICATION project (app.talyn.dev, VERCEL_PROJECT_ID_APP).",
-    "",
-    "It lives at the REPO ROOT, not in apps/web, because Vercel reads",
-    "vercel.json from the project's Root Directory — and this project's Root",
-    "Directory must be the repo root so the build can run npm workspace",
-    "commands (@talyn/web depends on @talyn/shared and @talyn/client, which",
-    "have to be compiled first; `npm run build -w …` only works from the",
-    "workspace root).",
-    "",
-    "The marketing WEBSITE project is unaffected: its Root Directory is",
-    "apps/marketing, so it reads apps/marketing/vercel.json (which does not",
-    "exist) and never sees this file."
-  ],
-
-  "buildCommand": "npm run build -w @talyn/shared && npm run build -w @talyn/client && npm run build -w @talyn/web",
-  "outputDirectory": "apps/web/dist",
+  "buildCommand": "cd ../.. && npm run build -w @talyn/shared && npm run build -w @talyn/client && npm run build -w @talyn/web",
+  "outputDirectory": "dist",
   "framework": null,
-
   "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
-
   "headers": [
     {
       "source": "/assets/(.*)",

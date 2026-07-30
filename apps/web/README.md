@@ -60,12 +60,20 @@ app.talyn.dev, `VERCEL_PROJECT_ID_APP`. This directory is `apps/web` but ships
 to the **app** project, which reads backwards; the secret, not the folder, is
 what decides where a build lands.
 
-**The Vercel project's Root Directory must be the repo root**, not `apps/web`.
-The build has to run npm workspace commands (`@talyn/shared` and
-`@talyn/client` are compiled first), and those only work from the workspace
-root. That's also why `vercel.json` lives at the repo root — Vercel reads it
-from the project's Root Directory. Marketing is unaffected: its Root Directory
-is `apps/marketing`, so it never sees that file.
+**The Vercel project's Root Directory must be `apps/web`**, and `vercel.json`
+must live in that same directory.
+
+Do not move `vercel.json` to the repo root to make the workspace build work.
+That was tried and it **broke the marketing deploy**: both workflows invoke
+the Vercel CLI from the repo root, so the CLI reads a root `vercel.json`
+whatever the project's Root Directory says — marketing picked up the app's
+config and failed with *"Invalid vercel.json"*. One config at the root cannot
+serve two projects.
+
+The workspace build works from `apps/web` because the build command starts
+with `cd ../..`; `npm run build -w …` then resolves against the workspace root
+as normal. (`//` is also not a legal key in `vercel.json` — the CLI rejects
+unknown properties outright, so explanations go here, not in the JSON.)
 
 Build-time `VITE_TALYN_*` values are Vercel project environment variables.
 `vite.config.ts` fails the build if any required one is missing, so a
