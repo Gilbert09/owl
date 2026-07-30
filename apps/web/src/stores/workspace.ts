@@ -192,6 +192,14 @@ interface WorkspaceState {
   // startup (useSystemStatus) so Settings → Integrations renders instantly
   // instead of fetching on open. null = not yet checked.
   githubStatus: GitHubStatus | null;
+  /**
+   * Whether the backend answered our last status check.
+   *
+   * null = not determined yet. false means the request never reached it
+   * (offline, DNS, backend down) — which is NOT the same as the backend
+   * answering "GitHub isn't configured", and must not be rendered as such.
+   */
+  backendReachable: boolean | null;
   githubUser: GitHubUser | null;
   // GitHub App installations the connected user can access (one per account/org).
   // Preloaded by useSystemStatus and kept fresh on focus, so the global banner +
@@ -222,6 +230,7 @@ interface WorkspaceState {
   setOnboardingComplete: (done: boolean) => void;
   setJustOnboarded: (value: boolean) => void;
   setGitHubStatus: (status: GitHubStatus | null) => void;
+  setBackendReachable: (reachable: boolean | null) => void;
   setGitHubUser: (user: GitHubUser | null) => void;
   setGitHubInstallations: (installations: GitHubInstallation[] | null) => void;
   setPostHogStatus: (status: PostHogCodeStatus | null) => void;
@@ -285,6 +294,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   onboardingComplete: getInitialOnboardingComplete(),
   justOnboarded: false,
   githubStatus: null,
+  backendReachable: null,
   githubUser: null,
   githubInstallations: null,
   posthogStatus: null,
@@ -318,6 +328,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   setJustOnboarded: (justOnboarded) => set({ justOnboarded }),
 
   setGitHubStatus: (githubStatus) => set({ githubStatus }),
+  setBackendReachable: (backendReachable) => set({ backendReachable }),
 
   setGitHubUser: (githubUser) => set({ githubUser }),
 

@@ -1,8 +1,27 @@
 import React, { useState } from 'react';
-import { AlertTriangle, Github, Loader2, Plus, Settings } from 'lucide-react';
+import { AlertTriangle, Github, Loader2, Plus, Settings, WifiOff } from 'lucide-react';
 import { Button } from '../ui/button';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { openGithubAppFlow, uncoveredOwners, formatOwnerList } from '../../lib/githubInstall';
+
+/**
+ * A connectivity row. Deliberately styled apart from the amber warning rows:
+ * losing the network is transient and usually nothing the user did wrong, so
+ * it should read as informational rather than as a misconfiguration.
+ */
+function OfflineRow() {
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  return (
+    <div className="flex items-center gap-3 border-b border-border bg-muted px-4 py-2 text-sm text-muted-foreground">
+      <WifiOff className="h-4 w-4 shrink-0" />
+      <span className="min-w-0 flex-1">
+        {offline
+          ? "You're offline — Talyn will reconnect and refresh automatically."
+          : "Can't reach Talyn right now. Retrying — your data will refresh automatically."}
+      </span>
+    </div>
+  );
+}
 
 /** One warning row in the global banner. */
 function BannerRow({ message, action }: { message: string; action?: React.ReactNode }) {
@@ -22,8 +41,14 @@ function BannerRow({ message, action }: { message: string; action?: React.ReactN
  * extended: push more rows as other core services gain hard requirements.
  */
 export function SystemStatusBanner() {
-  const { currentWorkspaceId, githubStatus, githubInstallations, repositories, setActivePanel } =
-    useWorkspaceStore();
+  const {
+    currentWorkspaceId,
+    githubStatus,
+    githubInstallations,
+    repositories,
+    setActivePanel,
+    backendReachable,
+  } = useWorkspaceStore();
   const [connecting, setConnecting] = useState(false);
   const [installing, setInstalling] = useState(false);
 
@@ -54,6 +79,18 @@ export function SystemStatusBanner() {
   }
 
   const rows: React.ReactNode[] = [];
+
+  // Backend unreachable: say exactly that, and say nothing else. Every other
+  // row below describes remote state we could not read, so rendering them
+  // would be guessing — which is how a dropped connection used to surface as
+  // "GitHub OAuth isn't configured on the backend".
+  if (backendReachable === false) {
+    return (
+      <div className="shrink-0">
+        <OfflineRow />
+      </div>
+    );
+  }
 
   // GitHub — the core of the app. `githubStatus === null` means "not checked
   // yet", so we don't flash a banner before the first status load resolves.

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type GitHubStatus, type GitHubUser } from '../lib/api';
+import { ApiNetworkError, api, type GitHubStatus, type GitHubUser } from '../lib/api';
 
 /**
  * Tracks GitHub connection state for a workspace and detects OAuth
@@ -12,11 +12,14 @@ import { api, type GitHubStatus, type GitHubUser } from '../lib/api';
 export function useGithubConnection(workspaceId: string | null) {
   const [status, setStatus] = useState<GitHubStatus | null>(null);
   const [user, setUser] = useState<GitHubUser | null>(null);
+  /** null until the first attempt resolves; false when the backend is unreachable. */
+  const [reachable, setReachable] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     if (!workspaceId) return;
     try {
       const s = await api.github.getStatus(workspaceId);
+      setReachable(true);
       setStatus(s);
       if (s.connected) {
         try {
@@ -27,7 +30,17 @@ export function useGithubConnection(workspaceId: string | null) {
       } else {
         setUser(null);
       }
-    } catch {
+    } catch (err) {
+      // A transport failure means we never got an answer — it is NOT the
+      // backend telling us GitHub is unconfigured. Reporting it as
+      // `configured: false` is what produced the misleading "set
+      // GITHUB_CLIENT_ID" banner whenever the network dropped. Leave the last
+      // known status alone and report unreachability instead.
+      if (err instanceof ApiNetworkError) {
+        setReachable(false);
+        return;
+      }
+      setReachable(true);
       setStatus({ configured: false, connected: false });
     }
   }, [workspaceId]);
@@ -48,5 +61,5 @@ export function useGithubConnection(workspaceId: string | null) {
     };
   }, [refresh]);
 
-  return { status, user, refresh, setStatus, setUser };
+  return { status, user, reachable, refresh, setStatus, setUser };
 }
