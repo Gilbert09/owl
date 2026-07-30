@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './components/auth/AuthProvider';
+import { Toaster } from './components/ui/toaster';
 import { AuthCallback } from './routes/AuthCallback';
 import { Login } from './routes/Login';
 import { Shell } from './routes/Shell';
@@ -23,6 +24,8 @@ export default function App() {
           <Route path="/auth/callback" element={<AuthCallback />} />
           <Route path="/*" element={<RequireAuth />} />
         </Routes>
+        {/* Outside <Routes> so a toast survives navigation. */}
+        <Toaster />
       </AuthProvider>
     </BrowserRouter>
   );
