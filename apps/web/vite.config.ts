@@ -47,13 +47,19 @@ export default defineConfig(({ mode, command }) => {
   // config runs in Node, so process.env is genuinely available HERE (unlike
   // in browser code, which is the whole reason the app reads import.meta.env).
   // Vercel sets VERCEL_GIT_COMMIT_SHA; Actions sets GITHUB_SHA.
-  const sha = (
-    process.env.VITE_TALYN_BUILD_SHA ??
-    process.env.VERCEL_GIT_COMMIT_SHA ??
-    process.env.GITHUB_SHA ??
-    env.VITE_TALYN_BUILD_SHA ??
-    'dev'
-  ).slice(0, 7);
+  // `??` is wrong here: these arrive as EMPTY STRINGS rather than unset.
+  // `vercel build --prebuilt` runs after our own checkout, so Vercel injects
+  // VERCEL_GIT_COMMIT_SHA with no value — and `??` only falls through on
+  // null/undefined, so the version shipped as "web/" with no SHA at all.
+  const sha =
+    [
+      process.env.VITE_TALYN_BUILD_SHA,
+      process.env.VERCEL_GIT_COMMIT_SHA,
+      process.env.GITHUB_SHA,
+      env.VITE_TALYN_BUILD_SHA,
+    ]
+      .find((v) => typeof v === 'string' && v.trim() !== '')
+      ?.slice(0, 7) ?? 'dev';
 
   return {
     plugins: [react()],
