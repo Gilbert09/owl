@@ -2,6 +2,18 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 79 — The self-hosted fleet becomes reachable (2026-07-31)
+
+The `selfhosted` provider merged in #22 was **dead code**: `packages/backend/src/index.ts` registered only PostHog Code and Claude Code, so `getCloudProvider('selfhosted')` returned null and no dispatch path could reach it. It is now registered behind `FLEET_ENABLED`.
+
+**Unregistered is a stronger off than a runtime branch.** With the flag unset the provider is absent from the registry entirely — nothing behaves differently from before, and the failure mode of forgetting the flag is "the feature is missing", not "a task went somewhere unexpected". A workspace also needs fleet credentials configured before the provider accepts anything, so the flag alone changes nothing for any existing workspace. `fleetRegistration.test.ts` pins the gate, which is otherwise a single `if` in boot code that nothing covers — exactly the shape that gets dropped in a refactor and noticed in production.
+
+**The GitHub token wiring was already done** — #22 fetches it fresh per dispatch via `githubService.getAccessToken` and sends it in the run payload. It goes backend → fleetd only; the fleet's credential proxy injects it host-side and it never enters the microVM. Checked that `getAccessToken` is synchronous, because an un-awaited promise there would have serialized as `{}` and failed as an auth error rather than a type error.
+
+On the fleet side (`Gilbert09/talyn-fleet`), the credential proxy's `/ghapi` route had been attaching that token to **any** `api.github.com` path. Per-run socket isolation meant an agent could not reach another run's credentials, but it could spend its own on merging a PR, dispatching a workflow, editing repo settings, or installing a webhook or deploy key. It is now bounded twice — an allowlist of the endpoints the three task types need, and the repo the run was dispatched for — both checked before the credential is attached, so a refused call never spends the token.
+
+That is the sixth bug this project has had of one shape: **a check that passed every time anyone looked at it and was wrong anyway.** Teardown that could not detect a leaked VM, wedge detection that killed healthy runs, a deploy check verifying a previous generation's image. `talyn-fleet/docs/HANDOFF.md` now leads with that pattern, because the instruction it implies — write the test that proves your check can *fail* — is the most transferable thing the project has produced.
+
 ## Session 78 — The web app ships, and the analytics that were lying about it (2026-07-31)
 
 `apps/web` went from the Session 76 placeholder to **live at app.talyn.dev**: panels ported, Vercel project created, `deploy-app.yml` green. The Vercel secrets were renamed along the way — `*_WEB` is the marketing site, `*_APP` is the application — because the two had been sharing `VERCEL_PROJECT_ID` and a mis-sequenced rename would have deployed the app over www.talyn.dev.
