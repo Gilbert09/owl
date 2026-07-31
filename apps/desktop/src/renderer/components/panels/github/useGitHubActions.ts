@@ -144,6 +144,7 @@ export function useGitHubActions() {
         throw new Error(result.message || 'GitHub did not merge the pull request');
       }
       trackEvent('pr_merged', {
+        source: 'manual',
         repo: `${row.owner}/${row.repo}`,
         pr_number: row.number,
         blocking_reason: row.summary.blockingReason,

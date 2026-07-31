@@ -46,6 +46,7 @@ import {
   getAutoMergeCapability,
 } from '../githubAutoMerge.js';
 import { debugBus } from '../debugBus.js';
+import { captureWorkspaceEvent } from '../analytics.js';
 import { decide } from './decide.js';
 import { toLegacyPublicState, toLegacyStateBlob, toPublicMergeQueue } from './legacy.js';
 import { casTransition, rowToEntrySnapshot, type EntryRow } from './store.js';
@@ -867,6 +868,16 @@ async function verifyLiveThenMerge(ctx: ActionContext): Promise<ActionOutcome> {
     // The branch let us merge after all — drop any gate we'd recorded for it so
     // a relaxed ruleset doesn't leave the queue submitting forever.
     clearExternalMergeGate(ctx.pr.workspaceId, ctx.pr.owner, ctx.pr.repo, entry.baseBranch);
+    // Until now `pr_merged` was captured ONLY by the desktop/web merge button,
+    // so every merge the queue performed — the product's headline feature —
+    // was invisible in analytics and the dashboard read a near-flat zero.
+    // `source` splits the two paths; the manual button sends 'manual'.
+    captureWorkspaceEvent(ctx.pr.workspaceId, 'pr_merged', {
+      source: 'merge_queue',
+      repo: `${ctx.pr.owner}/${ctx.pr.repo}`,
+      pr_number: ctx.pr.number,
+      merge_method: entry.mergeMethod,
+    });
   }
   // The merging transition consumed one CAS version; the merge itself writes
   // no entry state (the aftermath rules do, next round).

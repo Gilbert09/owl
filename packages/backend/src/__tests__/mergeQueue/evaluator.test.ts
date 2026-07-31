@@ -71,6 +71,15 @@ const { mockGetGate, mockMarkGate, mockClearGate, mockSubmitLabel } = vi.hoisted
   mockClearGate: vi.fn(),
   mockSubmitLabel: vi.fn(),
 }));
+// Analytics: the queue captures `pr_merged` on a successful merge. Mocked so
+// nothing posts and the call is assertable.
+const { mockCaptureWorkspaceEvent } = vi.hoisted(() => ({
+  mockCaptureWorkspaceEvent: vi.fn(),
+}));
+vi.mock('../../services/analytics.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/analytics.js')>()),
+  captureWorkspaceEvent: mockCaptureWorkspaceEvent,
+}));
 vi.mock('../../services/repoMergeGate.js', () => ({
   getExternalMergeGate: mockGetGate,
   markExternalMergeGate: mockMarkGate,
@@ -313,6 +322,34 @@ describe('mergeQueue v2 pipeline', () => {
     const codes = (await eventsOf(db, entryId)).map((e) => e.code);
     expect(codes).toContain('merge_attempt');
     expect(codes).toContain('merged');
+  });
+
+  // Regression: `pr_merged` used to be captured ONLY by the desktop/web merge
+  // button, so every queue merge was invisible and the analytics tile read a
+  // near-flat zero while the queue was merging daily.
+  it('captures pr_merged so queue merges are not invisible to analytics', async () => {
+    await insertQueuedPr(db);
+
+    await evaluateGroupNow('repo1', 'main', 'test');
+
+    expect(mockCaptureWorkspaceEvent).toHaveBeenCalledWith(
+      expect.any(String),
+      'pr_merged',
+      expect.objectContaining({ source: 'merge_queue' })
+    );
+  });
+
+  it('does NOT capture pr_merged when GitHub declines the merge', async () => {
+    mergeSpy.mockResolvedValueOnce({ sha: '', merged: false, message: 'not merged' });
+    await insertQueuedPr(db);
+
+    await evaluateGroupNow('repo1', 'main', 'test');
+
+    expect(mockCaptureWorkspaceEvent).not.toHaveBeenCalledWith(
+      expect.any(String),
+      'pr_merged',
+      expect.anything()
+    );
   });
 
   it('does nothing while the v1 engine drives (dormant)', async () => {
