@@ -37,6 +37,10 @@ const APP_VERSION = process.env.TALYN_APP_VERSION || '';
 const BUILD_SUPER_PROPERTIES: Record<string, unknown> = {
   ...(APP_VERSION ? { app_version: APP_VERSION } : {}),
   environment: IS_DEV ? 'development' : 'production',
+  // Counterpart to the web app's `client: 'web'`. Without it a breakdown by
+  // client reads "web vs blank" rather than "web vs desktop", and every
+  // pre-existing event stays unattributed.
+  client: 'desktop',
 };
 
 let initialized = false;
