@@ -2,6 +2,24 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 78 — The web app ships, and the analytics that were lying about it (2026-07-31)
+
+`apps/web` went from the Session 76 placeholder to **live at app.talyn.dev**: panels ported, Vercel project created, `deploy-app.yml` green. The Vercel secrets were renamed along the way — `*_WEB` is the marketing site, `*_APP` is the application — because the two had been sharing `VERCEL_PROJECT_ID` and a mis-sequenced rename would have deployed the app over www.talyn.dev.
+
+Most of the session's bugs were things that compiled, typechecked, and passed tests while being **wrong in a browser**, which is the failure mode a fork invites:
+
+- **`usePanelUrlSync` raced itself.** Two effects, one commit, the same stale snapshot — clicking Merge Queue landed you on My PRs. Rewritten as a single effect that compares against `last.current` to decide *which side* changed. (The mutation test for this hung vitest in an infinite loop, which is its own kind of proof.)
+- **`window.open` after an `await` is a popup block.** The GitHub App install flow now opens the tab synchronously and assigns `location.href` once the URL resolves.
+- **`??` doesn't fall through on empty strings**, so a blank env var shipped `app_version: "web/"`. Build SHA resolution now filters on non-blank.
+- **Dev CSP was missing `127.0.0.1`** (it had `localhost`), so the app hung on the boot screen behind an opaque "Failed to fetch".
+- **The nightly was broken by the `@talyn/client` split** — `nightly.yml` and `publish.yml` built `@talyn/shared` but not the new package. The nightly caught it; the next stable release would have hit the same wall.
+
+**PostHog identity needed web-specific handling, twice.** The desktop detects a fresh login by watching `userId` go null → set, which works because its OAuth runs in the system browser and the app never reloads. On web the redirect is a full page navigation that destroys exactly that transition, so `logged_in` was never captured at all — now a `talyn:pending-login` sessionStorage marker survives the hop. Separately, the identify effect also runs before auth resolves; treating "not known yet" as "signed out" meant `posthog.reset()` on **every page load**, churning the anonymous `distinct_id` and starting a fresh replay session each time.
+
+**"We can't reach the backend" was being reported as "GitHub OAuth isn't configured."** `useGithubConnection` caught every failure — including *there is no network* — and recorded `{ configured: false }`, which the banner renders as an alarming, actionable-looking, and entirely wrong instruction to go set `GITHUB_CLIENT_ID`. A transport failure means we never got an answer; it is not an answer. `ApiNetworkError` now short-circuits to an offline banner and the GitHub rows are suppressed rather than shown stale. Fixed on both clients.
+
+**The merge queue never told analytics it merged anything.** Chasing "the PR merged tile shows nothing merged, which isn't true" found the tile was reporting its event honestly — `pr_merged` fired *only* from the desktop/web merge button, so every merge the queue performed, the product's headline feature, was invisible. 19 events in 30 days, most days literally `0`. The executor now captures it, both paths carry a `source` property (`merge_queue` | `manual`), and the tile that hid the remaining signal under a shared linear axis (merges 1–8/day against fix runs up to 99/day) got dual Y axes. Desktop events also now carry `client: 'desktop'` to match the web app's `client: 'web'` — without it a client breakdown reads "web vs blank" and every desktop event stays unattributed.
+
 ## Session 77 — The external merge gate decays instead of needing a restart (2026-07-30)
 
 trunk.io was switched off for `posthog/posthog` and the queue kept submitting PRs to a merge system that no longer existed. The cause was one line of ranking in `repoMergeGate.ts`: `if (cached?.confirmed) return 'confirmed'` sat *above* the TTL check, so a gate learned from an observed 405/403 was sticky for the life of the process. `clearExternalMergeGate()` existed for exactly this case but was unreachable — it only fires after a **successful direct merge**, and a confirmed gate never attempts one (`decideCleanPath` routes straight to `submit_external`). The only cure was a Railway redeploy.
