@@ -874,13 +874,36 @@ export interface PostHogCodeTaskMetadata {
 export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'claude_code';
 
 /**
+ * A provider id as it may actually arrive at runtime — including one this build
+ * has never heard of.
+ *
+ * `CloudProviderType` is the closed set of providers *this* build knows how to
+ * register, and it should stay closed: a `Record<CloudProviderType, ...>` that
+ * stops compiling when a provider is added is a useful reminder to add its
+ * label and logo. But the desktop app is a released Electron binary, so users
+ * run old versions against a newer backend indefinitely. Anything that *reads*
+ * a provider id off the wire — task metadata, an environment row, an API
+ * response — must therefore accept a string it does not recognise and degrade,
+ * rather than treat it as absent.
+ *
+ * The `(string & {})` intersection is the standard trick for "any string, but
+ * keep autocompleting the known ones".
+ */
+// eslint-disable-next-line @typescript-eslint/ban-types
+export type AnyCloudProviderType = CloudProviderType | (string & {});
+
+/**
  * Neutral, provider-agnostic cloud-run metadata stored on
  * `task.metadata.cloudTask`. Supersedes the legacy `posthog*` fields; a
  * read-through helper ({@link readCloudTaskMeta}) maps old tasks forward.
  */
 export interface CloudTaskMetadata {
-  /** Which provider owns this task. */
-  provider: CloudProviderType;
+  /**
+   * Which provider owns this task. Deliberately the permissive type: this is
+   * deserialised from a JSON blob written by whichever backend version was
+   * running at the time, so it may name a provider this build does not know.
+   */
+  provider: AnyCloudProviderType;
   /** Remote task id on the provider. */
   remoteTaskId: string;
   /** Remote run id, once a run has started. */
@@ -903,14 +926,21 @@ export interface CloudTaskMetadata {
 export function readCloudTaskProvider(task: {
   provider?: string;
   metadata?: Record<string, unknown> | null;
-}): CloudProviderType | null {
-  const KNOWN: CloudProviderType[] = ['posthog_code', 'codex_cloud', 'claude_code'];
-  if (task.provider && KNOWN.includes(task.provider as CloudProviderType)) {
-    return task.provider as CloudProviderType;
+}): AnyCloudProviderType | null {
+  // Any non-empty string is a provider id. This used to filter through a
+  // hand-maintained allowlist, which meant a provider added to the union but
+  // not to that array — or, worse, a provider from a newer backend arriving at
+  // an older client — silently resolved to null, and the task then rendered as
+  // if it had no cloud run at all. Null must mean "no cloud run", not "a cloud
+  // run I have not been taught about".
+  if (typeof task.provider === 'string' && task.provider.trim()) {
+    return task.provider;
   }
   const meta = task.metadata ?? {};
   const cloud = meta.cloudTask as CloudTaskMetadata | undefined;
-  if (cloud?.provider && KNOWN.includes(cloud.provider)) return cloud.provider;
+  if (typeof cloud?.provider === 'string' && cloud.provider.trim()) {
+    return cloud.provider;
+  }
   if (typeof meta.posthogTaskId === 'string' && meta.posthogTaskId) {
     return 'posthog_code';
   }
