@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Eye } from 'lucide-react';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
-import type { TaskStatus, CloudProviderType } from '@talyn/shared';
+import type { TaskStatus, AnyCloudProviderType } from '@talyn/shared';
 import { taskCloudProvider } from '../../../lib/providerMeta';
 import { GitHubPageShell } from './GitHubPageShell';
 import { PRTable, reviewRequestSearchText } from './prTableShared';
@@ -35,7 +35,7 @@ export function ReviewsPanel() {
   }, [tasks]);
 
   const taskProviderById = useMemo(() => {
-    const m = new Map<string, CloudProviderType | null>();
+    const m = new Map<string, AnyCloudProviderType | null>();
     for (const t of tasks) m.set(t.id, taskCloudProvider(t, environments));
     return m;
   }, [tasks, environments]);

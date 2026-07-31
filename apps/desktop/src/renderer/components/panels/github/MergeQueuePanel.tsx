@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { GitMerge, ListOrdered, Zap } from 'lucide-react';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
-import type { TaskStatus, CloudProviderType, MergeQueueMode, Workspace } from '@talyn/shared';
+import type { TaskStatus, AnyCloudProviderType, MergeQueueMode, Workspace } from '@talyn/shared';
 import { taskCloudProvider } from '../../../lib/providerMeta';
 import { api, type PRRow } from '../../../lib/api';
 import { cn } from '../../../lib/utils';
@@ -122,7 +122,7 @@ export function MergeQueuePanel() {
   }, [tasks]);
 
   const taskProviderById = useMemo(() => {
-    const m = new Map<string, CloudProviderType | null>();
+    const m = new Map<string, AnyCloudProviderType | null>();
     for (const t of tasks) m.set(t.id, taskCloudProvider(t, environments));
     return m;
   }, [tasks, environments]);

@@ -22,7 +22,7 @@ import { copyRich, prMarkdownLink } from '../../../lib/prClipboard';
 import type { StackMeta } from './stacks';
 import {
   type TaskStatus,
-  type CloudProviderType,
+  type AnyCloudProviderType,
   type SkillSummary,
   externalQueueProviderLabel,
   externalQueueStateLabel,
@@ -80,7 +80,7 @@ interface PRTableProps {
   /** Live status of each linked task, keyed by task id. */
   taskStatusById: Map<string, TaskStatus>;
   /** Cloud provider of each linked task, keyed by task id (null until dispatched). */
-  taskProviderById?: Map<string, CloudProviderType | null>;
+  taskProviderById?: Map<string, AnyCloudProviderType | null>;
   variant: PRTableVariant;
   viewerLogin: string | null;
   /** Stacked-PR placement per row id (My PRs only) — drives indent + accent. */
@@ -205,7 +205,7 @@ function PRTableRow({
   /** Live status of the row's linked task, if any is loaded. */
   taskStatus?: TaskStatus;
   /** Cloud provider of the row's linked task, if known. */
-  taskProvider?: CloudProviderType | null;
+  taskProvider?: AnyCloudProviderType | null;
 }) {
   const summary = row.summary;
   const updatedTooltip = new Date(summary.updatedAt || row.lastPolledAt).toLocaleString();

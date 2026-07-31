@@ -135,6 +135,11 @@ class CloudTaskPoller {
         this.throttle.pruneTo(new Set(rows.map((r) => r.workspaceId)));
 
         const now = Date.now();
+        // Deduplicates the warning below to one line per unknown provider per
+        // tick, so a backlog of tasks on one unregistered provider cannot
+        // flood the log every poll interval.
+        const unregistered = new Set<string>();
+
         for (const row of rows) {
           // Skip every task in a rate-limited workspace until its cooldown
           // expires — one 429 shouldn't re-fire a request per sibling task.
@@ -146,7 +151,23 @@ class CloudTaskPoller {
           const metadata = (row.metadata as Record<string, unknown> | null) ?? {};
           const providerType = readCloudTaskProvider({ metadata });
           const provider = getCloudProvider(providerType);
-          if (!provider) continue;
+          if (!provider) {
+            // No registered provider for this id. The task cannot be
+            // reconciled by this process and will sit in_progress until
+            // something else moves it, so say so once per provider per tick
+            // rather than skipping in silence — a task stuck forever with no
+            // log line is close to undiagnosable. Reasons this happens: a
+            // provider gated off by an env flag, or a task written by a newer
+            // deploy that knows a provider this one does not.
+            if (providerType && !unregistered.has(providerType)) {
+              unregistered.add(providerType);
+              console.warn(
+                `[cloudPoller] no provider registered for "${providerType}" (task ${row.id}); ` +
+                  'leaving it in progress'
+              );
+            }
+            continue;
+          }
 
           const taskRow: CloudTaskRow = {
             id: row.id,

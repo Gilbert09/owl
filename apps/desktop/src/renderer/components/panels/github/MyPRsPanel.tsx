@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { GitPullRequest } from 'lucide-react';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
-import type { TaskStatus, CloudProviderType } from '@talyn/shared';
+import type { TaskStatus, AnyCloudProviderType } from '@talyn/shared';
 import { taskCloudProvider } from '../../../lib/providerMeta';
 import { cn } from '../../../lib/utils';
 import { GitHubPageShell } from './GitHubPageShell';
@@ -52,7 +52,7 @@ export function MyPRsPanel() {
   }, [tasks]);
 
   const taskProviderById = useMemo(() => {
-    const m = new Map<string, CloudProviderType | null>();
+    const m = new Map<string, AnyCloudProviderType | null>();
     for (const t of tasks) m.set(t.id, taskCloudProvider(t, environments));
     return m;
   }, [tasks, environments]);
