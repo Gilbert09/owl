@@ -106,8 +106,14 @@ jobs:
             console.log('Building nightly', p.version);
           "
 
-      - name: Build shared package
-        run: npm run build -w @talyn/shared
+      - name: Build workspace packages
+        # @talyn/client too, not just shared — apps/desktop's renderer imports
+        # it from dist, so webpack fails with "Can't resolve '@talyn/client'"
+        # without this. Adding the package updated test.yml and deploy-app.yml
+        # but not the release workflows, which broke the nightly.
+        run: |
+          npm run build -w @talyn/shared
+          npm run build -w @talyn/client
 
       - name: Build desktop app
         # These are baked into the renderer bundle at build time by webpack's
@@ -214,8 +220,14 @@ jobs:
             console.log('Building nightly', p.version);
           "
 
-      - name: Build shared package
-        run: npm run build -w @talyn/shared
+      - name: Build workspace packages
+        # @talyn/client too, not just shared — apps/desktop's renderer imports
+        # it from dist, so webpack fails with "Can't resolve '@talyn/client'"
+        # without this. Adding the package updated test.yml and deploy-app.yml
+        # but not the release workflows, which broke the nightly.
+        run: |
+          npm run build -w @talyn/shared
+          npm run build -w @talyn/client
 
       - name: Build desktop app
         env:

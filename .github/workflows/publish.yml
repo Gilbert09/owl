@@ -108,9 +108,11 @@ jobs:
             console.log('Building release', p.version);
           "
 
-      - name: Build shared package
+      - name: Build workspace packages
+        # @talyn/client too — the desktop renderer imports it from dist.
         run: |
           npm run build -w @talyn/shared
+          npm run build -w @talyn/client
 
       - name: Build desktop app
         # Baked into the renderer bundle by webpack at build time — must be on
@@ -227,8 +229,14 @@ jobs:
             console.log('Building release', p.version);
           "
 
-      - name: Build shared package
-        run: npm run build -w @talyn/shared
+      - name: Build workspace packages
+        # @talyn/client too, not just shared — apps/desktop's renderer imports
+        # it from dist, so webpack fails with "Can't resolve '@talyn/client'"
+        # without this. Adding the package updated test.yml and deploy-app.yml
+        # but not the release workflows, which broke the nightly.
+        run: |
+          npm run build -w @talyn/shared
+          npm run build -w @talyn/client
 
       - name: Build desktop app
         env:
