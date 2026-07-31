@@ -4,6 +4,7 @@ import {
   POSTHOG_LOGO,
   CLAUDE_LOGO,
   CODEX_LOGO,
+  SELFHOSTED_LOGO,
   GENERIC_PROVIDER_LOGO,
 } from '../assets/providers/logos';
 
@@ -34,6 +35,7 @@ export const PROVIDER_META: Record<CloudProviderType, ProviderMeta> = {
   posthog_code: { label: 'PostHog Code', src: POSTHOG_LOGO },
   claude_code: { label: 'Claude Code', src: CLAUDE_LOGO },
   codex_cloud: { label: 'Codex Cloud', src: CODEX_LOGO },
+  selfhosted: { label: 'Self-hosted', src: SELFHOSTED_LOGO },
 };
 
 /** `some_new_provider` -> `Some New Provider`. */

@@ -20,3 +20,18 @@ export const GENERIC_PROVIDER_LOGO =
       '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.2 9.2 4.5 4.5 0 0 0 6.5 19z"/>' +
       '</svg>',
   );
+
+/**
+ * Self-hosted fleet — a server rack rather than a vendor logo, because there is
+ * no vendor: the run happens on hardware we own.
+ */
+export const SELFHOSTED_LOGO =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="%235b8def" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      '<rect x="3" y="4" width="18" height="6" rx="1.5"/>' +
+      '<rect x="3" y="14" width="18" height="6" rx="1.5"/>' +
+      '<path d="M7 7h.01M7 17h.01"/>' +
+      '</svg>',
+  );
