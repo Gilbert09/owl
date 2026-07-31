@@ -871,7 +871,7 @@ export interface PostHogCodeTaskMetadata {
  * run and reconciles status/transcript back. `posthog_code` is live today;
  * the other two are planned drop-ins (see docs/CLOUD_PROVIDERS.md).
  */
-export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'claude_code';
+export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'claude_code' | 'selfhosted';
 
 /**
  * A provider id as it may actually arrive at runtime — including one this build
