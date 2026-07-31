@@ -335,6 +335,32 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // excludes them).
   if (entry.status === 'merged' || entry.status === 'removed') return d.done('advance');
 
+  // R0b — the external provider says it merged the PR. Terminal, and it has to
+  // be honoured HERE rather than left to R0, because R0 keys on Talyn's OWN pr
+  // row, which lags an external merge. In that lag the PR is the worst possible
+  // shape to fall through on: its head branch is deleted, so GitHub answers
+  // mergeable/UNKNOWN, which reads as a settled blocker — `stillSubmitted()` is
+  // true (merged is not an ejection), so the awaiting_external branch declines
+  // to short-circuit and remediation fires a PAID fix run. Every eager
+  // evaluation of a gated group did it again: PostHog/posthog#75985 burned 10+
+  // cloud runs, each concluding "this PR is already merged".
+  //
+  // `merged` is in neither isExternalQueueEjected nor isExternalQueueHolding —
+  // it is the one provider state with no branch of its own, which is exactly
+  // how it fell through every guard.
+  const extMerged = externalQueueOf(pr, ctx);
+  if (extMerged && extMerged.state === 'merged') {
+    d.transition('merged', {
+      set: { externalSubmitVia: null, externalSubmittedAt: null, externalState: 'merged' },
+      event: {
+        code: 'external_queue_merged',
+        message: `${externalQueueProviderLabel(extMerged.provider)} merged this PR.`,
+        detail: { evidence: extMerged.evidence, source: extMerged.source },
+      },
+    });
+    return d.done('advance');
+  }
+
   // R1 — merge aftermath: this evaluation's own merge attempt already ran.
   // Handled before everything else because the entry is mid-flow. The submit
   // aftermath comes first: a submit that fell back to the direct merge clears

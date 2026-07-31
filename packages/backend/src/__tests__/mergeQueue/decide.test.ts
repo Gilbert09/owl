@@ -1359,13 +1359,55 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(d.verdict).toBe('advance');
     });
 
+    // PostHog/posthog#75985: trunk merged the PR, so its head branch was
+    // deleted and GitHub started answering mergeable/UNKNOWN. `merged` is in
+    // neither isExternalQueueEjected nor isExternalQueueHolding, so it matched
+    // no branch: stillSubmitted() was true (not an ejection), the
+    // awaiting_external short-circuit needs !hasSettledBlocker and UNKNOWN IS
+    // one, and remediation fired a paid fix run. Gated groups evaluate eagerly,
+    // so it did it again on every webhook — 10+ cloud runs, each concluding
+    // "this PR is already merged".
+    it('is TERMINAL when the provider merged the PR — never fires a fix run', () => {
+      const mergedAndDeleted = trunkPr(
+        'trunk-merged',
+        { mergeStateStatus: 'UNKNOWN' },
+        { mergeable: 'UNKNOWN', blockingReason: 'blocked' }
+      );
+      const d = decide(
+        commented(longAgo),
+        mergedAndDeleted,
+        ctx({ externalGate: 'confirmed', externalQueue: observed('merged', 'merged successfully') })
+      );
+      expect(lastTransition(d)?.to).toBe('merged');
+      expect(fixRun(d)).toBeUndefined();
+      expect(kinds(d)).not.toContain('submit_external');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('stays terminal even when Talyn\'s own PR row still reads open', () => {
+      // The lag that made R0 useless here: our row says open, the provider
+      // says merged. The provider is right.
+      const d = decide(
+        entry({ status: 'queued' }),
+        trunkPr('trunk-merged', { state: 'open', mergeStateStatus: 'UNKNOWN' }, { mergeable: 'UNKNOWN' }),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('merged') })
+      );
+      expect(lastTransition(d)?.to).toBe('merged');
+      expect(fixRun(d)).toBeUndefined();
+    });
+
     it('outranks a stale label the provider has moved past', () => {
+      // The label still says testing; the comment says merged. The comment
+      // wins — and since merged is terminal, it closes the entry out rather
+      // than merely recording the newer state.
       const d = decide(
         submitted({ externalState: 'testing' }),
         trunkPr('trunk-testing'),
         ctx({ externalGate: 'confirmed', externalQueue: observed('merged') })
       );
-      expect(recorded(d)).toBe('merged');
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('merged');
+      expect(t.set?.externalState).toBe('merged');
     });
 
     it('blocks only on the provider SAYING it has no submission, past the grace window', () => {
