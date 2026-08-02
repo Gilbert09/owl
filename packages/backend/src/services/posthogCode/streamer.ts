@@ -1,8 +1,6 @@
-import { eq } from 'drizzle-orm';
 import type { AgentEvent } from '@talyn/shared';
-import { getDbClient } from '../../db/client.js';
-import { tasks as tasksTable } from '../../db/schema.js';
 import { emitTaskEvent } from '../websocket.js';
+import { PERSIST_INTERVAL_MS, writeTranscript } from '../cloudProviders/transcriptStore.js';
 import { getPostHogCodeClient } from './credentials.js';
 import { AcpConverter, type AcpLogEntry, type AgentEventInput } from './acpConverter.js';
 import type { PostHogCodeClient } from './client.js';
@@ -37,8 +35,6 @@ import type { PostHogCodeClient } from './client.js';
  * durable snapshot, so a longer window costs nothing perceptible. The
  * stream-end tail and `flushNow()` cover anything still buffered at the end.
  */
-const PERSIST_INTERVAL_MS = 45_000;
-const TRANSCRIPT_MAX_EVENTS = 2000;
 const MAX_RECONNECTS = 5;
 const RECONNECT_DELAY_MS = 1500;
 // A live run's SSE closes between bursts; we reconnect-to-tail until this
@@ -383,24 +379,12 @@ class PostHogCodeStreamer {
     if (stream.unpersisted === 0) return;
     stream.unpersisted = 0;
     stream.lastPersistAt = Date.now();
-
-    let transcript = stream.transcript;
-    if (transcript.length > TRANSCRIPT_MAX_EVENTS) {
-      const head = transcript.slice(0, 100);
-      const tail = transcript.slice(transcript.length - (TRANSCRIPT_MAX_EVENTS - 101));
-      const marker: AgentEvent = {
-        seq: -1,
-        type: 'system',
-        subtype: 'truncated',
-        dropped: transcript.length - (head.length + tail.length),
-      };
-      transcript = [...head, marker, ...tail];
-    }
-
-    await getDbClient()
-      .update(tasksTable)
-      .set({ transcript: transcript as unknown as object, updatedAt: new Date() })
-      .where(eq(tasksTable.id, stream.taskId));
+    // Truncation and the write itself are shared; the debounce is NOT. This
+    // streamer counts unpersisted appends against a wall clock, because it
+    // owns a long-lived accumulator and knows exactly what is dirty. The two
+    // pollers rebuild or re-read and compare counts instead. Same interval,
+    // different question, so only the half that is genuinely identical moves.
+    await writeTranscript(stream.taskId, stream.transcript);
   }
 }
 
