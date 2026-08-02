@@ -10,7 +10,7 @@ import { linkTaskToPullRequest } from '../prCache.js';
 import { clearWatched } from '../cloudProviders/taskWatch.js';
 import type { CloudTaskRow } from '../cloudProviders/types.js';
 import { getSelfHostedClient } from './credentials.js';
-import type { FleetEvent, FleetRun } from './client.js';
+import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 
 const TRANSCRIPT_MAX_EVENTS = 2000;
 const PERSIST_INTERVAL_MS = 45_000;
@@ -51,6 +51,8 @@ export function taskStatusForFleetRun(status: string | undefined): TaskStatus {
 class SelfHostedPoller {
   /** taskId → highest fleet `seq` already emitted over WS + persisted. */
   private cursor = new Map<string, number>();
+  /** taskId → the live SSE follow, when one is open. */
+  private follows = new Map<string, AbortController>();
   /** taskId → transcript accumulated this process lifetime. */
   private transcripts = new Map<string, AgentEvent[]>();
   private persisted = new Map<string, number>();
@@ -75,6 +77,14 @@ class SelfHostedPoller {
     // host-side and serves events past a cursor, so we never refetch the whole
     // transcript. That keeps a long run's egress flat rather than quadratic.
     await this.syncTranscript(row, client, runId, terminal);
+
+    // For a task somebody is actually watching, also open a live stream. The
+    // poll above still runs and is still what finalises the task — this only
+    // shortens the latency from "up to one poll interval" to "as fast as the
+    // guest emits". If the stream never opens or dies mid-run, nothing breaks:
+    // the poll is holding the same cursor.
+    if (row.watched && !terminal) this.ensureFollow(row, client, runId);
+    if (terminal) this.stopFollow(row.id);
 
     const prUrl = run.prUrl ?? cloud.prUrl ?? null;
     await patchTaskMetadata(row.id, (existing) => {
@@ -119,16 +129,12 @@ class SelfHostedPoller {
       return;
     }
 
+    // The fleet's seq is authoritative and monotonic; reuse it rather than
+    // re-indexing, so a transcript survives a backend restart mid-run with its
+    // numbering intact. `ingest` also drops anything the live stream already
+    // delivered, which is what lets both run at once.
+    this.ingest(row, fetched);
     const transcript = this.transcripts.get(row.id) ?? [];
-    for (const ev of fetched) {
-      // The fleet's seq is authoritative and monotonic; reuse it rather than
-      // re-indexing, so a transcript survives a backend restart mid-run with
-      // its numbering intact.
-      transcript.push({ ...(ev.event as object), seq: ev.seq } as AgentEvent);
-      this.cursor.set(row.id, Math.max(this.cursor.get(row.id) ?? 0, ev.seq));
-      emitTaskEvent(row.workspaceId, row.id, transcript[transcript.length - 1]);
-    }
-    this.transcripts.set(row.id, transcript);
 
     const now = Date.now();
     if (
@@ -166,8 +172,76 @@ class SelfHostedPoller {
       .where(eq(tasksTable.id, taskId));
   }
 
+  /**
+   * Open a live transcript stream, if one is not already running.
+   *
+   * Deliberately fire-and-forget. The stream is an optimisation over the poll,
+   * so awaiting it here would make the reconcile tick block on a connection
+   * that is designed to stay open for the life of the run.
+   */
+  private ensureFollow(
+    row: CloudTaskRow,
+    client: { followEvents: FleetClient['followEvents'] },
+    runId: string,
+  ): void {
+    if (this.follows.has(row.id)) return;
+    const abort = new AbortController();
+    this.follows.set(row.id, abort);
+
+    void (async () => {
+      try {
+        const after = this.cursor.get(row.id) ?? 0;
+        for await (const frame of client.followEvents(runId, after, abort.signal)) {
+          this.ingest(row, frame.events);
+          if (frame.terminal) break;
+        }
+      } catch (err) {
+        // Never surface this. A dropped stream is a latency regression, not a
+        // failed run, and the poll underneath is unaffected — treating it as an
+        // error would turn a slow transcript into a failed task.
+        if (!abort.signal.aborted) {
+          console.warn(
+            `[selfhosted] transcript stream for ${row.id.slice(0, 8)} ended:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
+      } finally {
+        // Only clear if this is still the current stream: a stopStreaming that
+        // raced a reconnect would otherwise delete somebody else's controller.
+        if (this.follows.get(row.id) === abort) this.follows.delete(row.id);
+      }
+    })();
+  }
+
+  private stopFollow(taskId: string): void {
+    this.follows.get(taskId)?.abort();
+    this.follows.delete(taskId);
+  }
+
+  /**
+   * Append events and emit them, skipping anything already seen.
+   *
+   * Shared by the poll and the stream, which is what makes running both at once
+   * safe: the fleet's `seq` is authoritative and monotonic, so whichever gets a
+   * given event first wins and the other drops it. Without this the two would
+   * double-emit every event to the desktop.
+   */
+  private ingest(row: CloudTaskRow, events: FleetEvent[]): void {
+    const transcript = this.transcripts.get(row.id) ?? [];
+    let advanced = false;
+    for (const ev of events) {
+      if (ev.seq <= (this.cursor.get(row.id) ?? 0)) continue;
+      transcript.push({ ...(ev.event as object), seq: ev.seq } as AgentEvent);
+      this.cursor.set(row.id, ev.seq);
+      emitTaskEvent(row.workspaceId, row.id, transcript[transcript.length - 1]);
+      advanced = true;
+    }
+    if (advanced) this.transcripts.set(row.id, transcript);
+  }
+
   /** Drop the in-memory cursors for a task (stop/delete). */
   stopStreaming(taskId: string): void {
+    this.stopFollow(taskId);
     this.cursor.delete(taskId);
     this.transcripts.delete(taskId);
     this.persisted.delete(taskId);
