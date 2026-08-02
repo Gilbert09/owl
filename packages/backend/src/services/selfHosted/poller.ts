@@ -8,28 +8,15 @@ import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus, emitTaskUpdate, emitTaskEvent } from '../websocket.js';
 import { linkTaskToPullRequest } from '../prCache.js';
 import { clearWatched } from '../cloudProviders/taskWatch.js';
+import { TranscriptCursors } from '../cloudProviders/transcriptStore.js';
 import type { CloudTaskRow } from '../cloudProviders/types.js';
 import { getSelfHostedClient } from './credentials.js';
 import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 
-const TRANSCRIPT_MAX_EVENTS = 2000;
-const PERSIST_INTERVAL_MS = 45_000;
-
-/**
- * Decide whether to rewrite the transcript blob this tick. Skip when the DB is
- * already current, or when the debounce window hasn't elapsed — unless `force`
- * (a terminal tick) demands a final flush. Pure so the truth table is testable.
- */
-export function shouldPersistTranscript(opts: {
-  length: number;
-  persistedCount: number;
-  lastPersistAt: number;
-  now: number;
-  force: boolean;
-}): boolean {
-  if (opts.length === opts.persistedCount) return false;
-  return opts.force || opts.now - opts.lastPersistAt >= PERSIST_INTERVAL_MS;
-}
+// Re-exported, not redeclared. This module and claudeCode/poller.ts each had a
+// byte-identical copy of the predicate and the two constants behind it; a
+// second definition of one rule is how they drift.
+export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
 
 /** A fleet run is terminal exactly when the fleet says so — it owns the
  *  lifecycle and reports one of three end states. */
@@ -55,8 +42,8 @@ class SelfHostedPoller {
   private follows = new Map<string, AbortController>();
   /** taskId → transcript accumulated this process lifetime. */
   private transcripts = new Map<string, AgentEvent[]>();
-  private persisted = new Map<string, number>();
-  private lastPersistAt = new Map<string, number>();
+  /** Emission + persistence bookkeeping, shared with every other provider. */
+  private cursors = new TranscriptCursors();
 
   /** Entry point the generic cloud poller calls via the provider seam. */
   async reconcileTask(row: CloudTaskRow): Promise<void> {
@@ -134,42 +121,7 @@ class SelfHostedPoller {
     // numbering intact. `ingest` also drops anything the live stream already
     // delivered, which is what lets both run at once.
     this.ingest(row, fetched);
-    const transcript = this.transcripts.get(row.id) ?? [];
-
-    const now = Date.now();
-    if (
-      !shouldPersistTranscript({
-        length: transcript.length,
-        persistedCount: this.persisted.get(row.id) ?? 0,
-        lastPersistAt: this.lastPersistAt.get(row.id) ?? 0,
-        now,
-        force,
-      })
-    ) {
-      return;
-    }
-    this.lastPersistAt.set(row.id, now);
-    this.persisted.set(row.id, transcript.length);
-    await this.persist(row.id, transcript);
-  }
-
-  private async persist(taskId: string, full: AgentEvent[]): Promise<void> {
-    let transcript = full;
-    if (transcript.length > TRANSCRIPT_MAX_EVENTS) {
-      const head = transcript.slice(0, 100);
-      const tail = transcript.slice(transcript.length - (TRANSCRIPT_MAX_EVENTS - 101));
-      const marker: AgentEvent = {
-        seq: -1,
-        type: 'system',
-        subtype: 'truncated',
-        dropped: transcript.length - (head.length + tail.length),
-      } as AgentEvent;
-      transcript = [...head, marker, ...tail];
-    }
-    await getDbClient()
-      .update(tasksTable)
-      .set({ transcript: transcript as unknown as object, updatedAt: new Date() })
-      .where(eq(tasksTable.id, taskId));
+    await this.cursors.persistIfDue(row.id, this.transcripts.get(row.id) ?? [], { force });
   }
 
   /**
@@ -244,8 +196,7 @@ class SelfHostedPoller {
     this.stopFollow(taskId);
     this.cursor.delete(taskId);
     this.transcripts.delete(taskId);
-    this.persisted.delete(taskId);
-    this.lastPersistAt.delete(taskId);
+    this.cursors.forget(taskId);
   }
 
   private async linkPr(

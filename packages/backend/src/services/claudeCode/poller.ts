@@ -13,9 +13,10 @@ import {
 } from '../../db/schema.js';
 import { captureWorkspaceEvent } from '../analytics.js';
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
-import { emitTaskStatus, emitTaskUpdate, emitTaskEvent } from '../websocket.js';
+import { emitTaskStatus, emitTaskUpdate } from '../websocket.js';
 import { linkTaskToPullRequest } from '../prCache.js';
 import { clearWatched } from '../cloudProviders/taskWatch.js';
+import { TranscriptCursors } from '../cloudProviders/transcriptStore.js';
 import type { CloudTaskRow } from '../cloudProviders/types.js';
 import { getClaudeCodeClient } from './credentials.js';
 import {
@@ -25,33 +26,10 @@ import {
   type ManagedAgentEvent,
 } from './converter.js';
 
-const TRANSCRIPT_MAX_EVENTS = 2000;
-
-/**
- * Each persist REWRITES the whole transcript jsonb array (full re-TOAST + WAL +
- * dead tuple), so while a watched run streams we debounce the DB write to at
- * most once per window — a big saving on the Supabase disk-IO budget. Events
- * still emit to the UI live every tick regardless; only the durable snapshot
- * lags. A terminal tick forces an immediate final flush.
- */
-const PERSIST_INTERVAL_MS = 45_000;
-
-/**
- * Decide whether to rewrite the transcript blob this tick. Skip when the DB is
- * already current (`length === persistedCount`), or when the debounce window
- * hasn't elapsed — unless `force` (a terminal tick) demands a final flush.
- * Pure so the debounce truth table is unit-testable.
- */
-export function shouldPersistTranscript(opts: {
-  length: number;
-  persistedCount: number;
-  lastPersistAt: number;
-  now: number;
-  force: boolean;
-}): boolean {
-  if (opts.length === opts.persistedCount) return false;
-  return opts.force || opts.now - opts.lastPersistAt >= PERSIST_INTERVAL_MS;
-}
+// Re-exported, not redeclared. This module and selfHosted/poller.ts each
+// carried a byte-identical copy of the predicate, both constants, and the
+// truncation below; a second definition of one rule is how they drift.
+export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
 
 /** The stop reasons we treat as "still working" rather than terminal. The
  *  vendor resumes a `pause_turn` (a long turn paused server-side) on its own. */
@@ -97,15 +75,8 @@ export function isManagedRunSuccess(stopType: string | null, hasPr: boolean): bo
  * the full job each tick.
  */
 class ClaudeCodePoller {
-  /** taskId → count of transcript events already emitted over WS (in-memory
-   *  cursor; avoids re-emitting an unchanged transcript each tick). */
-  private emitted = new Map<string, number>();
-  /** taskId → count of transcript events already persisted to the DB. Trails
-   *  {@link emitted} because the durable write is debounced (PERSIST_INTERVAL_MS)
-   *  while WS emits stay live — so a poll can advance `emitted` without a write. */
-  private persisted = new Map<string, number>();
-  /** taskId → last DB persist time (ms) for the debounce. */
-  private lastPersistAt = new Map<string, number>();
+  /** Emission + persistence bookkeeping, shared with every other provider. */
+  private cursors = new TranscriptCursors();
 
   /** Entry point the generic cloud poller calls via the provider wrapper. */
   async reconcileTask(row: CloudTaskRow): Promise<void> {
@@ -212,54 +183,15 @@ class ClaudeCodePoller {
     const transcript: AgentEvent[] = inputs.map((input, i) => ({ ...input, seq: i }) as AgentEvent);
 
     // Live path: emit anything past the WS cursor every tick, cheaply.
-    const emittedCount = this.emitted.get(taskId) ?? 0;
-    if (transcript.length > emittedCount) {
-      for (let i = emittedCount; i < transcript.length; i += 1) {
-        emitTaskEvent(workspaceId, taskId, transcript[i]);
-      }
-      this.emitted.set(taskId, transcript.length);
-    }
-
+    this.cursors.emitNew(taskId, workspaceId, transcript);
     // Durable path: skip the full-array rewrite when the DB is already current,
     // or when the debounce window hasn't elapsed (unless forced at terminal).
-    const now = Date.now();
-    const persist = shouldPersistTranscript({
-      length: transcript.length,
-      persistedCount: this.persisted.get(taskId) ?? 0,
-      lastPersistAt: this.lastPersistAt.get(taskId) ?? 0,
-      now,
-      force,
-    });
-    if (!persist) return;
-    this.lastPersistAt.set(taskId, now);
-    this.persisted.set(taskId, transcript.length);
-    await this.persist(taskId, transcript);
-  }
-
-  private async persist(taskId: string, full: AgentEvent[]): Promise<void> {
-    let transcript = full;
-    if (transcript.length > TRANSCRIPT_MAX_EVENTS) {
-      const head = transcript.slice(0, 100);
-      const tail = transcript.slice(transcript.length - (TRANSCRIPT_MAX_EVENTS - 101));
-      const marker: AgentEvent = {
-        seq: -1,
-        type: 'system',
-        subtype: 'truncated',
-        dropped: transcript.length - (head.length + tail.length),
-      } as AgentEvent;
-      transcript = [...head, marker, ...tail];
-    }
-    await getDbClient()
-      .update(tasksTable)
-      .set({ transcript: transcript as unknown as object, updatedAt: new Date() })
-      .where(eq(tasksTable.id, taskId));
+    await this.cursors.persistIfDue(taskId, transcript, { force });
   }
 
   /** Drop the in-memory transcript cursors for a task (stop/delete). */
   stopStreaming(taskId: string): void {
-    this.emitted.delete(taskId);
-    this.persisted.delete(taskId);
-    this.lastPersistAt.delete(taskId);
+    this.cursors.forget(taskId);
   }
 
   private async linkPr(
@@ -315,9 +247,7 @@ class ClaudeCodePoller {
     status: TaskStatus,
     result: TaskResult,
   ): Promise<void> {
-    this.emitted.delete(taskId);
-    this.persisted.delete(taskId);
-    this.lastPersistAt.delete(taskId);
+    this.cursors.forget(taskId);
     clearWatched(taskId);
     const now = new Date();
     await getDbClient()
