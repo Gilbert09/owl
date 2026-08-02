@@ -18,6 +18,7 @@ import {
   environments as environmentsTable,
 } from '../db/schema.js';
 import { getCloudProvider } from './cloudProviders/registry.js';
+import { fleetRefusalReason, workspaceMayUseFleet } from './cloudProviders/fleetAccess.js';
 import { createCloudTask } from './taskCreate.js';
 
 /** Task statuses that mean a run is still working the PR. */
@@ -82,20 +83,47 @@ export interface ResolvedCloudEnv {
  * qualify.
  */
 export async function resolveCloudEnv(workspaceId: string): Promise<ResolvedCloudEnv | null> {
+  return (await resolveCloudEnvChain(workspaceId))[0] ?? null;
+}
+
+/**
+ * Every provider this workspace could dispatch to, in preference order.
+ *
+ * The fail-back list of §10.7. `resolveCloudEnv` is the head of it and stays
+ * the answer for callers that just want somewhere to send a task; the task
+ * queue walks the whole chain, so a **capacity** refusal from the first choice
+ * moves to the second rather than failing the user's work (§11.6). That is the
+ * property that lets the self-hosted fleet be smaller than peak demand — a full
+ * box degrades to a hosted provider instead of to an error.
+ *
+ * `selfhosted` is reachable only by being pinned as the workspace's
+ * `defaultCloudProvider`, never from the standard order, and it is dropped from
+ * the chain entirely when the workspace is not on the fleet allow-list. Falling
+ * through is deliberate: a workspace that pinned the fleet and is not allowed
+ * to use it should get its task run somewhere, not fail.
+ */
+export async function resolveCloudEnvChain(workspaceId: string): Promise<ResolvedCloudEnv[]> {
   const pinned = await defaultCloudProvider(workspaceId);
   const order: CloudProviderType[] =
     pinned && pinned !== 'ask'
       ? [pinned, ...CLOUD_PROVIDER_ORDER.filter((t) => t !== pinned)]
       : CLOUD_PROVIDER_ORDER;
 
+  const chain: ResolvedCloudEnv[] = [];
   for (const type of order) {
     const provider = getCloudProvider(type);
     if (!provider) continue;
+    if (type === 'selfhosted' && !(await workspaceMayUseFleet(workspaceId))) {
+      console.warn(
+        `[cloudEnv] workspace ${workspaceId.slice(0, 8)} prefers the fleet but ${fleetRefusalReason()}; skipping it`,
+      );
+      continue;
+    }
     if (!(await provider.hasCredentials(workspaceId))) continue;
     const envId = await envIdForType(workspaceId, type);
-    if (envId) return { envId, provider: type };
+    if (envId) chain.push({ envId, provider: type });
   }
-  return null;
+  return chain;
 }
 
 /** Env-id-only convenience over {@link resolveCloudEnv}. */

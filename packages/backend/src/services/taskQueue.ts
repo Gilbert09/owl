@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type {
+  CloudProviderType,
   Environment,
   EnvironmentConfig,
   Task,
@@ -10,7 +11,7 @@ import { guardCrossReplica } from './advisoryLock.js';
 import { captureWorkspaceEvent } from './analytics.js';
 import { getCloudProvider } from './cloudProviders/registry.js';
 import { fleetRefusalReason, workspaceMayUseFleet } from './cloudProviders/fleetAccess.js';
-import { resolveCloudEnvId } from './prCloudFix.js';
+import { resolveCloudEnvChain, resolveCloudEnvId } from './prCloudFix.js';
 import { rowToTask, taskColumnsNoTranscript } from './taskSerialize.js';
 import { patchTaskMetadata } from './taskMetadataMutex.js';
 import { TickGuard } from './tickGuard.js';
@@ -212,49 +213,87 @@ class TaskQueueService extends EventEmitter {
   }
 
   private async dispatchTask(task: Task): Promise<void> {
-    const env = await this.resolveCloudEnv(task);
-    if (!env) {
-      // resolveCloudEnv already tried the workspace's configured provider,
-      // so reaching here means the workspace has NO connected cloud
-      // provider at all — nothing can run it. Leave it queued (visible,
-      // not lost) until a provider is connected.
+    // The workspace's fail-back list (§10.7). A task already pinned to an env
+    // stays there — re-resolving one somebody deliberately assigned would move
+    // work they placed on purpose.
+    const chain = task.assignedEnvironmentId
+      ? await this.pinnedChain(task)
+      : await resolveCloudEnvChain(task.workspaceId);
+
+    if (chain.length === 0) {
+      // No connected cloud provider at all — nothing can run it. Leave it
+      // queued (visible, not lost) until one is connected.
       console.warn(
         `[TaskQueue] task "${task.title}" has no connected cloud provider; skipping`
       );
       return;
     }
 
-    const provider = getCloudProvider(env.type);
-    if (!provider) {
-      console.warn(
-        `[TaskQueue] no provider registered for env type "${env.type}"; skipping "${task.title}"`
+    // Walk the chain. A CAPACITY refusal moves to the next provider; anything
+    // else is terminal for this task and stops here. That distinction is the
+    // whole point: "the fleet is full" and "this repo does not exist" both
+    // arrive as a failed dispatch, and only one of them is worth retrying
+    // somewhere else.
+    let lastError = 'no provider accepted this task';
+    let lastType: string | undefined;
+    for (let i = 0; i < chain.length; i++) {
+      const link = chain[i]!;
+      const env = await this.loadCloudEnv(link.envId);
+      if (!env) continue;
+
+      const provider = getCloudProvider(env.type);
+      if (!provider) {
+        console.warn(
+          `[TaskQueue] no provider registered for env type "${env.type}"; skipping "${task.title}"`
+        );
+        continue;
+      }
+
+      // Defence in depth. resolveCloudEnvChain already drops the fleet for a
+      // workspace that may not use it, and the credential route refuses to
+      // store fleet credentials for one — this catches a task pinned to a fleet
+      // env before either existed.
+      if (provider.type === 'selfhosted' && !(await workspaceMayUseFleet(task.workspaceId))) {
+        lastError = fleetRefusalReason();
+        lastType = env.type;
+        console.warn(`[TaskQueue] refusing to dispatch "${task.title}" to the fleet: ${lastError}`);
+        continue;
+      }
+
+      // Record where the task actually went, so reconcile and the poller look
+      // at the provider that ran it rather than the one that was preferred.
+      if (task.assignedEnvironmentId !== env.id) {
+        await this.db
+          .update(tasksTable)
+          .set({ assignedEnvironmentId: env.id, updatedAt: new Date() })
+          .where(eq(tasksTable.id, task.id));
+      }
+
+      console.log(
+        `[TaskQueue] Dispatching task "${task.title}" to ${provider.displayName}`
       );
-      return;
-    }
-
-    // The self-hosted fleet is allowlisted by the workspace owner's email.
-    // Enforced HERE, at the point of work, rather than by filtering the list
-    // the desktop renders: this codebase has already paid for a gate that only
-    // existed in the client (services/billing/clientGate.ts), which the CLI,
-    // the MCP server and plain curl all walked past silently. Anything that
-    // reaches dispatch has to pass, whatever asked for it.
-    if (provider.type === 'selfhosted' && !(await workspaceMayUseFleet(task.workspaceId))) {
-      const reason = fleetRefusalReason();
-      console.warn(`[TaskQueue] refusing to dispatch "${task.title}" to the fleet: ${reason}`);
-      // A terminal dispatch failure, not a capacity one: no amount of waiting
-      // puts this workspace on the allowlist, so failing it back to another
-      // provider (§11.6) would be the wrong shape too. Say so and stop.
-      await this.recordDispatchFailure(task, reason, env.type);
-      return;
-    }
-
-    console.log(
-      `[TaskQueue] Dispatching task "${task.title}" to ${provider.displayName}`
-    );
-    const result = await provider.dispatch(task, env);
-    if (!result.ok) {
-      await this.recordDispatchFailure(task, result.error, env.type);
-    } else {
+      const result = await provider.dispatch(task, env);
+      if (!result.ok) {
+        lastError = result.error;
+        lastType = env.type;
+        const next = chain[i + 1];
+        if (result.capacity && next) {
+          console.warn(
+            `[TaskQueue] ${provider.displayName} has no capacity for "${task.title}" ` +
+              `(${result.error}); falling back to ${next.provider}`
+          );
+          captureWorkspaceEvent(task.workspaceId, 'task_dispatch_failed_over', {
+            task_id: task.id,
+            from_provider: env.type,
+            to_provider: next.provider,
+            reason: result.error,
+          });
+          continue;
+        }
+        // Terminal, or capacity with nowhere left to go.
+        await this.recordDispatchFailure(task, result.error, env.type);
+        return;
+      }
       // Stamp when the remote run started so finalize can report the
       // actual run duration (vs total time incl. queueing) — and clear the
       // retry bookkeeping so a later re-queue starts a fresh attempt budget.
@@ -273,7 +312,29 @@ class TaskQueueService extends EventEmitter {
         priority: task.priority,
         duration_queued_ms: Date.now() - new Date(task.createdAt).getTime(),
       });
+      return;
     }
+
+    // Every link refused. Record against the last one tried, which is the most
+    // informative: the earlier ones were capacity refusals we deliberately
+    // routed around.
+    await this.recordDispatchFailure(task, lastError, lastType);
+  }
+
+  /** The single-link chain for a task somebody pinned to a specific env. */
+  private async pinnedChain(task: Task): Promise<{ envId: string; provider: CloudProviderType }[]> {
+    const env = await this.loadCloudEnv(task.assignedEnvironmentId!);
+    return env ? [{ envId: env.id, provider: env.type as CloudProviderType }] : [];
+  }
+
+  /** Load one env marker by id. */
+  private async loadCloudEnv(envId: string): Promise<Environment | null> {
+    const rows = await this.db
+      .select(CLOUD_ENV_COLUMNS)
+      .from(environmentsTable)
+      .where(eq(environmentsTable.id, envId))
+      .limit(1);
+    return rows[0] ? rowToCloudEnv(rows[0]) : null;
   }
 
   /**
