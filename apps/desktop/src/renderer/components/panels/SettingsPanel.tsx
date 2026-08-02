@@ -1065,7 +1065,12 @@ function SelfHostedFleetCard() {
       blurb="Run tasks on your own Firecracker fleet. Each task gets its own microVM; the GitHub token is injected host-side and never enters the VM."
       connectedBlurb="Cloud tasks run in microVMs on your own hardware and open PRs via this workspace's GitHub connection."
       fields={[
-        { key: 'fleetEndpoint', label: 'Fleet API URL', placeholder: 'http://10.0.0.2:8080' },
+        {
+          key: 'fleetEndpoint',
+          label: 'Fleet API URL (optional)',
+          placeholder: 'blank \u2014 use whichever host is least loaded',
+          optional: true,
+        },
         { key: 'fleetToken', label: 'Fleet API token', type: 'password', placeholder: 'the host\u2019s FLEET_API_TOKEN' },
         {
           key: 'anthropicApiKey',

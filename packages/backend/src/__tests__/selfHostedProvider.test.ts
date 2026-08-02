@@ -35,14 +35,18 @@ describe('selfHostedProvider — CloudTaskProvider conformance', () => {
     }
   });
 
-  it('rejects credentials missing the endpoint or token (no DB/network hit)', async () => {
+  // The TOKEN is what makes a workspace configured. The endpoint became
+  // optional when the host registry landed — blank means "whichever registered
+  // host is least loaded" — so this now pins the narrower rule rather than the
+  // old one, and still refuses on the case that actually matters.
+  it('rejects credentials missing the token (no DB/network hit)', async () => {
     expect(await selfHostedProvider.validateCredentials('ws1', {})).toEqual({
       ok: false,
-      error: 'fleetEndpoint and fleetToken are required',
+      error: 'fleetToken is required',
     });
     expect(
       await selfHostedProvider.validateCredentials('ws1', { fleetEndpoint: 'http://x' }),
-    ).toEqual({ ok: false, error: 'fleetEndpoint and fleetToken are required' });
+    ).toEqual({ ok: false, error: 'fleetToken is required' });
   });
 
   it('registers and resolves through the registry by type', () => {

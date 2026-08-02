@@ -191,3 +191,86 @@ describe('fleet host registry', () => {
     });
   });
 });
+
+/**
+ * Dispatch routing: the credential says WHETHER a workspace may use the fleet,
+ * the registry says WHERE.
+ *
+ * Splitting them is what makes more than one host possible — a token stored per
+ * workspace does not know which box is least loaded, which is draining, or
+ * which has stopped reporting. These tests pin that split, and in particular
+ * that "not configured" and "configured but nothing is up" stay distinguishable:
+ * collapsing them into one silent null answers neither.
+ */
+describe('resolveFleetTarget', () => {
+  let db: Database;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    ({ db, cleanup } = await createTestDb());
+    process.env.FLEET_REPORT_TOKEN = 'shared-secret';
+    // The credential store encrypts at rest, so these tests need a key.
+    process.env.TALYN_TOKEN_KEY ||= Buffer.alloc(32, 7).toString('base64');
+  });
+
+  afterEach(async () => {
+    await cleanup();
+    delete process.env.FLEET_REPORT_TOKEN;
+  });
+
+  async function seedWorkspaceWithFleetCreds(endpoint: string): Promise<void> {
+    const { seedUser, TEST_USER_ID } = await import('./helpers/testDb.js');
+    const { workspaces } = await import('../db/schema.js');
+    const { storeSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
+    await seedUser(db, { id: TEST_USER_ID });
+    await db.insert(workspaces).values({ id: 'ws1', ownerId: TEST_USER_ID, name: 'ws' });
+    await storeSelfHostedCredentials('ws1', { fleetEndpoint: endpoint, fleetToken: 'fleet-token' });
+  }
+
+  it('returns null when the workspace has no fleet credential at all', async () => {
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    // "Not configured" — distinct from "configured and nothing is up", which
+    // throws. One is a setup step the user has not done; the other is an
+    // outage, and they need different answers.
+    expect(await resolveFleetTarget('ws-unknown')).toBeNull();
+  });
+
+  it('uses an endpoint the workspace pinned, ignoring the registry', async () => {
+    await seedWorkspaceWithFleetCreds('http://pinned.example:8080');
+    await recordFleetHostReport({ host: 'other', apiEndpoint: 'http://other:8080', runsMax: 4 });
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const target = await resolveFleetTarget('ws1');
+    // Explicit beats inferred: pinning one host is how you debug a specific box
+    // without draining the others.
+    expect(target?.endpoint).toBe('http://pinned.example:8080');
+    expect(target?.host).toBeUndefined();
+  });
+
+  it('falls back to the least-loaded registered host when no endpoint is pinned', async () => {
+    await seedWorkspaceWithFleetCreds('');
+    await recordFleetHostReport({ host: 'busy', apiEndpoint: 'http://busy:8080', runsLive: 3, runsMax: 4 });
+    await recordFleetHostReport({ host: 'idle', apiEndpoint: 'http://idle:8080', runsLive: 0, runsMax: 4 });
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const target = await resolveFleetTarget('ws1');
+    expect(target?.host).toBe('idle');
+    expect(target?.endpoint).toBe('http://idle:8080');
+    // The credential still comes from the workspace — the registry supplies an
+    // address, never a secret. A host that could publish its own API token in a
+    // report would be publishing it to anything that can POST there.
+    expect(target?.token).toBe('fleet-token');
+  });
+
+  it('raises a CAPACITY error, not a terminal one, when nothing is dispatchable', async () => {
+    await seedWorkspaceWithFleetCreds('');
+    await recordFleetHostReport({ host: 'draining', apiEndpoint: 'http://d:8080', draining: true, runsMax: 4 });
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const { FleetCapacityError } = await import('../services/selfHosted/client.js');
+    // Every box being busy or offline is exactly what fail-back exists for
+    // (§11.6). Failing the user's task over it would be the wrong shape —
+    // another provider can still run the work.
+    await expect(resolveFleetTarget('ws1')).rejects.toBeInstanceOf(FleetCapacityError);
+  });
+});
