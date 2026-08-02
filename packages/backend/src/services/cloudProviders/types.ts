@@ -57,7 +57,25 @@ export interface CloudTaskProvider {
   cancel?(task: Task): Promise<void>;
 }
 
-export type DispatchResult = { ok: true } | { ok: false; error: string };
+export type DispatchResult =
+  | { ok: true }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * True when the dispatch failed for AVAILABILITY rather than because
+       * anything is wrong with the task — the host is full, draining, out of
+       * disk, or unreachable. The task queue falls these back to the next
+       * provider in the workspace's order (§10.7, §11.6) instead of failing the
+       * user's task.
+       *
+       * A discriminator rather than a string prefix on `error`. The selfhosted
+       * executor used to signal this by prefixing "No fleet capacity:" and
+       * saying so in a comment, which makes the routing decision depend on
+       * message wording that any later edit is free to change.
+       */
+      capacity?: boolean;
+    };
 
 export interface CloudProviderCapabilities {
   /** Show a model picker in the composer. */

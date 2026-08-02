@@ -8,7 +8,12 @@ import { githubService } from '../github.js';
 import { FleetCapacityError } from './client.js';
 import { getSelfHostedCredentials, getSelfHostedClient } from './credentials.js';
 
-export type DispatchResult = { ok: true } | { ok: false; error: string };
+// Re-exported, not redeclared. A second definition of this contract is how the
+// two drift: the shared one grew a `capacity` discriminator and this copy
+// silently did not, so the value the fail-back routes on could not be set.
+import type { DispatchResult } from '../cloudProviders/types.js';
+
+export type { DispatchResult };
 
 const SYSTEM_PROMPT =
   'You are a coding agent working in an isolated microVM with the repository checked out. ' +
@@ -103,11 +108,10 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     return { ok: true };
   } catch (err) {
     if (err instanceof FleetCapacityError) {
-      // Availability, not failure. Surfaced with a recognisable prefix so the
-      // task queue's fail-back branch can route to another provider rather than
-      // failing the user's task (§10.7, §11.6). Until that branch exists this
-      // still reads clearly in the UI rather than looking like a broken repo.
-      return { ok: false, error: `No fleet capacity: ${err.message}` };
+      // Availability, not failure: the task is fine and another provider can
+      // run it. `capacity` is what the task queue routes on (§10.7, §11.6) —
+      // the message stays human-readable for the UI but nothing branches on it.
+      return { ok: false, error: `No fleet capacity: ${err.message}`, capacity: true };
     }
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

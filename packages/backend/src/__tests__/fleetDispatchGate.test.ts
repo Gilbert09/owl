@@ -86,11 +86,17 @@ describe('fleet dispatch gate', () => {
 
   beforeEach(async () => {
     ({ db, cleanup } = await createTestDb());
+    // The queue service is a singleton with a re-entry guard; without this a
+    // previous suite in the same worker leaves it held and every dispatch here
+    // silently no-ops.
+    taskQueueService.resetForTests();
     original = getCloudProvider('selfhosted');
     resetFleetAccessCache();
   });
 
   afterEach(async () => {
+    taskQueueService.shutdown();
+    taskQueueService.resetForTests();
     if (original) registerCloudProvider(original);
     await cleanup();
     delete process.env.FLEET_ALLOWED_EMAILS;
