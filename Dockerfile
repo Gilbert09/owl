@@ -53,8 +53,32 @@ FROM node:22-bookworm-slim AS runtime
 # ca-certificates: outbound HTTPS (GitHub API, Supabase) works.
 # libstdc++ is already in the base image, so native modules load.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
+
+# Tailscale, for reaching self-hosted fleet hosts.
+#
+# A fleet host binds loopback and must never be exposed publicly (fleet spec
+# §16.4), so the backend needs a private path to it. Spec §15 risk 5 asks for a
+# WireGuard mesh; a tailnet is the same idea with key distribution solved.
+#
+# USERSPACE MODE, because a PaaS container has no NET_ADMIN and cannot create a
+# TUN device. tailscaled instead exposes a local HTTP proxy and the fleet client
+# dials through it (see services/selfHosted/client.ts). Nothing else in the
+# backend's networking changes, and with no TS_AUTHKEY the daemon never starts
+# at all — the image behaves exactly as it did before.
+#
+# Pinned and checksummed like every other fetched artifact.
+ARG TAILSCALE_VERSION=1.98.10
+ARG TAILSCALE_SHA256=52490ce0832b245857e2afef7426d6ae5a4b49fb391412833cc95729bd23f7de
+RUN set -eux; \
+    curl -fsSL -o /tmp/ts.tgz \
+      "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz"; \
+    echo "${TAILSCALE_SHA256}  /tmp/ts.tgz" | sha256sum -c -; \
+    tar xzf /tmp/ts.tgz -C /tmp; \
+    install -m0755 "/tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscale"  /usr/local/bin/tailscale; \
+    install -m0755 "/tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscaled" /usr/local/sbin/tailscaled; \
+    rm -rf /tmp/ts.tgz "/tmp/tailscale_${TAILSCALE_VERSION}_amd64"
 
 WORKDIR /app
 ENV NODE_ENV=production
@@ -81,6 +105,10 @@ COPY --from=builder /app/packages/backend/node_modules ./packages/backend/node_m
 COPY --from=builder /app/packages/backend/dist ./packages/backend/dist
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 EXPOSE 4747
 WORKDIR /app/packages/backend
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "dist/index.js"]

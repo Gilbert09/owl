@@ -245,6 +245,94 @@ A workspace is allowed when its **owner's** email is on the list (comma-separate
 
 A task dispatched by a workspace that is not allowed is failed with the reason attached rather than left silently queued.
 
+### Connecting the backend to a self-hosted fleet (Tailscale)
+
+A fleet host binds loopback and is never exposed publicly (fleet spec §16.4), so
+the backend needs a private path to it. The fleet spec asks for a WireGuard mesh
+(§15 risk 5); a tailnet is the same idea with key distribution already solved.
+
+**Both ends run Tailscale in userspace mode.** That is not a preference:
+
+- On the **backend**, a PaaS container has no `NET_ADMIN` and cannot create a
+  TUN device. `tailscaled` exposes a local HTTP proxy instead and the fleet
+  client dials through it; nothing else in the backend's networking changes.
+- On a **fleet host**, a TUN-mode `tailscaled` programs its own nftables rules.
+  `hetzner-64` runs an Incus-managed guest for a different workload, with
+  `table inet incus` beside our `table inet fleet` — adding a third party's
+  firewall rules to that is how you break a co-tenant nobody warned. Userspace
+  mode creates no interface and writes no firewall rules at all; inbound
+  connections are terminated by `tailscaled` and proxied to fleetd's loopback
+  port by `tailscale serve`.
+
+#### 1. Tailnet + keys
+
+In the Tailscale admin console, generate **reusable, pre-approved, tagged** auth
+keys. Tag them so ACLs can name groups rather than machines:
+
+```
+tag:talyn-backend   the backend container(s)
+tag:talyn-fleet     the fleet hosts
+```
+
+An ACL that lets only the backend reach fleet hosts, on the fleet port:
+
+```jsonc
+"acls": [
+  { "action": "accept", "src": ["tag:talyn-backend"], "dst": ["tag:talyn-fleet:8080"] }
+]
+```
+
+That matters — without it, every device on the tailnet can reach a machine that
+runs untrusted code.
+
+#### 2. Each fleet host
+
+From the `talyn-fleet` repo:
+
+```
+sudo provision/tailscale.sh --authkey tskey-auth-... --hostname fleet-hetzner-64
+```
+
+It prints the tailnet address. Add to `/etc/fleet/secrets.env` and restart fleetd:
+
+```
+FLEET_ADVERTISE_ENDPOINT=http://100.x.y.z:8080
+FLEET_REPORT_URL=https://prod.talyn.dev/api/v1/fleet/report
+FLEET_REPORT_TOKEN=<same value as the backend's>
+```
+
+`FLEET_ADVERTISE_ENDPOINT` is what the backend dials. It is advertised **by the
+host** because the report arrives from a NAT'd source address that is not
+somewhere you can connect back to, and only the host knows which of its
+addresses is. Leave it unset and the host registers as observable but **not
+dispatchable** — a real state, not a broken one.
+
+#### 3. The backend
+
+```
+TS_AUTHKEY=tskey-auth-...              # absent = Tailscale never starts
+TS_HOSTNAME=talyn-backend
+FLEET_HTTP_PROXY=http://localhost:1055 # what the fleet client dials through
+FLEET_REPORT_TOKEN=<shared with every fleet host>
+FLEET_ENABLED=true
+FLEET_ALLOWED_EMAILS=you@example.com
+```
+
+**`FLEET_REPORT_TOKEN` unset means the report endpoint refuses everything.** An
+open one lets anyone invent a host, and an invented host with an
+`apiEndpoint` is a *dispatch target* — a route to sending customer work to a
+stranger's server, not merely bad telemetry.
+
+With no `TS_AUTHKEY` the daemon never starts and the image behaves exactly as it
+did before; a deployment with no self-hosted fleet should not be running a
+networking daemon it has no use for.
+
+#### 4. Check it
+
+`GET /api/v1/fleet/hosts` (admin only) lists every host that has reported, with
+`online` and `dispatchable`. A host that is online but not dispatchable has not
+advertised an endpoint, is draining, or is at capacity.
+
 ### 5. Railway account (deployed)
 
 Hosted backend lives at **https://prod.talyn.dev**
