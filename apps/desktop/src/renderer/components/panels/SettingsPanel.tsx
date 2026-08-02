@@ -32,6 +32,7 @@ import {
   Wand2,
   CreditCard,
   Zap,
+  Server,
 } from 'lucide-react';
 import { SkillsSettings } from './SkillsSettings';
 import type { UpdaterEvent } from '../../../main/updaterEvents';
@@ -1029,9 +1030,55 @@ export function ProviderConnectCards() {
           />
         }
       />
+
+      {/* The self-hosted Firecracker fleet. Rendered ONLY when the backend
+          listed it for this workspace: /cloud-providers filters it out for
+          anyone not on FLEET_ALLOWED_EMAILS, so showing the card
+          unconditionally would offer every user a form whose save 403s. */}
+      <SelfHostedFleetCard />
     </>
   );
 }
+
+/**
+ * The self-hosted fleet card.
+ *
+ * Gated on the provider appearing in the workspace's provider list rather than
+ * rendered unconditionally like the other two. The fleet runs on hardware we
+ * own and the backend only offers it to allow-listed workspaces; a card that
+ * appeared for everyone would be a form that always 403s on save, which reads
+ * as a broken integration rather than one you do not have.
+ *
+ * Absence is not "still loading" — `cloudProviders === null` is. Both mean
+ * "render nothing", but conflating them is how a card flashes in and out on
+ * every settings visit.
+ */
+function SelfHostedFleetCard() {
+  const cloudProviders = useWorkspaceStore((s) => s.cloudProviders);
+  if (!cloudProviderOffered(cloudProviders, 'selfhosted')) return null;
+
+  return (
+    <CloudProviderCard
+      type="selfhosted"
+      displayName="Self-hosted (Firecracker)"
+      icon={Server}
+      blurb="Run tasks on your own Firecracker fleet. Each task gets its own microVM; the GitHub token is injected host-side and never enters the VM."
+      connectedBlurb="Cloud tasks run in microVMs on your own hardware and open PRs via this workspace's GitHub connection."
+      fields={[
+        { key: 'fleetEndpoint', label: 'Fleet API URL', placeholder: 'http://10.0.0.2:8080' },
+        { key: 'fleetToken', label: 'Fleet API token', type: 'password', placeholder: 'the host\u2019s FLEET_API_TOKEN' },
+        {
+          key: 'anthropicApiKey',
+          label: 'Anthropic API key (optional)',
+          type: 'password',
+          placeholder: 'sk-ant-\u2026 \u2014 leave blank to use the fleet\u2019s own key',
+          optional: true,
+        },
+      ]}
+    />
+  );
+}
+
 
 /**
  * Lets the workspace pick which cloud provider new tasks dispatch to — Auto
@@ -1165,6 +1212,56 @@ interface CloudProviderField {
   label: string;
   type?: 'text' | 'password';
   placeholder?: string;
+  /**
+   * A field the provider will accept without. Everything was required until
+   * the fleet arrived: its `validateCredentials` needs an endpoint and a token
+   * but treats the Anthropic key as optional, because a BYO-key fleet gets one
+   * per dispatch instead. Without this the form refuses to submit a
+   * configuration the backend would have accepted.
+   */
+  optional?: boolean;
+}
+
+
+/**
+ * The fields a provider's config request must carry, from what the user typed.
+ *
+ * Blank OPTIONAL fields are omitted rather than sent as "": a provider that
+ * stores what it is given would persist an empty credential and then fail
+ * authenticating with it, which reads as a bad key rather than no key. Exported
+ * so the rule is testable without rendering the card.
+ */
+export function cloudProviderConfigFromValues(
+  fields: CloudProviderField[],
+  values: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    fields
+      .map((f) => [f.key, (values[f.key] ?? '').trim()] as const)
+      .filter(([, v]) => v !== ''),
+  );
+}
+
+/** Whether every REQUIRED field has a value. Optional ones may stay blank. */
+export function cloudProviderFormComplete(
+  fields: CloudProviderField[],
+  values: Record<string, string>,
+): boolean {
+  return fields.every((f) => f.optional || Boolean(values[f.key]?.trim()));
+}
+
+/**
+ * Whether the backend offered this provider to the current workspace.
+ *
+ * `null` means the list has not loaded, which is NOT the same as "absent" even
+ * though both render nothing — conflating them is how a card flashes in and out
+ * on every settings visit.
+ */
+export function cloudProviderOffered(
+  cloudProviders: { type: string }[] | null,
+  type: string,
+): boolean {
+  return Boolean(cloudProviders?.some((p) => p.type === type));
 }
 
 /**
@@ -1227,12 +1324,11 @@ function CloudProviderCard({
 
   const handleSave = async () => {
     if (!currentWorkspaceId) return;
-    const missing = fields.find((f) => !values[f.key]?.trim());
-    if (missing) return;
+    if (!cloudProviderFormComplete(fields, values)) return;
     setIsSaving(true);
     setError(null);
     try {
-      const config = Object.fromEntries(fields.map((f) => [f.key, values[f.key].trim()]));
+      const config = cloudProviderConfigFromValues(fields, values);
       await api.cloudProviders.saveConfig(type, currentWorkspaceId, config);
       trackEvent('cloud_provider_connected', { provider: type });
       setConnectedInStore(true);
@@ -1263,7 +1359,7 @@ function CloudProviderCard({
   // Don't offer the form until we actually know the state — avoids flashing the
   // connect form (then the connected card) on first load / tab return.
   const showForm = editing || (loaded && !connected);
-  const canSave = fields.every((f) => values[f.key]?.trim());
+  const canSave = cloudProviderFormComplete(fields, values);
 
   return (
     <Card className="p-4">
