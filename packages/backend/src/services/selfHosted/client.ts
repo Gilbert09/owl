@@ -141,6 +141,68 @@ export class FleetClient {
     return this.request(`/v1/runs/${encodeURIComponent(runId)}/events?after=${after}`);
   }
 
+  /**
+   * Follow a run's transcript as server-sent events.
+   *
+   * The cursor poll above is correct but its latency is the caller's poll
+   * interval — 10s here, which is what an agent's output arriving in
+   * ten-second bursts looks like to somebody watching a task. The fleet's
+   * follow endpoint pushes instead, and each frame carries the identical
+   * {events, cursor, terminal} object `getEvents` returns, so this and the
+   * poll share one shape and a dropped stream resumes from the same cursor.
+   *
+   * Yields frames until the run is terminal, the caller aborts, or the stream
+   * breaks. A broken stream is NOT an error worth surfacing: the poll is still
+   * running underneath and will finish the job a little less promptly.
+   */
+  async *followEvents(
+    runId: string,
+    after: number,
+    signal: AbortSignal,
+  ): AsyncGenerator<{ events: FleetEvent[]; cursor: number; terminal: boolean }> {
+    const resp = await fetch(
+      this.url(`/v1/runs/${encodeURIComponent(runId)}/events?follow=1&after=${after}`),
+      {
+        headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/event-stream' },
+        signal,
+      },
+    );
+    if (!resp.ok || !resp.body) {
+      throw new Error(`follow ${runId}: ${resp.status} ${resp.statusText}`);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by a blank line. Anything that is not a
+        // `data:` line is a comment — the server sends `: ping` through idle
+        // gaps so a proxy does not reap the connection.
+        let sep: number;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          for (const line of frame.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              yield JSON.parse(line.slice(6));
+            } catch {
+              // A malformed frame is not worth killing the stream over; the
+              // poll holds the same cursor and will re-fetch what was missed.
+            }
+          }
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+  }
+
   async cancelRun(runId: string): Promise<void> {
     await this.request(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
   }
