@@ -3,6 +3,7 @@ import type { CloudProviderType, ApiResponse } from '@talyn/shared';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import { getCloudProvider, listCloudProviders } from '../services/cloudProviders/registry.js';
 import { ensureCloudEnvironment } from '../services/cloudProviders/environment.js';
+import { fleetRefusalReason, workspaceMayUseFleet } from '../services/cloudProviders/fleetAccess.js';
 
 interface CloudProviderInfo {
   type: CloudProviderType;
@@ -31,13 +32,20 @@ export function cloudProviderRoutes(): Router {
     } catch (err) {
       return handleAccessError(err, res);
     }
+    // Hiding a provider this workspace may not use is COSMETIC — it keeps the
+    // settings screen honest, and nothing more. The gate that matters is at
+    // dispatch and at credential-write below, because a filtered list is not a
+    // permission check: the CLI, the MCP server and curl never render it.
+    const mayUseFleet = await workspaceMayUseFleet(workspaceId);
     const providers: CloudProviderInfo[] = await Promise.all(
-      listCloudProviders().map(async (p) => ({
-        type: p.type,
-        displayName: p.displayName,
-        capabilities: p.capabilities,
-        connected: await p.hasCredentials(workspaceId),
-      })),
+      listCloudProviders()
+        .filter((p) => p.type !== 'selfhosted' || mayUseFleet)
+        .map(async (p) => ({
+          type: p.type,
+          displayName: p.displayName,
+          capabilities: p.capabilities,
+          connected: await p.hasCredentials(workspaceId),
+        })),
     );
     res.json({ success: true, data: providers } as ApiResponse<CloudProviderInfo[]>);
   });
@@ -56,6 +64,14 @@ export function cloudProviderRoutes(): Router {
       await requireWorkspaceAccess(req, workspaceId);
     } catch (err) {
       return handleAccessError(err, res);
+    }
+
+    // Refuse before any credential is validated or stored. A workspace that
+    // cannot dispatch to the fleet has no business holding a fleet token: it
+    // would sit encrypted in the integrations row forever, and the first thing
+    // anyone would try after being told "not allowed" is to configure it again.
+    if (provider.type === 'selfhosted' && !(await workspaceMayUseFleet(workspaceId))) {
+      return res.status(403).json({ success: false, error: fleetRefusalReason() });
     }
 
     const result = await provider.validateCredentials(workspaceId, req.body);

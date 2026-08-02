@@ -228,6 +228,23 @@ TALYN_ALLOWED_EMAILS=you@example.com
 
 Multiple emails are comma-separated. Unauthorised callers get a 403 on first request. Once invite flows land (TODO in ROADMAP Phase 19) this can go away.
 
+### Self-hosted fleet allow-list (required to use the Firecracker fleet)
+
+The `selfhosted` provider runs tasks on hardware we own — one box, with a memory
+budget that fits a couple of concurrent runs. Two flags gate it, and both are
+needed:
+
+```
+FLEET_ENABLED=true
+FLEET_ALLOWED_EMAILS=you@example.com
+```
+
+`FLEET_ENABLED` decides whether the provider is registered at all. **`FLEET_ALLOWED_EMAILS` decides who may use it, and unset means NOBODY** — not everybody. That is deliberate: turning the provider on for the backend must not simultaneously turn it on for every workspace that happens to configure credentials.
+
+A workspace is allowed when its **owner's** email is on the list (comma-separated, case-insensitive). The check runs at dispatch and at credential-write, not in the UI — the settings screen also hides the provider, but that is cosmetic, and the CLI, the MCP server and `curl` never render it.
+
+A task dispatched by a workspace that is not allowed is failed with the reason attached rather than left silently queued.
+
 ### 5. Railway account (deployed)
 
 Hosted backend lives at **https://prod.talyn.dev**
