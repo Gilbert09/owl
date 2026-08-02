@@ -9,6 +9,7 @@ import type {
 import { guardCrossReplica } from './advisoryLock.js';
 import { captureWorkspaceEvent } from './analytics.js';
 import { getCloudProvider } from './cloudProviders/registry.js';
+import { fleetRefusalReason, workspaceMayUseFleet } from './cloudProviders/fleetAccess.js';
 import { resolveCloudEnvId } from './prCloudFix.js';
 import { rowToTask, taskColumnsNoTranscript } from './taskSerialize.js';
 import { patchTaskMetadata } from './taskMetadataMutex.js';
@@ -228,6 +229,22 @@ class TaskQueueService extends EventEmitter {
       console.warn(
         `[TaskQueue] no provider registered for env type "${env.type}"; skipping "${task.title}"`
       );
+      return;
+    }
+
+    // The self-hosted fleet is allowlisted by the workspace owner's email.
+    // Enforced HERE, at the point of work, rather than by filtering the list
+    // the desktop renders: this codebase has already paid for a gate that only
+    // existed in the client (services/billing/clientGate.ts), which the CLI,
+    // the MCP server and plain curl all walked past silently. Anything that
+    // reaches dispatch has to pass, whatever asked for it.
+    if (provider.type === 'selfhosted' && !(await workspaceMayUseFleet(task.workspaceId))) {
+      const reason = fleetRefusalReason();
+      console.warn(`[TaskQueue] refusing to dispatch "${task.title}" to the fleet: ${reason}`);
+      // A terminal dispatch failure, not a capacity one: no amount of waiting
+      // puts this workspace on the allowlist, so failing it back to another
+      // provider (§11.6) would be the wrong shape too. Say so and stop.
+      await this.recordDispatchFailure(task, reason, env.type);
       return;
     }
 

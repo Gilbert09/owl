@@ -29,6 +29,7 @@ import { postHogCodeStreamer } from './services/posthogCode/streamer.js';
 import { registerCloudProvider } from './services/cloudProviders/registry.js';
 import { postHogCodeProvider } from './services/cloudProviders/posthog/provider.js';
 import { claudeCodeProvider } from './services/cloudProviders/claude/provider.js';
+import { selfHostedProvider } from './services/cloudProviders/selfhosted/provider.js';
 import { cloudTaskPoller } from './services/cloudProviders/poller.js';
 import { prAutoMergeWatcher } from './services/prAutoMergeWatcher.js';
 import { mergeQueueProcessor } from './services/mergeQueueProcessor.js';
@@ -78,6 +79,23 @@ async function main() {
   // slots in here with no other changes (see docs/CLOUD_PROVIDERS.md).
   registerCloudProvider(postHogCodeProvider);
   registerCloudProvider(claudeCodeProvider);
+
+  // The self-hosted Firecracker fleet, off unless FLEET_ENABLED is set.
+  //
+  // Unregistered is a stronger off than a runtime branch: with the flag unset
+  // `getCloudProvider('selfhosted')` returns null, so no dispatch path can
+  // reach the fleet at all and nothing behaves differently from before. The
+  // flag exists so turning it on is a config change rather than a deploy —
+  // but the failure mode of forgetting it is "the feature is absent", not
+  // "a task went somewhere unexpected".
+  //
+  // A workspace also has to have fleet credentials configured before the
+  // provider will accept anything, so this flag alone changes nothing for
+  // any existing workspace.
+  if (process.env.FLEET_ENABLED === 'true') {
+    registerCloudProvider(selfHostedProvider);
+    console.log('[fleet] self-hosted provider registered (FLEET_ENABLED=true)');
+  }
 
   // One-time sweep: re-encrypt any legacy plaintext credentials before the
   // services read them (the plaintext read fallbacks are gone). Per-row
