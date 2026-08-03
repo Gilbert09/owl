@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { FleetClient } from '../services/selfHosted/client.js';
+import { toAgentEvent } from '../services/selfHosted/poller.js';
 
 /**
  * The live transcript stream.
@@ -165,5 +166,68 @@ describe('poller de-duplication', () => {
     expect(emitted).toHaveLength(3);
 
     selfHostedPoller.stopStreaming('task-1');
+  });
+});
+
+
+/**
+ * The fleet's envelope must be unwrapped before it becomes an AgentEvent.
+ *
+ * The fleet ships `{type, subtype, raw, guestSeq}` where `raw` is the Agent SDK
+ * message; AgentEvent carries that message at the TOP level. Spreading the
+ * wrapper put `message` one level down under `raw`, and the renderer — which
+ * reads `message.content` — found nothing. The transcript was structurally
+ * valid, persisted, the right length, and displayed as an empty terminal.
+ *
+ * Nothing type-checks a jsonb column, so only a test on the shape catches this.
+ */
+describe('toAgentEvent', () => {
+  it('lifts the SDK message to the top level', () => {
+    const out = toAgentEvent({
+      seq: 3,
+      at: '2026-08-03T16:01:20Z',
+      event: {
+        type: 'assistant',
+        guestSeq: 3,
+        raw: { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } },
+      },
+    });
+    // The renderer reads exactly this path. Before the fix it was out.raw.message.
+    expect(out.message?.content).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(out.type).toBe('assistant');
+    expect(out.seq).toBe(3);
+  });
+
+  it('keeps the fleet seq rather than the guest one', () => {
+    // The fleet's seq is host-assigned and monotonic across a run; the guest's
+    // restarts. Cursor arithmetic depends on using the fleet's.
+    const out = toAgentEvent({
+      seq: 12,
+      at: '',
+      event: { type: 'system', guestSeq: 4, raw: { type: 'system', subtype: 'init' } },
+    });
+    expect(out.seq).toBe(12);
+  });
+
+  it('carries a result summary through', () => {
+    const out = toAgentEvent({
+      seq: 99,
+      at: '',
+      event: { type: 'result', subtype: 'success', raw: { type: 'result', subtype: 'success', result: 'done', total_cost_usd: 3.83 } },
+    });
+    expect(out.result).toBe('done');
+    expect(out.total_cost_usd).toBe(3.83);
+  });
+
+  // An older fleet that does not wrap must still ingest, rather than silently
+  // producing entries with nothing in them — the failure this whole test exists
+  // to prevent.
+  it('passes an unwrapped event through unchanged', () => {
+    const out = toAgentEvent({
+      seq: 1,
+      at: '',
+      event: { type: 'assistant', message: { content: [{ type: 'text', text: 'plain' }] } },
+    });
+    expect(out.message?.content).toEqual([{ type: 'text', text: 'plain' }]);
   });
 });
