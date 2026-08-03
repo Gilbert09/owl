@@ -35,6 +35,7 @@ import {
   type TaskPriority,
   type TaskStatus,
   type CreateTaskRequest,
+  readCloudTaskMeta,
   type ApiResponse,
   type GenerateTaskMetadataRequest,
   type GenerateTaskMetadataResponse,
@@ -452,13 +453,66 @@ export function taskRoutes(): Router {
     }
     const task = rowToTask(rows[0]);
     const meta = (task.metadata ?? {}) as Record<string, unknown>;
-    const posthogTaskId = meta.posthogTaskId as string | undefined;
-    if (!posthogTaskId) {
-      return res.status(400).json({ success: false, error: 'Not a PostHog Code task.' });
-    }
+
     // Mark watched before any remote call — even if the run hasn't started
     // yet (409 below), the poller should start streaming once it has.
     markWatched(task.id);
+
+    // Every provider EXCEPT PostHog Code refreshes through the generic seam.
+    //
+    // This route predates that seam and read `meta.posthogTaskId` directly, so
+    // "Refresh logs" on a fleet task answered `Not a PostHog Code task.` — the
+    // one button whose entire job is recovering a blank transcript refused to
+    // work on exactly the tasks whose transcripts were blank.
+    //
+    // `reconcile` is the right thing to call: it is what the poller runs each
+    // tick, and for the fleet it re-fetches by cursor and persists. Calling it
+    // here just runs a tick early, on demand, which is what the button means.
+    //
+    // PostHog Code keeps its bespoke path below because refreshing it is not a
+    // reconcile — it resolves a run id and starts a live SSE tail or a one-shot
+    // S3 backfill, neither of which the generic seam models.
+    const cloud = readCloudTaskMeta(task);
+    const posthogTaskId = meta.posthogTaskId as string | undefined;
+    if (!posthogTaskId) {
+      if (!cloud?.provider || !cloud.remoteTaskId) {
+        return res.status(400).json({
+          success: false,
+          error: 'This task has no cloud run to fetch logs from yet.',
+        });
+      }
+      const provider = getCloudProvider(cloud.provider);
+      if (!provider?.reconcile) {
+        return res.status(400).json({
+          success: false,
+          error: `${cloud.provider} cannot refresh logs on demand.`,
+        });
+      }
+      try {
+        await provider.reconcile({
+          id: task.id,
+          workspaceId: task.workspaceId,
+          title: task.title,
+          repositoryId: task.repositoryId ?? null,
+          metadata: (task.metadata ?? {}) as Record<string, unknown>,
+          // The point of the request: assume nothing is stored and re-sync.
+          transcriptEmpty: true,
+          // The caller is looking at it, by definition — this is what opens the
+          // live stream for a still-running task.
+          watched: true,
+          status: task.status as 'in_progress',
+          // rowToTask serialises dates to ISO strings; CloudTaskRow wants the
+          // Date the poller passes it, so convert rather than cast.
+          completedAt: task.completedAt ? new Date(task.completedAt) : null,
+        });
+      } catch (err) {
+        return res.status(502).json({
+          success: false,
+          error: err instanceof Error ? err.message : 'Failed to reach the cloud provider.',
+        });
+      }
+      return res.json({ success: true });
+    }
     const client = await getPostHogCodeClient(task.workspaceId);
     if (!client) {
       return res.status(400).json({
