@@ -94,13 +94,23 @@ export class FleetThrottleError extends Error {
  */
 let cachedProxy: { url: string; dispatcher: unknown } | null = null;
 
-function fleetDispatcher(): unknown | undefined {
+/** Exported for tests: proving this CONSTRUCTS is the only check that catches
+ *  a missing `undici` before production does. */
+export function fleetDispatcher(): unknown | undefined {
   const url = process.env.FLEET_HTTP_PROXY ?? '';
   if (!url) return undefined;
   if (cachedProxy?.url === url) return cachedProxy.dispatcher;
-  // Required lazily: undici ships with Node but importing ProxyAgent at module
-  // scope would make every consumer of this file pay for it, including the
-  // ones that never touch a fleet.
+  // `undici` is a DECLARED DEPENDENCY of this package, not something Node
+  // provides. Node bundles undici to implement global `fetch`, but only as an
+  // internal module — `require('undici')` resolves nothing unless the package
+  // is installed. This comment used to claim the opposite, and the belief cost
+  // a production deploy: the dev tree happened to have it transitively, the
+  // runtime image prunes dev dependencies, and the miss was invisible locally
+  // because FLEET_HTTP_PROXY is unset there so this line never ran.
+  //
+  // Still required lazily rather than imported at module scope: a deployment
+  // with no private link never needs a proxy agent, and this file is imported
+  // by the provider registry that every workspace touches.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { ProxyAgent } = require('undici') as { ProxyAgent: new (u: string) => unknown };
   cachedProxy = { url, dispatcher: new ProxyAgent(url) };
