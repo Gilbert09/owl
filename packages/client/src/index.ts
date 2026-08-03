@@ -26,7 +26,26 @@ import type {
   CreatePlatformSkillRequest,
   UpdatePlatformSkillRequest,
   ExternalQueueState,
+  AdminAccess,
+  AdminAuditEntry,
+  AdminFleetHost,
+  AdminFleetHostDetail,
+  AdminGoldensView,
+  AdminIncident,
+  AdminPage,
+  AdminRebakeStatus,
+  AdminRunEventPage,
+  AdminRunRow,
+  AdminTaskDetail,
+  AdminTaskSummary,
+  AdminUserDetail,
+  AdminUserSummary,
+  AdminWorkspaceDetail,
+  AdminWorkspaceSummary,
 } from '@talyn/shared';
+// Value import (not a type): the SSE frame parser the admin transcript stream
+// shares with the backend proxy and the fleet client.
+import { createSseJsonParser } from '@talyn/shared';
 
 export {
   configureApiClient,
@@ -176,6 +195,67 @@ async function request<T>(
   }
 
   return data.data as T;
+}
+
+/**
+ * A request whose response is NOT an `ApiResponse` envelope.
+ *
+ * Two admin endpoints stream or pass through: the Prometheus text scrape and
+ * the run-transcript SSE proxy. `request()` reads the whole body as text and
+ * JSON.parses it, which would buffer a stream forever and reject a text/plain
+ * body — so those need the raw `Response`.
+ *
+ * Everything else about the transport is identical, deliberately: same auth
+ * header, same client-version header, same 401-recover-and-replay, same
+ * ApiNetworkError wrapping. Diverging on any of those is how one endpoint ends
+ * up being the only thing that doesn't survive a token refresh.
+ */
+async function rawRequest(
+  method: string,
+  path: string,
+  init: { accept?: string; signal?: AbortSignal } = {},
+  isRetry = false
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    'X-Talyn-Client-Version': getConfig().clientVersion,
+  };
+  if (init.accept) headers.Accept = init.accept;
+  const token = await getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let response: Response;
+  try {
+    response = await fetch(`${getApiRoot()}${path}`, {
+      method,
+      headers,
+      signal: init.signal,
+    });
+  } catch (err) {
+    throw new ApiNetworkError(method, path, err);
+  }
+
+  if (response.status === 401 && token && !isRetry) {
+    if (await recoverSession()) {
+      return rawRequest(method, path, init, true);
+    }
+  }
+
+  if (!response.ok) {
+    // An error body here IS the JSON envelope — only the success path is raw.
+    const text = await response.text().catch(() => '');
+    let code: string | undefined;
+    let message = `Request failed (HTTP ${response.status})`;
+    try {
+      const parsed = JSON.parse(text) as ApiResponse<never>;
+      if (parsed.error) message = parsed.error;
+      code = parsed.code;
+    } catch {
+      if (text) message = text.slice(0, 200);
+    }
+    throw new ApiError(message, response.status, code);
+  }
+
+  return response;
 }
 
 // Workspaces
@@ -1170,6 +1250,168 @@ export const billing = {
     request<CheckoutSessionResponse>('POST', `/billing/orders/${orderId}/invoice`),
 };
 
+// ============================================================================
+// Admin (admin.talyn.dev — the operator console)
+// ============================================================================
+//
+// Cross-tenant and admin-gated server-side. Read endpoints only for now;
+// mutations land with the audit service behind them.
+//
+// Nothing here sends an `actor` field. fleetd requires one on every mutating
+// call, but the backend fills it from req.user — a client-supplied actor on an
+// audit log is a field an attacker gets to write. Do not "helpfully" add it.
+
+function adminQuery(params: Record<string, string | number | boolean | undefined>): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === '') continue;
+    qs.set(k, String(v));
+  }
+  const s = qs.toString();
+  return s ? `?${s}` : '';
+}
+
+const adminFleet = {
+  /**
+   * The host list. `live=false` skips dialling entirely and answers from the
+   * registry, which is what the list should render first — a page that waits
+   * on N tailnet round trips before showing anything is a page you cannot use
+   * during the incident you opened it for.
+   */
+  hosts: (opts?: { live?: boolean }) =>
+    request<AdminFleetHost[]>('GET', `/admin/fleet/hosts${adminQuery({ live: opts?.live })}`),
+  host: (name: string) =>
+    request<AdminFleetHostDetail>('GET', `/admin/fleet/hosts/${encodeURIComponent(name)}`),
+  /** fleetd's Prometheus scrape, passed through as text. */
+  metrics: (name: string) =>
+    rawRequest('GET', `/admin/fleet/hosts/${encodeURIComponent(name)}/metrics`, {
+      accept: 'text/plain',
+    }).then((r) => r.text()),
+  runs: (params?: { host?: string; status?: string; limit?: number; before?: string }) =>
+    request<AdminPage<AdminRunRow>>('GET', `/admin/fleet/runs${adminQuery({ ...params })}`),
+  run: (host: string, runId: string) =>
+    request<AdminRunRow>(
+      'GET',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/runs/${encodeURIComponent(runId)}`
+    ),
+  events: (host: string, runId: string, params?: { after?: number; limit?: number }) =>
+    request<AdminRunEventPage>(
+      'GET',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/runs/${encodeURIComponent(
+        runId
+      )}/events${adminQuery({ ...params })}`
+    ),
+  goldens: (name: string) =>
+    request<AdminGoldensView>('GET', `/admin/fleet/hosts/${encodeURIComponent(name)}/goldens`),
+  rebakeStatus: (name: string) =>
+    request<AdminRebakeStatus>(
+      'GET',
+      `/admin/fleet/hosts/${encodeURIComponent(name)}/goldens/rebake`
+    ),
+  incidents: () => request<AdminIncident[]>('GET', '/admin/fleet/incidents'),
+
+  /**
+   * Follow a run's transcript live.
+   *
+   * `fetch` + ReadableStream, NOT `EventSource`. EventSource cannot set an
+   * Authorization header, and the alternative — putting the JWT in the query
+   * string — is the thing the WS auth path already refuses to do, because
+   * tokens in URLs land in access logs and the edge proxy's request log.
+   *
+   * Resolves when the run goes terminal, the stream ends, or `signal` aborts.
+   * A broken stream is not fatal: the caller still has the cursor endpoint and
+   * can resume from `frame.cursor`.
+   */
+  async followRun(
+    host: string,
+    runId: string,
+    opts: {
+      after?: number;
+      signal: AbortSignal;
+      onFrame: (frame: AdminRunEventPage) => void;
+    }
+  ): Promise<void> {
+    const resp = await rawRequest(
+      'GET',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/runs/${encodeURIComponent(
+        runId
+      )}/stream${adminQuery({ after: opts.after })}`,
+      { accept: 'text/event-stream', signal: opts.signal }
+    );
+    if (!resp.body) return;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSseJsonParser<AdminRunEventPage>();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+          opts.onFrame(frame);
+          if (frame.terminal) return;
+        }
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+  },
+};
+
+export const admin = {
+  /**
+   * Whether the caller is an operator, and what this deploy lets them do.
+   *
+   * Deliberately NOT admin-gated server-side: it answers `{admin:false}` rather
+   * than 403 so the console can render "this is for Talyn operators" instead of
+   * an error page. It is the only admin call a non-admin's browser ever makes.
+   */
+  me: () => request<AdminAccess>('GET', '/admin/me'),
+  fleet: adminFleet,
+  users: {
+    list: (params?: { q?: string; plan?: string; admin?: boolean; limit?: number; before?: string }) =>
+      request<AdminPage<AdminUserSummary>>('GET', `/admin/users${adminQuery({ ...params })}`),
+    get: (id: string) => request<AdminUserDetail>('GET', `/admin/users/${encodeURIComponent(id)}`),
+  },
+  workspaces: {
+    list: (params?: { q?: string; ownerId?: string; limit?: number; before?: string }) =>
+      request<AdminPage<AdminWorkspaceSummary>>(
+        'GET',
+        `/admin/workspaces${adminQuery({ ...params })}`
+      ),
+    get: (id: string) =>
+      request<AdminWorkspaceDetail>('GET', `/admin/workspaces/${encodeURIComponent(id)}`),
+  },
+  tasks: {
+    list: (params?: {
+      ownerId?: string;
+      workspaceId?: string;
+      status?: string;
+      provider?: string;
+      host?: string;
+      limit?: number;
+      before?: string;
+    }) => request<AdminPage<AdminTaskSummary>>('GET', `/admin/tasks${adminQuery({ ...params })}`),
+    /** `transcript: true` is audited server-side — it is another tenant's
+     *  agent conversation, and recording the access is what makes it OK. */
+    get: (id: string, opts?: { transcript?: boolean }) =>
+      request<AdminTaskDetail>(
+        'GET',
+        `/admin/tasks/${encodeURIComponent(id)}${adminQuery({ transcript: opts?.transcript })}`
+      ),
+  },
+  audit: {
+    list: (params?: {
+      actorId?: string;
+      action?: string;
+      targetKind?: string;
+      targetId?: string;
+      limit?: number;
+      before?: string;
+    }) => request<AdminPage<AdminAuditEntry>>('GET', `/admin/audit${adminQuery({ ...params })}`),
+  },
+};
+
 // Account-level self-service.
 export const users = {
   /**
@@ -1201,5 +1443,6 @@ export const api = {
   debug,
   billing,
   users,
+  admin,
   ws: wsClient,
 };

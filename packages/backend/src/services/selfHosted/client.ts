@@ -6,6 +6,8 @@
  * SPEC §16.1 replaces it once the fleet publishes a tagged artifact.
  */
 
+import { createSseJsonParser } from '@talyn/shared';
+
 /** A run as the fleet reports it. */
 export interface FleetRun {
   id: string;
@@ -225,29 +227,21 @@ export class FleetClient {
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    // Framing lives in @talyn/shared so this, the admin SSE proxy, and the
+    // browser that reads the proxied stream cannot disagree about what a frame
+    // is — a disagreement there shows up as "the transcript stops halfway",
+    // not as an exception.
+    const parser = createSseJsonParser<{
+      events: FleetEvent[];
+      cursor: number;
+      terminal: boolean;
+    }>();
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) return;
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE frames are separated by a blank line. Anything that is not a
-        // `data:` line is a comment — the server sends `: ping` through idle
-        // gaps so a proxy does not reap the connection.
-        let sep: number;
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          for (const line of frame.split('\n')) {
-            if (!line.startsWith('data: ')) continue;
-            try {
-              yield JSON.parse(line.slice(6));
-            } catch {
-              // A malformed frame is not worth killing the stream over; the
-              // poll holds the same cursor and will re-fetch what was missed.
-            }
-          }
+        for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+          yield frame;
         }
       }
     } finally {

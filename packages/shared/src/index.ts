@@ -11,6 +11,13 @@ export * from './externalMergeQueue.js';
 export * from './skills.js';
 export * from './skillPrompt.js';
 
+// The operator console's contract (admin.talyn.dev ⇄ /api/v1/admin).
+export * from './admin.js';
+
+// SSE framing, shared by the fleet client, the admin SSE proxy, and the
+// browser that reads the proxied stream.
+export * from './sse.js';
+
 import type { SkillKey, SkillSource, SkillSummary, SkillUsageEntry } from './skills.js';
 
 // ============================================================================
