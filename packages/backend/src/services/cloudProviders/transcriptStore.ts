@@ -86,11 +86,56 @@ export function truncateTranscript(transcript: AgentEvent[]): AgentEvent[] {
 }
 
 /** Write the transcript blob. The only place any provider touches the column. */
+/**
+ * Strip NUL characters from every string in a transcript.
+ *
+ * Postgres `jsonb` cannot represent `\u0000`. Not "does not index it well" —
+ * cannot store it: the write is rejected outright with `unsupported Unicode
+ * escape sequence`. JSON the spec allows, a jsonb column does not.
+ *
+ * An agent transcript reaches one the moment a tool reads a binary file. Any
+ * `cat` of a compiled artifact, any grep that wanders into a `.pyc`, any dump of
+ * a core file, and the tool result carries NUL bytes into the event stream.
+ *
+ * What made this expensive is how it failed. The write is the LAST step: the
+ * fleet had the full transcript, the poller fetched it correctly, and only the
+ * persist was refused — so the task ran perfectly and displayed no logs at all,
+ * with the failure visible only as a `[cloudPoller] reconcile failed` line whose
+ * error text was buried under a megabyte of query params. And because the
+ * transcript only grows, once a run touched one binary file EVERY later write
+ * failed too. One `\u0000` costs the whole run's logs, not one event's.
+ *
+ * Walks the structure rather than regexing the serialised JSON, because in
+ * serialised form the escape for a real NUL and the text `\u0000` a transcript
+ * might legitimately quote differ only by a backslash — and getting that
+ * distinction wrong corrupts the very tool output this exists to preserve.
+ */
+export function stripNulls<T>(value: T): T {
+  if (typeof value === 'string') {
+    // split/join rather than a regex: a regex literal containing a control
+    // character trips no-control-regex, and suppressing that rule to keep a
+    // one-character pattern is a worse trade than not needing a regex at all.
+    return (value.includes('\u0000') ? value.split('\u0000').join('') : value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map(stripNulls) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      // Keys too: a NUL in a key is just as unstorable as one in a value.
+      out[stripNulls(k)] = stripNulls(v);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
 export async function writeTranscript(taskId: string, transcript: AgentEvent[]): Promise<void> {
   await getDbClient()
     .update(tasksTable)
     .set({
-      transcript: truncateTranscript(transcript) as unknown as object,
+      transcript: stripNulls(truncateTranscript(transcript)) as unknown as object,
       updatedAt: new Date(),
     })
     .where(eq(tasksTable.id, taskId));
