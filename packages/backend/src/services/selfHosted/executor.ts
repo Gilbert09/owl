@@ -5,8 +5,8 @@ import { tasks as tasksTable, repositories as repositoriesTable } from '../../db
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { githubService } from '../github.js';
-import { FleetCapacityError } from './client.js';
-import { getSelfHostedCredentials, getSelfHostedClient } from './credentials.js';
+import { FleetCapacityError, FleetClient } from './client.js';
+import { getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
 
 // Re-exported, not redeclared. A second definition of this contract is how the
 // two drift: the shared one grew a `capacity` discriminator and this copy
@@ -47,7 +47,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     return {
       ok: false,
       error:
-        'The self-hosted fleet is not configured for this workspace — add a fleet endpoint and token in workspace settings.',
+        'Talyn Fleet is not configured for this workspace — add your Claude OAuth token in workspace settings.',
     };
   }
 
@@ -63,7 +63,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   }
 
   if (!task.repositoryId) {
-    return { ok: false, error: 'Self-hosted tasks require a repository.' };
+    return { ok: false, error: 'Talyn Fleet tasks require a repository.' };
   }
   const repo = await resolveRepository(task.repositoryId);
   if (!repo) {
@@ -74,8 +74,14 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   const runId = fleetRunIdForTask(task.id);
 
   try {
-    const client = await getSelfHostedClient(task.workspaceId);
-    if (!client) return { ok: false, error: 'The self-hosted fleet is not configured for this workspace.' };
+    // The TARGET, not just a client: the run's metadata records which box took
+    // it, and "which box" is now the registry's answer rather than a string the
+    // workspace stored. Reading it off the resolved target is the only way that
+    // stays true — a remembered endpoint would name the host that was picked
+    // the day the credential was saved.
+    const target = await resolveFleetTarget(task.workspaceId);
+    if (!target) return { ok: false, error: 'Talyn Fleet is not configured for this workspace.' };
+    const client = new FleetClient(target.endpoint, target.token);
 
     const run = await client.createRun({
       runId,
@@ -86,7 +92,9 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       model: modelFromTask(task) ?? modelFromEnv(env),
       repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
       githubToken,
-      ...(creds.anthropicApiKey ? { anthropicKey: creds.anthropicApiKey } : {}),
+      // Always sent, never optional. The workspace's own Claude credential is
+      // the only LLM key in play — the fleet has no house key to fall back on.
+      anthropicKey: creds.claudeToken,
     });
 
     const cloudTask: CloudTaskMetadata = {
@@ -94,7 +102,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       remoteTaskId: run.id,
       remoteRunId: run.id,
       status: run.status ?? 'queued',
-      extra: { repo: repo.slug, endpoint: creds.fleetEndpoint },
+      extra: { repo: repo.slug, endpoint: target.endpoint, ...(target.host ? { host: target.host } : {}) },
     };
     await patchTaskMetadata(task.id, (existing) => ({ ...existing, cloudTask }));
 

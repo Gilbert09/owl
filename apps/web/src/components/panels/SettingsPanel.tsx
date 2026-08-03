@@ -49,6 +49,7 @@ import {
   GetKeyLink,
   POSTHOG_API_KEYS_URL,
   ANTHROPIC_API_KEYS_URL,
+  CLAUDE_SETUP_TOKEN_URL,
   POSTHOG_KEY_SCOPE_NOTE,
 } from '../widgets/GetKeyLink';
 import { GithubInstallStatus } from '../widgets/GithubInstallStatus';
@@ -1028,7 +1029,7 @@ export function ProviderConnectCards() {
         }
       />
 
-      {/* The self-hosted Firecracker fleet. Rendered ONLY when the backend
+      {/* Talyn Fleet (Firecracker). Rendered ONLY when the backend
           listed it for this workspace: /cloud-providers filters it out for
           anyone not on FLEET_ALLOWED_EMAILS, so showing the card
           unconditionally would offer every user a form whose save 403s. */}
@@ -1038,7 +1039,35 @@ export function ProviderConnectCards() {
 }
 
 /**
- * The self-hosted fleet card.
+ * What a workspace has to supply to use Talyn Fleet: its Claude credential, and
+ * literally nothing else.
+ *
+ * Two fields used to sit here and neither was the workspace's to give. The
+ * fleet API bearer authenticates the BACKEND to a host — one service to
+ * another, identical for every workspace — so asking a user for it made them
+ * custodian of a secret they neither own nor can rotate. The endpoint answered
+ * WHICH host, which nobody using the product is in a position to answer: they
+ * cannot see which box is least loaded, which is draining, or which stopped
+ * reporting four minutes ago. The registry can, from reports seconds old, and a
+ * stale pinned endpoint silently routed every task to a dead machine.
+ *
+ * Both are deployment config now — `FLEET_API_TOKEN` and, for the debugging
+ * case, `FLEET_PINNED_ENDPOINT`.
+ *
+ * Exported for the card tests, whose entire point is that this list has exactly
+ * one entry and does not re-grow the other two.
+ */
+export const SELFHOSTED_FIELDS: CloudProviderField[] = [
+  {
+    key: 'claudeToken',
+    label: 'Claude OAuth token',
+    type: 'password',
+    placeholder: 'sk-ant-oat…',
+  },
+];
+
+/**
+ * The Talyn Fleet card.
  *
  * Gated on the provider appearing in the workspace's provider list rather than
  * rendered unconditionally like the other two. The fleet runs on hardware we
@@ -1057,26 +1086,16 @@ function SelfHostedFleetCard() {
   return (
     <CloudProviderCard
       type="selfhosted"
-      displayName="Self-hosted (Firecracker)"
+      displayName="Talyn Fleet"
       icon={Server}
-      blurb="Run tasks on your own Firecracker fleet. Each task gets its own microVM; the GitHub token is injected host-side and never enters the VM."
-      connectedBlurb="Cloud tasks run in microVMs on your own hardware and open PRs via this workspace's GitHub connection."
-      fields={[
-        {
-          key: 'fleetEndpoint',
-          label: 'Fleet API URL (optional)',
-          placeholder: 'blank \u2014 use whichever host is least loaded',
-          optional: true,
-        },
-        { key: 'fleetToken', label: 'Fleet API token', type: 'password', placeholder: 'the host\u2019s FLEET_API_TOKEN' },
-        {
-          key: 'anthropicApiKey',
-          label: 'Anthropic API key (optional)',
-          type: 'password',
-          placeholder: 'sk-ant-\u2026 \u2014 leave blank to use the fleet\u2019s own key',
-          optional: true,
-        },
-      ]}
+      blurb="Run tasks on Talyn's own Firecracker fleet. Each task gets its own microVM; the GitHub token is injected host-side and never enters the VM."
+      connectedBlurb="Cloud tasks run in microVMs on Talyn's hardware and open PRs via this workspace's GitHub connection."
+      fields={SELFHOSTED_FIELDS}
+      keyHelp={{
+        url: CLAUDE_SETUP_TOKEN_URL,
+        label: 'How to get a token',
+        note: 'run `claude setup-token` for an OAuth token off your Claude subscription, or paste a Console API key (sk-ant-api\u2026) to be billed per token.',
+      }}
     />
   );
 }
@@ -1215,11 +1234,14 @@ interface CloudProviderField {
   type?: 'text' | 'password';
   placeholder?: string;
   /**
-   * A field the provider will accept without. Everything was required until
-   * the fleet arrived: its `validateCredentials` needs an endpoint and a token
-   * but treats the Anthropic key as optional, because a BYO-key fleet gets one
-   * per dispatch instead. Without this the form refuses to submit a
-   * configuration the backend would have accepted.
+   * A field the provider will accept without. Without it the form refuses to
+   * submit a configuration the backend would have accepted.
+   *
+   * No descriptor currently sets it: Talyn Fleet was the only user and its
+   * optional field turned out not to belong in the UI at all. Kept because the
+   * rule it encodes is generic and `cloudProviderFormComplete` implements it —
+   * a provider with a genuinely optional credential should set this rather than
+   * rediscover why every field being required is wrong.
    */
   optional?: boolean;
 }
@@ -1290,7 +1312,7 @@ function CloudProviderCard({
   connectedBlurb: string;
   fields: CloudProviderField[];
   /** Optional "Get a key ↗" link (+ scope note) shown under the form. */
-  keyHelp?: { url: string; note?: string };
+  keyHelp?: { url: string; label?: string; note?: string };
   /** Extra per-provider settings (e.g. the model row) rendered inside the
    *  card, under a divider, only while connected. */
   connectedExtras?: React.ReactNode;
@@ -1405,7 +1427,7 @@ function CloudProviderCard({
                   disabled={isSaving}
                 />
               ))}
-              {keyHelp && <GetKeyLink url={keyHelp.url} note={keyHelp.note} />}
+              {keyHelp && <GetKeyLink url={keyHelp.url} label={keyHelp.label} note={keyHelp.note} />}
               {error && (
                 <div className="text-sm text-destructive flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />

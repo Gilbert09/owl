@@ -209,6 +209,9 @@ describe('resolveFleetTarget', () => {
   beforeEach(async () => {
     ({ db, cleanup } = await createTestDb());
     process.env.FLEET_REPORT_TOKEN = 'shared-secret';
+    // The bearer the backend presents to a host. Deployment config, not a
+    // workspace secret — the workspace supplies only its Claude token.
+    process.env.FLEET_API_TOKEN = 'fleet-token';
     // The credential store encrypts at rest, so these tests need a key.
     process.env.TALYN_TOKEN_KEY ||= Buffer.alloc(32, 7).toString('base64');
   });
@@ -216,15 +219,17 @@ describe('resolveFleetTarget', () => {
   afterEach(async () => {
     await cleanup();
     delete process.env.FLEET_REPORT_TOKEN;
+    delete process.env.FLEET_API_TOKEN;
+    delete process.env.FLEET_PINNED_ENDPOINT;
   });
 
-  async function seedWorkspaceWithFleetCreds(endpoint: string): Promise<void> {
+  async function seedWorkspaceWithFleetCreds(): Promise<void> {
     const { seedUser, TEST_USER_ID } = await import('./helpers/testDb.js');
     const { workspaces } = await import('../db/schema.js');
     const { storeSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
     await seedUser(db, { id: TEST_USER_ID });
     await db.insert(workspaces).values({ id: 'ws1', ownerId: TEST_USER_ID, name: 'ws' });
-    await storeSelfHostedCredentials('ws1', { fleetEndpoint: endpoint, fleetToken: 'fleet-token' });
+    await storeSelfHostedCredentials('ws1', { claudeToken: 'sk-ant-oat01-test' });
   }
 
   it('returns null when the workspace has no fleet credential at all', async () => {
@@ -235,20 +240,23 @@ describe('resolveFleetTarget', () => {
     expect(await resolveFleetTarget('ws-unknown')).toBeNull();
   });
 
-  it('uses an endpoint the workspace pinned, ignoring the registry', async () => {
-    await seedWorkspaceWithFleetCreds('http://pinned.example:8080');
+  it('uses FLEET_PINNED_ENDPOINT when the operator set one, ignoring the registry', async () => {
+    await seedWorkspaceWithFleetCreds();
     await recordFleetHostReport({ host: 'other', apiEndpoint: 'http://other:8080', runsMax: 4 });
+    process.env.FLEET_PINNED_ENDPOINT = 'http://pinned.example:8080/';
 
     const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
     const target = await resolveFleetTarget('ws1');
-    // Explicit beats inferred: pinning one host is how you debug a specific box
-    // without draining the others.
+    // A debugging override: it forces every run onto one box regardless of load
+    // or health, which is what you want while bisecting a host and what you do
+    // not want otherwise. Trailing slash normalised, or every dialled path
+    // doubles its separator.
     expect(target?.endpoint).toBe('http://pinned.example:8080');
     expect(target?.host).toBeUndefined();
   });
 
-  it('falls back to the least-loaded registered host when no endpoint is pinned', async () => {
-    await seedWorkspaceWithFleetCreds('');
+  it('falls back to the least-loaded registered host when nothing is pinned', async () => {
+    await seedWorkspaceWithFleetCreds();
     await recordFleetHostReport({ host: 'busy', apiEndpoint: 'http://busy:8080', runsLive: 3, runsMax: 4 });
     await recordFleetHostReport({ host: 'idle', apiEndpoint: 'http://idle:8080', runsLive: 0, runsMax: 4 });
 
@@ -256,14 +264,28 @@ describe('resolveFleetTarget', () => {
     const target = await resolveFleetTarget('ws1');
     expect(target?.host).toBe('idle');
     expect(target?.endpoint).toBe('http://idle:8080');
-    // The credential still comes from the workspace — the registry supplies an
-    // address, never a secret. A host that could publish its own API token in a
-    // report would be publishing it to anything that can POST there.
+    // The registry supplies an ADDRESS, never a secret. A host that could
+    // publish its own API token in a report would be publishing it to anything
+    // that can POST there — the bearer comes from deployment config instead.
     expect(target?.token).toBe('fleet-token');
   });
 
+  it('throws when the deployment has no FLEET_API_TOKEN, rather than dispatching unauthenticated', async () => {
+    await seedWorkspaceWithFleetCreds();
+    await recordFleetHostReport({ host: 'idle', apiEndpoint: 'http://idle:8080', runsMax: 4 });
+    delete process.env.FLEET_API_TOKEN;
+
+    const { resolveFleetTarget, FleetNotDeployedError } = await import(
+      '../services/selfHosted/credentials.js'
+    );
+    // Not a capacity error and not a null: the hosts are fine and the workspace
+    // is configured. Reporting either would send someone to look in the wrong
+    // place — this is an operator's missing env var.
+    await expect(resolveFleetTarget('ws1')).rejects.toBeInstanceOf(FleetNotDeployedError);
+  });
+
   it('raises a CAPACITY error, not a terminal one, when nothing is dispatchable', async () => {
-    await seedWorkspaceWithFleetCreds('');
+    await seedWorkspaceWithFleetCreds();
     await recordFleetHostReport({ host: 'draining', apiEndpoint: 'http://d:8080', draining: true, runsMax: 4 });
 
     const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');

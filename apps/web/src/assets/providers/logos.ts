@@ -22,7 +22,7 @@ export const GENERIC_PROVIDER_LOGO =
   );
 
 /**
- * Self-hosted fleet — a server rack rather than a vendor logo, because there is
+ * Talyn Fleet — a server rack rather than a vendor logo, because there is
  * no vendor: the run happens on hardware we own.
  */
 export const SELFHOSTED_LOGO =

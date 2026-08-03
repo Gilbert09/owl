@@ -15,8 +15,11 @@ import { FleetCapacityError, FleetThrottleError } from '../services/selfHosted/c
 
 describe('selfHostedProvider — CloudTaskProvider conformance', () => {
   it('declares the expected identity + capabilities', () => {
+    // The TYPE is the wire/DB value and must not follow the product name: it is
+    // persisted in `environments.type` and `integrations.type`, so renaming it
+    // would orphan every configured workspace. Only the label is the product's.
     expect(selfHostedProvider.type).toBe('selfhosted');
-    expect(selfHostedProvider.displayName).toBe('Self-hosted (Firecracker)');
+    expect(selfHostedProvider.displayName).toBe('Talyn Fleet');
     expect(selfHostedProvider.capabilities).toMatchObject({ model: true });
   });
 
@@ -35,18 +38,55 @@ describe('selfHostedProvider — CloudTaskProvider conformance', () => {
     }
   });
 
-  // The TOKEN is what makes a workspace configured. The endpoint became
-  // optional when the host registry landed — blank means "whichever registered
-  // host is least loaded" — so this now pins the narrower rule rather than the
-  // old one, and still refuses on the case that actually matters.
-  it('rejects credentials missing the token (no DB/network hit)', async () => {
-    expect(await selfHostedProvider.validateCredentials('ws1', {})).toEqual({
+  // The CLAUDE TOKEN is the ONLY credential the workspace supplies. The other
+  // two fields left the card entirely: the bearer for FLEET_API_TOKEN and the
+  // endpoint for the host registry (with FLEET_PINNED_ENDPOINT as the operator's
+  // debugging override). The middle case below proves a leftover `fleetEndpoint`
+  // in a request body cannot stand in for the token.
+  //
+  // All of these must reject BEFORE any DB or network work: this suite runs
+  // with no database, so a regression that reordered the checks would show up
+  // as a connection error rather than a quiet pass.
+  it.each([
+    ['nothing at all', {}],
+    ['an endpoint the card no longer offers', { fleetEndpoint: 'http://x' }],
+    ['a blank token', { claudeToken: '' }],
+  ])('rejects %s (no DB/network hit)', async (_label, input) => {
+    expect(await selfHostedProvider.validateCredentials('ws1', input)).toEqual({
       ok: false,
-      error: 'fleetToken is required',
+      error: 'A Claude OAuth token is required.',
     });
-    expect(
-      await selfHostedProvider.validateCredentials('ws1', { fleetEndpoint: 'http://x' }),
-    ).toEqual({ ok: false, error: 'fleetToken is required' });
+  });
+
+  // A wrong-shaped credential is caught in the form, not twenty minutes into a
+  // run when the agent's first request 401s. The two accepted prefixes are the
+  // fleet proxy's (`oauthTokenPrefix = "sk-ant-oat"` and Console keys).
+  it.each([
+    ['a GitHub PAT', 'ghp_abcdefghijklmnop'],
+    ['a bare word', 'my-token'],
+    ['the prefix with nothing after it', 'sk-ant-'],
+    ['a token with embedded whitespace', 'sk-ant-oat01 truncated'],
+  ])('rejects %s as not a Claude credential', async (_label, claudeToken) => {
+    const result = await selfHostedProvider.validateCredentials('ws1', { claudeToken });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('does not look like a Claude credential');
+  });
+
+  // Past the shape check with no FLEET_API_TOKEN set, the failure must name the
+  // DEPLOYMENT, not the workspace — the user's input was fine and sending them
+  // back to the settings form they just filled in correctly helps nobody.
+  it('blames the deployment, not the workspace, when FLEET_API_TOKEN is unset', async () => {
+    const saved = process.env.FLEET_API_TOKEN;
+    delete process.env.FLEET_API_TOKEN;
+    try {
+      const result = await selfHostedProvider.validateCredentials('ws1', {
+        claudeToken: 'sk-ant-oat01-abc',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('FLEET_API_TOKEN');
+    } finally {
+      if (saved !== undefined) process.env.FLEET_API_TOKEN = saved;
+    }
   });
 
   it('registers and resolves through the registry by type', () => {

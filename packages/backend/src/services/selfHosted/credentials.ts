@@ -14,18 +14,67 @@ import { pickFleetHost } from '../fleetHosts.js';
 const INTEGRATION_TYPE = 'selfhosted';
 
 interface SelfHostedIntegrationConfig {
-  fleetEndpoint?: string;
-  fleetTokenEnc?: EncryptedEnvelope;
-  /** Optional BYO LLM key. Absent means the fleet uses its own resold key. */
+  /** The workspace's own Claude credential — an OAuth token from a Claude
+   *  subscription, or a Console API key. This is the ONE secret a user supplies,
+   *  and the only key this config carries. */
   anthropicKeyEnc?: EncryptedEnvelope;
+
+  // Legacy, read nowhere. Both were fields on the settings card and neither was
+  // ever the workspace's to give: `fleetTokenEnc` authenticated the BACKEND to a
+  // host, and `fleetEndpoint` chose WHICH host, which is the registry's job.
+  // They live in deployment config now (FLEET_API_TOKEN / FLEET_PINNED_ENDPOINT)
+  // and stay in the type so an old row is recognisably old rather than
+  // mysteriously shaped.
+  fleetTokenEnc?: EncryptedEnvelope;
+  fleetEndpoint?: string;
 }
 
 export interface SelfHostedCredentials {
-  /** Optional: blank means "use whichever registered host is least loaded".
-   *  Set it to pin this workspace to one box. */
-  fleetEndpoint: string;
-  fleetToken: string;
-  anthropicApiKey?: string;
+  /** `sk-ant-oat…` (OAuth) or `sk-ant-api…` (Console key) — the fleet's
+   *  credential proxy accepts either and picks the right auth header. */
+  claudeToken: string;
+}
+
+/**
+ * The bearer the backend presents to a fleet host's API.
+ *
+ * Deployment config, not a workspace secret. It authenticates ONE service to
+ * another — every host in a deployment shares it, and no user of the product
+ * has any reason to know it exists, let alone to paste it into a settings form.
+ * Putting it in the UI made the workspace responsible for a credential it does
+ * not own and cannot rotate.
+ *
+ * Set it on the backend and on every host's `/etc/fleet/secrets.env`
+ * (`FLEET_API_TOKEN`); the two must match or dispatch 401s.
+ */
+export function fleetApiToken(): string {
+  return process.env.FLEET_API_TOKEN ?? '';
+}
+
+/**
+ * Force every run onto one host, bypassing the registry. Blank = registry.
+ *
+ * This is a DEBUGGING escape hatch and it is deployment-level for the same
+ * reason the bearer is: which box a run lands on is infrastructure. A workspace
+ * has no way to know which host is healthy, which is draining, or which is the
+ * one you are currently bisecting a bug on — the registry does, from reports
+ * seconds old. Exposing the pin as a settings field asked users to answer a
+ * question they cannot answer, and a stale one silently routed every task to a
+ * box that had been offline for a week.
+ */
+export function fleetPinnedEndpoint(): string {
+  return (process.env.FLEET_PINNED_ENDPOINT ?? '').replace(/\/+$/, '');
+}
+
+/** Thrown when the deployment itself is misconfigured — not a per-workspace fault. */
+export class FleetNotDeployedError extends Error {
+  constructor() {
+    super(
+      'FLEET_API_TOKEN is not set on the backend, so it cannot authenticate to any fleet host. ' +
+        'This is deployment configuration, not a workspace setting.',
+    );
+    this.name = 'FleetNotDeployedError';
+  }
 }
 
 function readEnc(env: EncryptedEnvelope | undefined, label: string): string | null {
@@ -59,18 +108,18 @@ export async function getSelfHostedCredentials(
   if (!row || !row.enabled) return null;
 
   const config = (row.config as SelfHostedIntegrationConfig | null) ?? {};
-  const fleetToken = readEnc(config.fleetTokenEnc, 'fleet API token');
-  // The TOKEN is what makes a workspace configured; the endpoint is optional
-  // and blank means "resolve through the host registry" (resolveFleetTarget).
-  // Requiring it here would make a registry-routed workspace look unconfigured,
-  // which reads as "you never set this up" rather than "your hosts are down".
-  if (!fleetToken) return null;
+  // The CLAUDE TOKEN is what makes a workspace configured, and it is now the
+  // only thing this config holds. Nothing else could play that role: the fleet
+  // bearer is identical for every workspace so it distinguishes nothing, and
+  // the endpoint answers "which host", which the registry answers better.
+  //
+  // A row written before this change carries `fleetTokenEnc`/`fleetEndpoint`
+  // and no Claude token; it reads as unconfigured, which is accurate — the user
+  // still has to supply the one secret that is now actually theirs.
+  const claudeToken = readEnc(config.anthropicKeyEnc, 'Claude token');
+  if (!claudeToken) return null;
 
-  return {
-    fleetEndpoint: config.fleetEndpoint ?? '',
-    fleetToken,
-    anthropicApiKey: readEnc(config.anthropicKeyEnc, 'Anthropic key') ?? undefined,
-  };
+  return { claudeToken };
 }
 
 /** Build a client for a workspace, or null if it isn't configured. */
@@ -84,7 +133,7 @@ export interface FleetTarget {
   endpoint: string;
   token: string;
   /** The registered host this resolved to, when it came from the registry.
-   *  Absent when the workspace pinned an endpoint itself. */
+   *  Absent when FLEET_PINNED_ENDPOINT overrode it. */
   host?: string;
 }
 
@@ -92,15 +141,16 @@ export interface FleetTarget {
  * Resolve which fleet host this workspace's next run should go to.
  *
  * The credential says WHETHER a workspace may use the fleet; the registry says
- * WHERE. Splitting them is what makes more than one host possible: a token
- * stored per workspace does not know which box is least loaded, or which is
- * draining, or which has stopped reporting.
+ * WHERE. Splitting them is what makes more than one host possible: a workspace
+ * does not know which box is least loaded, or which is draining, or which has
+ * stopped reporting, so it was never in a position to choose one.
  *
  * Order:
- *   1. An endpoint the workspace pinned itself. Explicit beats inferred, and
- *      pinning one host is how you debug a specific box without draining the
- *      others.
- *   2. The least-loaded dispatchable host in the registry.
+ *   1. FLEET_PINNED_ENDPOINT, if the operator set one. A debugging override —
+ *      it forces every run onto one box regardless of load or health, which is
+ *      exactly what you want while bisecting a host and exactly what you do not
+ *      want otherwise.
+ *   2. The least-loaded dispatchable host in the registry. The normal path.
  *
  * Returns null when the workspace has no credential at all — the fleet is not
  * configured for it, which is different from "configured and nothing is up".
@@ -112,9 +162,15 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
   const creds = await getSelfHostedCredentials(workspaceId);
   if (!creds) return null;
 
-  if (creds.fleetEndpoint) {
-    return { endpoint: creds.fleetEndpoint, token: creds.fleetToken };
-  }
+  // Deliberately thrown, not returned as null: a missing deployment token is
+  // an operator error and every workspace hits it identically. Reporting it as
+  // "not configured" would send the user back to a settings form they have
+  // already filled in correctly.
+  const token = fleetApiToken();
+  if (!token) throw new FleetNotDeployedError();
+
+  const pinned = fleetPinnedEndpoint();
+  if (pinned) return { endpoint: pinned, token };
 
   const host = await pickFleetHost();
   if (!host?.apiEndpoint) {
@@ -127,13 +183,13 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
         '(none registered, all draining, all at capacity, or none advertising an endpoint)',
     );
   }
-  return { endpoint: host.apiEndpoint, token: creds.fleetToken, host: host.name };
+  return { endpoint: host.apiEndpoint, token, host: host.name };
 }
 
 /** Upsert a workspace's fleet credentials (secrets encrypted at rest). */
 export async function storeSelfHostedCredentials(
   workspaceId: string,
-  input: { fleetEndpoint?: string; fleetToken: string; anthropicApiKey?: string },
+  input: { claudeToken: string },
 ): Promise<void> {
   const db = getDbClient();
   const existing = await db
@@ -147,12 +203,12 @@ export async function storeSelfHostedCredentials(
     )
     .limit(1);
 
+  // Written whole, not merged into what was there. A workspace configured
+  // before the fleet bearer and endpoint left the card still has them on disk;
+  // carrying them forward would keep a dead per-workspace endpoint alive as a
+  // silent routing override long after the field that set it was removed.
   const config: SelfHostedIntegrationConfig = {
-    // Trailing slashes off, and blank stays blank — an empty endpoint is the
-    // signal to resolve through the registry, not a malformed one.
-    fleetEndpoint: (input.fleetEndpoint ?? '').replace(/\/+$/, ''),
-    fleetTokenEnc: encryptString(input.fleetToken),
-    ...(input.anthropicApiKey ? { anthropicKeyEnc: encryptString(input.anthropicApiKey) } : {}),
+    anthropicKeyEnc: encryptString(input.claudeToken),
   };
 
   const now = new Date();
