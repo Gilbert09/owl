@@ -90,6 +90,49 @@ export const billingEvents = pgTable('billing_events', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ---------- Admin audit log (operator console) ----------
+//
+// One row per mutating action taken from admin.talyn.dev — and per read of
+// another tenant's task transcript, which is the single most sensitive read
+// on that surface. `is_admin` used to gate a read-only debug panel; it now
+// gates draining a fleet host, comping an account and granting admin, and
+// what makes that defensible is being able to answer "who, when, why"
+// afterwards.
+//
+// Same backend-pool-only posture as billing_events: RLS on, no policy, no
+// grant, so a JWT connection can never read it. `actor_id` has no FK and
+// `actor_email` is denormalised so the trail outlives an account wipe and
+// still names a person afterwards. See 0039 for the two write shapes
+// (pending-then-settle for remote calls, one transaction for local ones).
+export const adminAuditLog = pgTable(
+  'admin_audit_log',
+  {
+    id: text('id').primaryKey(),
+    at: timestamp('at', { withTimezone: true }).notNull().defaultNow(),
+    actorId: text('actor_id').notNull(),
+    actorEmail: text('actor_email').notNull(),
+    // The AdminAuditAction union in @talyn/shared is this column's contract.
+    action: text('action').notNull(),
+    targetKind: text('target_kind').notNull(), // host|run|golden|user|workspace|task
+    targetId: text('target_id').notNull(),
+    reason: text('reason').notNull(),
+    params: jsonb('params'),
+    before: jsonb('before'),
+    after: jsonb('after'),
+    outcome: text('outcome').notNull(), // 'pending' | 'ok' | 'error'
+    error: text('error'),
+    durationMs: integer('duration_ms'),
+    requestId: text('request_id'),
+    ip: text('ip'),
+    userAgent: text('user_agent'),
+  },
+  (t) => ({
+    atIdx: index('idx_admin_audit_at').on(t.at),
+    actorIdx: index('idx_admin_audit_actor').on(t.actorId, t.at),
+    targetIdx: index('idx_admin_audit_target').on(t.targetKind, t.targetId, t.at),
+  })
+);
+
 // ---------- Workspaces ----------
 
 export const workspaces = pgTable(

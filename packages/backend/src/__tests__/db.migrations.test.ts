@@ -168,4 +168,64 @@ describe('Drizzle migration', () => {
     }
     expect(map.get('settings')).toBe(false);
   });
+
+  it('creates admin_audit_log as a backend-pool-only table (RLS on, no policy)', async () => {
+    const testDb = await createTestDb();
+    cleanup = testDb.cleanup;
+
+    const colsRes = await testDb.pglite.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'admin_audit_log'
+    `);
+    const cols = colsRes.rows.map((r) => r.column_name);
+    for (const c of [
+      'id',
+      'at',
+      'actor_id',
+      'actor_email',
+      'action',
+      'target_kind',
+      'target_id',
+      'reason',
+      'params',
+      'before',
+      'after',
+      'outcome',
+      'error',
+      'duration_ms',
+      'request_id',
+      'ip',
+      'user_agent',
+    ]) {
+      expect(cols).toContain(c);
+    }
+
+    // The security property is RLS enabled with NO policy: only the
+    // privileged pool role (which bypasses RLS) can read or write. Assert
+    // both halves rather than trusting the migration's comment — an
+    // `authenticated` policy added here later would silently expose who
+    // comped whom to any JWT connection.
+    const rlsRes = await testDb.pglite.query<{ rowsecurity: boolean }>(`
+      SELECT rowsecurity FROM pg_tables
+      WHERE schemaname = 'public' AND tablename = 'admin_audit_log'
+    `);
+    expect(rlsRes.rows[0]?.rowsecurity).toBe(true);
+
+    const polRes = await testDb.pglite.query<{ policyname: string }>(`
+      SELECT policyname FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = 'admin_audit_log'
+    `);
+    expect(polRes.rows).toHaveLength(0);
+
+    // The trail must survive an account wipe, which cascades from users.
+    // A FK on actor_id would take the audit row with it — the one row you
+    // most want after an account is deleted.
+    const fkRes = await testDb.pglite.query<{ constraint_name: string }>(`
+      SELECT tc.constraint_name FROM information_schema.table_constraints tc
+      WHERE tc.table_schema = 'public'
+        AND tc.table_name = 'admin_audit_log'
+        AND tc.constraint_type = 'FOREIGN KEY'
+    `);
+    expect(fkRes.rows).toHaveLength(0);
+  });
 });
