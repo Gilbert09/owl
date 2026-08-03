@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createTestDb } from './helpers/testDb.js';
-import type { Database } from '../db/client.js';
+import { runInScopedDb, type Database } from '../db/client.js';
 import { fleetHosts as fleetHostsTable } from '../db/schema.js';
 import {
   HOST_STALE_AFTER_MS,
@@ -12,6 +12,68 @@ import {
   pickFleetHost,
   recordFleetHostReport,
 } from '../services/fleetHosts.js';
+
+/**
+ * These queries must never run on the owner-scoped handle.
+ *
+ * `fleet_hosts` is deployment infrastructure with no owner column: RLS on, no
+ * policy, no `authenticated` GRANT. But `pickFleetHost` is reached from request
+ * context, where `withOwnerScope` has dropped the transaction to
+ * `authenticated` — so a `getDbClient()` in this module picks up that handle
+ * and Postgres answers `permission denied for table fleet_hosts`. Prod,
+ * 2026-08-03: it surfaced in the settings card as a raw "Failed query".
+ *
+ * A privileges test cannot catch this. The suite runs on pglite as a superuser
+ * with no `authenticated` role at all, so the GRANT that is missing in
+ * production is irrelevant here and the query succeeds either way — the check
+ * would pass no matter which client the module used, which is worse than no
+ * check because it reads like coverage.
+ *
+ * So test the thing that IS observable: install a scoped handle that throws if
+ * anything touches it, and assert the registry works anyway. That fails
+ * immediately if `getPoolDbClient()` ever goes back to `getDbClient()`, which is
+ * the actual regression.
+ */
+describe('fleet host registry ignores the owner scope', () => {
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    ({ cleanup } = await createTestDb());
+  });
+  afterEach(async () => {
+    await cleanup();
+  });
+
+  /** A handle whose every use is a test failure. */
+  const poisoned = new Proxy({} as Database, {
+    get(_t, prop) {
+      throw new Error(
+        `fleet_hosts query used the owner-scoped DB handle (.${String(prop)}). ` +
+          'It must use getPoolDbClient() — the authenticated role has no grant on that table.',
+      );
+    },
+  });
+
+  it('reads the registry from inside an owner scope', async () => {
+    await recordFleetHostReport({ host: 'h1', apiEndpoint: 'http://h1:8080', runsMax: 4 });
+
+    await runInScopedDb(poisoned, async () => {
+      expect((await listFleetHosts()).map((h) => h.name)).toEqual(['h1']);
+      expect((await getFleetHost('h1'))?.apiEndpoint).toBe('http://h1:8080');
+      expect((await pickFleetHost())?.name).toBe('h1');
+    });
+  });
+
+  // The write path is pre-auth today (the report route is token-gated, not
+  // JWT-gated) so it never met a scope — which is exactly why it would be the
+  // one to break silently if that route ever moved behind auth.
+  it('writes to the registry from inside an owner scope', async () => {
+    await runInScopedDb(poisoned, async () => {
+      await recordFleetHostReport({ host: 'h2', apiEndpoint: 'http://h2:8080', runsMax: 2 });
+    });
+    expect((await getFleetHost('h2'))?.runsMax).toBe(2);
+  });
+});
 
 /**
  * The fleet host registry.
