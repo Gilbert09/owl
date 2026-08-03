@@ -36,10 +36,18 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
     i=$((i + 1)); sleep 1
   done
 
-  # --hostname so the machine is identifiable in the admin console; Railway
-  # replaces containers, and a tailnet full of anonymous ephemeral nodes is
-  # impossible to reason about. --accept-routes=false: we want to reach fleet
-  # hosts, not inherit anybody's subnet routes.
+  # --hostname so the machine is identifiable in the admin console.
+  #
+  # THE KEY MUST BE EPHEMERAL. This container has no persistent volume, so every
+  # deploy starts with empty tailscaled state and registers as a NEW node.
+  # With a normal key the old node lingers, Tailscale disambiguates the taken
+  # hostname, and you accumulate talyn-backend-1, -2, -3... one per deploy, all
+  # tagged and all apparently valid ACL sources. An ephemeral key makes the node
+  # remove itself shortly after it goes offline, which is exactly the container
+  # lifecycle. See docs/SETUP.md.
+  #
+  # --accept-routes=false: we want to reach fleet hosts, not inherit anybody's
+  # subnet routes.
   if /usr/local/bin/tailscale --socket=/var/run/tailscale/tailscaled.sock up \
        --authkey="${TS_AUTHKEY}" \
        --hostname="${TS_HOSTNAME:-talyn-backend}" \

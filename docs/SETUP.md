@@ -327,6 +327,18 @@ With no `TS_AUTHKEY` the daemon never starts and the image behaves exactly as it
 did before; a deployment with no self-hosted fleet should not be running a
 networking daemon it has no use for.
 
+**The backend's key must be EPHEMERAL** (tick "Ephemeral" when generating it).
+The container has no persistent volume, so every deploy starts with empty
+tailscaled state and registers as a new node. With a normal key the old one
+lingers and you accumulate `talyn-backend-1`, `-2`, `-3`… one per deploy — all
+tagged, all apparently valid ACL sources, and none of them the live one. An
+ephemeral node removes itself shortly after it goes offline, which is exactly
+the container lifecycle.
+
+Fleet hosts are the opposite: their keys should NOT be ephemeral, because a host
+that reboots should come back as the same node with the same tailnet address —
+which is what `FLEET_ADVERTISE_ENDPOINT` has been told to publish.
+
 #### 4. Check it
 
 `GET /api/v1/fleet/hosts` (admin only) lists every host that has reported, with
