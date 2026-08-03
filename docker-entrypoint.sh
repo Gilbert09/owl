@@ -17,6 +17,25 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
   echo "[entrypoint] starting tailscaled (userspace) for fleet connectivity"
   mkdir -p /var/lib/tailscale /var/run/tailscale
 
+  # Tunnel MTU. Tailscale's default is 1280 and on this path it BLACK-HOLES:
+  # anything that fits in one segment arrives, anything larger never does, in
+  # either direction. Small responses (/healthz, /v1/capacity) worked
+  # throughout, which is exactly why it went unnoticed until a response with a
+  # real payload in it was tried — dispatch timed out at 20s, transcripts could
+  # not be read at all, and the failure read as "the fleet is unreachable".
+  #
+  # Measured, not guessed. At the default: /v1/runs returned 0 bytes and timed
+  # out, a 60KB upload took 3.4s (~17KB/s, retransmit-shaped). At 1000: 10,675
+  # bytes in 20ms, 8 times out of 8, and the same upload in 0.04s.
+  #
+  # 1000 rather than something nearer the default because the headroom is worth
+  # more than the throughput: the cost is a few percent of per-packet overhead
+  # on a link carrying transcripts, and the failure mode it avoids is silent and
+  # looks like a network outage. Override with TS_DEBUG_MTU if a deployment's
+  # path is known to carry more.
+  export TS_DEBUG_MTU="${TS_DEBUG_MTU:-1000}"
+  echo "[entrypoint] tailscale tunnel MTU: ${TS_DEBUG_MTU}"
+
   # --tun=userspace-networking: no interface, no netfilter, no capabilities.
   # --outbound-http-proxy-listen is what the fleet client dials through; undici
   # speaks to an HTTP proxy natively, which SOCKS would have needed a shim for.
