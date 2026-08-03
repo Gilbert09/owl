@@ -35,6 +35,34 @@ export function taskStatusForFleetRun(status: string | undefined): TaskStatus {
   return status === 'completed' ? 'completed' : 'failed';
 }
 
+/**
+ * Unwrap the fleet's envelope into the shape the transcript renderer reads.
+ *
+ * The fleet WRAPS each event as `{type, subtype, raw, guestSeq}`, where `raw` is
+ * the Agent SDK message itself and the outer `type`/`subtype` are copies fleetd
+ * probed out of it so it can index without parsing the payload.
+ *
+ * `AgentEvent` — what every other provider produces and what the renderer reads
+ * — carries the SDK message AT THE TOP LEVEL: `message`, `content`, `result`.
+ * Spreading the wrapper put all of that one level down under `raw`, so a
+ * transcript looked structurally fine and rendered as nothing: a task sat on
+ * "Claude is thinking..." while 47 events were already in Postgres.
+ *
+ * Worth stating plainly, because the symptom was indistinguishable from the
+ * three other causes chased before it (a tailnet MTU black hole, NUL bytes the
+ * jsonb column refused, a stale fleet build). Every layer reported success and
+ * the payload was present at every hop. Only the shape was wrong, and nothing
+ * type-checks a jsonb column.
+ *
+ * Falls back to the event itself when there is no `raw`, so an older fleet that
+ * does not wrap still ingests rather than producing empty entries.
+ */
+export function toAgentEvent(ev: FleetEvent): AgentEvent {
+  const wrapper = ev.event as { raw?: unknown } | undefined;
+  const payload = (wrapper?.raw ?? ev.event ?? {}) as object;
+  return { ...payload, seq: ev.seq } as AgentEvent;
+}
+
 class SelfHostedPoller {
   /** taskId → highest fleet `seq` already emitted over WS + persisted. */
   private cursor = new Map<string, number>();
@@ -183,7 +211,7 @@ class SelfHostedPoller {
     let advanced = false;
     for (const ev of events) {
       if (ev.seq <= (this.cursor.get(row.id) ?? 0)) continue;
-      transcript.push({ ...(ev.event as object), seq: ev.seq } as AgentEvent);
+      transcript.push(toAgentEvent(ev));
       this.cursor.set(row.id, ev.seq);
       emitTaskEvent(row.workspaceId, row.id, transcript[transcript.length - 1]);
       advanced = true;
