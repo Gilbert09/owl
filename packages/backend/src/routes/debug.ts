@@ -3,11 +3,22 @@ import type { DebugCategory } from '@talyn/shared';
 import { debugBus, type DebugOwnerFilter } from '../services/debugBus.js';
 import { requireAdmin } from '../middleware/auth.js';
 
-const CATEGORIES: ReadonlySet<string> = new Set([
+/**
+ * The categories `?category=` accepts.
+ *
+ * Must stay in step with the `DebugCategory` union — an unlisted value here is
+ * not rejected, it silently falls through to "no filter", so the panel's chip
+ * appears to do nothing rather than to fail. `db` and `webhook` were missing
+ * for exactly that reason: the UI had chips for both and clicking either
+ * returned the unfiltered stream.
+ */
+const CATEGORIES: ReadonlySet<DebugCategory> = new Set<DebugCategory>([
   'http',
+  'db',
   'polling',
   'websocket',
   'event',
+  'webhook',
   'error',
 ]);
 
@@ -41,7 +52,7 @@ export function debugRoutes(): Router {
   router.get('/events', (req, res) => {
     const categoryRaw = req.query.category as string | undefined;
     const category =
-      categoryRaw && CATEGORIES.has(categoryRaw)
+      categoryRaw && CATEGORIES.has(categoryRaw as DebugCategory)
         ? (categoryRaw as DebugCategory)
         : undefined;
     const service = (req.query.service as string | undefined) || undefined;

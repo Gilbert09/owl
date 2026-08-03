@@ -10,6 +10,7 @@ import { skillRoutes } from './skills.js';
 import { pullRequestRoutes } from './pullRequests.js';
 import { debugRoutes } from './debug.js';
 import { fleetPublicRoutes, fleetRoutes } from './fleet.js';
+import { adminRoutes } from './admin/index.js';
 import { userRoutes } from './users.js';
 import { billingRoutes } from './billing.js';
 import { mcpTokenRoutes } from './mcpTokens.js';
@@ -115,6 +116,32 @@ export function setupRoutes(app: Express): void {
   // and mounted alongside debug for the same reason: it is an operator surface,
   // not a workspace one.
   app.use(`${api}/fleet`, mount(fleetRoutes()));
+
+  // The operator console's API (admin.talyn.dev): the debug surface, fleet
+  // operations, cross-tenant product admin, and the audit trail. Admin-gated
+  // inside (except GET /admin/me, which answers {admin:false} rather than 403
+  // so the console can render a "not an operator" screen).
+  //
+  // Pre-ownerScope with debug and fleet, and for a sharper reason than either:
+  // every read here is deliberately cross-tenant, and ownerScope would not
+  // error on them — it would silently return zero rows, which is the worst
+  // available failure for a console whose job is to show what is happening
+  // across the whole deployment.
+  //
+  // Its own per-user ceiling on top of the global one. A console page fans out
+  // over hosts and polls, so its floor is higher than a product client's, but
+  // it is still one human clicking: 300/min is generous for that and well
+  // under anything that looks like a script.
+  app.use(
+    `${api}/admin`,
+    rateLimit({
+      windowMs: 60_000,
+      max: 300,
+      keyFn: (req) => req.user?.id ?? req.ip ?? 'unknown',
+      message: 'Too many admin requests — slow down.',
+    }),
+    mount(adminRoutes())
+  );
 
   // Account-level self-service (wipe). Pre-ownerScope: deletes the caller's
   // own users row, which RLS blocks from the authenticated role; handlers
