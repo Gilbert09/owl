@@ -319,7 +319,21 @@ FLEET_REPORT_TOKEN=<shared with every fleet host>
 FLEET_API_TOKEN=<shared with every fleet host>
 FLEET_ENABLED=true
 FLEET_ALLOWED_EMAILS=you@example.com
+TS_DEBUG_MTU=1000                      # optional; the entrypoint defaults to this
 ```
+
+**On the tunnel MTU, because the failure it prevents does not look like an MTU
+problem.** Tailscale's default tunnel MTU is 1280, and on at least one
+Railway↔Hetzner path that black-holes: anything fitting in a single segment
+arrives, anything larger never does. `/healthz` and `/v1/capacity` answered in
+20ms throughout, so the link looked healthy — while dispatch timed out at 20s
+and transcripts could not be read at all. It presents as "the fleet is
+unreachable", and every small-payload check you would reach for to test that
+passes.
+
+The entrypoint defaults `TS_DEBUG_MTU` to 1000. Raise it only with a measurement
+in hand: fetch something over a few KB (`/v1/runs`, `/metrics`) through the
+proxy and check the byte count, not just the status code.
 
 **The two fleet tokens run in opposite directions and are not interchangeable:**
 
