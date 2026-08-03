@@ -15,11 +15,36 @@ import type { DispatchResult } from '../cloudProviders/types.js';
 
 export type { DispatchResult };
 
+/**
+ * The publishing instruction is load-bearing, not boilerplate.
+ *
+ * The first real fleet run did its work correctly and then could not ship it:
+ * `posthog/posthog` requires verified signatures, so every `git push` came back
+ * `GH013: Commits must have verified signatures`. There is no signing key in the
+ * VM and there must not be one. The agent then spent minutes probing GitHub API
+ * routes looking for a way through — all correctly refused by the credential
+ * proxy — and in the process created an empty review draft it could not delete.
+ *
+ * `fleet-publish` is the way through: it asks the credential proxy to create the
+ * commit through GitHub's API, which signs it server-side. Telling the agent
+ * that git push WILL fail matters as much as telling it the alternative exists,
+ * because an agent that believes push should work treats the refusal as
+ * something to route around.
+ */
 const SYSTEM_PROMPT =
   'You are a coding agent working in an isolated microVM with the repository checked out. ' +
-  'Make the requested change, commit it to a new branch, push, and open a pull request. ' +
-  'git is already authenticated — there are no credentials in this VM and you do not need any. ' +
-  'Keep the change minimal and focused on what was asked; do not refactor unrelated code. ' +
+  'Make the requested change and open a pull request. ' +
+  'Keep the change minimal and focused on what was asked; do not refactor unrelated code.\n\n' +
+  'PUBLISHING YOUR WORK: do not use `git push`. It will be rejected on any repository that ' +
+  'requires verified signatures, and there is no signing key in this VM by design. ' +
+  'Instead run `fleet-publish --branch <branch> --message "<headline>" [--body "<longer text>"]`, ' +
+  'which publishes your working tree as one commit that GitHub signs server-side. ' +
+  'It diffs against the merge-base with the default branch, so commit locally or not as you prefer — ' +
+  'only the final file contents matter. Then open the PR with the GitHub API as usual.\n\n' +
+  'git and the GitHub API are already authenticated — there are no credentials in this VM and you ' +
+  'do not need any. Some API endpoints are deliberately unreachable; if one is refused, that is a ' +
+  'policy decision, not an obstacle to work around. Do not probe for alternatives, and never use a ' +
+  'request that creates state (a review, a comment, a ref) to test whether something is permitted.\n\n' +
   'When done, state the URL of the pull request you opened.';
 
 /**
