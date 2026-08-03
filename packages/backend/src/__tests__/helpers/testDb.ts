@@ -48,15 +48,31 @@ export async function createTestDb(): Promise<{
     END $$;
   `);
 
-  // Apply every generated migration in order. drizzle-kit names them
-  // `NNNN_<slug>.sql` and writes `--> statement-breakpoint` between
-  // statements; splitting on that marker gives one call per statement.
-  const migrationFiles = fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
+  // Apply the migrations THE JOURNAL LISTS, in journal order — not every .sql
+  // file on disk.
+  //
+  // Production runs drizzle's `migrate()`, which reads meta/_journal.json and
+  // ignores anything not in it. This helper used to readdir the folder instead,
+  // so a migration added without a journal entry ran here and NOT in
+  // production: every test passed, the deploy came up, and the first request to
+  // touch the new table got `relation "fleet_hosts" does not exist`. A test
+  // database that is more permissive than production validates something
+  // production will never do.
+  const journal = JSON.parse(
+    fs.readFileSync(path.join(MIGRATIONS_DIR, 'meta', '_journal.json'), 'utf-8'),
+  ) as { entries: { tag: string }[] };
+  const migrationFiles = journal.entries.map((e) => `${e.tag}.sql`);
+
   for (const file of migrationFiles) {
-    const sqlText = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf-8');
+    const full = path.join(MIGRATIONS_DIR, file);
+    if (!fs.existsSync(full)) {
+      // The journal naming a file that is not there is the mirror-image
+      // mistake, and just as invisible if it were skipped quietly.
+      throw new Error(
+        `migration journal lists ${file} but it does not exist in ${MIGRATIONS_DIR}`,
+      );
+    }
+    const sqlText = fs.readFileSync(full, 'utf-8');
     const statements = sqlText
       .split('--> statement-breakpoint')
       .map((s) => s.trim())
