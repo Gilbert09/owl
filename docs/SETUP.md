@@ -228,9 +228,11 @@ TALYN_ALLOWED_EMAILS=you@example.com
 
 Multiple emails are comma-separated. Unauthorised callers get a 403 on first request. Once invite flows land (TODO in ROADMAP Phase 19) this can go away.
 
-### Self-hosted fleet allow-list (required to use the Firecracker fleet)
+### Talyn Fleet allow-list (required to use the Firecracker fleet)
 
-The `selfhosted` provider runs tasks on hardware we own — one box, with a memory
+The `selfhosted` provider — **"Talyn Fleet" everywhere in the UI**; the wire and
+DB value stays `selfhosted` because it is persisted in `environments.type` and
+`integrations.type` — runs tasks on hardware we own — one box, with a memory
 budget that fits a couple of concurrent runs. Two flags gate it, and both are
 needed:
 
@@ -314,9 +316,29 @@ TS_AUTHKEY=tskey-auth-...              # absent = Tailscale never starts
 TS_HOSTNAME=talyn-backend
 FLEET_HTTP_PROXY=http://localhost:1055 # what the fleet client dials through
 FLEET_REPORT_TOKEN=<shared with every fleet host>
+FLEET_API_TOKEN=<shared with every fleet host>
 FLEET_ENABLED=true
 FLEET_ALLOWED_EMAILS=you@example.com
 ```
+
+**The two fleet tokens run in opposite directions and are not interchangeable:**
+
+| | direction | must match |
+|---|---|---|
+| `FLEET_REPORT_TOKEN` | host → backend (`POST /fleet/report`) | every host's `FLEET_REPORT_TOKEN` |
+| `FLEET_API_TOKEN` | backend → host (dispatch, follow, cancel) | every host's `FLEET_API_TOKEN` |
+
+**`FLEET_API_TOKEN` is deployment config, not a workspace setting.** It
+authenticates one service to another and is identical for every workspace, so
+the settings UI does not ask for it — a user cannot be custodian of a secret
+they neither own nor can rotate, and asking them got it wrong in the obvious way
+(a token right for one host and wrong for the next). Unset, the backend refuses
+to store fleet credentials at all and says so, rather than accepting a Claude
+token against a fleet it cannot talk to.
+
+The one secret a workspace *does* supply is its **Claude OAuth token**
+(`claude setup-token`, or a Console API key). It is the only required field on
+the Talyn Fleet card.
 
 **`FLEET_REPORT_TOKEN` unset means the report endpoint refuses everything.** An
 open one lets anyone invent a host, and an invented host with an

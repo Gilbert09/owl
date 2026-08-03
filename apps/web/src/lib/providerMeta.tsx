@@ -35,7 +35,9 @@ export const PROVIDER_META: Record<CloudProviderType, ProviderMeta> = {
   posthog_code: { label: 'PostHog Code', src: POSTHOG_LOGO },
   claude_code: { label: 'Claude Code', src: CLAUDE_LOGO },
   codex_cloud: { label: 'Codex Cloud', src: CODEX_LOGO },
-  selfhosted: { label: 'Self-hosted', src: SELFHOSTED_LOGO },
+  // The wire/DB value stays 'selfhosted' — it is persisted in environments.type
+  // and integrations.type. Only the label is the product's name for it.
+  selfhosted: { label: 'Talyn Fleet', src: SELFHOSTED_LOGO },
 };
 
 /** `some_new_provider` -> `Some New Provider`. */

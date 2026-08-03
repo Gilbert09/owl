@@ -6,6 +6,8 @@ import {
   getSelfHostedClient,
   storeSelfHostedCredentials,
   removeSelfHostedCredentials,
+  fleetApiToken,
+  FleetNotDeployedError,
 } from '../../selfHosted/credentials.js';
 import { dispatchTaskToFleet } from '../../selfHosted/executor.js';
 import { selfHostedPoller } from '../../selfHosted/poller.js';
@@ -13,12 +15,11 @@ import type { CloudTaskProvider, CloudTaskRow, DispatchResult } from '../types.j
 
 interface SelfHostedCredInput {
   fleetEndpoint?: string;
-  fleetToken?: string;
-  anthropicApiKey?: string;
+  claudeToken?: string;
 }
 
 /**
- * Self-hosted provider — delegates to a Talyn-owned Firecracker fleet
+ * Talyn Fleet provider — delegates to a Talyn-owned Firecracker fleet
  * (Gilbert09/talyn-fleet). Each task runs in its own microVM on hardware we
  * own; the fleet clones the repo, runs the agent, and opens the PR, with the
  * GitHub token injected host-side so it never enters the VM.
@@ -31,14 +32,33 @@ interface SelfHostedCredInput {
  */
 export const selfHostedProvider: CloudTaskProvider = {
   type: 'selfhosted',
-  displayName: 'Self-hosted (Firecracker)',
+  displayName: 'Talyn Fleet',
   capabilities: { model: true },
 
   async validateCredentials(workspaceId, input) {
-    const { fleetEndpoint, fleetToken, anthropicApiKey } = (input ?? {}) as SelfHostedCredInput;
-    if (!fleetToken) {
-      return { ok: false, error: 'fleetToken is required' };
+    const { fleetEndpoint, claudeToken } = (input ?? {}) as SelfHostedCredInput;
+    if (!claudeToken) {
+      return { ok: false, error: 'A Claude OAuth token is required.' };
     }
+    // Checked here rather than left to the fleet, because the fleet only finds
+    // out when the agent's first request 401s — twenty minutes into a run, as a
+    // task failure. A pasted GitHub PAT or a truncated copy is caught in the
+    // form instead, where the fix is obvious.
+    if (!/^sk-ant-\S+$/.test(claudeToken)) {
+      return {
+        ok: false,
+        error:
+          'That does not look like a Claude credential. Expected an OAuth token ' +
+          '(sk-ant-oat…) from a Claude subscription, or a Console API key (sk-ant-api…).',
+      };
+    }
+
+    // The fleet API bearer is deployment config, not something the workspace
+    // supplies — see fleetApiToken(). Without it there is nothing to ping with,
+    // and storing a Claude token against a fleet the backend cannot talk to
+    // would just defer the failure to dispatch.
+    const bearer = fleetApiToken();
+    if (!bearer) return { ok: false, error: new FleetNotDeployedError().message };
 
     // The endpoint is optional: blank means "whichever registered host is
     // least loaded" (see resolveFleetTarget). Pinning one is for debugging a
@@ -46,7 +66,7 @@ export const selfHostedProvider: CloudTaskProvider = {
     // verify before storing anything.
     if (fleetEndpoint) {
       try {
-        await new FleetClient(fleetEndpoint, fleetToken).ping();
+        await new FleetClient(fleetEndpoint, bearer).ping();
       } catch (err) {
         return {
           ok: false,
@@ -68,7 +88,7 @@ export const selfHostedProvider: CloudTaskProvider = {
         };
       }
       try {
-        await new FleetClient(host.apiEndpoint, fleetToken).ping();
+        await new FleetClient(host.apiEndpoint, bearer).ping();
       } catch (err) {
         return {
           ok: false,
@@ -77,7 +97,7 @@ export const selfHostedProvider: CloudTaskProvider = {
       }
     }
 
-    await storeSelfHostedCredentials(workspaceId, { fleetEndpoint, fleetToken, anthropicApiKey });
+    await storeSelfHostedCredentials(workspaceId, { fleetEndpoint, claudeToken });
     return { ok: true };
   },
 
@@ -116,7 +136,7 @@ export const selfHostedProvider: CloudTaskProvider = {
     const cloud = readCloudTaskMeta(task);
     if (!cloud?.remoteTaskId) return; // never dispatched — nothing to cancel.
     const client = await getSelfHostedClient(task.workspaceId);
-    if (!client) throw new Error('The self-hosted fleet is not configured for this workspace.');
+    if (!client) throw new Error('Talyn Fleet is not configured for this workspace.');
     await client.cancelRun(cloud.remoteTaskId);
   },
 };

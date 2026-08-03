@@ -15,17 +15,49 @@ const INTEGRATION_TYPE = 'selfhosted';
 
 interface SelfHostedIntegrationConfig {
   fleetEndpoint?: string;
-  fleetTokenEnc?: EncryptedEnvelope;
-  /** Optional BYO LLM key. Absent means the fleet uses its own resold key. */
+  /** The workspace's own Claude credential — an OAuth token from a Claude
+   *  subscription, or a Console API key. This is the ONE secret a user supplies. */
   anthropicKeyEnc?: EncryptedEnvelope;
+  /** Legacy. The fleet API bearer used to be stored per workspace; it is
+   *  deployment config now (FLEET_API_TOKEN). Read nowhere, kept in the type so
+   *  an old row is recognisably old rather than mysteriously shaped. */
+  fleetTokenEnc?: EncryptedEnvelope;
 }
 
 export interface SelfHostedCredentials {
   /** Optional: blank means "use whichever registered host is least loaded".
    *  Set it to pin this workspace to one box. */
   fleetEndpoint: string;
-  fleetToken: string;
-  anthropicApiKey?: string;
+  /** `sk-ant-oat…` (OAuth) or `sk-ant-api…` (Console key) — the fleet's
+   *  credential proxy accepts either and picks the right auth header. */
+  claudeToken: string;
+}
+
+/**
+ * The bearer the backend presents to a fleet host's API.
+ *
+ * Deployment config, not a workspace secret. It authenticates ONE service to
+ * another — every host in a deployment shares it, and no user of the product
+ * has any reason to know it exists, let alone to paste it into a settings form.
+ * Putting it in the UI made the workspace responsible for a credential it does
+ * not own and cannot rotate.
+ *
+ * Set it on the backend and on every host's `/etc/fleet/secrets.env`
+ * (`FLEET_API_TOKEN`); the two must match or dispatch 401s.
+ */
+export function fleetApiToken(): string {
+  return process.env.FLEET_API_TOKEN ?? '';
+}
+
+/** Thrown when the deployment itself is misconfigured — not a per-workspace fault. */
+export class FleetNotDeployedError extends Error {
+  constructor() {
+    super(
+      'FLEET_API_TOKEN is not set on the backend, so it cannot authenticate to any fleet host. ' +
+        'This is deployment configuration, not a workspace setting.',
+    );
+    this.name = 'FleetNotDeployedError';
+  }
 }
 
 function readEnc(env: EncryptedEnvelope | undefined, label: string): string | null {
@@ -59,18 +91,19 @@ export async function getSelfHostedCredentials(
   if (!row || !row.enabled) return null;
 
   const config = (row.config as SelfHostedIntegrationConfig | null) ?? {};
-  const fleetToken = readEnc(config.fleetTokenEnc, 'fleet API token');
-  // The TOKEN is what makes a workspace configured; the endpoint is optional
-  // and blank means "resolve through the host registry" (resolveFleetTarget).
-  // Requiring it here would make a registry-routed workspace look unconfigured,
-  // which reads as "you never set this up" rather than "your hosts are down".
-  if (!fleetToken) return null;
+  // The CLAUDE TOKEN is what makes a workspace configured. The endpoint is
+  // optional (blank resolves through the host registry) and the fleet API
+  // bearer is deployment config, so neither can play that role: requiring the
+  // endpoint would make a registry-routed workspace look unconfigured, and the
+  // bearer is identical for every workspace, so it distinguishes nothing.
+  //
+  // A row written before this change carries `fleetTokenEnc` and no Claude
+  // token; it reads as unconfigured, which is accurate — the user still has to
+  // supply the one secret that is now actually theirs.
+  const claudeToken = readEnc(config.anthropicKeyEnc, 'Claude token');
+  if (!claudeToken) return null;
 
-  return {
-    fleetEndpoint: config.fleetEndpoint ?? '',
-    fleetToken,
-    anthropicApiKey: readEnc(config.anthropicKeyEnc, 'Anthropic key') ?? undefined,
-  };
+  return { fleetEndpoint: config.fleetEndpoint ?? '', claudeToken };
 }
 
 /** Build a client for a workspace, or null if it isn't configured. */
@@ -112,8 +145,15 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
   const creds = await getSelfHostedCredentials(workspaceId);
   if (!creds) return null;
 
+  // Deliberately thrown, not returned as null: a missing deployment token is
+  // an operator error and every workspace hits it identically. Reporting it as
+  // "not configured" would send the user back to a settings form they have
+  // already filled in correctly.
+  const token = fleetApiToken();
+  if (!token) throw new FleetNotDeployedError();
+
   if (creds.fleetEndpoint) {
-    return { endpoint: creds.fleetEndpoint, token: creds.fleetToken };
+    return { endpoint: creds.fleetEndpoint, token };
   }
 
   const host = await pickFleetHost();
@@ -127,13 +167,13 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
         '(none registered, all draining, all at capacity, or none advertising an endpoint)',
     );
   }
-  return { endpoint: host.apiEndpoint, token: creds.fleetToken, host: host.name };
+  return { endpoint: host.apiEndpoint, token, host: host.name };
 }
 
 /** Upsert a workspace's fleet credentials (secrets encrypted at rest). */
 export async function storeSelfHostedCredentials(
   workspaceId: string,
-  input: { fleetEndpoint?: string; fleetToken: string; anthropicApiKey?: string },
+  input: { fleetEndpoint?: string; claudeToken: string },
 ): Promise<void> {
   const db = getDbClient();
   const existing = await db
@@ -151,8 +191,7 @@ export async function storeSelfHostedCredentials(
     // Trailing slashes off, and blank stays blank — an empty endpoint is the
     // signal to resolve through the registry, not a malformed one.
     fleetEndpoint: (input.fleetEndpoint ?? '').replace(/\/+$/, ''),
-    fleetTokenEnc: encryptString(input.fleetToken),
-    ...(input.anthropicApiKey ? { anthropicKeyEnc: encryptString(input.anthropicApiKey) } : {}),
+    anthropicKeyEnc: encryptString(input.claudeToken),
   };
 
   const now = new Date();
