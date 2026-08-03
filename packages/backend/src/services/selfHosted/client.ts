@@ -258,6 +258,28 @@ export class FleetClient {
   async cancelRun(runId: string): Promise<void> {
     await this.request(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
   }
+
+  /**
+   * Hand a run's credentials back after the fleet restarted under it.
+   *
+   * The fleet never writes credentials to disk, so a `fleetd` restart loses
+   * them and the surviving microVM cannot authenticate anything — its next call
+   * returns `502 no Anthropic credential was supplied for this run`, and it then
+   * burns the rest of its deadline before being reported as "deadline exceeded".
+   *
+   * We are the only party that still has them. Re-supplying is what makes a
+   * fleet deploy survivable for a task that is already running, which is what
+   * lets deploys happen at all rather than waiting for an idle host.
+   */
+  async setRunCredentials(
+    runId: string,
+    creds: { githubToken: string; anthropicKey?: string; repo?: string },
+  ): Promise<void> {
+    await this.request(`/v1/runs/${encodeURIComponent(runId)}/credentials`, {
+      method: 'POST',
+      body: JSON.stringify(creds),
+    });
+  }
 }
 
 async function errorMessage(resp: Response, fallback: string): Promise<string> {

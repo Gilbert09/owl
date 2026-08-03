@@ -10,7 +10,8 @@ import { linkTaskToPullRequest } from '../prCache.js';
 import { clearWatched } from '../cloudProviders/taskWatch.js';
 import { TranscriptCursors } from '../cloudProviders/transcriptStore.js';
 import type { CloudTaskRow } from '../cloudProviders/types.js';
-import { getSelfHostedClient } from './credentials.js';
+import { githubService } from '../github.js';
+import { getSelfHostedClient, getSelfHostedCredentials } from './credentials.js';
 import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 
 // Re-exported, not redeclared. This module and claudeCode/poller.ts each had a
@@ -72,6 +73,8 @@ class SelfHostedPoller {
   private transcripts = new Map<string, AgentEvent[]>();
   /** Emission + persistence bookkeeping, shared with every other provider. */
   private cursors = new TranscriptCursors();
+  /** Runs already re-credentialed after an adoption, so we do it once. */
+  private recredentialed = new Set<string>();
 
   /** Entry point the generic cloud poller calls via the provider seam. */
   async reconcileTask(row: CloudTaskRow): Promise<void> {
@@ -87,6 +90,18 @@ class SelfHostedPoller {
     // never fail the task — the run is still going on the metal.
     const { run } = await client.getRun(runId);
     const terminal = isFleetRunTerminal(run.status);
+
+    // An ADOPTED run survived a fleetd restart, but its credentials did not:
+    // the fleet holds them only in memory, deliberately, so the surviving VM
+    // cannot authenticate anything until somebody hands them back. We are the
+    // only party that still has them.
+    //
+    // Done before the transcript sync so the run is working again as early in
+    // this tick as possible — every second it spends un-credentialed is a
+    // second of its deadline spent on requests that will 502.
+    if (run.adopted && !terminal) {
+      await this.recredential(row, client, runId);
+    }
 
     // Cursor-based, unlike the other providers: the fleet assigns `seq`
     // host-side and serves events past a cursor, so we never refetch the whole
@@ -150,6 +165,41 @@ class SelfHostedPoller {
     // delivered, which is what lets both run at once.
     this.ingest(row, fetched);
     await this.cursors.persistIfDue(row.id, this.transcripts.get(row.id) ?? [], { force });
+  }
+
+  /**
+   * Re-supply an adopted run's credentials.
+   *
+   * Best effort and deliberately non-fatal: if this fails the run is no worse
+   * off than before, and the next tick tries again. Throwing here would fail a
+   * reconcile — and therefore stop the transcript sync — over something that is
+   * already broken and that we are trying to repair.
+   */
+  private async recredential(
+    row: CloudTaskRow,
+    client: FleetClient,
+    runId: string,
+  ): Promise<void> {
+    if (this.recredentialed.has(row.id)) return;
+    try {
+      const githubToken = githubService.getAccessToken(row.workspaceId);
+      const creds = await getSelfHostedCredentials(row.workspaceId);
+      if (!githubToken || !creds) return;
+      const repo = (readCloudTaskMeta({ metadata: row.metadata })?.extra as { repo?: string })?.repo;
+      await client.setRunCredentials(runId, {
+        githubToken,
+        anthropicKey: creds.claudeToken,
+        ...(repo ? { repo } : {}),
+      });
+      // Marked only on success, so a failed attempt is retried next tick.
+      this.recredentialed.add(row.id);
+      console.log(`[selfhosted] re-supplied credentials to adopted run ${runId}`);
+    } catch (err) {
+      console.warn(
+        `[selfhosted] could not re-supply credentials to ${runId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   /**
@@ -223,6 +273,7 @@ class SelfHostedPoller {
   stopStreaming(taskId: string): void {
     this.stopFollow(taskId);
     this.cursor.delete(taskId);
+    this.recredentialed.delete(taskId);
     this.transcripts.delete(taskId);
     this.cursors.forget(taskId);
   }
