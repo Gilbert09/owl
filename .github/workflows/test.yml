@@ -54,6 +54,18 @@ jobs:
           VITE_TALYN_BUILD_SHA: ${{ github.sha }}
         run: npm run build -w @talyn/web
 
+      # Same reasoning as the web build above, and the same publishable repo
+      # variables. The console points at the same backend and the same
+      # Supabase project — what differs is who the backend lets in.
+      - name: Build admin console
+        env:
+          VITE_TALYN_API_URL: https://prod.talyn.dev
+          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL }}
+          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY }}
+          VITE_TALYN_POSTHOG_KEY: ${{ vars.TALYN_POSTHOG_KEY }}
+          VITE_TALYN_BUILD_SHA: ${{ github.sha }}
+        run: npm run build -w @talyn/admin
+
       - name: Typecheck
         run: npm run typecheck
 

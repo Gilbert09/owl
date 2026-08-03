@@ -1,0 +1,113 @@
+name: Deploy admin
+
+# Deploy the Talyn operator console — admin.talyn.dev — to Vercel on every
+# push to main that touches it. Like apps/web (and unlike apps/marketing) this
+# IS an npm workspace member, so everything installs from the ROOT lockfile.
+#
+# NAMING — there are now THREE Vercel projects and two of the three folder
+# names disagree with their project names. The SECRET, not the folder, decides
+# where a build lands:
+#
+#   VERCEL_PROJECT_ID_WEB    web   = the marketing WEBSITE   www.talyn.dev    apps/marketing
+#   VERCEL_PROJECT_ID_APP    app   = the APPLICATION         app.talyn.dev    apps/web
+#   VERCEL_PROJECT_ID_ADMIN  admin = the operator console    admin.talyn.dev  apps/admin
+#
+# Pointing this at the wrong project id would publish a cross-tenant admin
+# console over a customer-facing domain, so check the secret rather than the
+# path when editing.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/admin/**'
+      - 'packages/client/**'
+      - 'packages/shared/**'
+      - '.github/workflows/deploy-admin.yml'
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Skip on forks — no secrets there and nothing to deploy.
+    if: github.repository == 'Gilbert09/talyn'
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      # @talyn/client resolves from `dist`, not source, so both packages must
+      # be BUILT before anything typechecks against them.
+      - name: Build workspace deps
+        run: |
+          npm run build -w @talyn/shared
+          npm run build -w @talyn/client
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p apps/admin/tsconfig.json
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.repository == 'Gilbert09/talyn'
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID_ADMIN }}
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Until the Vercel project exists, a push that touches apps/admin would
+      # fail this job red on a missing project id. Skip cleanly instead —
+      # `check` above still gates the code. (The guard lives inside a step,
+      # not in `if:`, because the `secrets` context is not available in job
+      # conditions.)
+      - name: Is the Vercel project configured?
+        id: gate
+        run: |
+          if [ -z "${{ secrets.VERCEL_PROJECT_ID_ADMIN }}" ]; then
+            echo "VERCEL_PROJECT_ID_ADMIN not set — skipping deploy."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Vercel CLI
+        if: steps.gate.outputs.configured == 'true'
+        run: npm i -g vercel
+
+      # Run from the repo root — the Vercel project's Root Directory
+      # (apps/admin) is pulled with the project settings. VITE_TALYN_* build
+      # values live as Vercel project environment variables so `vercel build`
+      # sees them; vite.config.ts fails the build if any is missing, so a
+      # misconfigured project can't ship a white screen.
+      - name: Pull Vercel environment
+        if: steps.gate.outputs.configured == 'true'
+        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Build
+        if: steps.gate.outputs.configured == 'true'
+        env:
+          # Passed explicitly rather than relying on VERCEL_GIT_COMMIT_SHA:
+          # `--prebuilt` runs after OUR checkout, so Vercel injects that
+          # variable EMPTY. Here the cost is worse than the cosmetic one
+          # apps/web paid — without a SHA you cannot tell which build
+          # performed a mutation recorded in admin_audit_log.
+          VITE_TALYN_BUILD_SHA: ${{ github.sha }}
+        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy
+        if: steps.gate.outputs.configured == 'true'
+        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"

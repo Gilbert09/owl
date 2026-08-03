@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Talyn Admin</title>
+
+    <!--
+      Never index this. The console is admin-gated server-side so a crawler
+      would see nothing useful, but a search result for "Talyn admin" is free
+      reconnaissance about what exists and where. The real header ships from
+      vercel.json (X-Robots-Tag); this is the dev-server equivalent.
+    -->
+    <meta name="robots" content="noindex, nofollow" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#1a2542" />
+    <!--
+      The real CSP ships as a RESPONSE HEADER from vercel.json — only a header
+      is honoured for frame-ancestors, and headers can't be stripped by an
+      injected tag. This meta is the dev-server equivalent so a violation
+      shows up locally instead of at deploy time.
+
+      script-src 'self' with no CDN allowance works because lib/analytics
+      imports posthog-js/dist/module.full.no-external plus the inlined
+      recorder. 'unsafe-inline' on style-src is unavoidable (React inline
+      styles).
+
+      connect-src lists BOTH localhost and 127.0.0.1: `supabase start` serves
+      on 127.0.0.1:54321 while Vite serves on localhost, and the two are
+      distinct origins to CSP. Allowing only localhost silently broke local
+      auth in apps/web — every Supabase call failed as an opaque "TypeError:
+      Failed to fetch" and the app sat on the boot screen forever.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.githubusercontent.com; font-src 'self'; connect-src 'self' http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:* https://*.supabase.co wss://*.supabase.co https://prod.talyn.dev wss://prod.talyn.dev https://us.i.posthog.com; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'"
+    />
+  </head>
+  <body class="bg-background text-foreground">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
