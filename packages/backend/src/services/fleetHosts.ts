@@ -1,6 +1,6 @@
 import { desc, eq } from 'drizzle-orm';
 import { timingSafeEqual } from 'node:crypto';
-import { getDbClient } from '../db/client.js';
+import { getPoolDbClient } from '../db/client.js';
 import { fleetHosts as fleetHostsTable } from '../db/schema.js';
 
 /**
@@ -18,6 +18,31 @@ import { fleetHosts as fleetHostsTable } from '../db/schema.js';
  * is why `apiEndpoint` is advertised by the host rather than inferred from the
  * request's source address — only the host knows which of its addresses the
  * backend can actually dial, and a NAT'd source IP is not it.
+ *
+ * EVERY QUERY HERE USES THE POOL CLIENT, NOT `getDbClient()`.
+ *
+ * `fleet_hosts` has no owner column because a host belongs to the deployment,
+ * not to a user — so it is RLS-enabled with no policy and no `authenticated`
+ * GRANT, which is the right posture for a table the user role must never touch.
+ * The catch is that `pickFleetHost` is reached from REQUEST context (saving
+ * fleet credentials, and every dispatch), where `withOwnerScope` has dropped the
+ * transaction to `authenticated` — and `getDbClient()` returns that scoped
+ * handle. The result was `permission denied for table fleet_hosts`, surfaced in
+ * the settings card as a raw "Failed query: select ... from fleet_hosts". Prod,
+ * 2026-08-03.
+ *
+ * The tempting fix is `GRANT SELECT ... TO authenticated` plus a `USING (true)`
+ * policy. Do not: that publishes every host's tailnet address, capacity and
+ * metrics to any account that can reach the API, to accommodate a call that had
+ * no business being owner-scoped. `getPoolDbClient()` is documented for exactly
+ * this — cross-owner work reached from a scoped request.
+ *
+ * Same CLASS of bug as migration 0033 (merge_queue_entries shipped RLS-enabled
+ * with no GRANT, then read from request context), but not the same fix: that
+ * table held genuinely user-scoped data and wanted the policy. The shared lesson
+ * is narrower than either remedy — decide whether a table is user data or
+ * infrastructure BEFORE choosing an RLS posture, then make every call site agree
+ * with that choice.
  */
 
 /**
@@ -120,7 +145,7 @@ export async function recordFleetHostReport(report: FleetHostReport): Promise<vo
     updatedAt: now,
   };
 
-  await getDbClient()
+  await getPoolDbClient()
     .insert(fleetHostsTable)
     .values(values)
     .onConflictDoUpdate({ target: fleetHostsTable.name, set: values });
@@ -176,7 +201,7 @@ function toView(row: typeof fleetHostsTable.$inferSelect, now: number): FleetHos
 
 /** Every registered host, most recently seen first. */
 export async function listFleetHosts(now: number = Date.now()): Promise<FleetHostView[]> {
-  const rows = await getDbClient()
+  const rows = await getPoolDbClient()
     .select()
     .from(fleetHostsTable)
     .orderBy(desc(fleetHostsTable.reportedAt));
@@ -185,7 +210,7 @@ export async function listFleetHosts(now: number = Date.now()): Promise<FleetHos
 
 /** One host by name, or null. */
 export async function getFleetHost(name: string, now: number = Date.now()): Promise<FleetHostView | null> {
-  const rows = await getDbClient()
+  const rows = await getPoolDbClient()
     .select()
     .from(fleetHostsTable)
     .where(eq(fleetHostsTable.name, name))
