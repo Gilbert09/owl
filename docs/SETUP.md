@@ -336,9 +336,22 @@ they neither own nor can rotate, and asking them got it wrong in the obvious way
 to store fleet credentials at all and says so, rather than accepting a Claude
 token against a fleet it cannot talk to.
 
-The one secret a workspace *does* supply is its **Claude OAuth token**
-(`claude setup-token`, or a Console API key). It is the only required field on
-the Talyn Fleet card.
+The Talyn Fleet card asks for exactly one thing: the workspace's **Claude OAuth
+token** (`claude setup-token`, or a Console API key). Nothing else on it was the
+workspace's to give — *which host* a run lands on is answered by the registry
+from reports seconds old, and nobody using the product can see which box is
+least loaded or which stopped reporting four minutes ago.
+
+To force every run onto one box while debugging it:
+
+```
+FLEET_PINNED_ENDPOINT=http://100.x.y.z:8080   # blank/unset = use the registry
+```
+
+It bypasses load and health checks entirely, which is what you want while
+bisecting a host and what you very much do not want otherwise. **Unset it when
+you are done** — a stale pin routes every task to a machine that may have been
+offline for a week, and nothing in the product will say so.
 
 **`FLEET_REPORT_TOKEN` unset means the report endpoint refuses everything.** An
 open one lets anyone invent a host, and an invented host with an

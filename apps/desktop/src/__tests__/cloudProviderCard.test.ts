@@ -29,16 +29,21 @@ const MIXED_FIELDS = [
 
 describe('the Talyn Fleet descriptor', () => {
   // The point of the card's redesign: a workspace supplies its Claude
-  // credential and nothing else. The fleet API bearer authenticates the backend
-  // to a host — one service to another, identical for every workspace — so it
-  // is deployment config (FLEET_API_TOKEN) and must never come back as a field.
-  it('asks for exactly one required credential, the Claude token', () => {
-    const required = SELFHOSTED_FIELDS.filter((f) => !f.optional);
-    expect(required.map((f) => f.key)).toEqual(['claudeToken']);
+  // credential and nothing else at all.
+  it('asks for exactly one thing, the Claude token', () => {
+    expect(SELFHOSTED_FIELDS.map((f) => f.key)).toEqual(['claudeToken']);
+    expect(SELFHOSTED_FIELDS.every((f) => !f.optional)).toBe(true);
   });
 
-  it('never asks the user for the fleet API bearer', () => {
-    expect(SELFHOSTED_FIELDS.some((f) => f.key === 'fleetToken')).toBe(false);
+  // Both of these were fields once and neither was the workspace's to give.
+  // `fleetToken` authenticates the BACKEND to a host — identical for every
+  // workspace, so it is deployment config. `fleetEndpoint` chose WHICH host,
+  // which nobody using the product can answer: they cannot see which box is
+  // least loaded or which stopped reporting, and a stale pin silently routed
+  // every task to a dead machine. Named explicitly so re-adding either is a
+  // deliberate act with a failing test, not a plausible-looking edit.
+  it.each(['fleetToken', 'fleetEndpoint'])('never asks the user for %s', (key) => {
+    expect(SELFHOSTED_FIELDS.some((f) => f.key === key)).toBe(false);
   });
 
   // A credential rendered as plain text is one that gets read over a shoulder
@@ -47,23 +52,21 @@ describe('the Talyn Fleet descriptor', () => {
     expect(SELFHOSTED_FIELDS.find((f) => f.key === 'claudeToken')?.type).toBe('password');
   });
 
-  // Blank means "route through the host registry". Making it required would
-  // force every workspace to pin one box, which defeats the registry.
-  it('keeps the endpoint optional', () => {
-    expect(SELFHOSTED_FIELDS.find((f) => f.key === 'fleetEndpoint')?.optional).toBe(true);
-  });
-
-  it('is submittable with only the Claude token filled in', () => {
+  it('is submittable with only the Claude token filled in, and not without it', () => {
     expect(cloudProviderFormComplete(SELFHOSTED_FIELDS, { claudeToken: 'sk-ant-oat01-x' })).toBe(
       true,
     );
-    expect(cloudProviderFormComplete(SELFHOSTED_FIELDS, { fleetEndpoint: 'http://x' })).toBe(false);
+    expect(cloudProviderFormComplete(SELFHOSTED_FIELDS, {})).toBe(false);
   });
 
-  it('sends only the Claude token when the endpoint is left blank', () => {
+  // Anything else the form state happens to be carrying is dropped: the config
+  // request is built from the DESCRIPTOR, not from the values object, so a
+  // removed field cannot keep being submitted by a stale bit of state.
+  it('sends only the Claude token, ignoring values for fields it no longer has', () => {
     const config = cloudProviderConfigFromValues(SELFHOSTED_FIELDS, {
       claudeToken: 'sk-ant-oat01-x',
-      fleetEndpoint: '',
+      fleetEndpoint: 'http://stale:8080',
+      fleetToken: 'stale-bearer',
     });
     expect(config).toEqual({ claudeToken: 'sk-ant-oat01-x' });
   });

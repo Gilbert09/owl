@@ -7,6 +7,7 @@ import {
   storeSelfHostedCredentials,
   removeSelfHostedCredentials,
   fleetApiToken,
+  fleetPinnedEndpoint,
   FleetNotDeployedError,
 } from '../../selfHosted/credentials.js';
 import { dispatchTaskToFleet } from '../../selfHosted/executor.js';
@@ -14,7 +15,6 @@ import { selfHostedPoller } from '../../selfHosted/poller.js';
 import type { CloudTaskProvider, CloudTaskRow, DispatchResult } from '../types.js';
 
 interface SelfHostedCredInput {
-  fleetEndpoint?: string;
   claudeToken?: string;
 }
 
@@ -36,7 +36,7 @@ export const selfHostedProvider: CloudTaskProvider = {
   capabilities: { model: true },
 
   async validateCredentials(workspaceId, input) {
-    const { fleetEndpoint, claudeToken } = (input ?? {}) as SelfHostedCredInput;
+    const { claudeToken } = (input ?? {}) as SelfHostedCredInput;
     if (!claudeToken) {
       return { ok: false, error: 'A Claude OAuth token is required.' };
     }
@@ -60,44 +60,32 @@ export const selfHostedProvider: CloudTaskProvider = {
     const bearer = fleetApiToken();
     if (!bearer) return { ok: false, error: new FleetNotDeployedError().message };
 
-    // The endpoint is optional: blank means "whichever registered host is
-    // least loaded" (see resolveFleetTarget). Pinning one is for debugging a
-    // specific box, and it is the only case where there is an address to
-    // verify before storing anything.
-    if (fleetEndpoint) {
-      try {
-        await new FleetClient(fleetEndpoint, bearer).ping();
-      } catch (err) {
-        return {
-          ok: false,
-          error: `Could not reach the fleet: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
-    } else {
-      // Verify against whatever the registry would actually pick, rather than
-      // storing a token nobody has checked. A credential accepted without ever
-      // being tried is one that fails at dispatch, hours later, on somebody
-      // else's task.
-      const host = await pickFleetHost();
-      if (!host?.apiEndpoint) {
-        return {
-          ok: false,
-          error:
-            'No fleet host is currently dispatchable. Either start a host and let it report in, ' +
-            'or set an explicit Fleet API URL to pin this workspace to one.',
-        };
-      }
-      try {
-        await new FleetClient(host.apiEndpoint, bearer).ping();
-      } catch (err) {
-        return {
-          ok: false,
-          error: `Could not reach ${host.name}: ${err instanceof Error ? err.message : String(err)}`,
-        };
-      }
+    // Ping whatever dispatch would ACTUALLY pick — the operator's pin if there
+    // is one, else the registry's choice. Storing a credential nobody has tried
+    // is how a bad setup surfaces hours later, on somebody else's task, as a
+    // dispatch failure rather than a form error.
+    const pinned = fleetPinnedEndpoint();
+    const host = pinned ? null : await pickFleetHost();
+    const endpoint = pinned || host?.apiEndpoint;
+    if (!endpoint) {
+      return {
+        ok: false,
+        error:
+          'No fleet host is currently dispatchable. Start a host and let it report in ' +
+          '(it registers itself within ~15s), or set FLEET_PINNED_ENDPOINT on the backend.',
+      };
+    }
+    try {
+      await new FleetClient(endpoint, bearer).ping();
+    } catch (err) {
+      const where = host?.name ?? endpoint;
+      return {
+        ok: false,
+        error: `Could not reach ${where}: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
 
-    await storeSelfHostedCredentials(workspaceId, { fleetEndpoint, claudeToken });
+    await storeSelfHostedCredentials(workspaceId, { claudeToken });
     return { ok: true };
   },
 

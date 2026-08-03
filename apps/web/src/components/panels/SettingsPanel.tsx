@@ -1040,21 +1040,22 @@ export function ProviderConnectCards() {
 
 /**
  * What a workspace has to supply to use Talyn Fleet: its Claude credential, and
- * nothing else.
+ * literally nothing else.
  *
- * The fleet API bearer used to be a field here and is not one any more. It
- * authenticates the backend to a fleet host — one service to another, the same
- * value for every workspace — so asking a user for it made them custodian of a
- * secret they neither own nor can rotate, and got it wrong in the obvious way
- * (a token that is right for one host and wrong for the next). It lives in the
- * backend's `FLEET_API_TOKEN` now.
+ * Two fields used to sit here and neither was the workspace's to give. The
+ * fleet API bearer authenticates the BACKEND to a host — one service to
+ * another, identical for every workspace — so asking a user for it made them
+ * custodian of a secret they neither own nor can rotate. The endpoint answered
+ * WHICH host, which nobody using the product is in a position to answer: they
+ * cannot see which box is least loaded, which is draining, or which stopped
+ * reporting four minutes ago. The registry can, from reports seconds old, and a
+ * stale pinned endpoint silently routed every task to a dead machine.
  *
- * The endpoint stays, optional, because pinning one box is how you debug a
- * specific host without draining the others. Blank routes through the registry,
- * which is what everyone should leave it on.
+ * Both are deployment config now — `FLEET_API_TOKEN` and, for the debugging
+ * case, `FLEET_PINNED_ENDPOINT`.
  *
- * Exported for the card tests — the point of the test is that this descriptor
- * has exactly one required field.
+ * Exported for the card tests, whose entire point is that this list has exactly
+ * one entry and does not re-grow the other two.
  */
 export const SELFHOSTED_FIELDS: CloudProviderField[] = [
   {
@@ -1062,12 +1063,6 @@ export const SELFHOSTED_FIELDS: CloudProviderField[] = [
     label: 'Claude OAuth token',
     type: 'password',
     placeholder: 'sk-ant-oat…',
-  },
-  {
-    key: 'fleetEndpoint',
-    label: 'Fleet API URL (optional)',
-    placeholder: 'blank — use whichever host is least loaded',
-    optional: true,
   },
 ];
 
@@ -1239,10 +1234,14 @@ interface CloudProviderField {
   type?: 'text' | 'password';
   placeholder?: string;
   /**
-   * A field the provider will accept without. Everything was required until
-   * Talyn Fleet arrived, whose only required credential is the Claude token —
-   * its endpoint is a debugging pin that blank-means-registry. Without this the
-   * form refuses to submit a configuration the backend would have accepted.
+   * A field the provider will accept without. Without it the form refuses to
+   * submit a configuration the backend would have accepted.
+   *
+   * No descriptor currently sets it: Talyn Fleet was the only user and its
+   * optional field turned out not to belong in the UI at all. Kept because the
+   * rule it encodes is generic and `cloudProviderFormComplete` implements it —
+   * a provider with a genuinely optional credential should set this rather than
+   * rediscover why every field being required is wrong.
    */
   optional?: boolean;
 }

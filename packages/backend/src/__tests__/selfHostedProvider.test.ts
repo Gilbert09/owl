@@ -38,17 +38,18 @@ describe('selfHostedProvider — CloudTaskProvider conformance', () => {
     }
   });
 
-  // The CLAUDE TOKEN is now the one required credential. The endpoint became
-  // optional when the host registry landed (blank = least-loaded host), and the
-  // fleet API bearer left the workspace entirely for FLEET_API_TOKEN — so this
-  // pins the narrower rule, and still refuses the case that matters.
+  // The CLAUDE TOKEN is the ONLY credential the workspace supplies. The other
+  // two fields left the card entirely: the bearer for FLEET_API_TOKEN and the
+  // endpoint for the host registry (with FLEET_PINNED_ENDPOINT as the operator's
+  // debugging override). The middle case below proves a leftover `fleetEndpoint`
+  // in a request body cannot stand in for the token.
   //
-  // All four of these must reject BEFORE any DB or network work: this suite
-  // runs with no database, so a regression that reordered the checks would show
-  // up as a connection error rather than a quiet pass.
+  // All of these must reject BEFORE any DB or network work: this suite runs
+  // with no database, so a regression that reordered the checks would show up
+  // as a connection error rather than a quiet pass.
   it.each([
     ['nothing at all', {}],
-    ['an endpoint but no token', { fleetEndpoint: 'http://x' }],
+    ['an endpoint the card no longer offers', { fleetEndpoint: 'http://x' }],
     ['a blank token', { claudeToken: '' }],
   ])('rejects %s (no DB/network hit)', async (_label, input) => {
     expect(await selfHostedProvider.validateCredentials('ws1', input)).toEqual({
