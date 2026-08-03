@@ -9,6 +9,7 @@ import { repositoryRoutes } from './repositories.js';
 import { skillRoutes } from './skills.js';
 import { pullRequestRoutes } from './pullRequests.js';
 import { debugRoutes } from './debug.js';
+import { fleetPublicRoutes, fleetRoutes } from './fleet.js';
 import { userRoutes } from './users.js';
 import { billingRoutes } from './billing.js';
 import { mcpTokenRoutes } from './mcpTokens.js';
@@ -48,6 +49,14 @@ export function setupRoutes(app: Express): void {
   // redirect, not by our authenticated desktop client, so it must stay
   // unauth'd. State-token validation inside the handler prevents CSRF.
   app.use(`${api}/github`, mount(githubPublicRoutes()));
+
+  // Fleet hosts PUSH their state here every ~15s. The caller is fleetd — a
+  // daemon on bare metal with no Supabase session — so this mounts before
+  // requireAuth and authenticates with the shared FLEET_REPORT_TOKEN instead.
+  // The direction matters: the backend never dials a fleet host to ask, because
+  // that would mean a hosted PaaS holding an inbound path to every machine
+  // running untrusted code.
+  app.use(`${api}/fleet`, mount(fleetPublicRoutes()));
 
   // The hosted MCP endpoint authenticates with a personal MCP token (not a
   // Supabase JWT), so it mounts BEFORE requireAuth with its own gate. The
@@ -101,6 +110,11 @@ export function setupRoutes(app: Express): void {
   // middleware so it stays a cross-tenant operator surface (and so it never
   // runs inside an owner-scoped transaction).
   app.use(`${api}/debug`, mount(debugRoutes()));
+
+  // The host registry's read side. Admin-only (enforced inside), cross-tenant,
+  // and mounted alongside debug for the same reason: it is an operator surface,
+  // not a workspace one.
+  app.use(`${api}/fleet`, mount(fleetRoutes()));
 
   // Account-level self-service (wipe). Pre-ownerScope: deletes the caller's
   // own users row, which RLS blocks from the authenticated role; handlers

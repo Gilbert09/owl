@@ -74,6 +74,44 @@ export class FleetThrottleError extends Error {
   }
 }
 
+
+/**
+ * The dispatcher fleet requests go out through.
+ *
+ * A fleet host binds loopback and is reachable only over the deployment's
+ * private link (a tailnet). On a PaaS the backend joins that tailnet in
+ * userspace mode — there is no NET_ADMIN and therefore no TUN device — so the
+ * route is not transparent: traffic has to be dialled through the local HTTP
+ * proxy tailscaled exposes.
+ *
+ * Scoped to THIS client on purpose. A global proxy agent would send GitHub,
+ * Supabase and Anthropic through the tailnet daemon too, which is both slower
+ * and a much larger blast radius for a component whose only job is reaching one
+ * private host.
+ *
+ * Unset means direct, which is what a deployment with no self-hosted fleet — or
+ * one whose backend shares a network with its hosts — should do.
+ */
+let cachedProxy: { url: string; dispatcher: unknown } | null = null;
+
+function fleetDispatcher(): unknown | undefined {
+  const url = process.env.FLEET_HTTP_PROXY ?? '';
+  if (!url) return undefined;
+  if (cachedProxy?.url === url) return cachedProxy.dispatcher;
+  // Required lazily: undici ships with Node but importing ProxyAgent at module
+  // scope would make every consumer of this file pay for it, including the
+  // ones that never touch a fleet.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { ProxyAgent } = require('undici') as { ProxyAgent: new (u: string) => unknown };
+  cachedProxy = { url, dispatcher: new ProxyAgent(url) };
+  return cachedProxy.dispatcher;
+}
+
+/** Exposed for tests, which change the env between cases. */
+export function resetFleetDispatcherCache(): void {
+  cachedProxy = null;
+}
+
 export class FleetClient {
   constructor(
     private readonly endpoint: string,
@@ -95,6 +133,8 @@ export class FleetClient {
           ...(init.headers ?? {}),
         },
         signal: AbortSignal.timeout(20_000),
+        // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
+        dispatcher: fleetDispatcher(),
       });
     } catch (err) {
       // Network-level failure. Treated as capacity rather than terminal: an
@@ -165,6 +205,8 @@ export class FleetClient {
       {
         headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/event-stream' },
         signal,
+        // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
+        dispatcher: fleetDispatcher(),
       },
     );
     if (!resp.ok || !resp.body) {

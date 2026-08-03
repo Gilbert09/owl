@@ -22,6 +22,7 @@ import {
   boolean,
   integer,
   bigserial,
+  doublePrecision,
   uniqueIndex,
   index,
   primaryKey,
@@ -681,5 +682,46 @@ export const skillUsage = pgTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.workspaceId, t.skillKey] }),
+  })
+);
+
+// The self-hosted fleet's host registry (migration 0038).
+//
+// Hosts push a snapshot here every ~15s; the backend never dials them to ask.
+// The fleet runs untrusted code on bare metal behind a private interface, and
+// giving a hosted PaaS an inbound path to every such machine is the shape the
+// whole design avoids. See the migration for the full reasoning.
+export const fleetHosts = pgTable(
+  'fleet_hosts',
+  {
+    /** The host's own name for itself. Natural key: a host that restarts or
+     *  changes address is still the same host. */
+    name: text('name').primaryKey(),
+    /** Where the backend should dial this host's Fleet API — advertised BY the
+     *  host, because only it knows which of its addresses is reachable. Null
+     *  means observable but not dispatchable, which is what a host looks like
+     *  before its private link is up. */
+    apiEndpoint: text('api_endpoint'),
+    version: text('version'),
+    reportedAt: timestamp('reported_at', { withTimezone: true }).notNull(),
+
+    draining: boolean('draining').notNull().default(false),
+    runsLive: integer('runs_live').notNull().default(0),
+    runsMax: integer('runs_max').notNull().default(0),
+    memReservedMib: integer('mem_reserved_mib').notNull().default(0),
+    memBudgetMib: integer('mem_budget_mib').notNull().default(0),
+    diskFreeMib: integer('disk_free_mib').notNull().default(0),
+    maxIdleSeconds: doublePrecision('max_idle_seconds').notNull().default(0),
+
+    /** Opaque on purpose: the fleet ships on its own cadence and adding a
+     *  counter there must not need a migration here. */
+    metrics: jsonb('metrics'),
+    activeRuns: jsonb('active_runs'),
+
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    reportedAtIdx: index('idx_fleet_hosts_reported_at').on(t.reportedAt),
   })
 );
