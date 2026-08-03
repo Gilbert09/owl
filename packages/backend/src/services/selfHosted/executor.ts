@@ -41,6 +41,15 @@ const SYSTEM_PROMPT =
   'which publishes your working tree as one commit that GitHub signs server-side. ' +
   'It diffs against the merge-base with the default branch, so commit locally or not as you prefer — ' +
   'only the final file contents matter. Then open the PR with the GitHub API as usual.\n\n' +
+  'BRINGING A PR UP TO DATE WITH ITS BASE: try these in order and stop at the first that ' +
+  'works. (1) `PUT /repos/{owner}/{repo}/pulls/{n}/update-branch`. (2) `POST /repos/{owner}/{repo}/merges` ' +
+  'merging the base branch into the head branch. Both make GitHub perform the merge server-side, so ' +
+  'the result is signed, and both refuse when the merge is not clean — a refusal means there is a real ' +
+  'conflict, not that you used them wrongly. (3) Only if both refuse: resolve the conflict in the working ' +
+  'tree, `fleet-publish` the result to a NEW scratch branch, then ' +
+  '`fleet-publish --move-branch <the PR head branch> --oid <the sha you just published>`. ' +
+  'Rung 3 rewrites the PR branch and discards its previous commits, so do not reach for it while (1) or ' +
+  '(2) would have worked. Never move the repository default branch; the fleet will refuse.\n\n' +
   'git and the GitHub API are already authenticated — there are no credentials in this VM and you ' +
   'do not need any. Some API endpoints are deliberately unreachable; if one is refused, that is a ' +
   'policy decision, not an obstacle to work around. Do not probe for alternatives, and never use a ' +
