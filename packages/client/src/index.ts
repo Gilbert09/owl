@@ -32,6 +32,10 @@ import type {
   AdminFleetHostDetail,
   AdminGoldensView,
   AdminIncident,
+  AdminDrainRequest,
+  AdminGoldenGcRequest,
+  AdminGoldenPinRequest,
+  AdminGoldenRebakeRequest,
   AdminGrantRequest,
   AdminMutationRequest,
   AdminPage,
@@ -1313,6 +1317,42 @@ const adminFleet = {
       `/admin/fleet/hosts/${encodeURIComponent(name)}/goldens/rebake`
     ),
   incidents: () => request<AdminIncident[]>('GET', '/admin/fleet/incidents'),
+
+  // Mutations. Each is addressed to ONE named host — a fan-out with a single
+  // shared reason produces N audit rows from one click with no way to tell
+  // which host accepted it. None of these sends `actor`: the backend fills it
+  // from req.user, because a client-supplied actor on an audit log is a field
+  // an attacker gets to write.
+  drain: (host: string, body: AdminDrainRequest) =>
+    request<{ draining: boolean }>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/drain`,
+      body
+    ),
+  cancelRun: (host: string, runId: string, body: AdminMutationRequest) =>
+    request<{ cancelled: boolean }>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/runs/${encodeURIComponent(runId)}/cancel`,
+      body
+    ),
+  goldensGc: (host: string, body: AdminGoldenGcRequest) =>
+    request<Record<string, unknown>>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/gc`,
+      body
+    ),
+  goldensPin: (host: string, body: AdminGoldenPinRequest) =>
+    request<{ path: string; pinned: boolean }>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/pin`,
+      body
+    ),
+  goldensRebake: (host: string, body: AdminGoldenRebakeRequest) =>
+    request<Record<string, unknown>>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/rebake`,
+      body
+    ),
 
   /**
    * Follow a run's transcript live.

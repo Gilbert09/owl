@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import type {
   AdminFleetHostDetail,
   AdminGoldensView,
@@ -18,6 +18,22 @@ import {
 import { adminRunFromFleet, listAdminRuns } from '../../services/admin/runIndex.js';
 import { listFleetIncidents } from '../../services/admin/incidents.js';
 import { getFleetHost } from '../../services/fleetHosts.js';
+import {
+  ADMIN_SLOW_MUTATION_TIMEOUT_MS,
+} from '../../services/admin/fleetProxy.js';
+import {
+  auditActor,
+  fleetActorFields,
+  withRemoteAudit,
+} from '../../services/admin/audit.js';
+import {
+  adminReason,
+  AdminGuardError,
+  adminMutationLimit,
+  requireReason,
+  withGuards,
+} from './guards.js';
+import { ADMIN_FLEET_UNREACHABLE, SSE_KEEPALIVE_FRAME, formatSseFrame } from '@talyn/shared';
 
 /**
  * Fleet reads for the operator console.
@@ -28,6 +44,33 @@ import { getFleetHost } from '../../services/fleetHosts.js';
  * misbehaving, so a dead box must render as a row with a reason, never as a
  * failed request.
  */
+/**
+ * `withGuards`, plus the fleet's own error mapping.
+ *
+ * A mutation that could not reach the host must not surface as a generic 500
+ * — that reads as "Talyn is broken" when the accurate statement is "the box
+ * did not answer", and the two lead an operator to do completely different
+ * things. HostOffline/NotDialable keep their 409s; anything else upstream
+ * becomes a 502.
+ */
+function withFleetGuards(
+  fn: (req: Request, res: Response) => Promise<void>
+): (req: Request, res: Response, next: NextFunction) => Promise<void> {
+  return withGuards(async (req, res) => {
+    try {
+      await fn(req, res);
+    } catch (err) {
+      if (err instanceof AdminGuardError) throw err;
+      if (handleFleetProxyError(err, res)) return;
+      res.status(502).json({
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        code: ADMIN_FLEET_UNREACHABLE,
+      });
+    }
+  });
+}
+
 export function adminFleetRoutes(): Router {
   const router = Router();
 
@@ -231,6 +274,259 @@ export function adminFleetRoutes(): Router {
       }
     }
   });
+
+  /**
+   * A run's transcript as a live stream.
+   *
+   * Proxies fleetd's own SSE follow. Three things here are not optional:
+   *
+   *  - A keepalive every 15s. Railway's edge reaps idle connections, and
+   *    fleetd's own `: ping` is consumed by our parser rather than forwarded,
+   *    so without this the stream dies after ~60s of a quiet agent — which
+   *    looks exactly like the run having stopped.
+   *  - Aborting upstream when the client disconnects. Otherwise every closed
+   *    tab leaks a connection to a fleet host for the life of the run.
+   *  - Ending, not 502-ing, on a mid-stream failure. The headers went out with
+   *    the first byte; there is no status left to change, so the failure has to
+   *    travel as a frame.
+   */
+  router.get('/hosts/:name/runs/:runId/stream', async (req, res) => {
+    const after = Number(req.query.after);
+    let client;
+    try {
+      ({ client } = await fleetClientForHost(req.params.name));
+    } catch (err) {
+      if (!handleFleetProxyError(err, res)) {
+        res.status(502).json({
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'fleet_unreachable',
+        });
+      }
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Tells any buffering proxy in front of us to stop buffering. Without
+      // it an edge can hold frames until the response ends, which for a
+      // stream is never.
+      'X-Accel-Buffering': 'no',
+    });
+
+    const controller = new AbortController();
+    const keepalive = setInterval(() => res.write(SSE_KEEPALIVE_FRAME), 15_000);
+    // A stream is not a subscription for life: cap it so a forgotten tab
+    // cannot pin a fleet connection indefinitely. The browser reconnects from
+    // its cursor.
+    const cap = setTimeout(() => controller.abort(), 30 * 60_000);
+    const stop = () => {
+      clearInterval(keepalive);
+      clearTimeout(cap);
+      controller.abort();
+    };
+    req.on('close', stop);
+
+    try {
+      for await (const frame of client.followEvents(
+        req.params.runId,
+        Number.isFinite(after) && after > 0 ? after : 0,
+        controller.signal
+      )) {
+        res.write(formatSseFrame(frame));
+        if (frame.terminal) break;
+      }
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        res.write(formatSseFrame({ error: err instanceof Error ? err.message : String(err) }));
+      }
+    } finally {
+      stop();
+      res.end();
+    }
+  });
+
+  // --------------------------------------------------------------------
+  // Mutations
+  //
+  // Every one is addressed to ONE named host. A fan-out mutation with a single
+  // shared `reason` produces N audit rows from one click with no way to tell
+  // which host actually accepted it.
+  //
+  // These do NOT degrade: an unreachable host is an error, because "the drain
+  // probably worked" is how a box stays live through an incident somebody
+  // believes they drained. That is the deliberate exception to the read-side
+  // contract in services/admin/fleetProxy.ts.
+  // --------------------------------------------------------------------
+
+  const limit = adminMutationLimit();
+
+  /** Stop (or resume) a host taking new work. */
+  router.post(
+    '/hosts/:name/drain',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      const body = req.body as { draining?: unknown };
+      if (typeof body.draining !== 'boolean') {
+        throw new AdminGuardError(400, 'invalid_request', 'draining must be a boolean.');
+      }
+      const actor = auditActor(req);
+      const reason = adminReason(req);
+
+      await withRemoteAudit(
+        actor,
+        {
+          action: 'fleet.drain',
+          targetKind: 'host',
+          targetId: req.params.name,
+          reason,
+          params: { draining: body.draining },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name);
+          await client.setDrain({ draining: body.draining as boolean, ...fleetActorFields(actor, reason) });
+        }
+      );
+      res.json({ success: true, data: { draining: body.draining } });
+    })
+  );
+
+  /** Cancel one run on a host. */
+  router.post(
+    '/hosts/:name/runs/:runId/cancel',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      await withRemoteAudit(
+        auditActor(req),
+        {
+          action: 'fleet.run.cancel',
+          targetKind: 'run',
+          targetId: req.params.runId,
+          reason: adminReason(req),
+          params: { host: req.params.name },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name);
+          await client.cancelRun(req.params.runId);
+        }
+      );
+      res.json({ success: true, data: { cancelled: true } });
+    })
+  );
+
+  /** Reclaim golden-image disk. Slow — GC walks the store. */
+  router.post(
+    '/hosts/:name/goldens/gc',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      const body = req.body as { force?: boolean; dryRun?: boolean; minAge?: string };
+      const actor = auditActor(req);
+      const reason = adminReason(req);
+
+      const result = await withRemoteAudit(
+        actor,
+        {
+          action: 'fleet.golden.gc',
+          targetKind: 'host',
+          targetId: req.params.name,
+          reason,
+          params: { force: body.force ?? false, dryRun: body.dryRun ?? false, minAge: body.minAge ?? null },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name, {
+            timeoutMs: ADMIN_SLOW_MUTATION_TIMEOUT_MS,
+          });
+          return client.goldensGc({
+            force: body.force,
+            dryRun: body.dryRun,
+            minAge: body.minAge,
+            ...fleetActorFields(actor, reason),
+          });
+        }
+      );
+      res.json({ success: true, data: result });
+    })
+  );
+
+  /** Pin an image so GC never evicts it (or unpin it). */
+  router.post(
+    '/hosts/:name/goldens/pin',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      const body = req.body as { path?: unknown; pinned?: unknown };
+      if (typeof body.path !== 'string' || !body.path) {
+        throw new AdminGuardError(400, 'invalid_request', 'path is required.');
+      }
+      if (typeof body.pinned !== 'boolean') {
+        throw new AdminGuardError(400, 'invalid_request', 'pinned must be a boolean.');
+      }
+      const actor = auditActor(req);
+      const reason = adminReason(req);
+
+      await withRemoteAudit(
+        actor,
+        {
+          action: 'fleet.golden.pin',
+          targetKind: 'golden',
+          targetId: body.path,
+          reason,
+          params: { host: req.params.name, pinned: body.pinned },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name);
+          await client.goldensPin({
+            path: body.path as string,
+            pinned: body.pinned as boolean,
+            ...fleetActorFields(actor, reason),
+          });
+        }
+      );
+      res.json({ success: true, data: { path: body.path, pinned: body.pinned } });
+    })
+  );
+
+  /** Rebuild a repo's golden. Slow, and async on the fleet's side. */
+  router.post(
+    '/hosts/:name/goldens/rebake',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      const body = req.body as { repo?: unknown; baseBranch?: unknown };
+      if (typeof body.repo !== 'string' || !body.repo) {
+        throw new AdminGuardError(400, 'invalid_request', 'repo is required.');
+      }
+      const actor = auditActor(req);
+      const reason = adminReason(req);
+
+      const result = await withRemoteAudit(
+        actor,
+        {
+          action: 'fleet.golden.rebake',
+          targetKind: 'golden',
+          targetId: body.repo,
+          reason,
+          params: { host: req.params.name, baseBranch: body.baseBranch ?? null },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name, {
+            timeoutMs: ADMIN_SLOW_MUTATION_TIMEOUT_MS,
+          });
+          return client.goldensRebake({
+            repo: body.repo as string,
+            baseBranch: typeof body.baseBranch === 'string' ? body.baseBranch : undefined,
+            ...fleetActorFields(actor, reason),
+          });
+        }
+      );
+      res.json({ success: true, data: result });
+    })
+  );
 
   /** Derived signals, computed from the registry — no table. */
   router.get('/incidents', async (_req, res) => {
