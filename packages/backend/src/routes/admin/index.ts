@@ -3,6 +3,7 @@ import type { AdminAccess, ApiResponse } from '@talyn/shared';
 import { requireAdmin } from '../../middleware/auth.js';
 import { debugRoutes } from '../debug.js';
 import { adminCapabilities } from './guards.js';
+import { adminProductRoutes } from './product.js';
 
 /**
  * The operator console's API (admin.talyn.dev).
@@ -70,6 +71,12 @@ export function adminRoutes(): Router {
    * separate middleware stacks, so `wrapAsyncRoutes` does not double-wrap.
    */
   router.use('/debug', debugRoutes());
+
+  // Cross-tenant users / workspaces / tasks. Mounted at the router root
+  // rather than under a `/product` prefix: the console's URLs are grouped for
+  // navigation, but `/admin/users` reads better than `/admin/product/users`
+  // and matches how /debug and /fleet already sit.
+  router.use(adminProductRoutes());
 
   return router;
 }
