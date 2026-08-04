@@ -125,8 +125,17 @@ export function ProviderIcon({
   if (!provider) return null;
   const meta = providerMeta(provider);
   if (meta.Mark) {
-    // `text-foreground` rather than a literal black: this mark is ours and has
-    // to read on both themes, and a hardcoded #000 is invisible in dark mode.
+    // Black on light, brand clay on dark — the two ways this mark is meant to
+    // be seen. `text-foreground` rather than a literal `#000` so it tracks the
+    // theme's own ink instead of drifting from it.
+    //
+    // The dark value is clay.400 (#cf7553), not clay DEFAULT (#c25e3a). Both
+    // are the brand accent; the default is tuned for the light surfaces
+    // marketing uses, and at 14px on a near-black badge it loses the eyes.
+    // Lightening an accent for a dark surface is the ordinary move, and .400 is
+    // the palette's own step for it rather than a colour invented here.
+    // Compared against .600/.DEFAULT/.300 at 14/20/32px on the real badge.
+    //
     // A caller passing its own text-* class still wins — cn() puts it last.
     return (
       <span
@@ -134,7 +143,8 @@ export function ProviderIcon({
         aria-label={label ?? meta.label}
         role="img"
         className={cn(
-          'inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-foreground',
+          'inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center',
+          'text-foreground dark:text-[#cf7553]',
           className,
         )}
       >
