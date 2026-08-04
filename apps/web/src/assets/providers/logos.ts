@@ -30,16 +30,28 @@ export const GENERIC_PROVIDER_LOGO =
   );
 
 /**
- * Talyn Fleet — a server rack rather than a vendor logo, because there is
- * no vendor: the run happens on hardware we own.
+ * Talyn Fleet, as a URL.
+ *
+ * The owl, not the server rack it replaced: a rack says "self-hosted", which is
+ * a deployment detail, where the brand says whose fleet it is.
+ *
+ * This is the FALLBACK form. `ProviderIcon` renders {@link TalynOwlMark}
+ * instead, because a data URI cannot inherit `currentColor` and this mark has
+ * to follow the theme — black on light, legible on dark. The ink here is fixed
+ * for the same reason it is fixed on every other provider's logo: an `<img>`
+ * has no way to ask. Keep the geometry in step with TalynMark.tsx.
  */
 export const SELFHOSTED_LOGO =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="#5b8def" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
-      '<rect x="3" y="4" width="18" height="6" rx="1.5"/>' +
-      '<rect x="3" y="14" width="18" height="6" rx="1.5"/>' +
-      '<path d="M7 7h.01M7 17h.01"/>' +
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" ' +
+      'stroke="#1c1917" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">' +
+      '<path d="M18 22 C 21 10 43 10 46 22"/>' +
+      '<path d="M16 25 C 11 33 11 46 18 53"/>' +
+      '<path d="M48 25 C 53 33 53 46 46 53"/>' +
+      '<circle cx="25.5" cy="30" r="4.4"/>' +
+      '<circle cx="38.5" cy="30" r="4.4"/>' +
+      '<path d="M29 37 L 32 43 L 35 37"/>' +
+      '<path d="M27 49 Q 32 52 37 49"/>' +
       '</svg>',
   );

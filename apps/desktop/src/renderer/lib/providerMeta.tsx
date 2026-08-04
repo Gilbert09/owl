@@ -1,3 +1,4 @@
+import type React from 'react';
 import { readCloudTaskProvider, type AnyCloudProviderType, type CloudProviderType } from '@talyn/shared';
 import { cn } from './utils';
 import {
@@ -7,6 +8,7 @@ import {
   SELFHOSTED_LOGO,
   GENERIC_PROVIDER_LOGO,
 } from '../assets/providers/logos';
+import { TalynOwlMark } from '../assets/providers/TalynMark';
 
 // One canonical place mapping a cloud provider to its display name + brand logo,
 // so the Tasks panel, task detail, PR-row task badge, and Settings all show the
@@ -23,6 +25,15 @@ interface ProviderMeta {
   label: string;
   /** Brand logo as a data URI (see assets/providers/logos.ts). */
   src: string;
+  /**
+   * An inline mark, preferred over `src` when present.
+   *
+   * Only Talyn Fleet has one, and only because it is the one provider whose
+   * mark is OURS: it has to follow the theme rather than carry a vendor's fixed
+   * colours, and an `<img>` cannot inherit `currentColor`. `src` stays populated
+   * for both so every provider still has a URL form.
+   */
+  Mark?: (props: { className?: string }) => React.ReactElement;
 }
 
 /**
@@ -37,7 +48,7 @@ export const PROVIDER_META: Record<CloudProviderType, ProviderMeta> = {
   codex_cloud: { label: 'Codex Cloud', src: CODEX_LOGO },
   // The wire/DB value stays 'selfhosted' — it is persisted in environments.type
   // and integrations.type. Only the label is the product's name for it.
-  selfhosted: { label: 'Talyn Fleet', src: SELFHOSTED_LOGO },
+  selfhosted: { label: 'Talyn Fleet', src: SELFHOSTED_LOGO, Mark: TalynOwlMark },
 };
 
 /** `some_new_provider` -> `Some New Provider`. */
@@ -113,6 +124,24 @@ export function ProviderIcon({
 }) {
   if (!provider) return null;
   const meta = providerMeta(provider);
+  if (meta.Mark) {
+    // `text-foreground` rather than a literal black: this mark is ours and has
+    // to read on both themes, and a hardcoded #000 is invisible in dark mode.
+    // A caller passing its own text-* class still wins — cn() puts it last.
+    return (
+      <span
+        title={label ?? meta.label}
+        aria-label={label ?? meta.label}
+        role="img"
+        className={cn(
+          'inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-foreground',
+          className,
+        )}
+      >
+        <meta.Mark className="h-full w-full" />
+      </span>
+    );
+  }
   return (
     <img
       src={meta.src}

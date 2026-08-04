@@ -40,6 +40,15 @@ describe('inline SVG provider marks', () => {
     ['unknown provider', GENERIC_PROVIDER_LOGO],
   ];
 
+  it('Talyn Fleet is the owl, not the server rack it replaced', () => {
+    // Geometry, not a name: the mark is duplicated between here, TalynMark.tsx
+    // and apps/marketing, and nothing at build time notices if they drift. The
+    // head dome is the one path that is unmistakably the bird.
+    const svg = decodeSvg(SELFHOSTED_LOGO);
+    expect(svg).toContain('M18 22 C 21 10 43 10 46 22');
+    expect(svg).not.toContain('<rect');
+  });
+
   it.each(marks)('%s decodes to a well-formed <svg>', (_name, uri) => {
     const svg = decodeSvg(uri);
     expect(svg.startsWith('<svg')).toBe(true);
