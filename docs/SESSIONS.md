@@ -2,6 +2,28 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 80 — admin.talyn.dev: the operator console (2026-08-04)
+
+The Debug panel was streaming backend internals **across every account** from inside both customer-facing apps, behind a Settings toggle, maintained in two byte-identical copies. Meanwhile the fleet — hosts, microVMs, goldens — was invisible from the product: `fleetd` binds loopback and is only reachable over the tailnet, and the one endpoint we exposed (`GET /fleet/hosts`) was rendered by nothing. Both problems have the same answer, which is a third browser app that is not the product.
+
+`apps/admin` is a fork of `apps/web`, deployed to **admin.talyn.dev**, gated on the `is_admin` boolean that already existed. It holds fleet operations, cross-tenant product admin, the audit trail, and the Debug panel — which was **moved, not copied**: a zero-diff `git mv`, because its three relative imports resolve unchanged at the destination and a pure rename is reviewable as a move.
+
+**The read surface degrades; the write surface does not.** This is the one decision everything else follows from. The fleet page is the page you open *because* a host is misbehaving, so every read goes through a `probe()` that cannot throw — an unreachable box renders as a row with a reason, and one dead host never takes out a healthy one. Mutations are the deliberate exception: an unreachable drain is a 502, because "the drain probably worked" is how a box stays live through an incident somebody believes they drained. A **stale host is never dialled at all** — registration does not imply reachability, so there is no point burning the timeout to learn what the registry already said.
+
+**The recurring failure mode this console had to design against is an unknown value rendered as a definite one.** A host that never reported a memory budget must not read as 100% full, because the response to that is draining a healthy box. `runsMax: 0` is unknown, not zero-capacity. A Go zero-value timestamp is "never", not 01/01/0001. An empty table and a failed request must never look the same — "no hosts have reported" is a fact about the fleet, "we couldn't reach the backend" is a fact about us, and an operator may go and restart something on the strength of confusing them. That is `offlineBanner.test.tsx`'s lesson with much higher stakes, and it recurs at three layers: the access gate, the query hook, and every table.
+
+**Mutations are a stack of small specific refusals, not a permission model.** There is one operator, so a roles table would be a model nobody administers. Instead: a reason (persisted verbatim — a gate that drops the value is theatre), a self-mutation guard, confirm-by-typing-the-target's-email, a last-admin check inside the transaction, and `TALYN_ADMIN_GRANT_ENABLED` defaulting to **off** so a stolen operator session can read and comp — bad, but auditable and reversible — and cannot mint a second operator. Guard *order* is load-bearing and tested: exists → not-self → deploy-permits → confirm, because checking confirm first lets someone probe for accounts by watching which error came back.
+
+The audit log (`admin_audit_log`, migration 0039) has two write shapes because the two side effects have different rollback stories. A remote call cannot be rolled back, so the row is written as `pending` **before** dialling and settled after — if the backend dies mid-call the trail still says "we were about to drain hetzner-64", which is the only question anyone asks afterwards. A local mutation commits with its audit row or not at all. No FK on `actor_id` and a denormalised `actor_email`, so the trail outlives an account wipe and still names a person.
+
+**One read is audited**: fetching another tenant's task transcript, which is behind a click rather than loaded with the page. Auto-fetching would fill the log with accesses nobody chose to make and bury the ones somebody did.
+
+Two things surfaced that nothing had ever shown before. **Orphan runs** — a microVM live on a host with no task behind it — are invisible from either side alone, because the fleet's run store is in-memory and dies with the process while a task row cannot see a run we never recorded. And `FleetClient` had been recording **nothing** to the debug bus, a gap only visible once something made fleet calls per pageview.
+
+Also fixed in passing: `routes/debug.ts`'s category allowlist omitted `db` and `webhook` while the panel had chips for both, so clicking either silently returned the *unfiltered* stream.
+
+Left deliberately undone: `fleet_hosts` holds one snapshot per host, not a time series, so the incidents page reports counters cumulative since each host's last `fleetd` start rather than a rate. The page says so. A real trend needs either Prometheus scraping `/metrics` over the tailnet or an append-only samples table, and neither is worth it for one box.
+
 ## Session 79 — The self-hosted fleet becomes reachable (2026-07-31)
 
 The `selfhosted` provider merged in #22 was **dead code**: `packages/backend/src/index.ts` registered only PostHog Code and Claude Code, so `getCloudProvider('selfhosted')` returned null and no dispatch path could reach it. It is now registered behind `FLEET_ENABLED`.

@@ -6,6 +6,9 @@ import { StatCard } from '../../components/ui/StatCard';
 import { CopyableId } from '../../components/ui/CopyableId';
 import { absolute, relativeAge } from '../../lib/format';
 import { ROUTES, routeTo } from '../../lib/routes';
+import { useAdminMutation } from '../../hooks/useAdminMutation';
+import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
+import { useAccess, useCapability } from '../../components/auth/AdminGate';
 
 /**
  * One account.
@@ -22,6 +25,12 @@ export function UserDetailPage() {
     { deps: [userId], enabled: Boolean(userId) }
   );
 
+  const access = useAccess();
+  const canComp = useCapability('product.comp');
+  const canGrant = useCapability('product.grant_admin');
+  const comp = useAdminMutation<{ email: string; to: 'free' | 'unlimited' | null }>(refresh);
+  const grant = useAdminMutation<{ email: string; to: boolean }>(refresh);
+
   if (!data) {
     return (
       <Page title="User" backTo={ROUTES.users} backLabel="Users" onRefresh={refresh}>
@@ -35,6 +44,8 @@ export function UserDetailPage() {
       </Page>
     );
   }
+
+  const isSelf = access.email != null && access.email.toLowerCase() === data.email.toLowerCase();
 
   return (
     <Page
@@ -55,7 +66,56 @@ export function UserDetailPage() {
       backLabel="Users"
       onRefresh={refresh}
       refreshing={loading}
+      actions={
+        <div className="flex items-center gap-2">
+          {canComp && !isSelf && (
+            <button
+              onClick={() =>
+                comp.start(
+                  { email: data.email, to: data.planOverride ? null : 'unlimited' },
+                  ({ reason, confirm }) =>
+                    api.admin.users.setPlanOverride(data.id, {
+                      planOverride: data.planOverride ? null : 'unlimited',
+                      reason,
+                      confirm: confirm ?? '',
+                    })
+                )
+              }
+              className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent"
+            >
+              {data.planOverride ? 'Remove comp' : 'Comp account'}
+            </button>
+          )}
+          {canGrant && !isSelf && (
+            <button
+              onClick={() =>
+                grant.start({ email: data.email, to: !data.isAdmin }, ({ reason, confirm }) =>
+                  api.admin.users.setAdmin(data.id, {
+                    isAdmin: !data.isAdmin,
+                    reason,
+                    confirm: confirm ?? '',
+                  })
+                )
+              }
+              className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent"
+            >
+              {data.isAdmin ? 'Revoke operator' : 'Make operator'}
+            </button>
+          )}
+        </div>
+      }
     >
+      {/* The self-mutation guard lives on the server. Saying so here — and
+          hiding the buttons — saves an operator the confusing 403 they would
+          otherwise get on their own account. */}
+      {isSelf && (
+        <div className="mb-4 rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+          This is your own account. Comping yourself and changing your own operator flag are
+          refused by the server — use <code className="font-mono">psql</code> if you genuinely
+          need to, so it leaves a trace somewhere other than here.
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard
           label="Effective plan"
@@ -137,6 +197,66 @@ export function UserDetailPage() {
           View this account&apos;s tasks →
         </Link>
       </section>
+
+      <ConfirmMutationDialog
+        open={Boolean(comp.pending)}
+        onClose={comp.close}
+        title={comp.pending?.target.to ? 'Comp this account?' : 'Remove this comp?'}
+        description={
+          comp.pending?.target.to ? (
+            <>
+              <strong>{comp.pending.target.email}</strong> gets unlimited tasks and merge-queue
+              PRs, regardless of their subscription. This sets{' '}
+              <code className="font-mono text-xs">plan_override</code> — Polar never touches it,
+              so it stays until removed here.
+            </>
+          ) : (
+            <>
+              <strong>{comp.pending?.target.email}</strong> falls back to whatever their Polar
+              subscription says. If they have none, they go back to the free limits immediately.
+            </>
+          )
+        }
+        actionLabel={comp.pending?.target.to ? 'Comp account' : 'Remove comp'}
+        confirmText={comp.pending?.target.email}
+        confirmLabel="their email"
+        destructive={!comp.pending?.target.to}
+        analyticsAction="user.plan_override"
+        analyticsTargetType="user"
+        onConfirm={async (input) => {
+          await comp.pending!.run(input);
+          comp.succeeded(comp.pending!.target.to ? 'Account comped' : 'Comp removed');
+        }}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(grant.pending)}
+        onClose={grant.close}
+        title={grant.pending?.target.to ? 'Make this person an operator?' : 'Revoke operator access?'}
+        description={
+          grant.pending?.target.to ? (
+            <>
+              <strong>{grant.pending.target.email}</strong> gets everything you can see and do here
+              — every account&apos;s data, the fleet, and the ability to grant this to others.
+            </>
+          ) : (
+            <>
+              <strong>{grant.pending?.target.email}</strong> loses access to this console. If they
+              are the last operator this will be refused.
+            </>
+          )
+        }
+        actionLabel={grant.pending?.target.to ? 'Make operator' : 'Revoke operator'}
+        confirmText={grant.pending?.target.email}
+        confirmLabel="their email"
+        destructive
+        analyticsAction="user.admin"
+        analyticsTargetType="user"
+        onConfirm={async (input) => {
+          await grant.pending!.run(input);
+          grant.succeeded(grant.pending!.target.to ? 'Operator granted' : 'Operator revoked');
+        }}
+      />
     </Page>
   );
 }

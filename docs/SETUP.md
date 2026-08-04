@@ -564,7 +564,7 @@ POSTHOG_HOST=https://us.i.posthog.com
 # POLAR_PRODUCT_ID_ANNUAL=<uuid of the $150/yr product>
 # POLAR_SUCCESS_URL=https://www.talyn.dev/checkout-success   # optional
 
-# --- Browser app (app.talyn.dev) -------------------------------------------
+# --- Browser apps (app.talyn.dev, admin.talyn.dev) -------------------------
 # All three are unset for a desktop-only deployment, which is the default.
 #
 # ALLOWED_ORIGINS: comma-separated CORS/WS allowlist, EXACT string match (no
@@ -572,8 +572,37 @@ POSTHOG_HOST=https://us.i.posthog.com
 # Loopback and a missing Origin are always allowed, so the desktop app, the
 # CLI, and the MCP server never need an entry. Set this the moment a browser
 # client exists, or every one of its requests is blocked.
-# ALLOWED_ORIGINS=https://app.talyn.dev
+# ALLOWED_ORIGINS=https://app.talyn.dev,https://admin.talyn.dev
 #
+# It is READ ONCE AT BOOT, so adding an origin needs a restart. The failure
+# mode when you forget is a CORS error in the browser with NO server-side log
+# — worth checking first if a new front end can't talk to the backend.
+#
+# --- Operator console (admin.talyn.dev) ------------------------------------
+#
+# TALYN_ADMIN_EMAILS: comma-separated allow-list of operator emails. Promotes
+# `users.is_admin` on token verify — PROMOTE-ONLY, it never demotes, and no
+# route can self-promote. This is how you get into admin.talyn.dev at all;
+# without it every request there 403s and the console shows "Operators only".
+# TALYN_ADMIN_EMAILS=you@example.com
+#
+# TALYN_ADMIN_GRANT_ENABLED: set to exactly "1" to allow granting/revoking
+# operator access FROM the console. Default off, deliberately. Granting admin
+# is the one mutation that permanently widens the blast radius of every other
+# one, so with this unset a stolen operator session can read and comp — bad,
+# but auditable and reversible — and cannot mint a second operator to survive
+# the first being revoked. Use TALYN_ADMIN_EMAILS or SQL instead.
+# TALYN_ADMIN_GRANT_ENABLED=1
+#
+# The console also needs, in Supabase (dashboard, not config.toml):
+#   Authentication → URL Configuration → Redirect URLs
+#     += https://admin.talyn.dev/auth/callback
+# Client-side OAuth means Supabase owns that allowlist, not our backend.
+#
+# It reaches the fleet through the backend, so it needs no fleet secret of its
+# own — FLEET_API_TOKEN and FLEET_HTTP_PROXY (below) are already set for
+# dispatch and are what the console's proxy uses.
+
 # WEB_APP_URL: where the browser app lives. Must be https (localhost is
 # allowed for dev); a malformed or http:// value is a BOOT error, because it
 # becomes the GitHub App callback's redirect target and a bad one strands the

@@ -18,6 +18,15 @@ vi.mock('../lib/api', () => ({
   api: { admin: { fleet: { runs: (...a: unknown[]) => runs(...a) } } },
 }));
 
+vi.mock('../components/auth/AdminGate', () => ({
+  AdminGate: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useAccess: () => ({ admin: true, email: 'op@talyn.dev', capabilities: [] }),
+  // Capabilities are the UI's COPY of what the deploy permits; the server
+  // re-checks every one. Granting them here keeps a routing/rendering test
+  // from silently exercising the hidden-button path.
+  useCapability: () => true,
+}));
+
 const { RunsPage } = await import('../routes/fleet/RunsPage');
 
 function page(overrides: Partial<AdminRunIndex> = {}): AdminRunIndex {

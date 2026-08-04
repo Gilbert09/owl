@@ -7,6 +7,9 @@ import { Page, Pill } from '../../components/layout/Page';
 import { CopyableId } from '../../components/ui/CopyableId';
 import { absolute, relativeAge, usd } from '../../lib/format';
 import { ROUTES, routeTo } from '../../lib/routes';
+import { useAdminMutation } from '../../hooks/useAdminMutation';
+import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
+import { useCapability } from '../../components/auth/AdminGate';
 
 /**
  * One task.
@@ -27,6 +30,10 @@ export function TaskDetailPage() {
     () => api.admin.tasks.get(taskId, { transcript: showTranscript }),
     { deps: [taskId, showTranscript], enabled: Boolean(taskId) }
   );
+
+  const canMutate = useCapability('product.task_mutate');
+  const retry = useAdminMutation<{ id: string; title: string | null }>(refresh);
+  const kill = useAdminMutation<{ id: string; title: string | null; owner: string | null }>(refresh);
 
   if (!data) {
     return (
@@ -60,6 +67,35 @@ export function TaskDetailPage() {
       backLabel="Tasks"
       onRefresh={refresh}
       refreshing={loading}
+      actions={
+        canMutate && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() =>
+                retry.start({ id: data.id, title: data.title }, ({ reason }) =>
+                  api.admin.tasks.retry(data.id, { reason })
+                )
+              }
+              className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent"
+            >
+              Retry
+            </button>
+            {!['completed', 'failed', 'cancelled'].includes(data.status) && (
+              <button
+                onClick={() =>
+                  kill.start(
+                    { id: data.id, title: data.title, owner: data.ownerEmail },
+                    ({ reason }) => api.admin.tasks.kill(data.id, { reason })
+                  )
+                }
+                className="rounded-md border border-destructive/50 px-2.5 py-1.5 text-xs text-destructive hover:bg-destructive/10"
+              >
+                Kill
+              </button>
+            )}
+          </div>
+        )
+      }
     >
       {data.error && (
         <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -173,6 +209,50 @@ export function TaskDetailPage() {
           </p>
         )}
       </section>
+
+      <ConfirmMutationDialog
+        open={Boolean(retry.pending)}
+        onClose={retry.close}
+        title="Retry this task?"
+        description={
+          <>
+            <strong>{retry.pending?.target.title ?? retry.pending?.target.id}</strong> goes back in the queue and gets a FRESH
+            cloud run — the previous run&apos;s record is cleared, so nothing re-adopts it. If the
+            old run is still alive on a host, kill it first or you will have two.
+          </>
+        }
+        actionLabel="Retry task"
+        analyticsAction="task.retry"
+        analyticsTargetType="task"
+        onConfirm={async (input) => {
+          await retry.pending!.run(input);
+          retry.succeeded('Task requeued');
+        }}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(kill.pending)}
+        onClose={kill.close}
+        title="Kill this task?"
+        description={
+          <>
+            <strong>{kill.pending?.target.title ?? kill.pending?.target.id}</strong> is marked cancelled and the remote run is
+            asked to stop. That ask is best-effort — if the provider refuses, the run may still
+            finish and open a PR, and the result will say so.
+            {kill.pending?.target.owner && <> This belongs to {kill.pending.target.owner}.</>}
+          </>
+        }
+        actionLabel="Kill task"
+        confirmText={kill.pending?.target.id}
+        confirmLabel="the task id"
+        destructive
+        analyticsAction="task.kill"
+        analyticsTargetType="task"
+        onConfirm={async (input) => {
+          await kill.pending!.run(input);
+          kill.succeeded('Task cancelled');
+        }}
+      />
     </Page>
   );
 }

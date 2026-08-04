@@ -54,6 +54,11 @@ vi.mock('../components/auth/AuthProvider', () => ({
 }));
 vi.mock('../components/auth/AdminGate', () => ({
   AdminGate: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  useAccess: () => ({ admin: true, email: 'op@talyn.dev', capabilities: [] }),
+  // Capabilities are the UI's COPY of what the deploy permits; the server
+  // re-checks every one. Granting them here keeps a routing/rendering test
+  // from silently exercising the hidden-button path.
+  useCapability: () => true,
 }));
 
 const { default: App } = await import('../App');

@@ -8,6 +8,9 @@ import { StatCard } from '../../components/ui/StatCard';
 import { CopyableId } from '../../components/ui/CopyableId';
 import { absolute, bytes, relativeAge, shortSha } from '../../lib/format';
 import { GOLDEN_GC_LOW_PCT, goldenFreePct } from '../../lib/fleetView';
+import { useAdminMutation } from '../../hooks/useAdminMutation';
+import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
+import { useCapability } from '../../components/auth/AdminGate';
 
 /**
  * Baked images on one host.
@@ -35,6 +38,10 @@ export function GoldensPage() {
     deps: [effectiveHost],
     enabled: Boolean(effectiveHost),
   });
+
+  const canMutate = useCapability('fleet.mutate');
+  const pin = useAdminMutation<AdminGolden>(goldens.refresh);
+  const gc = useAdminMutation<{ host: string }>(goldens.refresh);
 
   const view = goldens.data;
   const rows = view?.goldens ?? null;
@@ -94,6 +101,30 @@ export function GoldensPage() {
       cell: (g) => <CopyableId value={g.contentSha} display={shortSha(g.contentSha, 10)} />,
     },
     { key: 'pm', header: 'Pkg mgr', cell: (g) => g.packageManager ?? '—' },
+    ...(canMutate
+      ? [
+          {
+            key: 'actions',
+            header: '',
+            cell: (g: AdminGolden) => (
+              <button
+                onClick={() =>
+                  pin.start(g, ({ reason }) =>
+                    api.admin.fleet.goldensPin(effectiveHost, {
+                      path: g.path,
+                      pinned: !g.operatorPinned,
+                      reason,
+                    })
+                  )
+                }
+                className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
+              >
+                {g.operatorPinned ? 'Unpin' : 'Pin'}
+              </button>
+            ),
+          } satisfies Column<AdminGolden>,
+        ]
+      : []),
     {
       key: 'built',
       header: 'Built',
@@ -112,6 +143,19 @@ export function GoldensPage() {
       onRefresh={goldens.refresh}
       refreshing={goldens.loading}
       actions={
+        <div className="flex items-center gap-2">
+        {canMutate && effectiveHost && (
+          <button
+            onClick={() =>
+              gc.start({ host: effectiveHost }, ({ reason }) =>
+                api.admin.fleet.goldensGc(effectiveHost, { reason })
+              )
+            }
+            className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent"
+          >
+            Run GC
+          </button>
+        )}
         <select
           value={effectiveHost}
           onChange={(e) => {
@@ -129,6 +173,7 @@ export function GoldensPage() {
             </option>
           ))}
         </select>
+        </div>
       }
     >
       <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -176,6 +221,56 @@ export function GoldensPage() {
             : 'Pick a host to see its images.'
         }
         rowClassName={(g) => (g.selectable ? undefined : 'opacity-70')}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(pin.pending)}
+        onClose={pin.close}
+        title={pin.pending?.target.operatorPinned ? 'Unpin this image?' : 'Pin this image?'}
+        description={
+          pin.pending?.target.operatorPinned ? (
+            <>
+              GC will be free to evict <strong>{pin.pending.target.repoSlug ?? 'this image'}</strong>{' '}
+              again once disk gets tight.
+            </>
+          ) : (
+            <>
+              GC will never evict <strong>{pin.pending?.target.repoSlug ?? 'this image'}</strong>,
+              even under disk pressure. That is a permanent hold on{' '}
+              {pin.pending ? bytes(pin.pending.target.diskBytes) : 'its'} of disk.
+            </>
+          )
+        }
+        actionLabel={pin.pending?.target.operatorPinned ? 'Unpin' : 'Pin'}
+        analyticsAction="fleet.golden.pin"
+        analyticsTargetType="golden"
+        onConfirm={async (input) => {
+          await pin.pending!.run(input);
+          pin.succeeded(pin.pending!.target.operatorPinned ? 'Image unpinned' : 'Image pinned');
+        }}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(gc.pending)}
+        onClose={gc.close}
+        title="Run golden GC?"
+        description={
+          <>
+            Evicts unpinned, unused images on <strong>{gc.pending?.target.host}</strong> to reclaim
+            disk. Images a live run is reflinked from, and the newest per repo, are never touched —
+            but a repo whose layer is evicted falls back to cloning on its next run.
+          </>
+        }
+        actionLabel="Run GC"
+        confirmText={gc.pending?.target.host}
+        confirmLabel="the host name"
+        destructive
+        analyticsAction="fleet.golden.gc"
+        analyticsTargetType="host"
+        onConfirm={async (input) => {
+          await gc.pending!.run(input);
+          gc.succeeded('GC complete');
+        }}
       />
     </Page>
   );

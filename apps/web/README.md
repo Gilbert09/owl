@@ -86,3 +86,16 @@ script.
 Build-time `VITE_TALYN_*` values are Vercel project environment variables.
 `vite.config.ts` fails the build if any required one is missing, so a
 half-configured project fails loudly rather than shipping a white screen.
+
+## The Debug panel moved
+
+It now lives only in [`apps/admin`](../admin/README.md) (admin.talyn.dev → Ops → Debug),
+removed from here and from the desktop in Session 80. It streamed backend
+internals across **every** account from inside a customer-facing app; that
+belongs on an admin-gated surface. The `debugMode` store field, the
+Settings → Developer toggle and the `'debug'` panel/route went with it.
+
+If you are porting a panel between the two apps, note that `apps/admin` is a
+fork of THIS app, not a third copy of the desktop renderer — so its auth,
+`lib/api` and `ui/*` are the ones documented above, but its routing
+deliberately is not (it uses plain react-router; see that README for why).

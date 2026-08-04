@@ -8,6 +8,9 @@ import { StatCard } from '../../components/ui/StatCard';
 import { mib, pctLabel, relativeAge, absolute } from '../../lib/format';
 import { hostState, memoryPct, slotsPct } from '../../lib/fleetView';
 import { ROUTES, routeTo } from '../../lib/routes';
+import { useAdminMutation } from '../../hooks/useAdminMutation';
+import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
+import { useCapability } from '../../components/auth/AdminGate';
 
 /**
  * The fleet's front page.
@@ -28,6 +31,9 @@ export function HostsPage() {
     () => api.admin.fleet.hosts({ live: true }),
     { intervalMs: POLL_MS }
   );
+
+  const canMutate = useCapability('fleet.mutate');
+  const drain = useAdminMutation<AdminFleetHost>(refresh);
 
   const hosts = data ?? [];
   const online = hosts.filter((h) => h.online);
@@ -95,6 +101,30 @@ export function HostsPage() {
       header: 'Version',
       cell: (h) => <span className="font-mono text-xs">{h.version ?? '—'}</span>,
     },
+    ...(canMutate
+      ? [
+          {
+            key: 'actions',
+            header: '',
+            cell: (h: AdminFleetHost) => (
+              <button
+                onClick={(e) => {
+                  // The row navigates; the button must not.
+                  e.stopPropagation();
+                  drain.start(h, ({ reason }) =>
+                    api.admin.fleet.drain(h.name, { draining: !h.draining, reason })
+                  );
+                }}
+                disabled={!h.online}
+                title={h.online ? undefined : 'Host is not reporting'}
+                className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-40"
+              >
+                {h.draining ? 'Undrain' : 'Drain'}
+              </button>
+            ),
+          } satisfies Column<AdminFleetHost>,
+        ]
+      : []),
     {
       key: 'live',
       header: 'Live',
@@ -154,6 +184,39 @@ export function HostsPage() {
         emptyHint="A host appears here once fleetd posts its first snapshot — check FLEET_REPORT_URL and FLEET_REPORT_TOKEN on the box."
         onRowClick={(h) => navigate(routeTo(ROUTES.fleetHost, { host: h.name }))}
         rowClassName={(h) => (h.online ? undefined : 'opacity-60')}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(drain.pending)}
+        onClose={drain.close}
+        title={drain.pending?.target.draining ? 'Resume this host?' : 'Drain this host?'}
+        description={
+          drain.pending?.target.draining ? (
+            <>
+              <strong>{drain.pending.target.name}</strong> will start accepting new runs again.
+            </>
+          ) : (
+            <>
+              <strong>{drain.pending?.target.name}</strong> will stop accepting new runs. Runs
+              already in flight keep going — draining is not a kill.
+            </>
+          )
+        }
+        actionLabel={drain.pending?.target.draining ? 'Resume host' : 'Drain host'}
+        // Typed confirmation only for the destructive direction. Resuming a
+        // host cannot lose anything, so making it as hard as draining one just
+        // trains people to type without reading.
+        confirmText={drain.pending?.target.draining ? undefined : drain.pending?.target.name}
+        confirmLabel="the host name"
+        destructive={!drain.pending?.target.draining}
+        analyticsAction="fleet.drain"
+        analyticsTargetType="host"
+        onConfirm={async (input) => {
+          await drain.pending!.run(input);
+          drain.succeeded(
+            drain.pending!.target.draining ? 'Host resumed' : 'Host draining'
+          );
+        }}
       />
     </Page>
   );

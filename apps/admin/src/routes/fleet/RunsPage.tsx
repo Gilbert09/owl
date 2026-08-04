@@ -6,8 +6,11 @@ import { Page, Pill } from '../../components/layout/Page';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { CopyableId } from '../../components/ui/CopyableId';
 import { absolute, countdown, relativeAge, usd } from '../../lib/format';
-import { idleSeconds, looksWedged, sortRuns } from '../../lib/fleetView';
+import { idleSeconds, isTerminal, looksWedged, sortRuns } from '../../lib/fleetView';
 import { ROUTES, routeTo } from '../../lib/routes';
+import { useAdminMutation } from '../../hooks/useAdminMutation';
+import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
+import { useCapability } from '../../components/auth/AdminGate';
 
 /**
  * Every run the fleet is or was running.
@@ -42,6 +45,9 @@ export function RunsPage() {
     else next.delete(key);
     setParams(next, { replace: true });
   }
+
+  const canMutate = useCapability('fleet.mutate');
+  const cancel = useAdminMutation<AdminRunRow>(refresh);
 
   const rows = data ? sortRuns(data.items) : null;
   const orphans = rows?.filter((r) => r.orphan).length ?? 0;
@@ -105,6 +111,28 @@ export function RunsPage() {
       header: 'Owner',
       cell: (r) => <span className="truncate text-xs">{r.ownerEmail ?? <Muted />}</span>,
     },
+    ...(canMutate
+      ? [
+          {
+            key: 'actions',
+            header: '',
+            cell: (r: AdminRunRow) =>
+              r.host && !isTerminal(r.status) ? (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    cancel.start(r, ({ reason }) =>
+                      api.admin.fleet.cancelRun(r.host!, r.runId, { reason })
+                    );
+                  }}
+                  className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
+                >
+                  Cancel
+                </button>
+              ) : null,
+          } satisfies Column<AdminRunRow>,
+        ]
+      : []),
     {
       key: 'age',
       header: 'Started',
@@ -178,6 +206,32 @@ export function RunsPage() {
         }
         onRowClick={(r) => navigate(routeTo(ROUTES.fleetRun, { runId: r.runId }) + hostQuery(r))}
         rowClassName={(r) => (r.orphan ? 'bg-destructive/5' : undefined)}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(cancel.pending)}
+        onClose={cancel.close}
+        title="Cancel this run?"
+        description={
+          <>
+            The microVM running <strong>{cancel.pending?.target.runId}</strong> on{' '}
+            <strong>{cancel.pending?.target.host}</strong> will be torn down. Any work it has not
+            already pushed is lost.
+            {cancel.pending?.target.ownerEmail && (
+              <> This belongs to {cancel.pending.target.ownerEmail}.</>
+            )}
+          </>
+        }
+        actionLabel="Cancel run"
+        confirmText={cancel.pending?.target.runId}
+        confirmLabel="the run id"
+        destructive
+        analyticsAction="fleet.run.cancel"
+        analyticsTargetType="run"
+        onConfirm={async (input) => {
+          await cancel.pending!.run(input);
+          cancel.succeeded('Run cancelled');
+        }}
       />
     </Page>
   );

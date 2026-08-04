@@ -20,7 +20,7 @@ const getAccess = vi.fn();
 const getEvents = vi.fn();
 const getSnapshot = vi.fn();
 const setDebugFilter = vi.fn();
-const on = vi.fn((_event: string, _handler: unknown) => () => {});
+const on = vi.fn((_type: string, _handler: unknown) => () => {});
 
 vi.mock('../lib/api', () => ({
   api: {
@@ -32,7 +32,7 @@ vi.mock('../lib/api', () => ({
     },
     ws: {
       setDebugFilter: (owner?: string) => setDebugFilter(owner),
-      on: (event: string, handler: unknown) => on(event, handler),
+      on: (type: string, handler: unknown) => on(type, handler),
     },
   },
 }));
