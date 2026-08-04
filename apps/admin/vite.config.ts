@@ -1,5 +1,6 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+import { assertUsableBuildEnv } from './buildEnv';
 
 /**
  * The operator console's build. A fork of apps/web's, and the constraints it
@@ -11,34 +12,16 @@ import react from '@vitejs/plugin-react';
  * browser unsubstituted and throws on the missing `process` global. The
  * desktop's webpack EnvironmentPlugin pattern does not port.
  */
-const REQUIRED = [
-  'VITE_TALYN_API_URL',
-  'VITE_TALYN_SUPABASE_URL',
-  'VITE_TALYN_SUPABASE_ANON_KEY',
-] as const;
 
 export default defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '');
 
   if (command === 'build' && mode === 'production') {
-    // A white screen on a public URL is much worse than the desktop's
-    // runtime throw, so fail the build rather than ship a broken bundle.
-    const missing = REQUIRED.filter((k) => !(process.env[k] ?? env[k]));
-    if (missing.length) {
-      throw new Error(
-        `Refusing to build the admin console without: ${missing.join(', ')}. ` +
-          'Set them as Vercel project environment variables.'
-      );
-    }
-    // The bundle is world-readable. The anon key is publishable by design; a
-    // service_role key pasted into the wrong Vercel variable would not be —
-    // and on THIS app that key would sit next to a cross-tenant console.
-    for (const key of REQUIRED) {
-      const value = process.env[key] ?? env[key] ?? '';
-      if (value.includes('service_role')) {
-        throw new Error(`${key} looks like a service_role secret — refusing to build.`);
-      }
-    }
+    // A white screen on a public URL is much worse than the desktop's runtime
+    // throw, so this fails the build rather than shipping a broken bundle.
+    // Read the SAME way Vite resolves import.meta.env: process.env first (CI
+    // and `vercel build` inject there), then the loaded .env files.
+    assertUsableBuildEnv((key) => process.env[key] ?? env[key]);
   }
 
   // `??` is wrong here: these arrive as EMPTY STRINGS rather than unset.
