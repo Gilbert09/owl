@@ -8,6 +8,7 @@ import {
   listAdminUsers,
   listAdminWorkspaces,
 } from '../../services/admin/queries.js';
+import { auditActor, recordAuditedRead } from '../../services/admin/audit.js';
 
 /**
  * Cross-tenant product reads for the operator console.
@@ -80,9 +81,11 @@ export function adminProductRoutes(): Router {
   /**
    * One task. `?transcript=1` additionally returns the run's conversation log.
    *
-   * That read is AUDITED (wired in the audit step) — it is another tenant's
-   * agent conversation, the single most sensitive thing this console can
-   * display, and recording the access is what makes displaying it defensible.
+   * That read is AUDITED — it is another tenant's agent conversation, the
+   * single most sensitive thing this console can display, and recording the
+   * access is what makes displaying it defensible. It is the only READ on this
+   * whole surface that writes an audit row; everything else here is metadata.
+   *
    * Without the flag the transcript blob never leaves Postgres.
    */
   router.get('/tasks/:id', async (req, res) => {
@@ -91,6 +94,20 @@ export function adminProductRoutes(): Router {
     if (!task) {
       res.status(404).json({ success: false, error: 'Task not found' });
       return;
+    }
+    if (wantsTranscript) {
+      // Logged AFTER the 404 check, so the trail records transcripts actually
+      // shown rather than ids someone typed. Fire-and-forget: a logging
+      // failure must not fail the read, or an audit outage is a console
+      // outage. `reason` is not solicited for a read — the console cannot
+      // sensibly prompt on every page load — so it records the access itself.
+      recordAuditedRead(auditActor(req), {
+        action: 'task.transcript.read',
+        targetKind: 'task',
+        targetId: task.id,
+        reason: 'operator opened the transcript',
+        params: { workspaceId: task.workspaceId, ownerEmail: task.ownerEmail },
+      });
     }
     res.json({ success: true, data: task } as ApiResponse<typeof task>);
   });

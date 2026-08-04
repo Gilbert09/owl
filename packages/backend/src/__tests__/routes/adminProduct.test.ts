@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import express from 'express';
 import { createServer, type Server } from 'http';
@@ -16,6 +16,7 @@ import { adminRoutes } from '../../routes/admin/index.js';
 import { createTestDb, seedUser } from '../helpers/testDb.js';
 import type { Database } from '../../db/client.js';
 import {
+  adminAuditLog,
   integrations as integrationsTable,
   repositories as repositoriesTable,
   tasks as tasksTable,
@@ -217,6 +218,29 @@ describe('what must not leak', () => {
   it('a task detail returns the transcript when explicitly asked', async () => {
     const { body } = await get<AdminTaskDetail>('/api/v1/admin/tasks/task-alice?transcript=1');
     expect(JSON.stringify(body.data.transcript)).toContain('SECRET TRANSCRIPT');
+  });
+
+  it('AUDITS the transcript read', async () => {
+    // The only read on this surface that writes an audit row. It is another
+    // tenant's agent conversation, and recording the access is what makes
+    // showing it defensible.
+    await get<AdminTaskDetail>('/api/v1/admin/tasks/task-alice?transcript=1');
+    await vi.waitFor(async () => {
+      const rows = await db.select().from(adminAuditLog);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.action).toBe('task.transcript.read');
+      expect(rows[0]!.targetId).toBe('task-alice');
+      expect(rows[0]!.actorId).toBe(OPERATOR);
+    });
+  });
+
+  it('does NOT audit a metadata-only task read', async () => {
+    // Everything else here is metadata. Auditing every page view would bury
+    // the one access that matters in noise.
+    await get<AdminTaskDetail>('/api/v1/admin/tasks/task-alice');
+    await get<TaskPage>('/api/v1/admin/tasks');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(await db.select().from(adminAuditLog)).toHaveLength(0);
   });
 
   it('a user detail DOES carry the Polar ids — that is what it is for', async () => {

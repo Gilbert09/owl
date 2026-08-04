@@ -4,6 +4,7 @@ import { requireAdmin } from '../../middleware/auth.js';
 import { debugRoutes } from '../debug.js';
 import { adminCapabilities } from './guards.js';
 import { adminProductRoutes } from './product.js';
+import { adminAuditRoutes } from './audit.js';
 
 /**
  * The operator console's API (admin.talyn.dev).
@@ -77,6 +78,8 @@ export function adminRoutes(): Router {
   // navigation, but `/admin/users` reads better than `/admin/product/users`
   // and matches how /debug and /fleet already sit.
   router.use(adminProductRoutes());
+
+  router.use('/audit', adminAuditRoutes());
 
   return router;
 }
