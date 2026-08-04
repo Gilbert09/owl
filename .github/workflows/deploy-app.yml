@@ -12,6 +12,21 @@ name: Deploy app
 # secret, not the folder, is what decides where a build lands, so check the
 # secret. Pointing this at the website's project id would publish the app's
 # bundle over www.talyn.dev.
+#
+# THIS WORKFLOW IS THE ONLY DEPLOY PATH. apps/web/vercel.json sets
+# `"git": { "deploymentEnabled": false }`, which turns off Vercel's own
+# push-triggered builds — otherwise every push to main deploys app.talyn.dev
+# TWICE, once from here and once from Vercel's Git integration, and whichever
+# finishes last wins the production alias.
+#
+# That race is not theoretical: on 2026-08-04 the two paths disagreed about
+# env (Vercel's build had the real Supabase values, the CLI build got
+# `[SENSITIVE]` placeholders) and the losing-but-later build served a white
+# screen. Keeping one path means one thing to reason about — and this is the
+# one to keep, because `check` typechecks before anything deploys.
+#
+# Deploys here still work: `git.deploymentEnabled` only governs Vercel's Git
+# hooks, not an explicit `vercel deploy --prebuilt`.
 on:
   push:
     branches: [main]
@@ -84,11 +99,16 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         run: npm i -g vercel
 
-      # Run from the repo root — the Vercel project's Root Directory
-      # (apps/web) is pulled with the project settings, same as marketing.
-      # TALYN_* build values live as Vercel project environment variables so
-      # `vercel build` sees them; vite.config.ts fails the build if any is
-      # missing, so a misconfigured project can't ship a white screen.
+      # Run from the repo root — the Vercel project's Root Directory is pulled
+      # with the project settings. VITE_TALYN_* build values live as Vercel
+      # project environment variables so `vercel build` sees them.
+      #
+      # Those variables must NOT be marked "Sensitive" in Vercel. `vercel pull`
+      # cannot decrypt a sensitive variable — it writes the literal string
+      # `[SENSITIVE]`, which then gets baked into the bundle. buildEnv.ts
+      # rejects that value by name now, so the build fails loudly instead of
+      # shipping a white screen (which is what happened to the web app on
+      # 2026-08-04, because the guard only checked for EMPTY).
       - name: Pull Vercel environment
         if: steps.gate.outputs.configured == 'true'
         run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"

@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": { "deploymentEnabled": false },
   "installCommand": "cd ../.. && npm install --ignore-scripts",
   "buildCommand": "cd ../.. && npm run build -w @talyn/shared && npm run build -w @talyn/client && npm run build -w @talyn/admin",
   "outputDirectory": "dist",

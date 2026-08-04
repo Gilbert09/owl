@@ -15,6 +15,21 @@ name: Deploy admin
 # Pointing this at the wrong project id would publish a cross-tenant admin
 # console over a customer-facing domain, so check the secret rather than the
 # path when editing.
+#
+# THIS WORKFLOW IS THE ONLY DEPLOY PATH. apps/admin/vercel.json sets
+# `"git": { "deploymentEnabled": false }`, which turns off Vercel's own
+# push-triggered builds — otherwise every push to main deploys admin.talyn.dev
+# TWICE, once from here and once from Vercel's Git integration, and whichever
+# finishes last wins the production alias.
+#
+# That race is not theoretical: on 2026-08-04 the two paths disagreed about
+# env (Vercel's build had the real Supabase values, the CLI build got
+# `[SENSITIVE]` placeholders) and the losing-but-later build served a white
+# screen. Keeping one path means one thing to reason about — and this is the
+# one to keep, because `check` typechecks before anything deploys.
+#
+# Deploys here still work: `git.deploymentEnabled` only governs Vercel's Git
+# hooks, not an explicit `vercel deploy --prebuilt`.
 on:
   push:
     branches: [main]
@@ -88,11 +103,16 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         run: npm i -g vercel
 
-      # Run from the repo root — the Vercel project's Root Directory
-      # (apps/admin) is pulled with the project settings. VITE_TALYN_* build
-      # values live as Vercel project environment variables so `vercel build`
-      # sees them; vite.config.ts fails the build if any is missing, so a
-      # misconfigured project can't ship a white screen.
+      # Run from the repo root — the Vercel project's Root Directory is pulled
+      # with the project settings. VITE_TALYN_* build values live as Vercel
+      # project environment variables so `vercel build` sees them.
+      #
+      # Those variables must NOT be marked "Sensitive" in Vercel. `vercel pull`
+      # cannot decrypt a sensitive variable — it writes the literal string
+      # `[SENSITIVE]`, which then gets baked into the bundle. buildEnv.ts
+      # rejects that value by name now, so the build fails loudly instead of
+      # shipping a white screen (which is what happened to the admin console on
+      # 2026-08-04, because the guard only checked for EMPTY).
       - name: Pull Vercel environment
         if: steps.gate.outputs.configured == 'true'
         run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"

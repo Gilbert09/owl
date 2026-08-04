@@ -123,6 +123,14 @@ Vercel project **Root Directory must be `apps/admin`**, and `vercel.json`
 repo root, so a root-level config would be picked up by the others (this was
 tried once and broke the marketing deploy).
 
+**The workflow is the only deploy path.** `vercel.json` sets
+`"git": { "deploymentEnabled": false }`, disabling Vercel's own push-triggered
+builds. Without that, every push deploys twice — once from the workflow, once
+from Vercel's Git integration — and whichever finishes last wins the
+production alias. On 2026-08-04 those two paths disagreed about env and the
+later one served a white screen. `git.deploymentEnabled` only governs Vercel's
+Git hooks; `vercel deploy --prebuilt` from CI is unaffected.
+
 `.github/workflows/deploy-admin.yml` needs `VERCEL_PROJECT_ID_ADMIN`. Mind the
 naming — two of the three folder names disagree with their project names:
 
