@@ -261,6 +261,8 @@ describe('the attribution envelope', () => {
       c.goldensPin({ actor: 'op@talyn.dev', reason: 'keeping', path: '/x.img', pinned: true })],
     ['goldensRebake', (c: import('../services/selfHosted/client.js').FleetClient) =>
       c.goldensRebake({ actor: 'op@talyn.dev', reason: 'lockfile moved', repo: 'o/r' })],
+    ['goldensDelete', (c: import('../services/selfHosted/client.js').FleetClient) =>
+      c.goldensDelete({ actor: 'op@talyn.dev', reason: 'retired repo', path: '/x.img' })],
   ])('sends actor AND reason on %s', async (_label, call) => {
     const { client } = await fleetClientForHost('hetzner-64');
     await call(client);

@@ -80,7 +80,24 @@ export function adminRunFromFleet(run: FleetRun, host: string): AdminRunRow {
     prUrl: run.prUrl ?? null,
     error: run.error ?? null,
     orphan: true,
+    selfTest: Boolean(run.task?.selfTest),
   };
+}
+
+/**
+ * Newest first, on the timestamp the row actually has.
+ *
+ * `startedAt` is the one an operator reads as "when did this run", but a queued
+ * run has none — falling back to `createdAt` keeps it beside its neighbours
+ * instead of at the bottom, which is where a bare `startedAt ?? 0` would put
+ * the run most likely to need attention.
+ */
+function byRecency(a: AdminRunRow, b: AdminRunRow): number {
+  const at = Date.parse(a.startedAt ?? a.createdAt ?? '') || 0;
+  const bt = Date.parse(b.startedAt ?? b.createdAt ?? '') || 0;
+  if (at !== bt) return bt - at;
+  // Stable for equal timestamps so the list does not shuffle between polls.
+  return a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0;
 }
 
 export interface AdminRunFilters {
@@ -122,7 +139,7 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
   }
 
   const claimed = new Set<string>();
-  const items: AdminRunRow[] = page.items.map((task) => {
+  const claimedItems: AdminRunRow[] = page.items.map((task) => {
     const runId = task.remoteRunId ?? `talyn-${task.id}`;
     const match = byRunId.get(runId);
     if (match) claimed.add(runId);
@@ -151,6 +168,7 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
       prUrl: run?.prUrl ?? null,
       error: run?.error ?? null,
       orphan: false,
+      selfTest: Boolean(run?.task?.selfTest),
     };
   });
 
@@ -158,5 +176,15 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
     .filter(([runId]) => !claimed.has(runId))
     .map(([, { run, host }]) => adminRunFromFleet(run, host));
 
-  return { items: [...orphans, ...items], nextCursor: page.nextCursor, degraded };
+  // Merged by time, not concatenated.
+  //
+  // Orphans used to be prepended wholesale, on the reasoning that they are the
+  // most valuable thing here. The effect was the opposite: a run that started
+  // 58 seconds ago sorted BELOW four deploy self-tests from an hour ago, so the
+  // one row an operator opened the page to find was the one they had to hunt
+  // for. Orphans keep their tinted row and their count in the header — that is
+  // what makes them findable, and it costs the list nothing to stay in order.
+  const items = [...orphans, ...claimedItems].sort(byRecency);
+
+  return { items, nextCursor: page.nextCursor, degraded };
 }

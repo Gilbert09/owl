@@ -39,6 +39,23 @@ export interface FleetRun {
    * (fleet HANDOFF failure #2), so this is the number that says "stuck".
    */
   lastActivity?: string;
+  /**
+   * The run's task, redacted by the fleet to the four fields it is willing to
+   * fan out (`fvspTaskRedacted`) — never the prompt, which embeds customer
+   * code.
+   */
+  task?: {
+    taskType?: string;
+    model?: string;
+    repo?: string;
+    /**
+     * A guest self-test rather than an agent loop. `deploy.sh` fires one after
+     * every deploy to prove the API contract, so these appear on the host with
+     * no Talyn task behind them — expected, and NOT the orphan the console is
+     * trying to warn about.
+     */
+    selfTest?: boolean;
+  };
 }
 
 /** fleetd's `GET /v1/capacity`. */
@@ -415,6 +432,12 @@ export class FleetClient {
     input: FleetAttribution & { path: string; pinned: boolean },
   ): Promise<Record<string, unknown>> {
     return this.request('/v1/goldens/pin', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async goldensDelete(
+    input: FleetAttribution & { path: string },
+  ): Promise<{ path: string; key: string; freedBytes: number }> {
+    return this.request('/v1/goldens/delete', { method: 'POST', body: JSON.stringify(input) });
   }
 
   async goldensRebake(

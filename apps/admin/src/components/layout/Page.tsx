@@ -72,7 +72,7 @@ export function Pill({
   children,
   title,
 }: {
-  tone?: 'default' | 'good' | 'warn' | 'critical' | 'muted';
+  tone?: 'default' | 'good' | 'info' | 'warn' | 'critical' | 'muted';
   children: ReactNode;
   title?: string;
 }) {
@@ -83,6 +83,8 @@ export function Pill({
         'inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-1.5 py-0.5 text-[11px] font-medium',
         tone === 'good' &&
           'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+        tone === 'info' &&
+          'border-blue-500/40 bg-blue-500/10 text-blue-700 dark:text-blue-400',
         tone === 'warn' && 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400',
         tone === 'critical' && 'border-destructive/40 bg-destructive/10 text-destructive',
         tone === 'muted' && 'border-border text-muted-foreground',

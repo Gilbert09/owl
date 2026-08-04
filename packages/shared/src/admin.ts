@@ -49,6 +49,7 @@ export type AdminAuditAction =
   | 'fleet.run.cancel'
   | 'fleet.golden.gc'
   | 'fleet.golden.pin'
+  | 'fleet.golden.delete'
   | 'fleet.golden.rebake'
   | 'user.plan_override'
   | 'user.admin'
@@ -240,6 +241,18 @@ export interface AdminRunRow {
   prUrl: string | null;
   error: string | null;
   orphan: boolean;
+  /**
+   * A guest self-test rather than an agent loop.
+   *
+   * `deploy.sh` fires one of these after every fleet deploy to prove the API
+   * contract still holds, so they land on the host with no Talyn task behind
+   * them and are orphans by the strict definition — but they are exactly what
+   * is supposed to happen, and four of them tinted red after four merges made
+   * the orphan warning mean nothing. Kept as a separate field rather than
+   * clearing `orphan`, because "no task behind it" is still true and the run
+   * detail page should be able to say so.
+   */
+  selfTest: boolean;
 }
 
 /**
@@ -386,6 +399,24 @@ export interface AdminGoldenGcRequest extends AdminMutationRequest {
 export interface AdminGoldenPinRequest extends AdminMutationRequest {
   path: string;
   pinned: boolean;
+}
+
+export interface AdminGoldenDeleteRequest extends AdminMutationRequest {
+  path: string;
+}
+
+/**
+ * What deleting one golden actually reclaimed.
+ *
+ * `freedBytes` is blocks the filesystem gave back, not the image's apparent
+ * size — a golden sharing all its extents with a live run's overlay frees
+ * nothing until that overlay goes, and reporting its apparent 2.5 GiB would
+ * make a no-op look like a win.
+ */
+export interface AdminGoldenDeleteResult {
+  path: string;
+  key: string;
+  freedBytes: number;
 }
 
 export interface AdminGoldenRebakeRequest extends AdminMutationRequest {

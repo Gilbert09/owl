@@ -36,6 +36,8 @@ import type {
   AdminGcResult,
   AdminGoldenGcRequest,
   AdminGoldenPinRequest,
+  AdminGoldenDeleteRequest,
+  AdminGoldenDeleteResult,
   AdminGoldenRebakeRequest,
   AdminGrantRequest,
   AdminMutationRequest,
@@ -1346,6 +1348,12 @@ const adminFleet = {
     request<{ path: string; pinned: boolean }>(
       'POST',
       `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/pin`,
+      body
+    ),
+  goldensDelete: (host: string, body: AdminGoldenDeleteRequest) =>
+    request<AdminGoldenDeleteResult>(
+      'POST',
+      `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/delete`,
       body
     ),
   goldensRebake: (host: string, body: AdminGoldenRebakeRequest) =>

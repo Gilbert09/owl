@@ -71,6 +71,7 @@ function run(overrides: Partial<AdminRunRow> = {}): AdminRunRow {
     prUrl: null,
     error: null,
     orphan: false,
+    selfTest: false,
     ...overrides,
   };
 }

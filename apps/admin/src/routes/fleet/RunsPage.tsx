@@ -19,10 +19,12 @@ import { useCapability } from '../../components/auth/AdminGate';
  * filtered view is a link an operator can paste into Slack. That is the same
  * reason drill-ins are routes rather than modals.
  *
- * Rows are ranked, not just sorted by time: orphans first (a microVM with no
- * task behind it), then anything that looks wedged, then live runs, then
- * history. A page that buries the one broken run on page four has failed at
- * the only job it has.
+ * Rows are in time order, newest first, orphans included. They used to be
+ * ranked — orphans hoisted to the top — which sounds right and read terribly:
+ * a run that started 58 seconds ago sorted BELOW four deploy self-tests from an
+ * hour ago, so the row an operator opened the page to find was the one they had
+ * to hunt for. Orphans keep a tinted row and a count in the header, which is
+ * what makes them findable without reordering the list around them.
  */
 const POLL_MS = 8_000;
 
@@ -50,7 +52,11 @@ export function RunsPage() {
   const cancel = useAdminMutation<AdminRunRow>(refresh);
 
   const rows = data ? sortRuns(data.items) : null;
-  const orphans = rows?.filter((r) => r.orphan).length ?? 0;
+  // Self-tests are orphans by the strict definition — no task row behind them —
+  // but they are exactly what is supposed to happen after a fleet deploy.
+  // Counting them made the header read "4 orphaned" after four merges, which is
+  // how a warning stops being read.
+  const orphans = rows?.filter((r) => r.orphan && !r.selfTest).length ?? 0;
   const wedged = rows?.filter((r) => looksWedged(r)).length ?? 0;
 
   const columns: Column<AdminRunRow>[] = [
@@ -60,11 +66,19 @@ export function RunsPage() {
       cell: (r) => (
         <div className="flex items-center gap-2">
           <CopyableId value={r.runId} />
-          {r.orphan && (
-            <Pill tone="critical" title="Live on a host with no task behind it">
-              orphan
-            </Pill>
-          )}
+          {r.orphan &&
+            (r.selfTest ? (
+              <Pill
+                tone="muted"
+                title="A guest self-test fired by the fleet's deploy script, not a Talyn task"
+              >
+                self-test
+              </Pill>
+            ) : (
+              <Pill tone="critical" title="Live on a host with no task behind it">
+                orphan
+              </Pill>
+            ))}
           {r.adopted && (
             <Pill tone="muted" title="Re-attached after a fleetd restart">
               adopted
@@ -205,7 +219,7 @@ export function RunsPage() {
             : 'Runs appear here once a task is dispatched to the self-hosted fleet.'
         }
         onRowClick={(r) => navigate(routeTo(ROUTES.fleetRun, { runId: r.runId }) + hostQuery(r))}
-        rowClassName={(r) => (r.orphan ? 'bg-destructive/5' : undefined)}
+        rowClassName={(r) => (r.orphan && !r.selfTest ? 'bg-destructive/5' : undefined)}
       />
 
       <ConfirmMutationDialog
@@ -246,7 +260,10 @@ function StatusPill({ run }: { run: AdminRunRow }) {
   if (looksWedged(run)) return <Pill tone="critical">wedged?</Pill>;
   switch (run.status) {
     case 'running':
-      return <Pill tone="good">running</Pill>;
+      // Blue, not green: green is the "this finished and it was fine" colour,
+      // and a run still in flight has not earned it. It also makes the one row
+      // an operator can still act on scannable in a list of finished ones.
+      return <Pill tone="info">running</Pill>;
     case 'queued':
       return <Pill tone="muted">queued</Pill>;
     case 'completed':

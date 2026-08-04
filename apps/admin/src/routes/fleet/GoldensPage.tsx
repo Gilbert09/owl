@@ -1,6 +1,11 @@
 import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { AdminFleetHost, AdminGcResult, AdminGolden } from '@talyn/shared';
+import type {
+  AdminFleetHost,
+  AdminGcResult,
+  AdminGolden,
+  AdminGoldenDeleteResult,
+} from '@talyn/shared';
 import { api } from '../../lib/api';
 import { useAdminQuery } from '../../hooks/useAdminQuery';
 import { Page, Pill } from '../../components/layout/Page';
@@ -43,6 +48,7 @@ export function GoldensPage() {
   const canMutate = useCapability('fleet.mutate');
   const pin = useAdminMutation<AdminGolden>(goldens.refresh);
   const gc = useAdminMutation<{ host: string; force: boolean }>(goldens.refresh);
+  const del = useAdminMutation<AdminGolden>(goldens.refresh);
 
   const [gcResult, setGcResult] = useState<AdminGcResult | null>(null);
 
@@ -123,6 +129,31 @@ export function GoldensPage() {
                 className="rounded-md border border-border px-2 py-1 text-xs hover:bg-accent"
               >
                 {g.operatorPinned ? 'Unpin' : 'Pin'}
+              </button>
+            ),
+          } satisfies Column<AdminGolden>,
+          {
+            key: 'delete',
+            header: '',
+            // The only way to remove a golden the GC protects forever: it never
+            // evicts the newest image for a repo, so a repo nobody runs any
+            // more keeps one image at any disk pressure.
+            cell: (g: AdminGolden) => (
+              <button
+                onClick={() =>
+                  del.start(g, ({ reason }) =>
+                    api.admin.fleet.goldensDelete(effectiveHost, { path: g.path, reason })
+                  )
+                }
+                disabled={g.inUse}
+                title={
+                  g.inUse
+                    ? 'A live run is reflinked from this image'
+                    : 'Delete this image from the host'
+                }
+                className="rounded-md border border-border px-2 py-1 text-xs text-destructive hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+              >
+                Delete
               </button>
             ),
           } satisfies Column<AdminGolden>,
@@ -287,6 +318,42 @@ export function GoldensPage() {
         onConfirm={async (input) => {
           await pin.pending!.run(input);
           pin.succeeded(pin.pending!.target.operatorPinned ? 'Image unpinned' : 'Image pinned');
+        }}
+      />
+
+      <ConfirmMutationDialog
+        open={Boolean(del.pending)}
+        onClose={del.close}
+        title="Delete this image?"
+        description={
+          <>
+            Removes <strong>{del.pending?.target.repoSlug ?? del.pending?.target.key}</strong> from{' '}
+            <strong>{effectiveHost}</strong>, reclaiming up to{' '}
+            {del.pending ? bytes(del.pending.target.diskBytes) : 'its'} of disk. The next run on
+            that repo clones from scratch and rebakes, so it will be slower — once.
+            <br />
+            <br />
+            The GC will never do this for you: it protects the newest image for every repo, at any
+            disk pressure, so a repo nobody runs any more keeps one forever.
+          </>
+        }
+        actionLabel="Delete"
+        confirmText={del.pending?.target.contentSha ?? undefined}
+        confirmLabel="the content SHA"
+        destructive
+        analyticsAction="fleet.golden.delete"
+        analyticsTargetType="golden"
+        onConfirm={async (input) => {
+          const res = (await del.pending!.run(input)) as AdminGoldenDeleteResult | undefined;
+          // Blocks actually reclaimed, not apparent size — an image sharing all
+          // its extents with a live run's overlay frees nothing until that
+          // overlay goes, and quoting its apparent 2.5 GB would report a win
+          // that did not happen.
+          del.succeeded(
+            res && res.freedBytes > 0
+              ? `Image deleted, reclaiming ${bytes(res.freedBytes)}`
+              : 'Image deleted. No disk came back yet — its extents are still shared with a live run.'
+          );
         }}
       />
 

@@ -491,6 +491,53 @@ export function adminFleetRoutes(): Router {
     })
   );
 
+  /**
+   * Delete ONE golden by name.
+   *
+   * Distinct from GC on purpose. The fleet's GC never evicts the newest image
+   * for a repo, because doing so makes the next run on that repo clone from
+   * scratch — a rule with no notion of a repo we are done with, so a retired
+   * repo's last golden is protected forever at any disk pressure. An operator
+   * naming a single image is making exactly the judgement the GC cannot.
+   *
+   * The fleet still refuses the two cases that are damage rather than waste (a
+   * live run reflinked from it, an operator pin), and those come back as the
+   * upstream 409 rather than being pre-empted here: fleetd owns that state and
+   * a second copy of the rule in this file would be one that drifts.
+   */
+  router.post(
+    '/hosts/:name/goldens/delete',
+    limit,
+    requireReason,
+    withFleetGuards(async (req, res) => {
+      const body = req.body as { path?: unknown };
+      if (typeof body.path !== 'string' || !body.path) {
+        throw new AdminGuardError(400, 'invalid_request', 'path is required.');
+      }
+      const actor = auditActor(req);
+      const reason = adminReason(req);
+
+      const result = await withRemoteAudit(
+        actor,
+        {
+          action: 'fleet.golden.delete',
+          targetKind: 'golden',
+          targetId: body.path,
+          reason,
+          params: { host: req.params.name },
+        },
+        async () => {
+          const { client } = await fleetClientForHost(req.params.name);
+          return client.goldensDelete({
+            path: body.path as string,
+            ...fleetActorFields(actor, reason),
+          });
+        }
+      );
+      res.json({ success: true, data: result });
+    })
+  );
+
   /** Rebuild a repo's golden. Slow, and async on the fleet's side. */
   router.post(
     '/hosts/:name/goldens/rebake',
