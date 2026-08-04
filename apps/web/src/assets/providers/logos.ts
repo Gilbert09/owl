@@ -11,12 +11,20 @@ export const CODEX_LOGO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAB
  * cloud, so an unknown provider reads as "some cloud agent" rather than as a
  * broken image or, worse, as nothing at all. Inline SVG: no new asset, no
  * network fetch, and it inherits nothing so it looks the same in both themes.
+ *
+ * Colours are written as plain `#rrggbb` and escaped ONCE, by
+ * encodeURIComponent. Pre-escaping the hash as `%23` looks right and is not:
+ * encodeURIComponent then escapes the percent, the browser decodes `%2523`
+ * back to the literal text `%23888`, SVG rejects that as a colour, and an
+ * invalid presentation attribute falls back to `stroke: none` — a perfectly
+ * sized, perfectly invisible icon. Both SVG marks here shipped that way and
+ * read as "there is no icon". See logos.test.ts.
  */
 export const GENERIC_PROVIDER_LOGO =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="%23888" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      'stroke="#888" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
       '<path d="M17.5 19a4.5 4.5 0 0 0 .5-8.97A6 6 0 0 0 6.2 9.2 4.5 4.5 0 0 0 6.5 19z"/>' +
       '</svg>',
   );
@@ -29,7 +37,7 @@ export const SELFHOSTED_LOGO =
   'data:image/svg+xml;utf8,' +
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
-      'stroke="%235b8def" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
+      'stroke="#5b8def" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' +
       '<rect x="3" y="4" width="18" height="6" rx="1.5"/>' +
       '<rect x="3" y="14" width="18" height="6" rx="1.5"/>' +
       '<path d="M7 7h.01M7 17h.01"/>' +
