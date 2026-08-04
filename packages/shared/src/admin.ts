@@ -299,6 +299,32 @@ export interface AdminGoldensView {
   freePct: number | null;
 }
 
+/**
+ * What a golden GC actually did.
+ *
+ * `triggered` is the field that matters. The fleet's GC is DISK-PRESSURE
+ * driven: below `force` it only evicts when free space is under the low-water
+ * mark (15%), so on a healthy disk it correctly removes nothing. Reporting
+ * "GC complete" for that — which the console did at first — reads as "your
+ * images are gone" when they are all still there.
+ */
+export interface AdminGcResult {
+  freePctBefore: number;
+  freePctAfter: number;
+  /** False when the disk was above the threshold, so nothing was considered. */
+  triggered: boolean;
+  removed: string[];
+  /**
+   * Blocks the evicted images actually occupied, not their apparent size. A
+   * golden sharing all its extents with another reclaims nothing, and
+   * reporting its apparent size would make a GC that achieved nothing look
+   * like it had worked.
+   */
+  freedBytes: number;
+  protected: number;
+  candidates: number;
+}
+
 export interface AdminRebakeStatus {
   slug: string | null;
   baseBranch: string | null;

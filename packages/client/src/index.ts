@@ -33,6 +33,7 @@ import type {
   AdminGoldensView,
   AdminIncident,
   AdminDrainRequest,
+  AdminGcResult,
   AdminGoldenGcRequest,
   AdminGoldenPinRequest,
   AdminGoldenRebakeRequest,
@@ -1336,7 +1337,7 @@ const adminFleet = {
       body
     ),
   goldensGc: (host: string, body: AdminGoldenGcRequest) =>
-    request<Record<string, unknown>>(
+    request<AdminGcResult>(
       'POST',
       `/admin/fleet/hosts/${encodeURIComponent(host)}/goldens/gc`,
       body

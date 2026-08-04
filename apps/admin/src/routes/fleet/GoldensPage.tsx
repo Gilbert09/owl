@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import type { AdminFleetHost, AdminGolden } from '@talyn/shared';
+import type { AdminFleetHost, AdminGcResult, AdminGolden } from '@talyn/shared';
 import { api } from '../../lib/api';
 import { useAdminQuery } from '../../hooks/useAdminQuery';
 import { Page, Pill } from '../../components/layout/Page';
@@ -41,7 +42,9 @@ export function GoldensPage() {
 
   const canMutate = useCapability('fleet.mutate');
   const pin = useAdminMutation<AdminGolden>(goldens.refresh);
-  const gc = useAdminMutation<{ host: string }>(goldens.refresh);
+  const gc = useAdminMutation<{ host: string; force: boolean }>(goldens.refresh);
+
+  const [gcResult, setGcResult] = useState<AdminGcResult | null>(null);
 
   const view = goldens.data;
   const rows = view?.goldens ?? null;
@@ -147,9 +150,17 @@ export function GoldensPage() {
         {canMutate && effectiveHost && (
           <button
             onClick={() =>
-              gc.start({ host: effectiveHost }, ({ reason }) =>
-                api.admin.fleet.goldensGc(effectiveHost, { reason })
-              )
+              gc.start({ host: effectiveHost, force: true }, async ({ reason }) => {
+                // `force` is the point of this button. Without it the fleet's
+                // GC is disk-pressure driven — it only evicts below the 15%
+                // low-water mark — so on a healthy disk it correctly removes
+                // NOTHING, which is what made the first version look broken.
+                const res = await api.admin.fleet.goldensGc(effectiveHost, {
+                  reason,
+                  force: true,
+                });
+                setGcResult(res);
+              })
             }
             className="rounded-md border border-border px-2.5 py-1.5 text-xs hover:bg-accent"
           >
@@ -206,6 +217,35 @@ export function GoldensPage() {
         </div>
       )}
 
+      {gcResult && (
+        <div className="mb-3 rounded-md border border-border bg-card px-3 py-2 text-xs">
+          <div className="flex items-start justify-between gap-3">
+            <span>
+              {gcResult.removed.length > 0 ? (
+                <>
+                  Evicted <strong>{gcResult.removed.length}</strong> image
+                  {gcResult.removed.length === 1 ? '' : 's'}, reclaiming{' '}
+                  <strong>{bytes(gcResult.freedBytes)}</strong> — free space{' '}
+                  {Math.round(gcResult.freePctBefore)}% → {Math.round(gcResult.freePctAfter)}%.
+                </>
+              ) : (
+                <>
+                  Nothing was evicted. {gcResult.candidates} candidate
+                  {gcResult.candidates === 1 ? '' : 's'}, {gcResult.protected} protected
+                  (in use, pinned, or the newest for their repo).
+                </>
+              )}
+            </span>
+            <button
+              onClick={() => setGcResult(null)}
+              className="shrink-0 text-muted-foreground underline hover:no-underline"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       <DataTable
         rows={rows}
         columns={columns}
@@ -253,15 +293,21 @@ export function GoldensPage() {
       <ConfirmMutationDialog
         open={Boolean(gc.pending)}
         onClose={gc.close}
-        title="Run golden GC?"
+        title="Evict unused golden images?"
         description={
           <>
             Evicts unpinned, unused images on <strong>{gc.pending?.target.host}</strong> to reclaim
             disk. Images a live run is reflinked from, and the newest per repo, are never touched —
             but a repo whose layer is evicted falls back to cloning on its next run.
+            <br />
+            <br />
+            This <strong>forces</strong> the eviction. The fleet&apos;s own GC only runs under disk
+            pressure (below {GOLDEN_GC_LOW_PCT}% free)
+            {free != null ? `, and this host is at ${Math.round(free)}%` : ''} — so without forcing
+            it, nothing would be removed.
           </>
         }
-        actionLabel="Run GC"
+        actionLabel="Evict now"
         confirmText={gc.pending?.target.host}
         confirmLabel="the host name"
         destructive
@@ -269,7 +315,11 @@ export function GoldensPage() {
         analyticsTargetType="host"
         onConfirm={async (input) => {
           await gc.pending!.run(input);
-          gc.succeeded('GC complete');
+          // Report what actually happened rather than "GC complete". The
+          // fleet reclaims BLOCKS, not apparent size: an image sharing all its
+          // extents with another frees nothing, so saying "2.9 GB reclaimed"
+          // off the apparent size would make a no-op look like a win.
+          gc.succeeded('GC finished');
         }}
       />
     </Page>
