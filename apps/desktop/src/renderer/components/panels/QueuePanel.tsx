@@ -506,7 +506,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
             whole story. */}
         <div className="flex-1 overflow-hidden p-4">
           <div className="h-full">
-            <TaskTerminal task={task} />
+            <TaskTerminal key={task.id} task={task} />
           </div>
         </div>
         <PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} />
@@ -773,7 +773,7 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       {/* The run transcript — read-only, hydrated on demand from the
           provider's durable logs even for finished tasks. */}
       <div className="flex-1 overflow-hidden">
-        <TaskTerminal task={task} />
+        <TaskTerminal key={task.id} task={task} />
       </div>
       <PRDetailSheet pullRequestId={prSheetId} onClose={() => setPRSheetId(null)} />
     </>

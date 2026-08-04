@@ -125,6 +125,7 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
           cloud agents directly (cloud-only PR-management direction). */}
       <div className="flex-1 bg-[#1e1e1e] overflow-hidden">
         <AgentConversation
+          scopeId={task.id}
           transcript={task.transcript}
           envName={envName}
           waitingHint={hasCloudRun ? 'Running in the cloud — fetching logs…' : undefined}

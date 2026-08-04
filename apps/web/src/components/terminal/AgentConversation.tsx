@@ -16,6 +16,13 @@ interface AgentConversationProps {
   envName?: string;
   /** Overrides the "Waiting for the agent to start…" empty-state copy (e.g. cloud tasks). */
   waitingHint?: string;
+  /**
+   * Whose transcript this is — the task id. Scopes block identity so two
+   * transcripts cannot share a React key: `seq` restarts at 1 per cloud run,
+   * so without it block "3.0" of one task collides with block "3.0" of
+   * another and the memo keeps the wrong one on screen.
+   */
+  scopeId?: string;
 }
 
 /**
@@ -30,6 +37,7 @@ export function AgentConversation({
   transcript,
   envName,
   waitingHint,
+  scopeId,
 }: AgentConversationProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   // Track "was the user at the bottom before the latest re-render?" so
@@ -77,7 +85,12 @@ export function AgentConversation({
       className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2 min-w-0"
     >
       {blocks.map((block) => (
-        <BlockView key={block.key} block={block} envName={envName} />
+        <BlockView
+          key={`${scopeId ?? ''}:${block.key}`}
+          block={block}
+          envName={envName}
+          scopeId={scopeId}
+        />
       ))}
     </div>
   );
@@ -345,6 +358,19 @@ function buildBlocks(events: AgentEvent[]): Block[] {
  * Including those mutable fields lets React.memo skip every settled
  * block on each per-frame transcript update while still re-rendering
  * the handful that actually changed.
+ *
+ * "The key alone is a stable identity" is true WITHIN one transcript and
+ * false across two. `seq` restarts at 1 for every cloud run, so block
+ * `"3.0"` of one task and block `"3.0"` of another are different content
+ * behind identical keys. React then reconciles the old element onto the
+ * new one by key, this comparator reports no change, and the previous
+ * task's tool calls stay on screen under the new task's header — three
+ * concurrent PR tasks all appeared to be working on the same PR.
+ *
+ * `scopeId` is what makes the identity whole. The mount site also keys
+ * TaskTerminal by task id so this cannot arise there any more, but a
+ * signature that is only correct because of where it happens to be
+ * called from is a trap for the next caller.
  */
 function blockSignature(block: Block): string {
   switch (block.kind) {
@@ -363,6 +389,7 @@ const BlockView = React.memo(
   BlockViewImpl,
   (prev, next) =>
     prev.envName === next.envName &&
+    prev.scopeId === next.scopeId &&
     blockSignature(prev.block) === blockSignature(next.block)
 );
 
@@ -372,6 +399,8 @@ function BlockViewImpl({
 }: {
   block: Block;
   envName?: string;
+  /** Whose transcript this block belongs to; see blockSignature. */
+  scopeId?: string;
 }) {
   switch (block.kind) {
     case 'text':
