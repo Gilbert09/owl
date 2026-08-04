@@ -79,20 +79,6 @@ function getInitialTheme(): Theme {
   return 'light';
 }
 
-const DEBUG_MODE_KEY = 'fastowl-debug-mode';
-
-// Developer-only Debug panel toggle. Persisted like the theme so it survives
-// restarts. Off by default — it surfaces app internals (requests, polling,
-// WebSocket) and is meant to be opt-in.
-function getInitialDebugMode(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    return localStorage.getItem(DEBUG_MODE_KEY) === 'true';
-  } catch {
-    return false;
-  }
-}
-
 const ONBOARDING_KEY = 'fastowl-onboarding-complete';
 
 // First-run onboarding gate. Persisted like the theme/debug flags so it
@@ -171,9 +157,7 @@ interface WorkspaceState {
 
   // UI State
   sidebarCollapsed: boolean;
-  activePanel: 'queue' | 'my_prs' | 'reviews' | 'merge_queue' | 'settings' | 'debug';
-  // Developer-only Debug panel visibility (sidebar entry + reachable view).
-  debugMode: boolean;
+  activePanel: 'queue' | 'my_prs' | 'reviews' | 'merge_queue' | 'settings';
   selectedTaskId: string | null;
   theme: Theme;
   // Whether the create-workspace modal is open (triggered from the sidebar
@@ -269,9 +253,8 @@ interface WorkspaceState {
 
   toggleSidebar: () => void;
   setActivePanel: (
-    panel: 'queue' | 'my_prs' | 'reviews' | 'merge_queue' | 'settings' | 'debug'
+    panel: 'queue' | 'my_prs' | 'reviews' | 'merge_queue' | 'settings'
   ) => void;
-  setDebugMode: (on: boolean) => void;
   selectTask: (id: string | null) => void;
   setTheme: (theme: Theme) => void;
 }
@@ -287,7 +270,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   repositories: [],
   sidebarCollapsed: false,
   activePanel: 'my_prs',
-  debugMode: getInitialDebugMode(),
   selectedTaskId: null,
   theme: getInitialTheme(),
   createWorkspaceOpen: false,
@@ -466,20 +448,6 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
 
   setActivePanel: (panel) => set({ activePanel: panel }),
-
-  setDebugMode: (on) => {
-    try {
-      localStorage.setItem(DEBUG_MODE_KEY, on ? 'true' : 'false');
-    } catch {
-      // ignore quota / privacy-mode issues
-    }
-    // Leaving debug mode while sitting on the Debug panel would strand the
-    // user on a now-hidden view — bounce them back to the GitHub panel.
-    set((state) => ({
-      debugMode: on,
-      activePanel: !on && state.activePanel === 'debug' ? 'my_prs' : state.activePanel,
-    }));
-  },
 
   selectTask: (id) => set({ selectedTaskId: id }),
 

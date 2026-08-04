@@ -22,7 +22,9 @@ import { DEFAULT_ROUTE, ROUTES, routeTo } from '../lib/routes';
 const pending = () => new Promise(() => {});
 vi.mock('../lib/api', () => ({
   api: {
-    ws: { connect: vi.fn(), disconnect: vi.fn() },
+    ws: { connect: vi.fn(), disconnect: vi.fn(), setDebugFilter: vi.fn(), on: vi.fn(() => () => {}) },
+    // The moved DebugPanel talks to api.debug, not api.admin.
+    debug: { getAccess: pending, getEvents: pending, getSnapshot: pending, clearEvents: pending },
     admin: {
       fleet: {
         hosts: pending,
@@ -63,11 +65,16 @@ const { default: App } = await import('../App');
  * whole-body text assertion would pass for a page that never rendered — the
  * first version of this test "proved" the run-detail route existed by matching
  * the word "Runs" in the sidebar.
+ *
+ * h1 OR h2: the console's own pages title themselves through `Page` (an h1),
+ * while the Debug panel came from apps/web as a zero-diff `git mv` and uses an
+ * h2. Editing it just to satisfy a selector would have made that move
+ * reviewable-as-a-move for nothing.
  */
 function renderAt(path: string): string {
   window.history.pushState({}, '', path);
   render(<App />);
-  return document.querySelector('main h1')?.textContent ?? '';
+  return document.querySelector('main h1, main h2')?.textContent ?? '';
 }
 
 afterEach(cleanup);

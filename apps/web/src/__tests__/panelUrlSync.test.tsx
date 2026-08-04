@@ -3,7 +3,7 @@ import { render, act } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { usePanelUrlSync } from '../hooks/usePanelUrlSync';
 import { useWorkspaceStore } from '../stores/workspace';
-import { PANEL_PATHS } from '../lib/routes';
+import { PANEL_PATHS, panelForPath } from '../lib/routes';
 import type { ActivePanel } from '../lib/panels';
 
 /**
@@ -82,4 +82,15 @@ describe('URL → store', () => {
     expect(currentPath).toBe(PANEL_PATHS.my_prs);
     expect(useWorkspaceStore.getState().activePanel).toBe('my_prs');
   });
+});
+
+/**
+ * The Debug panel moved to admin.talyn.dev — it surfaced internals across
+ * every account, so it belongs on the operator console rather than in the
+ * product. This guards against it quietly coming back: a route re-added here
+ * without the panel would resolve to a panel that no longer exists.
+ */
+it('has no route for the Debug panel any more', () => {
+  expect(panelForPath('/debug')).toBeNull();
+  expect(Object.values(PANEL_PATHS)).not.toContain('/debug');
 });

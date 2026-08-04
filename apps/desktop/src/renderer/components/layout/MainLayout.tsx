@@ -6,7 +6,6 @@ import { MyPRsPanel } from '../panels/github/MyPRsPanel';
 import { ReviewsPanel } from '../panels/github/ReviewsPanel';
 import { MergeQueuePanel } from '../panels/github/MergeQueuePanel';
 import { SettingsPanel } from '../panels/SettingsPanel';
-import { DebugPanel } from '../panels/DebugPanel';
 import { CreateWorkspaceModal } from '../modals/CreateWorkspaceModal';
 import { UpgradeModal } from '../modals/UpgradeModal';
 import { ConnectAgentModal } from '../modals/ConnectAgentModal';
@@ -38,7 +37,6 @@ export function MainLayout() {
             {activePanel === 'reviews' && <ReviewsPanel />}
             {activePanel === 'merge_queue' && <MergeQueuePanel />}
             {activePanel === 'settings' && <SettingsPanel />}
-            {activePanel === 'debug' && <DebugPanel />}
           </div>
         </main>
       </div>

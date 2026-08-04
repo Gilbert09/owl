@@ -10,7 +10,6 @@ import {
   Eye,
   Check,
   Plus,
-  Bug,
   Download,
 } from 'lucide-react';
 import type { User } from '@supabase/supabase-js';
@@ -35,7 +34,6 @@ export function Sidebar({ className }: SidebarProps) {
     activePanel,
     setActivePanel,
     tasks,
-    debugMode,
   } = useWorkspaceStore();
 
   const { user } = useAuth();
@@ -79,16 +77,6 @@ export function Sidebar({ className }: SidebarProps) {
       badge: runningTasksCount > 0 ? runningTasksCount : undefined,
       badgeVariant: 'secondary',
     },
-    // Developer-only — surfaced via Settings → Developer → Debug tools.
-    ...(debugMode
-      ? [
-          {
-            id: 'debug' as const,
-            icon: Bug,
-            label: 'Debug',
-          },
-        ]
-      : []),
   ];
 
   return (

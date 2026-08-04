@@ -1785,7 +1785,6 @@ function AppearanceSettings() {
 }
 
 function DeveloperSettings() {
-  const { debugMode, setDebugMode } = useWorkspaceStore();
   // The account wipe is a dev-workflow tool (reset to a first-run state);
   // production users should never see a one-click "delete everything".
   const isDevBuild = useIsDevBuild();
@@ -1822,36 +1821,16 @@ function DeveloperSettings() {
       </div>
 
       <Card className="p-4">
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <h4 className="font-medium flex items-center gap-2">
-              <Bug className="w-4 h-4" />
-              Debug tools
-            </h4>
-            <p className="text-sm text-muted-foreground mt-1">
-              Adds a <strong>Debug</strong> panel to the sidebar that surfaces app
-              internals live — external requests, polling cycles, and WebSocket
-              activity. Metadata only; tokens and request bodies are never shown.
-            </p>
-          </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={debugMode}
-            onClick={() => setDebugMode(!debugMode)}
-            className={cn(
-              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
-              debugMode ? 'bg-primary' : 'bg-muted'
-            )}
-          >
-            <span
-              className={cn(
-                'inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform',
-                debugMode ? 'translate-x-5' : 'translate-x-0.5'
-              )}
-            />
-          </button>
-        </div>
+        <h4 className="font-medium flex items-center gap-2">
+          <Bug className="w-4 h-4" />
+          Operator tooling
+        </h4>
+        <p className="text-sm text-muted-foreground mt-1">
+          The Debug panel moved to{' '}
+          <strong>admin.talyn.dev</strong>, along with fleet and account
+          tooling. It surfaced internals across every account, so it belongs on
+          the operator console rather than in the product.
+        </p>
       </Card>
 
       {isDevBuild && (

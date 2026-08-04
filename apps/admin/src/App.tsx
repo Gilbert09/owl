@@ -15,6 +15,7 @@ import { WorkspaceDetailPage } from './routes/product/WorkspaceDetailPage';
 import { TasksPage } from './routes/product/TasksPage';
 import { TaskDetailPage } from './routes/product/TaskDetailPage';
 import { AuditPage } from './routes/AuditPage';
+import { DebugPanel } from './components/panels/DebugPanel';
 import { HostsPage } from './routes/fleet/HostsPage';
 import { HostDetailPage } from './routes/fleet/HostDetailPage';
 import { RunsPage } from './routes/fleet/RunsPage';
@@ -87,8 +88,7 @@ export default function App() {
             <Route path={ROUTES.task} element={<TaskDetailPage />} />
 
             <Route path={ROUTES.audit} element={<AuditPage />} />
-            {/* ROUTES.debug is mounted in the same change that moves the panel
-                out of apps/web and apps/desktop. */}
+            <Route path={ROUTES.debug} element={<DebugPanel />} />
 
             <Route path="*" element={<Navigate to={DEFAULT_ROUTE} replace />} />
           </Route>

@@ -5,10 +5,13 @@ import type { ActivePanel } from './panels';
  *
  * The desktop switches on a zustand `activePanel` enum in MainLayout and has
  * no URLs at all. The store stays the source of truth in the fork too — it
- * drives transitions imperatively in a few places (onboarding completion,
- * bouncing off the debug panel when debug mode is turned off) that would be
- * awkward to express as navigations — but each panel now also has a path, kept
- * in sync by usePanelUrlSync.
+ * drives transitions imperatively (onboarding completion) in a way that would
+ * be awkward to express as a navigation — but each panel now also has a path,
+ * kept in sync by usePanelUrlSync.
+ *
+ * (The other imperative transition this used to cite — bouncing off the Debug
+ * panel when debug mode was switched off — went away with the panel itself,
+ * which now lives on admin.talyn.dev.)
  */
 export const PANEL_PATHS = {
   queue: '/queue',
@@ -16,7 +19,6 @@ export const PANEL_PATHS = {
   reviews: '/reviews',
   merge_queue: '/merge-queue',
   settings: '/settings',
-  debug: '/debug',
 } as const satisfies Record<ActivePanel, string>;
 
 export const PATH_TO_PANEL: Record<string, ActivePanel> = Object.fromEntries(

@@ -10,5 +10,4 @@ export type ActivePanel =
   | 'my_prs'
   | 'reviews'
   | 'merge_queue'
-  | 'settings'
-  | 'debug';
+  | 'settings';

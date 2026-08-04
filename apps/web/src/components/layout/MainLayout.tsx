@@ -17,9 +17,6 @@ const QueuePanel = lazy(() =>
 const SettingsPanel = lazy(() =>
   import('../panels/SettingsPanel').then((m) => ({ default: m.SettingsPanel }))
 );
-const DebugPanel = lazy(() =>
-  import('../panels/DebugPanel').then((m) => ({ default: m.DebugPanel }))
-);
 import { SystemStatusBanner } from './SystemStatusBanner';
 import { MyPRsPanel } from '../panels/github/MyPRsPanel';
 import { ReviewsPanel } from '../panels/github/ReviewsPanel';
@@ -59,7 +56,6 @@ export function MainLayout() {
               {activePanel === 'reviews' && <ReviewsPanel />}
               {activePanel === 'merge_queue' && <MergeQueuePanel />}
               {activePanel === 'settings' && <SettingsPanel />}
-              {activePanel === 'debug' && <DebugPanel />}
             </Suspense>
           </div>
         </main>

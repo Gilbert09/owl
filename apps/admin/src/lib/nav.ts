@@ -1,5 +1,6 @@
 import {
   Boxes,
+  Bug,
   Disc3,
   Layers,
   ListChecks,
@@ -58,10 +59,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Ops',
     items: [
       { id: 'audit', label: 'Audit log', to: ROUTES.audit, icon: ScrollText },
-      // Debug is added here in the same change that moves the panel out of
-      // apps/web and apps/desktop. A nav entry whose route is not mounted yet
-      // would silently redirect, which reads as a bug rather than as pending
-      // work — and sidebarNav.test.tsx would (correctly) fail on it.
+      { id: 'debug', label: 'Debug', to: ROUTES.debug, icon: Bug },
     ],
   },
 ];
