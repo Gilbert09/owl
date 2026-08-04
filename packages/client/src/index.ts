@@ -32,7 +32,10 @@ import type {
   AdminFleetHostDetail,
   AdminGoldensView,
   AdminIncident,
+  AdminGrantRequest,
+  AdminMutationRequest,
   AdminPage,
+  AdminPlanOverrideRequest,
   AdminRebakeStatus,
   AdminRunDetail,
   AdminRunEventPage,
@@ -1373,6 +1376,23 @@ export const admin = {
     list: (params?: { q?: string; plan?: string; admin?: boolean; limit?: number; before?: string }) =>
       request<AdminPage<AdminUserSummary>>('GET', `/admin/users${adminQuery({ ...params })}`),
     get: (id: string) => request<AdminUserDetail>('GET', `/admin/users/${encodeURIComponent(id)}`),
+    /**
+     * Comp an account, or take a comp away.
+     *
+     * `confirm` must be the TARGET's email — the "type the repo name to
+     * delete it" pattern, which makes a mis-clicked row or a blind cross-site
+     * POST unexecutable because either would have to already know which
+     * account it meant.
+     */
+    setPlanOverride: (id: string, body: AdminPlanOverrideRequest) =>
+      request<{ plan: string; planOverride: string | null }>(
+        'POST',
+        `/admin/users/${encodeURIComponent(id)}/plan-override`,
+        body
+      ),
+    /** Grant or revoke operator access. 403s unless the deploy opts in. */
+    setAdmin: (id: string, body: AdminGrantRequest) =>
+      request<{ isAdmin: boolean }>('POST', `/admin/users/${encodeURIComponent(id)}/admin`, body),
   },
   workspaces: {
     list: (params?: { q?: string; ownerId?: string; limit?: number; before?: string }) =>
@@ -1399,6 +1419,17 @@ export const admin = {
       request<AdminTaskDetail>(
         'GET',
         `/admin/tasks/${encodeURIComponent(id)}${adminQuery({ transcript: opts?.transcript })}`
+      ),
+    /** Put a stuck task back in the queue, with a fresh cloud run. */
+    retry: (id: string, body: AdminMutationRequest) =>
+      request<{ status: string }>('POST', `/admin/tasks/${encodeURIComponent(id)}/retry`, body),
+    /** Stop a running task. The remote cancel is best-effort; the response
+     *  says whether it landed, because the run may still open a PR. */
+    kill: (id: string, body: AdminMutationRequest) =>
+      request<{ status: string; remoteCancelled: boolean }>(
+        'POST',
+        `/admin/tasks/${encodeURIComponent(id)}/kill`,
+        body
       ),
   },
   audit: {
