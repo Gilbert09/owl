@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { v4 as uuid } from 'uuid';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { fetchDefaultBranch } from './repoDefaultBranch.js';
 import { getPoolDbClient, type Database } from '../db/client.js';
 import {
   repositories as repositoriesTable,
@@ -166,7 +167,13 @@ class PRMonitorService extends EventEmitter {
     const id = uuid();
     const fullName = `${owner}/${repo}`;
     const repoUrl = url || `https://github.com/${fullName}`;
-    const defaultBranch = 'main';
+    // Asked, not assumed. This used to be a hardcoded 'main' and nothing ever
+    // corrected it, so every master-defaulted repo carried a branch that does
+    // not exist — which is why PostHog/posthog's golden bake failed instantly
+    // on every dispatch (`fatal: Remote branch main not found`). 'main' is
+    // still the fallback when GitHub cannot be reached, because a watched repo
+    // with a wrong branch is better than no watched repo.
+    const defaultBranch = (await fetchDefaultBranch(workspaceId, owner, repo)) ?? 'main';
 
     await this.db.insert(repositoriesTable).values({
       id,

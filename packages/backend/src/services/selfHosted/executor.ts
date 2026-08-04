@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { readCloudTaskMeta, type CloudTaskMetadata, type Environment, type Task } from '@talyn/shared';
+import { reconcileDefaultBranch } from '../repoDefaultBranch.js';
 import { getDbClient } from '../../db/client.js';
 import { tasks as tasksTable, repositories as repositoriesTable } from '../../db/schema.js';
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
@@ -99,7 +100,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   if (!task.repositoryId) {
     return { ok: false, error: 'Talyn Fleet tasks require a repository.' };
   }
-  const repo = await resolveRepository(task.repositoryId);
+  const repo = await resolveRepository(task.repositoryId, task.workspaceId);
   if (!repo) {
     return { ok: false, error: 'Could not resolve a GitHub owner/repo for this task’s repository.' };
   }
@@ -171,8 +172,23 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   }
 }
 
+/**
+ * The repo to run against, with its default branch CHECKED rather than trusted.
+ *
+ * `repositories.default_branch` is hardcoded to 'main' by addWatchedRepo and
+ * was never corrected, so a master-defaulted repo carried a branch that does
+ * not exist. That is survivable for a run — the agent clones and works it out —
+ * and fatal for a golden, whose identity is `(repo, baseBranch)`: the bake
+ * cloned `--branch main`, git said "Remote branch main not found", and
+ * PostHog/posthog silently never got an image, on every single dispatch.
+ *
+ * Reconciling here rather than only at add-time is deliberate: every row that
+ * already exists is wrong, and a migration cannot ask GitHub. The first
+ * dispatch after this ships repairs the row.
+ */
 async function resolveRepository(
   repositoryId: string,
+  workspaceId: string,
 ): Promise<{ slug: string; defaultBranch: string } | null> {
   const rows = await getDbClient()
     .select({
@@ -187,7 +203,14 @@ async function resolveRepository(
   if (!row) return null;
   const slug = parseGitHubSlug(row.url) ?? sanitizeSlug(row.name);
   if (!slug) return null;
-  return { slug, defaultBranch: row.defaultBranch || 'main' };
+
+  const defaultBranch = await reconcileDefaultBranch({
+    repositoryId,
+    workspaceId,
+    url: row.url,
+    stored: row.defaultBranch,
+  });
+  return { slug, defaultBranch };
 }
 
 function parseGitHubSlug(url: string): string | null {
