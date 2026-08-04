@@ -34,6 +34,7 @@ import {
   subscribePRStatus,
 } from '../../lib/prSummaryCache';
 import { isAgentTask, readCloudTaskMeta } from '@talyn/shared';
+import type { TaskScheduleError } from '@talyn/shared';
 import type { Task, TaskStatus, TaskType, TaskPriority } from '@talyn/shared';
 import { ProviderIcon, providerLabel, taskCloudProvider } from '../../lib/providerMeta';
 
@@ -732,10 +733,33 @@ function TaskDetail({ taskId }: TaskDetailProps) {
       {task.status === 'queued' &&
         (() => {
           const meta = task.metadata as
-            | { lastScheduleError?: { at: string; reason: string } }
+            | { lastScheduleError?: TaskScheduleError }
             | undefined;
           const err = meta?.lastScheduleError;
           if (!err) return null;
+
+          // A provider being BUSY is not a failure. The task is queued, it will
+          // be retried automatically, and nothing is wrong — so it does not get
+          // the alarm colour or the word "failed". Saying "failed" here is what
+          // made a normal wait look like something needing attention.
+          if (err.capacity) {
+            return (
+              <div className="px-4 py-2 border-b bg-muted/50 text-xs">
+                <div className="flex items-start gap-2">
+                  <Clock className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-0.5" />
+                  <p className="text-muted-foreground break-words">
+                    Waiting for a runner — {err.reason.replace(/\.$/, '')}. This starts
+                    automatically as soon as one frees up
+                    {err.retryAt
+                      ? `; next check around ${new Date(err.retryAt).toLocaleTimeString()}`
+                      : ''}
+                    .
+                  </p>
+                </div>
+              </div>
+            );
+          }
+
           return (
             <div className="px-4 py-2 border-b bg-amber-500/10 text-xs">
               <div className="flex items-start gap-2">
@@ -743,6 +767,11 @@ function TaskDetail({ taskId }: TaskDetailProps) {
                 <p className="text-amber-700 dark:text-amber-300 break-words">
                   Last attempt to start this task failed at{' '}
                   {new Date(err.at).toLocaleTimeString()}: {err.reason}
+                  {err.retryAt
+                    ? ` Retrying around ${new Date(err.retryAt).toLocaleTimeString()}${
+                        err.maxAttempts ? ` (attempt ${err.attempts} of ${err.maxAttempts})` : ''
+                      }.`
+                    : ''}
                 </p>
               </div>
             </div>

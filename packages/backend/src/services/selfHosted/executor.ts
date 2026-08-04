@@ -151,9 +151,21 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   } catch (err) {
     if (err instanceof FleetCapacityError) {
       // Availability, not failure: the task is fine and another provider can
-      // run it. `capacity` is what the task queue routes on (§10.7, §11.6) —
-      // the message stays human-readable for the UI but nothing branches on it.
-      return { ok: false, error: `No fleet capacity: ${err.message}`, capacity: true };
+      // run it. `capacity` is what the task queue routes on (§10.7, §11.6).
+      //
+      // The message is written FOR A USER and deliberately does not include
+      // err.message, which carries the host's private endpoint — a tailnet
+      // address has no business in a customer-facing banner. The detail is
+      // already in the log line and on the debug bus for whoever is debugging.
+      console.warn(`[fleet] capacity refusal dispatching ${task.id}: ${err.message}`);
+      return {
+        ok: false,
+        error:
+          err.reason === 'unreachable'
+            ? 'The self-hosted runners are not reachable right now.'
+            : 'All self-hosted runners are busy.',
+        capacity: true,
+      };
     }
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

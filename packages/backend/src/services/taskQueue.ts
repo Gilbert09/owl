@@ -290,8 +290,10 @@ class TaskQueueService extends EventEmitter {
           });
           continue;
         }
-        // Terminal, or capacity with nowhere left to go.
-        await this.recordDispatchFailure(task, result.error, env.type);
+        // Terminal, or capacity with nowhere left to go. `capacity` travels
+        // so the UI can say "waiting for a runner" instead of "failed" — the
+        // task is queued and will be retried, which is a different thing.
+        await this.recordDispatchFailure(task, result.error, env.type, result.capacity);
         return;
       }
       // Stamp when the remote run started so finalize can report the
@@ -345,7 +347,8 @@ class TaskQueueService extends EventEmitter {
   private async recordDispatchFailure(
     task: Task,
     reason: string,
-    providerType?: string
+    providerType?: string,
+    capacity?: boolean
   ): Promise<void> {
     const meta = (task.metadata ?? {}) as Record<string, unknown>;
     const attempts = (Number(meta.dispatchAttempts) || 0) + 1;
@@ -363,22 +366,27 @@ class TaskQueueService extends EventEmitter {
       terminal,
     });
 
+    const retryAt = terminal
+      ? undefined
+      : new Date(Date.now() + dispatchBackoffMs(attempts)).toISOString();
+
     await patchTaskMetadata(task.id, (existing) => {
       const { nextDispatchAttemptAt: _nextAt, ...rest } = existing;
       return {
         ...rest,
         dispatchAttempts: attempts,
-        ...(terminal
-          ? {}
-          : {
-              nextDispatchAttemptAt: new Date(
-                Date.now() + dispatchBackoffMs(attempts)
-              ).toISOString(),
-            }),
+        ...(retryAt ? { nextDispatchAttemptAt: retryAt } : {}),
+        // Typed as TaskScheduleError in @talyn/shared. `capacity` and
+        // `retryAt` exist so the UI can distinguish "busy, will retry at
+        // 14:31" from "this failed" — the queue already knew both and simply
+        // never told anyone.
         lastScheduleError: {
           at: new Date().toISOString(),
           reason,
           attempts,
+          maxAttempts: MAX_DISPATCH_ATTEMPTS,
+          ...(capacity ? { capacity: true } : {}),
+          ...(retryAt ? { retryAt } : {}),
         },
       };
     });

@@ -153,6 +153,15 @@ export class FleetCapacityError extends Error {
   constructor(
     message: string,
     readonly retryAfterMs?: number,
+    /**
+     * Which kind of "not now" this is.
+     *
+     * Both mean retry, so nothing in the dispatch path branches on it — but
+     * they are different sentences to a user, and `message` cannot be shown to
+     * one either way: it carries the host's private endpoint, which has no
+     * business in a customer-facing banner.
+     */
+    readonly reason: 'no_capacity' | 'unreachable' = 'no_capacity',
   ) {
     super(message);
     this.name = 'FleetCapacityError';
@@ -268,6 +277,8 @@ export class FleetClient {
       // task because one box is down is exactly what fail-back exists to avoid.
       throw new FleetCapacityError(
         `Fleet unreachable at ${this.endpoint}: ${err instanceof Error ? err.message : String(err)}`,
+        undefined,
+        'unreachable',
       );
     }
 

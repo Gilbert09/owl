@@ -669,6 +669,28 @@ export const FREE_PLAN_ACTIVE_TASK_LIMIT = 3;
 export const FREE_PLAN_MERGE_QUEUE_LIMIT = 3;
 
 /** ApiResponse.code when task creation/activation is rejected by the free limit. */
+/**
+ * Why a queued task has not started yet.
+ *
+ * Written by the task queue onto `metadata.lastScheduleError`. `capacity` is
+ * the field that matters to the UI: a provider being BUSY is not a failure —
+ * the task is fine, still queued, and will be retried automatically — and
+ * rendering it as one is why "waiting for a runner" looked like something had
+ * gone wrong.
+ */
+export interface TaskScheduleError {
+  at: string;
+  /** User-facing. Must not carry internal endpoints or stack detail. */
+  reason: string;
+  attempts: number;
+  /** True when the provider was busy or unreachable rather than refusing. */
+  capacity?: boolean;
+  /** When the queue will try again. Absent once the attempt budget is spent. */
+  retryAt?: string;
+  /** The attempt budget, so the UI can say "3 of 40" rather than just "3". */
+  maxAttempts?: number;
+}
+
 export const TASK_LIMIT_ERROR_CODE = 'task_limit_reached';
 
 /** ApiResponse.code when queueing a PR is rejected by the free merge-queue limit. */
@@ -896,7 +918,6 @@ export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'claude_code' |
  * The `(string & {})` intersection is the standard trick for "any string, but
  * keep autocompleting the known ones".
  */
-// eslint-disable-next-line @typescript-eslint/ban-types
 export type AnyCloudProviderType = CloudProviderType | (string & {});
 
 /**

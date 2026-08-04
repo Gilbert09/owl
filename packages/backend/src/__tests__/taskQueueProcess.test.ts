@@ -1,3 +1,4 @@
+import type { TaskScheduleError } from '@talyn/shared';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import {
@@ -176,6 +177,61 @@ describe('taskQueueService.processQueue (cloud dispatch)', () => {
     expect(rows[0].status).toBe('queued');
     const meta = rows[0].metadata as { lastScheduleError?: { reason?: string } };
     expect(meta.lastScheduleError?.reason).toMatch(/no api key/);
+  });
+
+  // A provider being BUSY is not a failure, and the record has to say so.
+  //
+  // Both arrive as `ok: false` and both leave the task queued, so without the
+  // `capacity` flag the UI could only call it "Last attempt to start this task
+  // failed" — which is what made a normal wait for a fleet runner look like
+  // something had gone wrong and needed attention.
+  it('marks a capacity refusal as capacity, with a retry time', async () => {
+    const id = await insertQueuedTask(db);
+    registerCloudProvider(
+      fakeProvider(
+        vi.fn(async () => ({
+          ok: false as const,
+          error: 'All self-hosted runners are busy.',
+          capacity: true,
+        }))
+      )
+    );
+
+    await taskQueueService.processQueue();
+
+    const rows = await db
+      .select({ status: tasksTable.status, metadata: tasksTable.metadata })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, id));
+    expect(rows[0].status).toBe('queued');
+
+    const err = (rows[0].metadata as { lastScheduleError?: TaskScheduleError })
+      .lastScheduleError;
+    expect(err?.capacity).toBe(true);
+    // Without this the banner cannot say when it will try again, which is the
+    // difference between "stuck" and "waiting".
+    expect(err?.retryAt).toBeTruthy();
+    expect(Date.parse(err!.retryAt!)).toBeGreaterThan(Date.now() - 1000);
+    expect(err?.maxAttempts).toBeGreaterThan(1);
+  });
+
+  it('does NOT mark an ordinary dispatch failure as capacity', async () => {
+    // The inverse, so the flag cannot regress into always-on — which would
+    // render a genuinely broken task as "waiting for a runner" forever.
+    const id = await insertQueuedTask(db);
+    registerCloudProvider(
+      fakeProvider(vi.fn(async () => ({ ok: false as const, error: 'no api key' })))
+    );
+
+    await taskQueueService.processQueue();
+
+    const rows = await db
+      .select({ metadata: tasksTable.metadata })
+      .from(tasksTable)
+      .where(eq(tasksTable.id, id));
+    const err = (rows[0].metadata as { lastScheduleError?: TaskScheduleError })
+      .lastScheduleError;
+    expect(err?.capacity).toBeUndefined();
   });
 
   it('falls back to the workspace provider and dispatches a task with no pinned env', async () => {
