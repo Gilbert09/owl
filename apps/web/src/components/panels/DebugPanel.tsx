@@ -64,6 +64,8 @@ const SERVICE_INFO: Record<string, string> = {
     'Claude Managed Agents API — creates agents/sessions in Anthropic’s sandbox, polls the event transcript, and opens PRs via the GitHub MCP.',
   posthog_analytics:
     'PostHog product-analytics capture — server-side task lifecycle events (dispatched/completed/failed).',
+  fleet:
+    'The self-hosted Firecracker fleet (fleetd) over the private link — dispatch, transcript follow, and the operator console\u2019s host/run/golden reads.',
   ws: 'The WebSocket server fanning realtime updates out to connected desktop clients.',
   tasks: 'Task lifecycle domain events (queued → in_progress → completed/failed).',
   github_webhooks:

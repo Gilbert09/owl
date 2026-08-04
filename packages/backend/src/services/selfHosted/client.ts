@@ -7,8 +7,9 @@
  */
 
 import { createSseJsonParser } from '@talyn/shared';
+import { debugBus } from '../debugBus.js';
 
-/** A run as the fleet reports it. */
+/** A run as the fleet reports it. Field names match internal/fleet/store.go. */
 export interface FleetRun {
   id: string;
   workspaceId?: string;
@@ -22,6 +23,101 @@ export interface FleetRun {
   costUsd?: number;
   error?: string;
   adopted?: boolean;
+  /** Per-run network slot + uid offset; unique among live runs. */
+  slot?: number;
+  deadline?: string;
+  memMib?: number;
+  vcpuCount?: number;
+  golden?: string;
+  /** 'base' | 'repo' — which layer selection landed on. */
+  goldenLayer?: string;
+  /** Last vsock heartbeat. */
+  lastHeartbeat?: string;
+  /**
+   * Last vsock frame of ANY kind. Load-bearing and distinct from
+   * lastHeartbeat: wedge detection on heartbeats alone killed healthy runs
+   * (fleet HANDOFF failure #2), so this is the number that says "stuck".
+   */
+  lastActivity?: string;
+}
+
+/** fleetd's `GET /v1/capacity`. */
+export interface FleetCapacity {
+  draining: boolean;
+  runsLive: number;
+  runsMax: number;
+  memReservedMib: number;
+  memBudgetMib: number;
+  accepting: boolean;
+}
+
+/** fleetd's `GET /v1/stats` — the structured twin of /metrics. */
+export interface FleetStats {
+  host: {
+    version?: string;
+    draining: boolean;
+    runsLive: number;
+    runsMax: number;
+    memReservedMib: number;
+    memBudgetMib: number;
+    diskFreeMib: number;
+    maxIdleSeconds: number;
+  };
+  runsByStatus: Record<string, number>;
+  /**
+   * The fleet's own metrics snapshot, passed through whole. Deliberately
+   * loose: the fleet ships on its own cadence and adding a counter there must
+   * not need a release here.
+   */
+  metrics: Record<string, unknown>;
+}
+
+/** One baked image. `diskBytes` is reflink-aware and is the one that bills. */
+export interface FleetGolden {
+  key: string;
+  path: string;
+  contentSha: string;
+  repoSlug: string;
+  baseBranch: string;
+  repoCommit: string;
+  packageManager?: string;
+  workdir?: string;
+  builtAt: string;
+  diskBytes: number;
+  apparentBytes: number;
+  inUse: boolean;
+  operatorPinned: boolean;
+  /** False once baked on a base image this host no longer ships. */
+  selectable: boolean;
+  warnings?: string[];
+}
+
+export interface FleetGoldensView {
+  goldens: FleetGolden[];
+  freePct: number;
+  baseGolden: string;
+  baseOsSha: string;
+}
+
+export interface FleetRebakeStatus {
+  slug?: string;
+  baseBranch?: string;
+  actor?: string;
+  reason?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+}
+
+/**
+ * The attribution envelope every mutating fleetd action shares.
+ *
+ * fleetd 400s a body missing either field — spec §17.3, "an unattributed
+ * drain is the one that nobody can explain the next morning".
+ */
+export interface FleetAttribution {
+  actor: string;
+  reason: string;
 }
 
 /** One transcript entry. `seq` is assigned by the fleet, not the guest. */
@@ -124,17 +220,34 @@ export function resetFleetDispatcherCache(): void {
   cachedProxy = null;
 }
 
+/**
+ * The default request timeout.
+ *
+ * Right for dispatch and the poller, which can afford to wait on a busy host.
+ * The admin surface overrides it — a console page fanning out over hosts
+ * cannot hang 20s on one dead box, and a golden GC genuinely takes longer than
+ * either.
+ */
+const DEFAULT_TIMEOUT_MS = 20_000;
+
 export class FleetClient {
+  private readonly timeoutMs: number;
+
   constructor(
     private readonly endpoint: string,
     private readonly token: string,
-  ) {}
+    opts: { timeoutMs?: number } = {},
+  ) {
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
 
   private url(path: string): string {
     return `${this.endpoint.replace(/\/+$/, '')}${path}`;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const started = Date.now();
+    const method = init.method ?? 'GET';
     let resp: Response;
     try {
       resp = await fetch(this.url(path), {
@@ -144,11 +257,12 @@ export class FleetClient {
           ...(init.body ? { 'Content-Type': 'application/json' } : {}),
           ...(init.headers ?? {}),
         },
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(this.timeoutMs),
         // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
         dispatcher: fleetDispatcher(),
       });
     } catch (err) {
+      this.recordHttp(method, path, 0, started, false, err);
       // Network-level failure. Treated as capacity rather than terminal: an
       // unreachable host is an availability problem, and failing the user's
       // task because one box is down is exactly what fail-back exists to avoid.
@@ -156,6 +270,8 @@ export class FleetClient {
         `Fleet unreachable at ${this.endpoint}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+
+    this.recordHttp(method, path, resp.status, started, resp.ok);
 
     if (resp.status === 503) {
       throw new FleetCapacityError(
@@ -173,9 +289,127 @@ export class FleetClient {
     return (await resp.json()) as T;
   }
 
+  /**
+   * Feed the debug bus, per CLAUDE.md's rule that every outbound HTTP funnel
+   * records here.
+   *
+   * This client recorded nothing until the operator console started making
+   * fleet calls per pageview — a pre-existing gap that only became visible
+   * once there was traffic worth watching. The URL is the PATH, already free
+   * of query strings and of the host's tailnet address; recording the full URL
+   * would put a private endpoint in a panel that is screenshared.
+   */
+  private recordHttp(
+    method: string,
+    path: string,
+    status: number,
+    started: number,
+    ok: boolean,
+    err?: unknown,
+  ): void {
+    if (!debugBus.isRecording()) return;
+    debugBus.recordHttp({
+      service: 'fleet',
+      method,
+      url: path.split('?')[0] ?? path,
+      status,
+      durationMs: Date.now() - started,
+      ok,
+      error: err ? (err instanceof Error ? err.message : String(err)) : undefined,
+    });
+  }
+
   /** Liveness + version. Used by validateCredentials and testConnection. */
   async ping(): Promise<{ status: string; version: string }> {
     return this.request('/healthz');
+  }
+
+  // --------------------------------------------------------------------
+  // Operator surface
+  //
+  // Read-side methods the admin console proxies. One method per fleetd
+  // route, no reshaping — the console's own view types live in
+  // @talyn/shared and the mapping happens in services/admin/fleetProxy.ts,
+  // so this file stays a faithful description of the fleet's API.
+  // --------------------------------------------------------------------
+
+  async capacity(): Promise<FleetCapacity> {
+    return this.request('/v1/capacity');
+  }
+
+  async stats(): Promise<FleetStats> {
+    return this.request('/v1/stats');
+  }
+
+  /**
+   * The Prometheus scrape, as text.
+   *
+   * Not routed through `request()`, which parses JSON. Size-capped because
+   * this is proxied straight to a browser and a runaway registry should not
+   * be able to hand the console a hundred megabytes.
+   */
+  async metricsText(maxBytes = 1_048_576): Promise<string> {
+    const started = Date.now();
+    let resp: Response;
+    try {
+      resp = await fetch(this.url('/metrics'), {
+        headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/plain' },
+        signal: AbortSignal.timeout(this.timeoutMs),
+        // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
+        dispatcher: fleetDispatcher(),
+      });
+    } catch (err) {
+      this.recordHttp('GET', '/metrics', 0, started, false, err);
+      throw new FleetCapacityError(
+        `Fleet unreachable at ${this.endpoint}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.recordHttp('GET', '/metrics', resp.status, started, resp.ok);
+    if (!resp.ok) throw new Error(`fleet returned ${resp.status} for /metrics`);
+    const text = await resp.text();
+    return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+  }
+
+  async listRuns(): Promise<{ runs: FleetRun[] }> {
+    return this.request('/v1/runs');
+  }
+
+  async listGoldens(): Promise<FleetGoldensView> {
+    return this.request('/v1/goldens');
+  }
+
+  async getRebake(): Promise<FleetRebakeStatus> {
+    return this.request('/v1/goldens/rebake');
+  }
+
+  // --------------------------------------------------------------------
+  // Mutations
+  //
+  // Every one takes the actor/reason envelope. fleetd 400s a body missing
+  // either, so the types make them non-optional rather than letting a call
+  // site discover it at runtime.
+  // --------------------------------------------------------------------
+
+  async setDrain(input: FleetAttribution & { draining: boolean }): Promise<void> {
+    await this.request('/v1/drain', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async goldensGc(
+    input: FleetAttribution & { force?: boolean; dryRun?: boolean; minAge?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request('/v1/goldens/gc', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async goldensPin(
+    input: FleetAttribution & { path: string; pinned: boolean },
+  ): Promise<Record<string, unknown>> {
+    return this.request('/v1/goldens/pin', { method: 'POST', body: JSON.stringify(input) });
+  }
+
+  async goldensRebake(
+    input: FleetAttribution & { repo: string; baseBranch?: string },
+  ): Promise<Record<string, unknown>> {
+    return this.request('/v1/goldens/rebake', { method: 'POST', body: JSON.stringify(input) });
   }
 
   async createRun(input: CreateRunInput): Promise<FleetRun> {
@@ -189,8 +423,10 @@ export class FleetClient {
   async getEvents(
     runId: string,
     after: number,
+    limit?: number,
   ): Promise<{ events: FleetEvent[]; cursor: number; terminal: boolean }> {
-    return this.request(`/v1/runs/${encodeURIComponent(runId)}/events?after=${after}`);
+    const suffix = limit ? `&limit=${limit}` : '';
+    return this.request(`/v1/runs/${encodeURIComponent(runId)}/events?after=${after}${suffix}`);
   }
 
   /**
