@@ -8,7 +8,13 @@ import { AdminLayout } from './components/layout/AdminLayout';
 import { StartingSpinner } from './components/StartingSpinner';
 import { Analytics } from './components/Analytics';
 import { DEFAULT_ROUTE, ROUTES } from './lib/routes';
-import { Placeholder } from './routes/Placeholder';
+import { UsersPage } from './routes/product/UsersPage';
+import { UserDetailPage } from './routes/product/UserDetailPage';
+import { WorkspacesPage } from './routes/product/WorkspacesPage';
+import { WorkspaceDetailPage } from './routes/product/WorkspaceDetailPage';
+import { TasksPage } from './routes/product/TasksPage';
+import { TaskDetailPage } from './routes/product/TaskDetailPage';
+import { AuditPage } from './routes/AuditPage';
 import { HostsPage } from './routes/fleet/HostsPage';
 import { HostDetailPage } from './routes/fleet/HostDetailPage';
 import { RunsPage } from './routes/fleet/RunsPage';
@@ -73,14 +79,14 @@ export default function App() {
             <Route path={ROUTES.fleetGoldens} element={<GoldensPage />} />
             <Route path={ROUTES.fleetIncidents} element={<IncidentsPage />} />
 
-            <Route path={ROUTES.users} element={<Placeholder title="Users" />} />
-            <Route path={ROUTES.user} element={<Placeholder title="User" />} />
-            <Route path={ROUTES.workspaces} element={<Placeholder title="Workspaces" />} />
-            <Route path={ROUTES.workspace} element={<Placeholder title="Workspace" />} />
-            <Route path={ROUTES.tasks} element={<Placeholder title="Tasks" />} />
-            <Route path={ROUTES.task} element={<Placeholder title="Task" />} />
+            <Route path={ROUTES.users} element={<UsersPage />} />
+            <Route path={ROUTES.user} element={<UserDetailPage />} />
+            <Route path={ROUTES.workspaces} element={<WorkspacesPage />} />
+            <Route path={ROUTES.workspace} element={<WorkspaceDetailPage />} />
+            <Route path={ROUTES.tasks} element={<TasksPage />} />
+            <Route path={ROUTES.task} element={<TaskDetailPage />} />
 
-            <Route path={ROUTES.audit} element={<Placeholder title="Audit log" />} />
+            <Route path={ROUTES.audit} element={<AuditPage />} />
             {/* ROUTES.debug is mounted in the same change that moves the panel
                 out of apps/web and apps/desktop. */}
 

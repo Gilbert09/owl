@@ -33,6 +33,10 @@ vi.mock('../lib/api', () => ({
         goldens: pending,
         incidents: pending,
       },
+      users: { list: pending, get: pending },
+      workspaces: { list: pending, get: pending },
+      tasks: { list: pending, get: pending },
+      audit: { list: pending },
     },
   },
 }));
