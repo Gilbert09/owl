@@ -156,6 +156,8 @@ function StatusPill({ status }: { status: string }) {
   switch (status) {
     case 'in_progress':
       return <Pill tone="good">in progress</Pill>;
+    case 'completed':
+      return <Pill tone="good">completed</Pill>;
     case 'queued':
     case 'pending':
       return <Pill tone="muted">{status}</Pill>;

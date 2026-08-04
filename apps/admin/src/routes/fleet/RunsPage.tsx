@@ -250,7 +250,7 @@ function StatusPill({ run }: { run: AdminRunRow }) {
     case 'queued':
       return <Pill tone="muted">queued</Pill>;
     case 'completed':
-      return <Pill tone="muted">completed</Pill>;
+      return <Pill tone="good">completed</Pill>;
     case 'failed':
       return <Pill tone="critical">failed</Pill>;
     case 'cancelled':
