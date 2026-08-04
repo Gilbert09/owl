@@ -4,6 +4,7 @@ import type {
   AdminGoldensView,
   AdminIncident,
   AdminRebakeStatus,
+  AdminRunDetail,
   AdminRunEventPage,
   ApiResponse,
 } from '@talyn/shared';
@@ -14,7 +15,7 @@ import {
   probe,
   toAdminHost,
 } from '../../services/admin/fleetProxy.js';
-import { listAdminRuns } from '../../services/admin/runIndex.js';
+import { adminRunFromFleet, listAdminRuns } from '../../services/admin/runIndex.js';
 import { listFleetIncidents } from '../../services/admin/incidents.js';
 import { getFleetHost } from '../../services/fleetHosts.js';
 
@@ -124,8 +125,15 @@ export function adminFleetRoutes(): Router {
   router.get('/hosts/:name/runs/:runId', async (req, res) => {
     try {
       const { client } = await fleetClientForHost(req.params.name);
-      const run = await client.getRun(req.params.runId);
-      res.json({ success: true, data: run } as ApiResponse<typeof run>);
+      const { run, terminal } = await client.getRun(req.params.runId);
+      // Mapped to the SAME row shape the list uses, so the detail page does
+      // not reimplement idle time, wedge detection and the status pill
+      // against a second set of field names.
+      const data: AdminRunDetail = {
+        run: adminRunFromFleet(run, req.params.name),
+        terminal,
+      };
+      res.json({ success: true, data } as ApiResponse<AdminRunDetail>);
     } catch (err) {
       if (!handleFleetProxyError(err, res)) {
         res.status(502).json({

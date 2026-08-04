@@ -34,8 +34,9 @@ import type {
   AdminIncident,
   AdminPage,
   AdminRebakeStatus,
+  AdminRunDetail,
   AdminRunEventPage,
-  AdminRunRow,
+  AdminRunIndex,
   AdminTaskDetail,
   AdminTaskSummary,
   AdminUserDetail,
@@ -1288,9 +1289,9 @@ const adminFleet = {
       accept: 'text/plain',
     }).then((r) => r.text()),
   runs: (params?: { host?: string; status?: string; limit?: number; before?: string }) =>
-    request<AdminPage<AdminRunRow>>('GET', `/admin/fleet/runs${adminQuery({ ...params })}`),
+    request<AdminRunIndex>('GET', `/admin/fleet/runs${adminQuery({ ...params })}`),
   run: (host: string, runId: string) =>
-    request<AdminRunRow>(
+    request<AdminRunDetail>(
       'GET',
       `/admin/fleet/hosts/${encodeURIComponent(host)}/runs/${encodeURIComponent(runId)}`
     ),

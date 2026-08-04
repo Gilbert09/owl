@@ -9,6 +9,12 @@ import { StartingSpinner } from './components/StartingSpinner';
 import { Analytics } from './components/Analytics';
 import { DEFAULT_ROUTE, ROUTES } from './lib/routes';
 import { Placeholder } from './routes/Placeholder';
+import { HostsPage } from './routes/fleet/HostsPage';
+import { HostDetailPage } from './routes/fleet/HostDetailPage';
+import { RunsPage } from './routes/fleet/RunsPage';
+import { RunDetailPage } from './routes/fleet/RunDetailPage';
+import { GoldensPage } from './routes/fleet/GoldensPage';
+import { IncidentsPage } from './routes/fleet/IncidentsPage';
 
 /**
  * Plain react-router, deliberately — NOT the product apps' zustand store plus
@@ -60,12 +66,12 @@ export default function App() {
           >
             <Route path="/" element={<Navigate to={DEFAULT_ROUTE} replace />} />
 
-            <Route path={ROUTES.fleetHosts} element={<Placeholder title="Hosts" />} />
-            <Route path={ROUTES.fleetHost} element={<Placeholder title="Host" />} />
-            <Route path={ROUTES.fleetRuns} element={<Placeholder title="Runs" />} />
-            <Route path={ROUTES.fleetRun} element={<Placeholder title="Run" />} />
-            <Route path={ROUTES.fleetGoldens} element={<Placeholder title="Goldens" />} />
-            <Route path={ROUTES.fleetIncidents} element={<Placeholder title="Incidents" />} />
+            <Route path={ROUTES.fleetHosts} element={<HostsPage />} />
+            <Route path={ROUTES.fleetHost} element={<HostDetailPage />} />
+            <Route path={ROUTES.fleetRuns} element={<RunsPage />} />
+            <Route path={ROUTES.fleetRun} element={<RunDetailPage />} />
+            <Route path={ROUTES.fleetGoldens} element={<GoldensPage />} />
+            <Route path={ROUTES.fleetIncidents} element={<IncidentsPage />} />
 
             <Route path={ROUTES.users} element={<Placeholder title="Users" />} />
             <Route path={ROUTES.user} element={<Placeholder title="User" />} />

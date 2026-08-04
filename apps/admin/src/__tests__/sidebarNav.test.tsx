@@ -16,8 +16,25 @@ import { DEFAULT_ROUTE, ROUTES, routeTo } from '../lib/routes';
  * missing.
  */
 
+// The real pages fetch on mount. A never-resolving promise keeps every page
+// in its loading state, which is exactly what this test wants: it is asking
+// "is the route mounted", not "does the page render data".
+const pending = () => new Promise(() => {});
 vi.mock('../lib/api', () => ({
-  api: { ws: { connect: vi.fn(), disconnect: vi.fn() } },
+  api: {
+    ws: { connect: vi.fn(), disconnect: vi.fn() },
+    admin: {
+      fleet: {
+        hosts: pending,
+        host: pending,
+        runs: pending,
+        run: pending,
+        events: pending,
+        goldens: pending,
+        incidents: pending,
+      },
+    },
+  },
 }));
 
 // Both gates pass through: this file is about routing, and the gates have
@@ -88,13 +105,18 @@ describe('routes are mounted', () => {
   it.each(navItems.map((i) => [i.label, i.to] as const))(
     '%s (%s) renders its own page, not the fallback redirect',
     (label, to) => {
-      expect(renderAt(to)).toBe(label);
+      // `toContain`, because a real page's <h1> may carry a status pill
+      // alongside the title.
+      expect(renderAt(to)).toContain(label);
     }
   );
 
   it.each([
-    ['a host detail', routeTo(ROUTES.fleetHost, { host: 'hetzner-64' }), 'Host'],
-    ['a run detail', routeTo(ROUTES.fleetRun, { runId: 'talyn-abc' }), 'Run'],
+    // A real page titles itself after the thing it is showing, so the
+    // expected heading IS the path parameter — which incidentally proves the
+    // param was parsed rather than the route matching by accident.
+    ['a host detail', routeTo(ROUTES.fleetHost, { host: 'hetzner-64' }), 'hetzner-64'],
+    ['a run detail', routeTo(ROUTES.fleetRun, { runId: 'talyn-abc' }), 'talyn-abc'],
     ['a user detail', routeTo(ROUTES.user, { userId: 'user-1' }), 'User'],
     ['a workspace detail', routeTo(ROUTES.workspace, { workspaceId: 'ws-1' }), 'Workspace'],
     ['a task detail', routeTo(ROUTES.task, { taskId: 'task-1' }), 'Task'],
@@ -102,7 +124,7 @@ describe('routes are mounted', () => {
     // Drill-ins are ROUTES, not modals — an operator's commonest act is
     // pasting a run id into Slack, and a modal has no URL. So each one has to
     // actually resolve rather than fall through to the redirect.
-    expect(renderAt(path)).toBe(heading);
+    expect(renderAt(path)).toContain(heading);
   });
 
   it('redirects an unknown path to the default route', () => {

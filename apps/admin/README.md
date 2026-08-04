@@ -25,6 +25,18 @@ npm run dev:admin        # port 5174
 `5174`, not `5173` — `apps/web` sets `strictPort: true` on 5173, and running
 both at once is the normal case.
 
+Tests:
+
+```bash
+npx vitest run --root apps/admin      # or: npm test -w @talyn/admin
+```
+
+**Pass `--root apps/admin`** (or use the workspace script). Running `npx vitest`
+from the repo root picks up neither this app's `vitest.config.ts` — so
+`environment: 'jsdom'` never applies and every DOM test fails with `document is
+not defined` — nor its `include` glob, so it also tries to run the backend's
+pglite suites and hangs.
+
 You need `is_admin` on your user. Set `TALYN_ADMIN_EMAILS=<your login email>`
 in the backend `.env` and sign in again; the JWT middleware promotes on token
 verify (promote-only — it never demotes). Without it you get the

@@ -242,6 +242,25 @@ export interface AdminRunRow {
   orphan: boolean;
 }
 
+/**
+ * The runs page: durable rows, plus which hosts we could not reach.
+ *
+ * `degraded` is not decoration. Without it a fan-out that lost a host
+ * under-reports silently, and an operator reads a short list as "the fleet is
+ * idle" rather than "we could not ask one of the boxes".
+ */
+export interface AdminRunIndex {
+  items: AdminRunRow[];
+  nextCursor: string | null;
+  degraded: Array<{ host: string; error: string }>;
+}
+
+/** One run, as the host currently sees it. */
+export interface AdminRunDetail {
+  run: AdminRunRow;
+  terminal: boolean;
+}
+
 /** One transcript entry. `seq` is assigned host-side, not by the guest. */
 export interface AdminRunEvent {
   seq: number;

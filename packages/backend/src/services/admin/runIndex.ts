@@ -1,4 +1,4 @@
-import type { AdminRunRow, AdminRunStatus } from '@talyn/shared';
+import type { AdminRunIndex, AdminRunRow, AdminRunStatus } from '@talyn/shared';
 import type { FleetRun } from '../selfHosted/client.js';
 import { listAdminTasks } from './queries.js';
 import { fanOutHosts } from './fleetProxy.js';
@@ -46,7 +46,18 @@ function iso(value: string | undefined): string | null {
   return date.toISOString();
 }
 
-function fromLive(run: FleetRun, host: string): AdminRunRow {
+/**
+ * A live fleetd run, as the console's row shape.
+ *
+ * Exported so the single-run route returns the SAME shape the list does —
+ * two run shapes would mean the detail page reimplementing every derivation
+ * (idle time, wedge detection, status pill) against a different set of field
+ * names.
+ *
+ * `orphan: true` by default because this builds from the live side alone; the
+ * list overrides it when a task row claims the run.
+ */
+export function adminRunFromFleet(run: FleetRun, host: string): AdminRunRow {
   return {
     runId: run.id,
     host,
@@ -77,14 +88,6 @@ export interface AdminRunFilters {
   status?: unknown;
   limit?: unknown;
   before?: unknown;
-}
-
-export interface AdminRunIndex {
-  items: AdminRunRow[];
-  nextCursor: string | null;
-  /** Hosts whose live read failed, so the page can say so rather than imply
-   *  the fleet is idle. */
-  degraded: Array<{ host: string; error: string }>;
 }
 
 /**
@@ -153,7 +156,7 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
 
   const orphans = [...byRunId.entries()]
     .filter(([runId]) => !claimed.has(runId))
-    .map(([, { run, host }]) => fromLive(run, host));
+    .map(([, { run, host }]) => adminRunFromFleet(run, host));
 
   return { items: [...orphans, ...items], nextCursor: page.nextCursor, degraded };
 }
