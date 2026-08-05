@@ -8,6 +8,7 @@ import {
   type FleetHostReport,
   type FleetHostView,
 } from '../services/fleetHosts.js';
+import { resolveRunCredentials } from '../services/selfHosted/runCredentials.js';
 
 /**
  * The fleet host registry's write side.
@@ -44,6 +45,47 @@ export function fleetPublicRoutes(): Router {
 
     await recordFleetHostReport(report);
     return res.json({ success: true } as ApiResponse<void>);
+  });
+
+  /**
+   * Hand an adopted run its credentials back.
+   *
+   * fleetd calls this the moment it adopts a run across its own restart —
+   * the one moment it KNOWS the credentials are gone. The alternative was a
+   * push from the poller, which depends on the backend noticing, and which
+   * failed three times in half an hour on 2026-08-05.
+   *
+   * This is the only endpoint that hands secrets to a `FLEET_REPORT_TOKEN`
+   * holder, so the answer is bounded to a run this backend dispatched to
+   * exactly this host and that is still in flight — see
+   * `services/selfHosted/runCredentials.ts` for why that bound is what makes
+   * the pull no more powerful than the push.
+   */
+  router.post('/run-credentials', async (req, res) => {
+    const presented = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+    if (!fleetReportTokenValid(presented)) {
+      return res.status(401).json({ success: false, error: 'unauthorized' });
+    }
+
+    const { host, runId } = (req.body ?? {}) as { host?: unknown; runId?: unknown };
+    if (typeof host !== 'string' || !host || typeof runId !== 'string' || !runId) {
+      return res.status(400).json({ success: false, error: 'host and runId are required' });
+    }
+
+    const result = await resolveRunCredentials(host, runId);
+    if (!result.ok) {
+      // One status and one body for every refusal. Distinguishing "no such run"
+      // from "not your run" would let a host holding the shared token probe for
+      // which run ids exist on other hosts, which is the enumeration this
+      // endpoint's whole authorization check exists to prevent. The reason is
+      // logged rather than returned.
+      console.warn(
+        `[fleet] refused credentials for run ${runId} to host ${host}: ${result.reason}`,
+      );
+      return res.status(403).json({ success: false, error: 'forbidden' });
+    }
+
+    return res.json(result.credentials);
   });
 
   return router;

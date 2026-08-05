@@ -119,11 +119,20 @@ describe('selfHosted terminal-state mapping', () => {
   });
 
   // A run the fleet cancelled — deadline, wedge detection, or an operator —
-  // did not do the work. Reporting it completed would be a lie the user acts on.
+  // did not do the work, so it is never `completed`. But it is not `failed`
+  // either, and collapsing the two was costing real signal: five of the
+  // twenty-one failed fleet tasks on record were cancelled runs, so a quarter
+  // of the failure count described something that had not failed. Every one of
+  // those five was reaped by fleetd's wedge detector — a distinct problem the
+  // `failed` label hid. `cancelled` is in `TaskStatus`; use it.
   it.each([
     ['completed', 'completed'],
     ['failed', 'failed'],
-    ['cancelled', 'failed'],
+    ['cancelled', 'cancelled'],
+    [undefined, 'failed'],
+    // An unrecognised state is a failure, not a silent pass. Defaulting the
+    // other way would report a run we do not understand as having worked.
+    ['something-new', 'failed'],
   ])('taskStatusForFleetRun(%s) === %s', (fleet, local) => {
     expect(taskStatusForFleetRun(fleet)).toBe(local);
   });

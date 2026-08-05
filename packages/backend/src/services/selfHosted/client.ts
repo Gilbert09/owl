@@ -23,6 +23,13 @@ export interface FleetRun {
   costUsd?: number;
   error?: string;
   adopted?: boolean;
+  /**
+   * When THIS supervisor took the run over. Changes on every adoption, which is
+   * what makes it usable as the key for "have we re-credentialed this run since
+   * it was last adopted" — `adopted` alone is a latch and cannot distinguish a
+   * second restart from the first.
+   */
+  adoptedAt?: string;
   /** Per-run network slot + uid offset; unique among live runs. */
   slot?: number;
   deadline?: string;

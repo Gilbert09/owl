@@ -28,12 +28,23 @@ export function isFleetRunTerminal(status: string | undefined): boolean {
 /**
  * Map a fleet outcome onto a local task status.
  *
- * `cancelled` maps to `failed`, deliberately: the local model has no cancelled
- * state for a cloud run, and a run the fleet cancelled (deadline, wedge,
- * operator) did not do the work — reporting it completed would be a lie.
+ * `cancelled` used to collapse into `failed` on the grounds that "the local
+ * model has no cancelled state for a cloud run". It does — `TaskStatus`
+ * carries `cancelled`, and Session 52 established that an aborted cloud run
+ * lands there rather than in `failed`. The self-hosted provider simply never
+ * got that mapping.
+ *
+ * It is not cosmetic. Five of the twenty-one failed fleet tasks on record were
+ * cancelled runs, so a quarter of the failure count described something that
+ * had not failed — and every one of those five was reaped by fleetd's wedge
+ * detector, which is a distinct problem that the `failed` label hid rather than
+ * surfaced. Keeping the two apart is what makes the failure count mean
+ * something.
  */
 export function taskStatusForFleetRun(status: string | undefined): TaskStatus {
-  return status === 'completed' ? 'completed' : 'failed';
+  if (status === 'completed') return 'completed';
+  if (status === 'cancelled') return 'cancelled';
+  return 'failed';
 }
 
 /**
@@ -73,8 +84,22 @@ class SelfHostedPoller {
   private transcripts = new Map<string, AgentEvent[]>();
   /** Emission + persistence bookkeeping, shared with every other provider. */
   private cursors = new TranscriptCursors();
-  /** Runs already re-credentialed after an adoption, so we do it once. */
-  private recredentialed = new Set<string>();
+  /**
+   * taskId → the `adoptedAt` we last re-credentialed that run for.
+   *
+   * Keyed on the adoption, not the task. This was a bare `Set<string>` of task
+   * ids — "do it once" — and once is wrong: credentials live in the fleetd
+   * process's memory, so EVERY restart loses them again, and a run adopted a
+   * second time found its id already in the set and was skipped forever. Run
+   * 98c9698a on 2026-08-05 was re-credentialed on its first adoption at 11:19,
+   * silently skipped on its second at 11:52, and spent the next eighteen
+   * minutes failing every LLM call before being reported as
+   * "guest did not reconnect".
+   *
+   * fleetd now also pulls its own credentials at adoption, which is the primary
+   * repair; this stays correct as the eager path rather than the only one.
+   */
+  private recredentialed = new Map<string, string>();
 
   /** Entry point the generic cloud poller calls via the provider seam. */
   async reconcileTask(row: CloudTaskRow): Promise<void> {
@@ -100,7 +125,7 @@ class SelfHostedPoller {
     // this tick as possible — every second it spends un-credentialed is a
     // second of its deadline spent on requests that will 502.
     if (run.adopted && !terminal) {
-      await this.recredential(row, client, runId);
+      await this.recredential(row, client, runId, run.adoptedAt);
     }
 
     // Cursor-based, unlike the other providers: the fleet assigns `seq`
@@ -179,12 +204,26 @@ class SelfHostedPoller {
     row: CloudTaskRow,
     client: FleetClient,
     runId: string,
+    adoptedAt: string | undefined,
   ): Promise<void> {
-    if (this.recredentialed.has(row.id)) return;
+    // The guard is per ADOPTION. A fleetd with no `adoptedAt` on the wire is an
+    // older build, and there the safe reading of "unknown" is "not the one we
+    // already did" — re-supplying twice is harmless (it writes the same
+    // credentials into the same proxy) whereas skipping leaves the run blind.
+    const key = adoptedAt ?? '';
+    if (adoptedAt && this.recredentialed.get(row.id) === key) return;
     try {
       const githubToken = githubService.getAccessToken(row.workspaceId);
       const creds = await getSelfHostedCredentials(row.workspaceId);
-      if (!githubToken || !creds) return;
+      if (!githubToken || !creds) {
+        // Silent returns here were invisible for two sessions: the run went on
+        // failing every LLM call and nothing said why.
+        console.warn(
+          `[selfhosted] cannot re-supply credentials to ${runId}: ` +
+            `${!githubToken ? 'no GitHub token' : 'no Anthropic credential'} for workspace ${row.workspaceId}`,
+        );
+        return;
+      }
       const repo = (readCloudTaskMeta({ metadata: row.metadata })?.extra as { repo?: string })?.repo;
       await client.setRunCredentials(runId, {
         githubToken,
@@ -192,7 +231,7 @@ class SelfHostedPoller {
         ...(repo ? { repo } : {}),
       });
       // Marked only on success, so a failed attempt is retried next tick.
-      this.recredentialed.add(row.id);
+      this.recredentialed.set(row.id, key);
       console.log(`[selfhosted] re-supplied credentials to adopted run ${runId}`);
     } catch (err) {
       console.warn(
