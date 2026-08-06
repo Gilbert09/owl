@@ -457,6 +457,43 @@ describe('PostHog OAuth', () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
 
+    it('rides out a transient failure on the token still in hand', async () => {
+      // Inside the 5-minute refresh window but NOT expired: a PostHog wobble here
+      // must not fail the caller, or a brief blip becomes failed dispatches and
+      // stalled polls for the whole window.
+      await connect(60_000);
+      fetchMock.mockResolvedValue(jsonResponse({ error: 'server_error' }, 503));
+
+      expect(await ensureFreshAccessToken(WS)).toBe('pha_old');
+      expect((await getPostHogCodeCredentials(WS))?.reauthRequired).toBe(false);
+    });
+
+    it('does NOT ride it out when the token is genuinely expired', async () => {
+      await connect(-1000);
+      fetchMock.mockResolvedValue(jsonResponse({ error: 'server_error' }, 503));
+      await expect(ensureFreshAccessToken(WS)).rejects.toThrow(PostHogOAuthError);
+    });
+
+    it('does NOT ride it out on a forced refresh', async () => {
+      // Forced means the API just rejected the token in hand, so handing it back
+      // would loop on a credential we know is being refused.
+      await connect(30 * 60_000);
+      fetchMock.mockResolvedValue(jsonResponse({ error: 'server_error' }, 503));
+      await expect(ensureFreshAccessToken(WS, { force: true })).rejects.toThrow(
+        PostHogOAuthError
+      );
+    });
+
+    it('does NOT ride out a revoked grant', async () => {
+      // Terminal, not transient: falling back would hide a dead grant until the
+      // access token expired, and the user would see tasks fail instead of
+      // "Reconnect needed".
+      await connect(60_000);
+      fetchMock.mockResolvedValue(jsonResponse({ error: 'invalid_grant' }, 400));
+      await expect(ensureFreshAccessToken(WS)).rejects.toThrow(PostHogReauthRequiredError);
+      expect((await getPostHogCodeCredentials(WS))?.reauthRequired).toBe(true);
+    });
+
     it('leaves a transient failure recoverable', async () => {
       await connect(-1000);
       fetchMock.mockResolvedValue(jsonResponse({ error: 'server_error' }, 503));

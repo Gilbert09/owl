@@ -494,7 +494,25 @@ Refresh happens 5 minutes ahead of expiry, so it stays off the request path; a
 (`client.ts`). An `invalid_grant` is terminal — it sets `oauth.reauthRequiredAt`
 on the integration row so every surface agrees, the UI says "Reconnect needed",
 and nothing keeps hammering a grant that cannot come back. A 5xx or a network
-blip explicitly does NOT set that flag.
+blip explicitly does NOT set that flag, and a *preemptive* refresh that fails
+transiently falls back to the access token still in hand (it has minutes left, by
+construction) rather than failing the caller — excluded on a forced refresh, where
+the API has just rejected that very token, and on a terminal error.
+
+**PostHog Desktop (`PostHog/code`) solves the same problem the same way**, which is
+a useful cross-check: `AuthService.ensureValidSession` dedupes onto one
+`refreshPromise` assigned synchronously (their comment: *"Resolving the stored
+session must happen INSIDE refreshAndSync, else two callers both refresh and burn
+the rotating token twice"*), retries once on 401/403, and falls back to the current
+token when a preemptive refresh fails. It differs where the deployment differs: a
+1-minute skew instead of 5, no advisory lock (one process, no replicas), tokens
+encrypted at rest under a **machine-derived** key (`scrypt` over
+`machineId|platform|arch`, AES-256-GCM — deliberately not the OS keychain, so there
+are no prompts and a cloud-synced backup is useless) instead of our
+`TALYN_TOKEN_KEY` envelope, and an `OAUTH_SCOPE_VERSION` on the stored session that
+forces re-consent when the app's scope set changes. That last one is worth copying
+if we ever widen the scope ask; today a stored grant records its `scope`, but
+nothing compares it.
 
 ### Where it lives
 

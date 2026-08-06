@@ -385,7 +385,29 @@ async function refreshWithLock(workspaceId: string, force: boolean): Promise<str
     if (!isExpiring(fresh.expiresAt) && !force) {
       return decryptString(fresh.accessTokenEnc);
     }
-    return performRefresh(workspaceId, fresh);
+
+    try {
+      return await performRefresh(workspaceId, fresh);
+    } catch (err) {
+      // A *preemptive* refresh that failed transiently must not fail the caller.
+      // We refresh 5 minutes early, so the token in hand is normally still good
+      // for minutes — failing here would turn a brief PostHog wobble into failed
+      // dispatches and stalled polls for that whole window. (PostHog Desktop does
+      // the same thing with its own 1-minute skew.)
+      //
+      // Two exclusions, both load-bearing: a FORCED refresh means the API just
+      // rejected the token in hand, so returning it again is pointless, and a
+      // PostHogReauthRequiredError is terminal — falling back would paper over a
+      // revoked grant until the access token finally expired.
+      if (!force && err instanceof PostHogOAuthError && !isExpired(fresh.expiresAt)) {
+        console.warn(
+          `[posthog:oauth] preemptive refresh failed for workspace ${workspaceId}; ` +
+            `using the current access token (expires ${fresh.expiresAt}): ${err.message}`
+        );
+        return decryptString(fresh.accessTokenEnc);
+      }
+      throw err;
+    }
   };
 
   // pglite (tests) runs one WASM connection whose transaction() takes an
@@ -481,6 +503,16 @@ function isExpiring(expiresAt: string | undefined): boolean {
   const at = Date.parse(expiresAt);
   if (Number.isNaN(at)) return true;
   return at - Date.now() <= REFRESH_SKEW_MS;
+}
+
+/** Actually past its expiry, as opposed to merely inside the refresh window.
+ *  An unknown or unparseable expiry counts as expired: guessing "still valid"
+ *  about a token we can't date would hand callers something already dead. */
+function isExpired(expiresAt: string | undefined): boolean {
+  if (!expiresAt) return true;
+  const at = Date.parse(expiresAt);
+  if (Number.isNaN(at)) return true;
+  return at <= Date.now();
 }
 
 function expiryFrom(expiresIn: number | undefined): Date {
