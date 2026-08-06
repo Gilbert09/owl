@@ -77,7 +77,33 @@ export function slotsPct(host: AdminFleetHost): number | null {
 }
 
 /**
- * How long a run has been silent on the vsock.
+ * How long a run took, wall clock.
+ *
+ * From `startedAt` — falling back to `createdAt`, so a run that never got off
+ * the queue still reports how long it sat there — to `endedAt`, or to now while
+ * it is still going.
+ */
+export function durationSeconds(run: AdminRunRow, now: number = Date.now()): number | null {
+  const from = parseTime(run.startedAt) ?? parseTime(run.createdAt);
+  if (from == null) return null;
+  const to = parseTime(run.endedAt) ?? now;
+  return Math.max(0, Math.round((to - from) / 1000));
+}
+
+/**
+ * How long a run has been silent on the vsock — and, once it is over, how long
+ * it was silent BEFORE it ended.
+ *
+ * The clock stops at `endedAt`. It used to run to `now` unconditionally, which
+ * is right for a live run and meaningless for a finished one: a run that
+ * completed yesterday reported 86,400 seconds idle and climbing. The column was
+ * only ever readable on the handful of rows still in flight.
+ *
+ * Stopped, it answers the question that actually matters about a finished run:
+ * how much of its life was silence at the end. A run reaped by the wedge
+ * detector shows ~5 minutes there by definition, and a run that ended cleanly
+ * shows a second or two — which is the difference between "this finished" and
+ * "this was given up on", visible in one column.
  *
  * `lastActivity`, NOT `lastHeartbeat`. The distinction is load-bearing and the
  * fleet paid for it: wedge detection on heartbeats alone killed healthy runs
@@ -88,7 +114,21 @@ export function slotsPct(host: AdminFleetHost): number | null {
 export function idleSeconds(run: AdminRunRow, now: number = Date.now()): number | null {
   const at = parseTime(run.lastActivity) ?? parseTime(run.lastHeartbeat);
   if (at == null) return null;
-  return Math.max(0, Math.round((now - at) / 1000));
+  const until = parseTime(run.endedAt) ?? now;
+  return Math.max(0, Math.round((until - at) / 1000));
+}
+
+/**
+ * Idle as a share of the run's duration, 0-100, or null when either is unknown.
+ *
+ * The proportion is what makes the number act on: nine minutes of silence is
+ * routine on a two-hour run and is the whole story on a ten-minute one.
+ */
+export function idlePct(run: AdminRunRow, now: number = Date.now()): number | null {
+  const idle = idleSeconds(run, now);
+  const total = durationSeconds(run, now);
+  if (idle == null || total == null || total <= 0) return null;
+  return Math.min(100, Math.round((idle / total) * 100));
 }
 
 /** The fleet cancels a run silent for ~5 minutes. Warn before it does. */

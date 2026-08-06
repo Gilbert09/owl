@@ -5,7 +5,8 @@ import { api } from '../../lib/api';
 import { useAdminQuery } from '../../hooks/useAdminQuery';
 import { Page, Pill } from '../../components/layout/Page';
 import { CopyableId } from '../../components/ui/CopyableId';
-import { absolute, relativeAge } from '../../lib/format';
+import { absolute, duration, relativeAge } from '../../lib/format';
+import { durationSeconds, idlePct, idleSeconds, isTerminal, looksWedged } from '../../lib/fleetView';
 import { ROUTES } from '../../lib/routes';
 
 /**
@@ -60,6 +61,31 @@ export function RunDetailPage() {
           {run?.status && <Pill tone={run.status === 'failed' ? 'critical' : 'muted'}>{run.status}</Pill>}
           {run?.phase && <Pill tone="muted">{run.phase}</Pill>}
           {run?.startedAt && <span title={absolute(run.startedAt)}>started {relativeAge(run.startedAt)} ago</span>}
+          {run && durationSeconds(run) != null && (
+            <span
+              title={
+                isTerminal(run.status)
+                  ? `${absolute(run.startedAt ?? run.createdAt)} → ${absolute(run.endedAt)}`
+                  : 'Still running'
+              }
+            >
+              took {duration(durationSeconds(run))}
+              {!isTerminal(run.status) && '…'}
+            </span>
+          )}
+          {run && idleSeconds(run) != null && (
+            <span
+              className={looksWedged(run) ? 'font-medium text-destructive' : undefined}
+              title={
+                isTerminal(run.status)
+                  ? 'Silent on the vsock for this long before the run ended'
+                  : 'Time since the last vsock frame of any kind'
+              }
+            >
+              {duration(idleSeconds(run))} idle
+              {idlePct(run) != null && ` (${idlePct(run)}%)`}
+            </span>
+          )}
         </span>
       }
       backTo={ROUTES.fleetRuns}

@@ -83,6 +83,34 @@ export function countdown(iso: string | null | undefined, now: number = Date.now
   return `${Math.round(minutes / 60)}h`;
 }
 
+/**
+ * An elapsed span, from seconds: "12s", "4m 20s", "1h 4m", "2d 3h".
+ *
+ * Two units, not one, and that is the point of it existing next to
+ * `relativeAge`. Rounding a run to "1h" loses the difference between a job that
+ * took an hour and one that took nearly two, and run length is a number an
+ * operator compares between rows rather than reads in isolation. The second
+ * unit is dropped when it is zero so the common cases stay short.
+ */
+export function duration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—';
+  const s = Math.round(seconds);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) {
+    const rem = s % 60;
+    return rem ? `${m}m ${rem}s` : `${m}m`;
+  }
+  const h = Math.floor(m / 60);
+  if (h < 24) {
+    const rem = m % 60;
+    return rem ? `${h}h ${rem}m` : `${h}h`;
+  }
+  const d = Math.floor(h / 24);
+  const rem = h % 24;
+  return rem ? `${d}d ${rem}h` : `${d}d`;
+}
+
 /** Parsed epoch ms, or null for absent / unparseable / Go zero values. */
 export function parseTime(iso: string | null | undefined): number | null {
   if (!iso) return null;

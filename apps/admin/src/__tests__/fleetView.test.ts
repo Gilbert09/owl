@@ -4,6 +4,8 @@ import {
   HOST_STALE_AFTER_MS,
   WEDGE_WARN_SECONDS,
   hostState,
+  durationSeconds,
+  idlePct,
   idleSeconds,
   looksStale,
   looksWedged,
@@ -12,7 +14,7 @@ import {
   slotsPct,
   sortRuns,
 } from '../lib/fleetView';
-import { bytes, countdown, mib, parseTime, pct, relativeAge, usd } from '../lib/format';
+import { bytes, countdown, duration, mib, parseTime, pct, relativeAge, usd } from '../lib/format';
 
 /**
  * The judgements an operator acts on.
@@ -154,6 +156,102 @@ describe('idleSeconds', () => {
   it('is null when the fleet reported neither', () => {
     expect(idleSeconds(run({ lastActivity: null, lastHeartbeat: null }), NOW)).toBeNull();
   });
+
+  // THE regression. It ran to `now` unconditionally, so a run that finished
+  // yesterday reported 86,400 seconds idle and climbing — the column was only
+  // readable on the few rows still in flight. Stopped at endedAt it answers
+  // the question that matters about a finished run: how much of its life was
+  // silence at the end.
+  it('stops counting when the run ends', () => {
+    // Ended at NOW, last frame nine minutes before that.
+    const done = run({
+      status: 'completed',
+      endedAt: new Date(NOW).toISOString(),
+      lastActivity: new Date(NOW - 540_000).toISOString(),
+    });
+    // A full day later it still reports the nine minutes, not the day.
+    expect(idleSeconds(done, NOW + 86_400_000)).toBe(540);
+  });
+
+  // A run reaped as wedged shows ~5 minutes of trailing silence by definition;
+  // one that ended cleanly shows a second or two. That difference is the whole
+  // point of the column.
+  it('separates a clean finish from a reaped one', () => {
+    const ended = new Date(NOW).toISOString();
+    const clean = run({
+      status: 'completed',
+      endedAt: ended,
+      lastActivity: new Date(NOW - 1_000).toISOString(),
+    });
+    const reaped = run({
+      status: 'cancelled',
+      endedAt: ended,
+      lastActivity: new Date(NOW - 300_000).toISOString(),
+    });
+    expect(idleSeconds(clean, NOW + 60_000)).toBe(1);
+    expect(idleSeconds(reaped, NOW + 60_000)).toBe(300);
+  });
+});
+
+describe('durationSeconds', () => {
+  it('measures a finished run start to end', () => {
+    const r = run({
+      status: 'completed',
+      startedAt: new Date(NOW - 3_600_000).toISOString(),
+      endedAt: new Date(NOW - 600_000).toISOString(),
+    });
+    expect(durationSeconds(r, NOW)).toBe(3000);
+  });
+
+  it('runs to now while the run is still going', () => {
+    const r = run({ startedAt: new Date(NOW - 90_000).toISOString(), endedAt: null });
+    expect(durationSeconds(r, NOW)).toBe(90);
+  });
+
+  // A run that never started still spent time queued, and how long is exactly
+  // what an operator wants to know about it.
+  it('falls back to createdAt for a run that never started', () => {
+    const r = run({
+      status: 'queued',
+      createdAt: new Date(NOW - 120_000).toISOString(),
+      startedAt: null,
+      endedAt: null,
+    });
+    expect(durationSeconds(r, NOW)).toBe(120);
+  });
+
+  it('is null with no timestamps at all', () => {
+    expect(durationSeconds(run({ createdAt: null, startedAt: null }), NOW)).toBeNull();
+  });
+});
+
+describe('idlePct', () => {
+  it('reports idle as a share of the run', () => {
+    const r = run({
+      status: 'completed',
+      startedAt: new Date(NOW - 600_000).toISOString(),
+      endedAt: new Date(NOW).toISOString(),
+      lastActivity: new Date(NOW - 300_000).toISOString(),
+    });
+    // Five minutes silent out of ten.
+    expect(idlePct(r, NOW)).toBe(50);
+  });
+
+  // The proportion is what makes the raw number act on: nine minutes is
+  // routine on a two-hour run and is the whole story on a ten-minute one.
+  it('is small for a long run with the same absolute silence', () => {
+    const r = run({
+      status: 'completed',
+      startedAt: new Date(NOW - 7_200_000).toISOString(),
+      endedAt: new Date(NOW).toISOString(),
+      lastActivity: new Date(NOW - 300_000).toISOString(),
+    });
+    expect(idlePct(r, NOW)).toBe(4);
+  });
+
+  it('is null when the duration is unknown', () => {
+    expect(idlePct(run({ createdAt: null, startedAt: null }), NOW)).toBeNull();
+  });
 });
 
 describe('looksWedged', () => {
@@ -223,6 +321,24 @@ describe('formatters', () => {
     [5 * 1024 * 1024 * 1024, '5.0 GiB'],
   ])('bytes(%s) = %s', (input, expected) => {
     expect(bytes(input as number | null)).toBe(expected);
+  });
+
+  // Two units, deliberately. Rounding a run to "1h" loses the difference
+  // between a job that took an hour and one that took nearly two, and run
+  // length is a number an operator compares between rows.
+  it.each([
+    [null, '—'],
+    [-1, '—'],
+    [0, '0s'],
+    [45, '45s'],
+    [60, '1m'],
+    [260, '4m 20s'],
+    [3600, '1h'],
+    [3840, '1h 4m'],
+    [86_400, '1d'],
+    [97_200, '1d 3h'],
+  ])('duration(%s) = %s', (input, expected) => {
+    expect(duration(input as number | null)).toBe(expected);
   });
 
   it('formats cost, and unknown cost as a dash not $0.00', () => {

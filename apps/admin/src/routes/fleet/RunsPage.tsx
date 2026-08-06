@@ -5,8 +5,15 @@ import { useAdminQuery } from '../../hooks/useAdminQuery';
 import { Page, Pill } from '../../components/layout/Page';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { CopyableId } from '../../components/ui/CopyableId';
-import { absolute, countdown, relativeAge, usd } from '../../lib/format';
-import { idleSeconds, isTerminal, looksWedged, sortRuns } from '../../lib/fleetView';
+import { absolute, countdown, duration, relativeAge, usd } from '../../lib/format';
+import {
+  durationSeconds,
+  idlePct,
+  idleSeconds,
+  isTerminal,
+  looksWedged,
+  sortRuns,
+} from '../../lib/fleetView';
 import { ROUTES, routeTo } from '../../lib/routes';
 import { useAdminMutation } from '../../hooks/useAdminMutation';
 import { ConfirmMutationDialog } from '../../components/admin/ConfirmMutationDialog';
@@ -29,6 +36,16 @@ import { useCapability } from '../../components/auth/AdminGate';
 const POLL_MS = 8_000;
 
 const STATUSES = ['running', 'queued', 'completed', 'failed', 'cancelled'] as const;
+
+/**
+ * Below this, the idle share is noise rather than signal.
+ *
+ * Every run ends with a little trailing silence — the gap between its last
+ * frame and the host recording the outcome — so a percentage on every row would
+ * be a column of 1%s that trains the eye to skip it. Ten is where the number
+ * starts meaning "a material part of this run was spent saying nothing".
+ */
+const IDLE_SHARE_WORTH_SHOWING = 10;
 
 export function RunsPage() {
   const navigate = useNavigate();
@@ -95,17 +112,46 @@ export function RunsPage() {
     },
     { key: 'phase', header: 'Phase', cell: (r) => r.phase ?? <Muted /> },
     {
+      key: 'duration',
+      header: 'Took',
+      cell: (r) => {
+        const secs = durationSeconds(r);
+        if (secs == null) return <Muted />;
+        return (
+          <span
+            className="tabular-nums"
+            title={
+              isTerminal(r.status)
+                ? `${absolute(r.startedAt ?? r.createdAt)} → ${absolute(r.endedAt)}`
+                : `Started ${absolute(r.startedAt ?? r.createdAt)}; still running`
+            }
+          >
+            {duration(secs)}
+            {!isTerminal(r.status) && <span className="text-muted-foreground">…</span>}
+          </span>
+        );
+      },
+    },
+    {
       key: 'idle',
       header: 'Idle',
       cell: (r) => {
         const idle = idleSeconds(r);
         if (idle == null) return <Muted />;
+        const share = idlePct(r);
         return (
           <span
             className={looksWedged(r) ? 'font-medium text-destructive tabular-nums' : 'tabular-nums'}
-            title="Time since the last vsock frame of any kind"
+            title={
+              isTerminal(r.status)
+                ? 'How long this run was silent on the vsock before it ended. A run reaped as wedged shows ~5 minutes here by definition; one that ended cleanly shows a second or two.'
+                : 'Time since the last vsock frame of any kind'
+            }
           >
-            {idle}s
+            {duration(idle)}
+            {share != null && share >= IDLE_SHARE_WORTH_SHOWING && (
+              <span className="ml-1 text-muted-foreground">({share}%)</span>
+            )}
           </span>
         );
       },
