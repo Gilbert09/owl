@@ -94,26 +94,77 @@ export function isClaudeModelId(value: unknown): value is ClaudeModelId {
 }
 
 /**
- * Models a workspace can run PostHog Code tasks on. PostHog's run API takes
- * `runtime_adapter` + `model` together (Talyn always sends the `claude`
- * adapter); these are the canonical Claude ids its task processor knows.
- * Opus 4.8 is the default — it's what Talyn has always sent.
+ * Models a workspace can run PostHog Code tasks on — the ONE list, imported by
+ * the Settings picker, the per-task composer, and the backend's fallback. It
+ * used to be three hand-maintained copies, which is exactly how the composer
+ * ended up offering only Claude 4 models months after Claude 5 shipped.
+ *
+ * PostHog's run API takes `runtime_adapter` + `model` together and Talyn always
+ * sends the `claude` adapter, so the ids here must be ones that adapter accepts:
+ * the keys of `CLAUDE_REASONING_EFFORTS_BY_MODEL` in PostHog's
+ * `products/tasks/backend/temporal/process_task/utils.py`. That is a narrower set
+ * than the LLM gateway's catalog (`GET gateway.us.posthog.com/posthog_code/v1/models`,
+ * which also serves `claude-haiku-4-5`, `claude-sonnet-4-5` and every `gpt-*`) —
+ * offering a model from the gateway that the tasks runtime doesn't know earns a
+ * 400 at dispatch, so don't populate this from there. `posthogCodeModels.test.ts`
+ * pins the adapter's catalog so a bad id fails a test rather than a run.
+ *
+ * Current generation only, most capable first. Older Opus 4.x releases are still
+ * ACCEPTED on a stored setting (see `LEGACY_POSTHOG_CODE_MODEL_IDS`) but no longer
+ * offered.
  */
 export const POSTHOG_CODE_MODELS = [
-  { id: 'claude-opus-4-8', label: 'Opus 4.8', blurb: 'Most capable of the Claude 4 line — the default.' },
-  { id: 'claude-fable-5', label: 'Fable 5', blurb: 'Newest and most capable overall.' },
+  { id: 'claude-opus-5', label: 'Opus 5', blurb: 'Newest Opus, 1M context — the default.' },
+  { id: 'claude-fable-5', label: 'Fable 5', blurb: 'Newest of the Claude 5 line.' },
   { id: 'claude-sonnet-5', label: 'Sonnet 5', blurb: 'Strong and fast.' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', blurb: 'The previous Opus flagship.' },
   { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', blurb: 'Cheapest of the supported set.' },
 ] as const;
 
 export type PostHogCodeModelId = (typeof POSTHOG_CODE_MODELS)[number]['id'];
 
-/** Default model for PostHog Code runs when the workspace hasn't picked one. */
-export const DEFAULT_POSTHOG_CODE_MODEL_ID: PostHogCodeModelId = 'claude-opus-4-8';
+/**
+ * Model ids the tasks runtime still accepts, and that a workspace may already
+ * have pinned, but which the pickers no longer offer.
+ *
+ * The accepted set has to stay wider than the offered set. The composer used to
+ * offer Opus 4.5/4.6/4.7, and a stored value that fails validation falls back to
+ * the DEFAULT — so dropping them outright would silently move anyone who pinned
+ * Opus 4.5 (deliberately, for cost) onto Opus 5, which is dearer. Their choice
+ * keeps working; it just isn't on the menu any more.
+ */
+export const LEGACY_POSTHOG_CODE_MODEL_IDS = [
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-opus-4-5',
+] as const;
 
-/** Type guard for a stored/incoming value being a known PostHog Code model id. */
+export type LegacyPostHogCodeModelId = (typeof LEGACY_POSTHOG_CODE_MODEL_IDS)[number];
+
+/** Anything valid to have stored on a workspace: offered or legacy. */
+export type StoredPostHogCodeModelId = PostHogCodeModelId | LegacyPostHogCodeModelId;
+
+/** Default model for PostHog Code runs when the workspace hasn't picked one. */
+export const DEFAULT_POSTHOG_CODE_MODEL_ID: PostHogCodeModelId = 'claude-opus-5';
+
+/** Type guard for a value being a model the pickers currently OFFER. */
 export function isPostHogCodeModelId(value: unknown): value is PostHogCodeModelId {
   return typeof value === 'string' && POSTHOG_CODE_MODELS.some((m) => m.id === value);
+}
+
+/**
+ * Type guard for a value being one the runtime accepts — offered or legacy. Use
+ * this when reading a STORED setting; use `isPostHogCodeModelId` when validating
+ * something a picker should have produced.
+ */
+export function isStoredPostHogCodeModelId(
+  value: unknown
+): value is StoredPostHogCodeModelId {
+  return (
+    isPostHogCodeModelId(value) ||
+    (typeof value === 'string' &&
+      (LEGACY_POSTHOG_CODE_MODEL_IDS as readonly string[]).includes(value))
+  );
 }
 
 export interface WorkspaceSettings {

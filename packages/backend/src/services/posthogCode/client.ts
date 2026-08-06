@@ -1,4 +1,4 @@
-import type { PostHogCodeRuntimeAdapter } from '@talyn/shared';
+import { DEFAULT_POSTHOG_CODE_MODEL_ID, type PostHogCodeRuntimeAdapter } from '@talyn/shared';
 import type { AcpLogEntry } from './acpConverter.js';
 import { debugBus } from '../debugBus.js';
 import { fetchWithTimeout, type TimedFetchResponse } from '../httpTimeout.js';
@@ -11,9 +11,12 @@ const STREAM_OPEN_TIMEOUT_MS = 30_000;
  * Default model for PostHog Code runs. The API requires a model on every
  * cloud run (the `run/` endpoint 400s with `model is required when selecting
  * a cloud runtime` otherwise), so this is the fallback whenever the task /
- * env / UI didn't pin one. Kept current with the latest Opus.
+ * env / UI didn't pin one.
+ *
+ * Derived from `@talyn/shared` rather than restated, so the backend fallback and
+ * the two pickers cannot disagree about what the current model is.
  */
-export const DEFAULT_POSTHOG_CODE_MODEL = 'claude-opus-4-8';
+export const DEFAULT_POSTHOG_CODE_MODEL: string = DEFAULT_POSTHOG_CODE_MODEL_ID;
 
 /**
  * A non-2xx response from the PostHog Code API, carrying the HTTP `status`

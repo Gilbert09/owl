@@ -1,6 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import type { Environment, PostHogCodeRuntimeAdapter, Task } from '@talyn/shared';
-import { isPostHogCodeModelId } from '@talyn/shared';
+import { isStoredPostHogCodeModelId } from '@talyn/shared';
 import { getDbClient } from '../../db/client.js';
 import {
   tasks as tasksTable,
@@ -189,5 +189,8 @@ async function workspacePostHogCodeModel(workspaceId: string): Promise<string | 
     .from(workspacesTable)
     .where(eq(workspacesTable.id, workspaceId))
     .limit(1);
-  return isPostHogCodeModelId(row?.model) ? row.model : undefined;
+  // The wider guard on purpose: a workspace may have pinned an Opus 4.x the
+  // pickers no longer offer, and falling back to the default would quietly move
+  // it to a dearer model.
+  return isStoredPostHogCodeModelId(row?.model) ? row.model : undefined;
 }
