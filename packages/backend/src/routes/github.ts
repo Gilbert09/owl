@@ -21,6 +21,7 @@ import {
 import { rateLimit } from '../middleware/rateLimit.js';
 import { debugBus } from '../services/debugBus.js';
 import { getWebAppUrl, webAppUrl } from '../services/webApp.js';
+import { renderCallbackPage } from '../services/callbackPage.js';
 import type { Request } from 'express';
 import type { ApiResponse } from '@talyn/shared';
 
@@ -116,7 +117,7 @@ export function githubPublicRoutes(): Router {
       return res
         .status(opts.status ?? 200)
         .type('html')
-        .send(renderCallbackPage({ ok: opts.ok, message: opts.message }));
+        .send(renderCallbackPage({ ok: opts.ok, product: 'GitHub', message: opts.message }));
     };
 
     if (error) {
@@ -278,51 +279,6 @@ async function completeAppConnection(
     console.error('[github] post-connect bulk refresh failed:', err);
   });
   return installations.length;
-}
-
-/**
- * Render the minimal callback landing page. The user's browser opened
- * the OAuth flow and GitHub redirects back here — we need to give them
- * *something* to look at before they close the tab. The desktop app
- * polls its GitHub status on focus, so there's no need for a deep link.
- */
-function renderCallbackPage(opts: { ok: boolean; message: string }): string {
-  const color = opts.ok ? '#16a34a' : '#dc2626';
-  const title = opts.ok ? 'GitHub connected' : 'Connection failed';
-  const safe = escapeHtml(opts.message);
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Talyn — ${escapeHtml(title)}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-           background: #0b0b0f; color: #e5e7eb; display: grid; place-items: center;
-           min-height: 100vh; margin: 0; }
-    .card { background: #16161d; border: 1px solid #27272f; border-radius: 12px;
-            padding: 32px 40px; max-width: 420px; text-align: center; }
-    h1 { margin: 0 0 8px 0; font-size: 20px; color: ${color}; }
-    p { margin: 0; color: #9ca3af; font-size: 14px; line-height: 1.5; }
-    .hint { margin-top: 18px; font-size: 12px; color: #6b7280; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>${escapeHtml(title)}</h1>
-    <p>${safe}</p>
-    <p class="hint">You can close this tab and return to Talyn.</p>
-  </div>
-</body>
-</html>`;
-}
-
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /**

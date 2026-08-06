@@ -107,11 +107,15 @@ describe('migrateLegacyPlaintextCredentials', () => {
     expect(isEncryptedEnvelope(config.apiKeyEnc)).toBe(true);
 
     const creds = await getPostHogCodeCredentials(WS);
-    expect(creds).toEqual({
-      apiKey: 'phx_legacy_plaintext',
+    expect(creds).toMatchObject({
       projectId: '123',
       host: 'https://us.posthog.com',
+      // A migrated legacy row has no `authMethod`, which must still resolve to
+      // the personal-API-key path — that's every pre-OAuth install.
+      authMethod: 'personal_api_key',
+      reauthRequired: false,
     });
+    expect(await creds!.getToken()).toBe('phx_legacy_plaintext');
   });
 
   it('keeps an existing envelope and just drops stale plaintext when both are present', async () => {

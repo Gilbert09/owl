@@ -437,6 +437,92 @@ Single source of truth for analytics + error tracking + logs (Phase 18.8).
 - **Desktop** — `TALYN_POSTHOG_KEY` / `TALYN_POSTHOG_HOST`, baked in at webpack build time (CI secret). The renderer also bakes `TALYN_APP_VERSION` from `release/app/package.json` automatically so every event carries `app_version`.
 - **Backend** (Railway env) — `TALYN_POSTHOG_KEY` / `TALYN_POSTHOG_HOST` enable server-side task-lifecycle events (`task_dispatched` / `task_completed` / `task_failed`), attributed to the workspace owner. Unset ⇒ server analytics is a no-op (see `packages/backend/src/services/analytics.ts`).
 
+### 6b. "Connect with PostHog" — the PostHog Code OAuth app
+
+Nothing to register anywhere. PostHog supports **CIMD** (OAuth Client ID Metadata
+Document), so Talyn's `client_id` IS a URL we host, and PostHog fetches it during
+the flow to learn our name, logo and redirect URIs. There is no client secret.
+
+Two backend env vars, and they are **all-or-nothing** — with either missing, the
+OAuth option is not offered anywhere in the UI and the personal-API-key path is
+the only way to connect (that is the local-dev default, and the prod kill switch):
+
+| Var | Value | Why |
+|-----|-------|-----|
+| `POSTHOG_OAUTH_CLIENT_ID` | `https://www.talyn.dev/oauth-client` | The CIMD document, served by `apps/marketing/app/oauth-client/route.ts` |
+| `POSTHOG_OAUTH_REDIRECT_URI` | `https://prod.talyn.dev/api/v1/posthog/oauth/callback` | Where PostHog sends the browser back |
+
+Three ways to get this wrong, all of which fail on PostHog's side with an error
+the user sees and we don't:
+
+1. **The `client_id` must be byte-identical to the URL the document is served
+   from** — PostHog string-compares them. `talyn.dev` 308-redirects to `www`, so
+   the `www` form is the only usable one. Don't "tidy" a trailing slash onto
+   either value.
+2. **`POSTHOG_OAUTH_REDIRECT_URI` must appear verbatim in the CIMD document's
+   `redirect_uris`.** They are two copies of one fact; the pair existing is what
+   stops anyone (including us) nominating a different destination for an
+   authorization code. Change one → change the other in the same push.
+3. **The marketing site must be deployed before the env vars are set.** PostHog
+   fetches the document at `/authorize` time, so pointing at a 404 breaks the
+   flow for everyone.
+
+Scopes requested: `openid task:read task:write`, narrowed to the single project
+the user picks on PostHog's consent screen (`required_access_level=project`). No
+analytics, flags, or query access is asked for, and none is granted.
+
+#### Running the flow against a LOCAL backend
+
+You can, and you don't need to host anything. **Don't** point the local backend at
+the production `client_id`: its CIMD document lists only the prod callback, so
+PostHog would reject a localhost `redirect_uri` — and adding localhost to the
+published document would widen the production client for everyone.
+
+Use **Dynamic Client Registration** instead (RFC 7591, `POST /oauth/register`).
+It hands back an opaque `client_id` and hosts nothing, which is exactly the shape
+a laptop needs. `POSTHOG_OAUTH_CLIENT_ID` accepts either form for this reason —
+a URL is validated as a CIMD document, anything else is passed through as an
+opaque id.
+
+```bash
+curl -s -X POST https://us.posthog.com/oauth/register/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "Talyn (local dev)",
+    "redirect_uris": ["http://localhost:4747/api/v1/posthog/oauth/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+    "scope": "task:read task:write"
+  }' | jq -r .client_id
+```
+
+Put the result in `packages/backend/.env`:
+
+```bash
+POSTHOG_OAUTH_CLIENT_ID=<the client_id from above>
+POSTHOG_OAUTH_REDIRECT_URI=http://localhost:4747/api/v1/posthog/oauth/callback
+```
+
+`http` is fine here and nowhere else: PostHog permits it for **loopback hosts
+only** (`is_loopback_host` in `posthog/models/oauth.py`), and so do we. Port 4747
+is the backend's default (`PORT` in `packages/backend/src/index.ts`) — match it to
+whatever yours actually serves on, in both places.
+
+Two things to expect on a dev client: the consent screen says **unverified
+application** and names it whatever you registered, and the flow authorizes your
+real PostHog account against a real project, so tasks it dispatches really run.
+Point it at a scratch project.
+
+The same recipe works against a **self-hosted or locally-running PostHog** —
+swap `us.posthog.com` for its origin and set the workspace's host to match in the
+Settings card. (CIMD is the wrong tool there: PostHog fetches the document
+server-side with SSRF screening, so a document served from your laptop is
+unreachable to PostHog Cloud and refused by a local instance.)
+
+And the boring option remains: leave both unset and use a personal API key. That
+is the default, and no OAuth UI appears at all.
+
 ---
 
 ## 🧰 Nice-to-have: MCP servers for Claude Code

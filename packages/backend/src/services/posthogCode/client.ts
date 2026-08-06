@@ -44,22 +44,41 @@ function parseRetryAfterMs(headers: Headers): number | null {
 }
 
 /**
+ * Resolves the bearer token for a request.
+ *
+ * A function rather than a string because an OAuth access token lives one hour:
+ * the token has to be fetched per request (cheap — usually a memoised read) and
+ * re-fetched with `forceRefresh` when the API says 401, which is what a token
+ * revoked or rotated out from under us looks like.
+ */
+export type PostHogTokenSource = (opts?: { forceRefresh?: boolean }) => Promise<string>;
+
+/**
  * Thin typed wrapper over the PostHog Code (tasks) REST API.
  *
- * Auth is a personal API key sent as `Authorization: Bearer …`. Every
- * call is scoped to a project (team) id and a host (us/eu cloud or a
- * self-hosted instance). See https://posthog.com/docs/api/tasks and
+ * Auth is a bearer token — either a personal API key (`phx_`) or an OAuth access
+ * token (`pha_`); the API treats them identically, including scope and per-project
+ * enforcement. Every call is scoped to a project (team) id and a host (us/eu cloud
+ * or a self-hosted instance). See https://posthog.com/docs/api/tasks and
  * .../task-runs for the underlying endpoints.
  *
  * This client is intentionally stateless — credentials are passed in by
  * the caller (resolved per-workspace) rather than held on a singleton.
  */
 export class PostHogCodeClient {
+  private readonly getToken: PostHogTokenSource;
+  /** Whether a 401 is worth one retry. A fixed personal API key that 401s will
+   *  401 again; only a refreshable token source can turn it around. */
+  private readonly canRefresh: boolean;
+
   constructor(
-    private readonly apiKey: string,
+    token: string | PostHogTokenSource,
     private readonly projectId: string,
     private readonly host: string,
-  ) {}
+  ) {
+    this.canRefresh = typeof token === 'function';
+    this.getToken = typeof token === 'function' ? token : async () => token;
+  }
 
   /** Create a task. Returns the new task's id. */
   async createTask(input: {
@@ -153,8 +172,11 @@ export class PostHogCodeClient {
     opts: { lastEventId?: string; signal?: AbortSignal } = {},
   ): Promise<Response> {
     const url = `${this.baseUrl}/tasks/${taskId}/runs/${runId}/stream/`;
+    // The stream authenticates once, at connect: an access token expiring
+    // mid-body doesn't drop the connection, and the streamer's own reconnect
+    // (Last-Event-ID) picks up a fresh token here.
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${await this.getToken()}`,
       Accept: 'text/event-stream',
     };
     if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId;
@@ -197,6 +219,8 @@ export class PostHogCodeClient {
     method: string,
     path: string,
     body?: unknown,
+    /** Internal: set on the one retry after a 401, so it can't loop. */
+    forceRefresh = false,
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
     const startedAt = Date.now();
@@ -207,7 +231,7 @@ export class PostHogCodeClient {
         {
           method,
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${await this.getToken({ forceRefresh })}`,
             'Content-Type': 'application/json',
           },
           body: body === undefined ? undefined : JSON.stringify(body),
@@ -236,6 +260,13 @@ export class PostHogCodeClient {
       bytes: text.length,
       ...(res.ok ? {} : { error: text.slice(0, 500) }),
     });
+    // A 401 on a refreshable token means our copy is stale in a way expiry
+    // bookkeeping missed — the token was revoked, or a clock drifted. Force one
+    // refresh and retry; if that 401s too, it's a real auth failure and the
+    // error below is what the caller (and the reconnect UI) needs to see.
+    if (res.status === 401 && this.canRefresh && !forceRefresh) {
+      return this.request<T>(method, path, body, true);
+    }
     if (!res.ok) {
       throw new PostHogCodeApiError(
         res.status,

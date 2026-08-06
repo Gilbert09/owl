@@ -13,9 +13,10 @@ import { useOnReconnect } from './useOnReconnect';
  *
  * GitHub reuses useGithubConnection's fetch + on-focus re-check, which also
  * catches OAuth completing in the external browser, so reconnecting clears the
- * banner without a manual refresh. PostHog Code credentials only change from
- * inside the app (the Settings card writes the new status straight to the
- * store), so a one-shot fetch per workspace is enough.
+ * banner without a manual refresh. PostHog Code is re-checked on focus for the
+ * same reason: its OAuth flow finishes in the system browser, so the app has no
+ * in-process signal that the workspace just got connected. (The personal-API-key
+ * path still writes the new status straight to the store from the card.)
  *
  * Cloud-provider connection status is loaded here too (not per-component) so
  * the Settings cards, the default-provider selector, the sidebar status row,
@@ -50,24 +51,30 @@ export function useSystemStatus(): void {
     setGitHubUser(user);
   }, [user, setGitHubUser]);
 
-  useEffect(() => {
+  const refreshPostHogStatus = useCallback(() => {
     if (!currentWorkspaceId) {
       setPostHogStatus(null);
       return;
     }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const s = await api.posthog.getStatus(currentWorkspaceId);
-        if (!cancelled) setPostHogStatus(s);
-      } catch {
-        if (!cancelled) setPostHogStatus({ connected: false });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    api.posthog
+      .getStatus(currentWorkspaceId)
+      .then(setPostHogStatus)
+      // Leave the last-known status in place on a transient failure rather than
+      // flashing "Not Connected" at someone who is connected.
+      .catch(() => {});
   }, [currentWorkspaceId, setPostHogStatus]);
+
+  useEffect(() => {
+    refreshPostHogStatus();
+  }, [refreshPostHogStatus]);
+
+  // The OAuth connect flow completes in the system browser, so focus is the only
+  // signal that a workspace just became connected.
+  useEffect(() => {
+    const onFocus = () => refreshPostHogStatus();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refreshPostHogStatus]);
 
   const refreshCloudProviders = useCallback(() => {
     if (!currentWorkspaceId) {

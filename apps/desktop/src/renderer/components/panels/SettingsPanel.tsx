@@ -1485,14 +1485,29 @@ function CloudProviderCard({
 }
 
 /**
- * PostHog Code (cloud tasks) credentials, per workspace. The API key is
- * write-only — once saved, the backend never returns it, so we show
- * connection state + project id and let the user re-enter to rotate.
+ * PostHog Code (cloud tasks) credentials, per workspace.
+ *
+ * Two ways to connect, both first-class:
+ *
+ * - **OAuth** — offered when the backend has `POSTHOG_OAUTH_*` configured. The
+ *   user authorizes Talyn on PostHog and picks the project on PostHog's own
+ *   consent screen, so no credential ever passes through this window and the
+ *   grant is narrowed to one project + `task:read`/`task:write`. It's revocable
+ *   from PostHog's Connected Apps screen.
+ * - **Personal API key** — the original path, still fully supported, and the only
+ *   one on a deployment without OAuth configured (self-hosted, local dev). An
+ *   existing key install is never migrated or nagged: it keeps this card and its
+ *   Edit button exactly as before, with OAuth offered as a quiet alternative
+ *   rather than a prompt.
+ *
+ * Either way the credential is write-only — the backend returns neither the key
+ * nor a token, so this renders connection state and the project id, nothing more.
  */
 function PostHogCodeCard() {
   // Status is preloaded into the store at startup (useSystemStatus), so the
   // card shows the connection state instantly. Mutations below write the fresh
-  // status straight back to the store.
+  // status straight back to the store; the OAuth flow finishes in the system
+  // browser instead, which useSystemStatus picks up on window focus.
   const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
   const status = useWorkspaceStore((s) => s.posthogStatus);
   const setStatus = useWorkspaceStore((s) => s.setPostHogStatus);
@@ -1510,6 +1525,38 @@ function PostHogCodeCard() {
     if (status?.projectId) setProjectId(status.projectId);
     if (status?.host) setHost(status.host);
   }, [status?.projectId, status?.host]);
+
+  const connected = Boolean(status?.connected);
+  const usingOAuth = status?.authMethod === 'oauth';
+  const needsReauth = status?.needsReauth === true;
+  // Strict `=== true`: a desktop build newer than its backend sees `undefined`
+  // here, and offering a flow the backend can't start is worse than not offering
+  // it at all.
+  const oauthAvailable = status?.oauthAvailable === true;
+  // The key form is the default landing state only where OAuth isn't an option.
+  const keyFormOpen = editing || (!connected && !oauthAvailable);
+
+  const handleConnectOAuth = async () => {
+    if (!currentWorkspaceId) return;
+    setIsSaving(true);
+    setError(null);
+    try {
+      const { authorizeUrl } = await api.posthog.startOAuth(currentWorkspaceId, {
+        host: host.trim() || undefined,
+        // Only a pre-selection on PostHog's consent screen, and only honoured
+        // there if the user actually has access to it — useful on a reconnect.
+        projectId: status?.projectId,
+      });
+      trackEvent('cloud_provider_oauth_started', { provider: 'posthog_code' });
+      // Must be the real browser: the user needs their PostHog session, and the
+      // consent screen is theirs, not ours to render.
+      await openExternal(authorizeUrl);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to start the PostHog connection');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const handleSave = async () => {
     if (!currentWorkspaceId || !apiKey.trim() || !projectId.trim()) return;
@@ -1537,7 +1584,7 @@ function PostHogCodeCard() {
     setIsSaving(true);
     try {
       await api.posthog.disconnect(currentWorkspaceId);
-      setStatus({ connected: false });
+      setStatus({ connected: false, oauthAvailable });
       setProjectId('');
       setEditing(false);
     } catch (e) {
@@ -1547,8 +1594,19 @@ function PostHogCodeCard() {
     }
   };
 
-  const connected = Boolean(status?.connected);
-  const showForm = editing || !connected;
+  const description = () => {
+    if (needsReauth) {
+      return 'PostHog rejected the stored authorization — reconnect to keep cloud tasks running.';
+    }
+    if (connected) {
+      return `Cloud tasks run under project ${status?.projectId} on ${status?.host}${
+        usingOAuth ? ', authorized with your PostHog account.' : '.'
+      }`;
+    }
+    return oauthAvailable
+      ? 'Connect your PostHog account to run tasks on PostHog Code’s cloud sandbox. Talyn asks only for task access to the one project you pick.'
+      : 'Add a personal API key + project id to run tasks on PostHog Code’s cloud sandbox.';
+  };
 
   return (
     <Card className="p-4">
@@ -1556,15 +1614,17 @@ function PostHogCodeCard() {
         <div
           className={cn(
             'w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0',
-            connected ? 'bg-green-500/10' : 'bg-secondary'
+            connected && !needsReauth ? 'bg-green-500/10' : 'bg-secondary'
           )}
         >
-          <BarChart3 className={cn('w-5 h-5', connected && 'text-green-500')} />
+          <BarChart3 className={cn('w-5 h-5', connected && !needsReauth && 'text-green-500')} />
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <h4 className="font-medium">PostHog Code</h4>
-            {connected ? (
+            {needsReauth ? (
+              <Badge variant="destructive">Reconnect needed</Badge>
+            ) : connected ? (
               <Badge variant="default" className="bg-green-600">
                 <Check className="w-3 h-3 mr-1" />
                 Connected
@@ -1572,14 +1632,45 @@ function PostHogCodeCard() {
             ) : (
               <Badge variant="secondary">Not Connected</Badge>
             )}
+            {connected && usingOAuth && <Badge variant="outline">via PostHog OAuth</Badge>}
           </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            {connected
-              ? `Cloud tasks run under project ${status?.projectId} on ${status?.host}.`
-              : 'Add a personal API key + project id to run tasks on PostHog Code’s cloud sandbox.'}
-          </p>
+          <p className="text-sm text-muted-foreground mt-1">{description()}</p>
 
-          {showForm && (
+          {/* Not connected, OAuth on the table: lead with it, and keep the key
+              path one click away rather than hidden. */}
+          {!connected && oauthAvailable && !keyFormOpen && (
+            <div className="mt-3 space-y-3">
+              <Input
+                label="PostHog host"
+                placeholder="https://us.posthog.com"
+                value={host}
+                onChange={(e) => setHost(e.target.value)}
+                disabled={isSaving}
+              />
+              {error && (
+                <div className="text-sm text-destructive flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                  <span>{error}</span>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={handleConnectOAuth} disabled={isSaving || !currentWorkspaceId}>
+                  {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Connect with PostHog'}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setEditing(true)}
+                  disabled={isSaving}
+                >
+                  <KeyRound className="w-4 h-4 mr-1" />
+                  Use a personal API key
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {keyFormOpen && (
             <div className="mt-3 space-y-3">
               <Input
                 label="Personal API key"
@@ -1620,7 +1711,14 @@ function PostHogCodeCard() {
                 >
                   {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save & verify'}
                 </Button>
-                {connected && (
+                {/* Offered, never pushed: an existing key install works fine and
+                    nothing here suggests it's deprecated. */}
+                {oauthAvailable && (
+                  <Button size="sm" variant="ghost" onClick={handleConnectOAuth} disabled={isSaving}>
+                    Connect with PostHog instead
+                  </Button>
+                )}
+                {(connected || oauthAvailable) && (
                   <Button
                     size="sm"
                     variant="ghost"
@@ -1639,12 +1737,27 @@ function PostHogCodeCard() {
           )}
         </div>
 
-        {connected && !showForm && (
+        {connected && !keyFormOpen && (
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setEditing(true)} disabled={isSaving}>
-              <Pencil className="w-4 h-4 mr-1" />
-              Edit
-            </Button>
+            {usingOAuth ? (
+              // No key to rotate on an OAuth connection — re-consenting is the
+              // equivalent, and it's also how you move the workspace to a
+              // different PostHog project.
+              <Button
+                variant={needsReauth ? 'default' : 'outline'}
+                size="sm"
+                onClick={handleConnectOAuth}
+                disabled={isSaving}
+              >
+                <RefreshCw className="w-4 h-4 mr-1" />
+                Reconnect
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" onClick={() => setEditing(true)} disabled={isSaving}>
+                <Pencil className="w-4 h-4 mr-1" />
+                Edit
+              </Button>
+            )}
             <Button variant="outline" size="sm" onClick={handleDisconnect} disabled={isSaving}>
               {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlink className="w-4 h-4" />}
             </Button>

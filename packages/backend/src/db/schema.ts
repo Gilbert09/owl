@@ -193,6 +193,41 @@ export const integrations = pgTable(
   })
 );
 
+// ---------- PostHog OAuth (PKCE) states ----------
+//
+// In-flight authorization codes for the PostHog Code OAuth connect flow. In
+// Postgres rather than a process-local Map (which is what the older GitHub App
+// flow uses) because the row holds the PKCE `code_verifier`: every deploy runs
+// two instances at once, and a callback landing on the instance that didn't mint
+// the state would have no way to redeem the code. Single-use and short-lived —
+// PostHog expires the authorization code itself after 5 minutes.
+export const posthogOauthStates = pgTable(
+  'posthog_oauth_states',
+  {
+    /** The opaque `state` parameter — and the whole CSRF defence. */
+    state: text('state').primaryKey(),
+    workspaceId: text('workspace_id')
+      .notNull()
+      .references(() => workspaces.id, { onDelete: 'cascade' }),
+    /** Who consented. The callback carries no session, so this row is the only
+     *  record of that, and it's who the cloud environment gets provisioned for. */
+    userId: text('user_id').notNull(),
+    /** PKCE verifier, encrypted (services/tokenCrypto.ts): useless alone, but it
+     *  completes the exchange if paired with a leaked authorization code. */
+    codeVerifierEnc: jsonb('code_verifier_enc').notNull(),
+    /** The instance being authorized, pinned at start so the callback can't
+     *  redirect the token exchange somewhere else. */
+    host: text('host').notNull(),
+    /** 'web' | 'desktop' — chooses how the flow ends, recorded server-side. */
+    client: text('client').notNull().default('desktop'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => ({
+    expiresAtIdx: index('idx_posthog_oauth_states_expires_at').on(t.expiresAt),
+  })
+);
+
 // ---------- GitHub App installations ----------
 //
 // App-owned, NOT workspace-scoped: a single GitHub App installation (on a user

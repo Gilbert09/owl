@@ -439,11 +439,31 @@ export interface PostHogCodeStatus {
   connected: boolean;
   projectId?: string;
   host?: string;
+  /** How this workspace authenticates. Absent on a workspace that has never
+   *  connected. A pre-OAuth install reports `personal_api_key` and keeps its
+   *  existing card — nothing about it changes. */
+  authMethod?: 'personal_api_key' | 'oauth';
+  /** OAuth only: the grant was revoked (in PostHog, or by reuse protection) and
+   *  the user has to reconnect. Nothing else can recover it. */
+  needsReauth?: boolean;
+  /** Whether the backend is configured to offer the OAuth flow at all. False on
+   *  a deployment without POSTHOG_OAUTH_* set — self-hosted, or local dev. */
+  oauthAvailable?: boolean;
 }
 
 export const posthog = {
   getStatus: (workspaceId: string) =>
     request<PostHogCodeStatus>('GET', `/posthog/status?workspaceId=${workspaceId}`),
+  /**
+   * Start the OAuth flow. Returns the PostHog authorize URL to open — the host
+   * app opens it (system browser on desktop, same tab on web); the backend
+   * callback finishes the exchange, so no token ever reaches the client.
+   */
+  startOAuth: (workspaceId: string, opts?: { host?: string; projectId?: string }) =>
+    request<{ authorizeUrl: string }>('POST', '/posthog/oauth/start', {
+      workspaceId,
+      ...opts,
+    }),
   saveConfig: (
     workspaceId: string,
     config: { apiKey: string; projectId: string; host?: string }
