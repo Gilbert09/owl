@@ -76,17 +76,29 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('DebugPanel in its new home', () => {
+  // Waits on the RENDER, not the call.
+  //
+  // These asserted the DOM immediately after `waitFor(() => expect(fetch)
+  // .toHaveBeenCalled())`, which is a race: the fetch being *called* happens
+  // synchronously in the mount effect, well before its promise resolves and
+  // React re-renders with the result. It usually passed because waitFor's
+  // polling interval let the microtask queue drain first — and failed roughly
+  // one run in five under load, which is how it went red on a CI macOS runner
+  // on a commit that touched none of this. Asserting the rendered text inside
+  // waitFor tests the same thing without depending on that timing.
   it('mounts and backfills the event buffer', async () => {
     render(<DebugPanel />);
     await waitFor(() => expect(getEvents).toHaveBeenCalled());
-    expect(document.body.textContent).toContain('GET /repos/o/r');
+    await waitFor(() => expect(document.body.textContent).toContain('GET /repos/o/r'));
   });
 
   it('renders the snapshot tiles', async () => {
     render(<DebugPanel />);
     await waitFor(() => expect(getSnapshot).toHaveBeenCalled());
-    expect(document.body.textContent).toMatch(/WS clients/i);
-    expect(document.body.textContent).toMatch(/DB egress/i);
+    await waitFor(() => {
+      expect(document.body.textContent).toMatch(/WS clients/i);
+      expect(document.body.textContent).toMatch(/DB egress/i);
+    });
   });
 
   it('checks admin access before doing anything else', async () => {

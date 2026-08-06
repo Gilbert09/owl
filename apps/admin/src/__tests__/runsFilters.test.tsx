@@ -91,7 +91,13 @@ describe('degraded hosts', () => {
 
   it('says nothing when every host answered', async () => {
     renderAt('/fleet/runs');
-    await waitFor(() => expect(runs).toHaveBeenCalled());
+    // Wait for the loaded view before asserting the banner is ABSENT.
+    //
+    // A negative assertion fired straight after the fetch was merely called
+    // passes trivially, because nothing has rendered yet — so this would stay
+    // green even if the banner were shown unconditionally. Waiting for the
+    // empty state first is what makes it a test.
+    await waitFor(() => expect(document.body.textContent).toMatch(/No fleet runs yet/i));
     expect(document.body.textContent).not.toMatch(/Couldn't reach/i);
   });
 });
