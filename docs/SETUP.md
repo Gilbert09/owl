@@ -467,14 +467,61 @@ the user sees and we don't:
    fetches the document at `/authorize` time, so pointing at a 404 breaks the
    flow for everyone.
 
-Local dev: leave both unset and use a personal API key. To exercise the flow
-against a local PostHog, set `POSTHOG_OAUTH_REDIRECT_URI=http://localhost:3001/api/v1/posthog/oauth/callback`
-(loopback http is allowed by both us and PostHog) and serve a CIMD document
-listing it — the marketing app on `next dev` will do, with the URLs swapped.
-
 Scopes requested: `openid task:read task:write`, narrowed to the single project
 the user picks on PostHog's consent screen (`required_access_level=project`). No
 analytics, flags, or query access is asked for, and none is granted.
+
+#### Running the flow against a LOCAL backend
+
+You can, and you don't need to host anything. **Don't** point the local backend at
+the production `client_id`: its CIMD document lists only the prod callback, so
+PostHog would reject a localhost `redirect_uri` — and adding localhost to the
+published document would widen the production client for everyone.
+
+Use **Dynamic Client Registration** instead (RFC 7591, `POST /oauth/register`).
+It hands back an opaque `client_id` and hosts nothing, which is exactly the shape
+a laptop needs. `POSTHOG_OAUTH_CLIENT_ID` accepts either form for this reason —
+a URL is validated as a CIMD document, anything else is passed through as an
+opaque id.
+
+```bash
+curl -s -X POST https://us.posthog.com/oauth/register/ \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "Talyn (local dev)",
+    "redirect_uris": ["http://localhost:4747/api/v1/posthog/oauth/callback"],
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"],
+    "token_endpoint_auth_method": "none",
+    "scope": "task:read task:write"
+  }' | jq -r .client_id
+```
+
+Put the result in `packages/backend/.env`:
+
+```bash
+POSTHOG_OAUTH_CLIENT_ID=<the client_id from above>
+POSTHOG_OAUTH_REDIRECT_URI=http://localhost:4747/api/v1/posthog/oauth/callback
+```
+
+`http` is fine here and nowhere else: PostHog permits it for **loopback hosts
+only** (`is_loopback_host` in `posthog/models/oauth.py`), and so do we. Port 4747
+is the backend's default (`PORT` in `packages/backend/src/index.ts`) — match it to
+whatever yours actually serves on, in both places.
+
+Two things to expect on a dev client: the consent screen says **unverified
+application** and names it whatever you registered, and the flow authorizes your
+real PostHog account against a real project, so tasks it dispatches really run.
+Point it at a scratch project.
+
+The same recipe works against a **self-hosted or locally-running PostHog** —
+swap `us.posthog.com` for its origin and set the workspace's host to match in the
+Settings card. (CIMD is the wrong tool there: PostHog fetches the document
+server-side with SSRF screening, so a document served from your laptop is
+unreachable to PostHog Cloud and refused by a local instance.)
+
+And the boring option remains: leave both unset and use a personal API key. That
+is the default, and no OAuth UI appears at all.
 
 ---
 

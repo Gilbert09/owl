@@ -12,7 +12,11 @@ import {
   resetOAuthInflightForTests,
   startAuthorization,
 } from '../services/posthogCode/oauth.js';
-import { resetPostHogOAuthConfigForTests } from '../services/posthogCode/oauthConfig.js';
+import {
+  getPostHogOAuthConfig,
+  isPostHogOAuthEnabled,
+  resetPostHogOAuthConfigForTests,
+} from '../services/posthogCode/oauthConfig.js';
 import {
   getPostHogCodeCredentials,
   storePostHogCodeCredentials,
@@ -130,6 +134,59 @@ describe('PostHog OAuth', () => {
       expect(a.state).not.toBe(b.state);
       const rows = await db.select().from(posthogOauthStates);
       expect(rows).toHaveLength(2);
+    });
+  });
+
+  describe('configuration', () => {
+    /** The env pair decides whether the flow is offered at all, so each case is
+     *  really "does this deployment get a Connect button". */
+    function configFor(clientId: string | undefined, redirectUri: string | undefined) {
+      if (clientId === undefined) delete process.env.POSTHOG_OAUTH_CLIENT_ID;
+      else process.env.POSTHOG_OAUTH_CLIENT_ID = clientId;
+      if (redirectUri === undefined) delete process.env.POSTHOG_OAUTH_REDIRECT_URI;
+      else process.env.POSTHOG_OAUTH_REDIRECT_URI = redirectUri;
+      resetPostHogOAuthConfigForTests();
+      return getPostHogOAuthConfig();
+    }
+
+    it.each([
+      ['a CIMD document URL', CLIENT_ID],
+      // DCR (`POST /oauth/register`) issues an opaque id and hosts nothing, which
+      // is what lets a local backend run this flow with no public URL.
+      ['an opaque DCR client id', '0198f3a1-6c2e-7b4d-9f10-2a5b8c3d4e5f'],
+    ])('accepts %s', (_label, clientId) => {
+      expect(configFor(clientId, REDIRECT_URI)).toEqual({ clientId, redirectUri: REDIRECT_URI });
+    });
+
+    it.each([
+      ['a loopback http callback (local dev)', 'http://localhost:3001/api/v1/posthog/oauth/callback'],
+      ['a 127.0.0.1 callback', 'http://127.0.0.1:3001/api/v1/posthog/oauth/callback'],
+    ])('accepts %s', (_label, redirectUri) => {
+      // PostHog permits http redirect URIs for loopback hosts only
+      // (posthog/models/oauth.py `is_loopback_host`), so this mirrors its rule.
+      expect(configFor(CLIENT_ID, redirectUri)?.redirectUri).toBe(redirectUri);
+    });
+
+    it.each([
+      ['neither var', undefined, undefined],
+      ['only a client id', CLIENT_ID, undefined],
+      ['only a redirect URI', undefined, REDIRECT_URI],
+      ['an empty client id', '', REDIRECT_URI],
+      ['a plain-http callback on a real host', CLIENT_ID, 'http://talyn.dev/cb'],
+      ['a non-https CIMD document', 'http://www.talyn.dev/oauth-client', REDIRECT_URI],
+      ['an unparseable redirect URI', CLIENT_ID, 'not a url'],
+    ])('offers nothing with %s', (_label, clientId, redirectUri) => {
+      expect(configFor(clientId, redirectUri)).toBeNull();
+      expect(isPostHogOAuthEnabled()).toBe(false);
+    });
+
+    it('passes both values through byte-identically', () => {
+      // PostHog string-compares the CIMD client_id against the URL it fetched, and
+      // the redirect URI against what was registered — a normalising round-trip
+      // that adds a trailing slash fails both.
+      const config = configFor('https://www.talyn.dev/oauth-client', REDIRECT_URI);
+      expect(config?.clientId).toBe('https://www.talyn.dev/oauth-client');
+      expect(config?.redirectUri).toBe(REDIRECT_URI);
     });
   });
 

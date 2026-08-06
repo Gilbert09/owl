@@ -2,26 +2,39 @@
  * Whether this deployment can offer "Connect with PostHog" — and with what
  * client identity.
  *
- * Talyn is a CIMD client (Client ID Metadata Document,
- * draft-ietf-oauth-client-id-metadata-document): our `client_id` IS an https URL
+ * In production Talyn is a CIMD client (Client ID Metadata Document,
+ * draft-ietf-oauth-client-id-metadata-document): the `client_id` IS an https URL
  * we host, and PostHog fetches the document there to learn our name, logo and
  * redirect URIs. There is no registration step and no client secret, which is
  * also why prod only advertises `token_endpoint_auth_method: none` — we are a
  * public client and PKCE is what protects the exchange (PostHog sets
  * `PKCE_REQUIRED` for every client, confidential ones included).
  *
- * Both variables are read ONLY from the environment, never from a request: the
- * redirect URI is the one value that decides where an authorization code is
- * delivered, so a caller-supplied one is a credential-theft primitive. They are
- * all-or-nothing (the `POLAR_*` pattern): with either missing, OAuth is simply
- * not offered and the personal-API-key path is the only way to connect. That is
- * the dev default, and the prod kill switch.
+ * `client_id` is NOT required to be a URL, though, because CIMD is not the only
+ * way PostHog issues one: `POST /oauth/register` (RFC 7591 Dynamic Client
+ * Registration) hands back an opaque id and needs nothing hosted anywhere, which
+ * is what makes a local backend able to run this flow at all (see
+ * `docs/SETUP.md` §6b). So the value is passed through verbatim, and only
+ * validated as a URL when it looks like one — which still catches the realistic
+ * CIMD mistake of a typo'd or http document URL.
+ *
+ * The redirect URI is validated strictly either way. It is the one value that
+ * decides where an authorization code gets delivered, and both variables are read
+ * ONLY from the environment, never from a request, for the same reason: a
+ * caller-supplied redirect target is a credential-theft primitive.
+ *
+ * They are all-or-nothing (the `POLAR_*` pattern): with either missing, OAuth is
+ * simply not offered and the personal-API-key path is the only way to connect.
+ * That is the default for a deployment that hasn't set them up, and the prod
+ * kill switch.
  */
 
 export interface PostHogOAuthConfig {
-  /** The CIMD document URL, used verbatim as `client_id`. */
+  /** The CIMD document URL, or an opaque id from DCR / a pre-registered app.
+   *  Sent verbatim as `client_id`. */
   clientId: string;
-  /** Where PostHog sends the browser back. Must be registered in the CIMD doc. */
+  /** Where PostHog sends the browser back. Must be registered against the client
+   *  (in the CIMD document, or at registration time). */
   redirectUri: string;
 }
 
@@ -56,19 +69,27 @@ export function getPostHogOAuthConfig(): PostHogOAuthConfig | null {
     return cached;
   }
 
-  const clientId = readUrl('POSTHOG_OAUTH_CLIENT_ID', rawClientId);
+  // A `client_id` that looks like a URL is a CIMD document and gets checked as
+  // one; anything else is an opaque id from DCR or a pre-registered app, which we
+  // have no way to validate and no business rewriting.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rawClientId) && !readUrl('POSTHOG_OAUTH_CLIENT_ID', rawClientId)) {
+    cached = null;
+    return cached;
+  }
   const redirectUri = readUrl('POSTHOG_OAUTH_REDIRECT_URI', rawRedirectUri);
-  if (!clientId || !redirectUri) {
+  if (!redirectUri) {
     cached = null;
     return cached;
   }
 
-  // The client_id must be byte-identical to the URL PostHog fetched it from —
-  // it compares the document's own `client_id` field against the request URL
-  // (posthog/api/oauth/cimd.py). A normalising URL round-trip that adds or drops
-  // a trailing slash fails that comparison with a confusing error at /authorize
-  // time, so keep the raw string and only use the parse as validation.
-  cached = { clientId: rawClientId, redirectUri: redirectUri.toString() };
+  // Both values are sent as the raw string. For CIMD the client_id must be
+  // byte-identical to the URL PostHog fetched it from — it compares the
+  // document's own `client_id` field against the request URL
+  // (posthog/api/oauth/cimd.py) — and the redirect URI must match what the client
+  // registered. A normalising round-trip that adds or drops a trailing slash
+  // fails both comparisons with a confusing error at /authorize time, so the
+  // parse above is used as validation only, never as the value.
+  cached = { clientId: rawClientId, redirectUri: rawRedirectUri };
   return cached;
 }
 

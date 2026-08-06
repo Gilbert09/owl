@@ -463,6 +463,15 @@ Talyn is a **public client** and PKCE is the protection (PostHog requires PKCE o
 every client, and prod advertises no `private_key_jwt`). Setup + the three ways to
 misconfigure the pair are in [`docs/SETUP.md`](./SETUP.md) §6b.
 
+`POSTHOG_OAUTH_CLIENT_ID` accepts an opaque id as well as a URL, because CIMD is
+not the only way PostHog issues one: `POST /oauth/register` (RFC 7591 DCR) hands
+back an id and hosts nothing. That is what lets a **local backend** run this flow —
+register a dev client against `http://localhost:4747/...` (PostHog allows http for
+loopback hosts only) rather than pointing dev at the production client, whose
+document lists only the prod callback. Adding localhost to the *published*
+document would widen the production client for every user; don't. Recipe in
+[`docs/SETUP.md`](./SETUP.md) §6b.
+
 ### The part that needs care: refresh-token rotation
 
 PostHog issues **1-hour access tokens** and **30-day refresh tokens**, rotates the
