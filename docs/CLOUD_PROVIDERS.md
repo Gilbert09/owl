@@ -489,9 +489,15 @@ the workspace out of a connection nobody touched.
    covers the cross-instance overlap. The winner's tokens are re-read inside the
    lock, so the loser uses the rotated pair rather than replaying a spent one.
 
-Refresh happens 5 minutes ahead of expiry, so it stays off the request path; a
-`401` on a token we believed valid forces exactly one refresh-and-retry
-(`client.ts`). An `invalid_grant` is terminal — it sets `oauth.reauthRequiredAt`
+Refreshing is **lazy — there is no timer**: whichever caller next asks for a token
+and finds it within 5 minutes of expiry does the refresh. The skew doesn't take the
+refresh off the request path, it hands it to an *earlier* caller with slack rather
+than the unlucky one that would meet an expired token — and in practice that caller
+is a background poll tick, since the pollers ask far more often than anything
+user-facing. Nothing keeps a token warm, so a workspace idle past the 30-day
+refresh-token lifetime needs reconnecting (harmless: an idle workspace has no cloud
+tasks to run either). A `401` on a token we believed valid forces exactly one
+refresh-and-retry (`client.ts`). An `invalid_grant` is terminal — it sets `oauth.reauthRequiredAt`
 on the integration row so every surface agrees, the UI says "Reconnect needed",
 and nothing keeps hammering a grant that cannot come back. A 5xx or a network
 blip explicitly does NOT set that flag, and a *preemptive* refresh that fails

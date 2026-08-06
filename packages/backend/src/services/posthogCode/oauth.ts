@@ -46,9 +46,28 @@ const SCOPES = ['openid', 'task:read', 'task:write'] as const;
  *  a longer window would only keep dead rows around. */
 const STATE_TTL_MS = 10 * 60_000;
 
-/** Refresh this far ahead of expiry. Comfortably longer than any single API call
- *  (the SSE stream authenticates once at connect, so it isn't a factor), which
- *  keeps refreshes off the request path in the normal case. */
+/**
+ * Refresh this far ahead of expiry.
+ *
+ * There is no refresh timer anywhere: refreshing is **lazy**, done by whichever
+ * caller next asks for a token and finds it inside this window. The skew doesn't
+ * move the refresh off the request path — it moves it to an *earlier* caller, one
+ * with slack, instead of the unlucky one that would otherwise meet an expired
+ * token. In practice that earlier caller is a background poll tick, because the
+ * pollers ask far more often than anything user-facing does.
+ *
+ * Five minutes is chosen for that reason (and it is comfortably longer than any
+ * single API call — the SSE stream authenticates once at connect, so a long-lived
+ * body isn't a factor). The trade is a wider window in which a *failed* refresh
+ * could strand a caller, which is exactly why `refreshWithLock` falls back to the
+ * token still in hand.
+ *
+ * Consequence worth knowing: nothing keeps a token warm. A workspace nobody
+ * touches makes no calls, so it refreshes nothing — harmless, because the refresh
+ * token lives 30 days, but a workspace left completely idle past that has to be
+ * reconnected. (A keep-warm sweep would fix it; not built, since a 30-day-idle
+ * workspace has no cloud tasks to run either.)
+ */
 const REFRESH_SKEW_MS = 5 * 60_000;
 
 const TOKEN_TIMEOUT_LABEL = 'PostHog OAuth';
