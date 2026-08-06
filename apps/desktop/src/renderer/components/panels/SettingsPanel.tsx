@@ -1632,7 +1632,6 @@ function PostHogCodeCard() {
             ) : (
               <Badge variant="secondary">Not Connected</Badge>
             )}
-            {connected && usingOAuth && <Badge variant="outline">via PostHog OAuth</Badge>}
           </div>
           <p className="text-sm text-muted-foreground mt-1">{description()}</p>
 
