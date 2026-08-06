@@ -494,9 +494,15 @@ and finds it within 5 minutes of expiry does the refresh. The skew doesn't take 
 refresh off the request path, it hands it to an *earlier* caller with slack rather
 than the unlucky one that would meet an expired token — and in practice that caller
 is a background poll tick, since the pollers ask far more often than anything
-user-facing. Nothing keeps a token warm, so a workspace idle past the 30-day
-refresh-token lifetime needs reconnecting (harmless: an idle workspace has no cloud
-tasks to run either). A `401` on a token we believed valid forces exactly one
+user-facing. Nothing keeps a token warm, and it doesn't need to: the refresh window
+is **rolling, not absolute**. Rotation pairs each new refresh token with a new
+access token, `validate_refresh_token` enforces no expiry of its own, and PostHog's
+daily sweep (`products/growth/dags/oauth.py`) only deletes an unrevoked refresh
+token once its paired access token expired more than `REFRESH_TOKEN_EXPIRE_SECONDS
++ OAUTH_EXPIRED_TOKEN_RETENTION_PERIOD` ago — 30d + 30d today. So every refresh
+buys roughly another two months, and an actively-used connection never lapses. We
+depend on none of those numbers: `invalid_grant` is terminal whenever it arrives,
+whatever the cause. A `401` on a token we believed valid forces exactly one
 refresh-and-retry (`client.ts`). An `invalid_grant` is terminal — it sets `oauth.reauthRequiredAt`
 on the integration row so every surface agrees, the UI says "Reconnect needed",
 and nothing keeps hammering a grant that cannot come back. A 5xx or a network

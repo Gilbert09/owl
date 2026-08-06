@@ -24,11 +24,13 @@ import {
  * and only `task:*`, and it is revocable from PostHog's own settings.
  *
  * What it costs, and what most of this module is about: PostHog access tokens
- * live 1 hour, refresh tokens 30 days, and refresh tokens ROTATE with reuse
- * protection (a 120-second grace, after which reusing a spent refresh token
- * revokes the entire token family). Talyn hits this API from a poll loop, a
- * streamer, and the dispatcher — across two instances during every deploy — so
- * an unguarded refresh would eventually revoke a workspace's own connection.
+ * live 1 hour, and refresh tokens ROTATE with reuse protection (a 120-second
+ * grace, after which reusing a spent refresh token revokes the entire token
+ * family). Their lifetime is a ROLLING window that each refresh renews, not a
+ * countdown from first consent — see REFRESH_SKEW_MS. Talyn hits this API from a
+ * poll loop, a streamer, and the dispatcher — across two instances during every
+ * deploy — so an unguarded refresh would eventually revoke a workspace's own
+ * connection.
  * Refreshes are therefore single-flighted twice over: an in-process promise map
  * collapses the common case without a round-trip, and a Postgres advisory lock
  * covers the cross-instance overlap.
@@ -63,10 +65,20 @@ const STATE_TTL_MS = 10 * 60_000;
  * token still in hand.
  *
  * Consequence worth knowing: nothing keeps a token warm. A workspace nobody
- * touches makes no calls, so it refreshes nothing — harmless, because the refresh
- * token lives 30 days, but a workspace left completely idle past that has to be
- * reconnected. (A keep-warm sweep would fix it; not built, since a 30-day-idle
- * workspace has no cloud tasks to run either.)
+ * touches makes no calls, so it refreshes nothing. That is fine, because the
+ * refresh window is ROLLING rather than absolute — rotation pairs each new refresh
+ * token with a new access token, and PostHog's cleanup only deletes an unrevoked
+ * refresh token once its paired access token expired more than
+ * REFRESH_TOKEN_EXPIRE_SECONDS + OAUTH_EXPIRED_TOKEN_RETENTION_PERIOD ago (30d +
+ * 30d today, swept daily). `validate_refresh_token` itself enforces no expiry at
+ * all, so a single refresh buys roughly another two months of idleness and an
+ * actively-used connection never lapses.
+ *
+ * Those are implementation details of PostHog's, not a documented guarantee, which
+ * is why nothing here depends on the number: `invalid_grant` is handled as terminal
+ * whenever it arrives, from whatever cause (deleted, user-revoked, secret-scanned,
+ * or reuse protection). A keep-warm sweep isn't built — a workspace idle for two
+ * months has no cloud tasks to run either.
  */
 const REFRESH_SKEW_MS = 5 * 60_000;
 
