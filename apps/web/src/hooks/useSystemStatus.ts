@@ -15,7 +15,8 @@ import { useOnReconnect } from './useOnReconnect';
  * catches OAuth completing in the external browser, so reconnecting clears the
  * banner without a manual refresh. PostHog Code credentials only change from
  * inside the app (the Settings card writes the new status straight to the
- * store), so a one-shot fetch per workspace is enough.
+ * store) OR via the OAuth flow, which leaves the app entirely — so it is
+ * re-checked on focus too.
  *
  * Cloud-provider connection status is loaded here too (not per-component) so
  * the Settings cards, the default-provider selector, the sidebar status row,
@@ -50,24 +51,31 @@ export function useSystemStatus(): void {
     setGitHubUser(user);
   }, [user, setGitHubUser]);
 
-  useEffect(() => {
+  const refreshPostHogStatus = useCallback(() => {
     if (!currentWorkspaceId) {
       setPostHogStatus(null);
       return;
     }
-    let cancelled = false;
-    void (async () => {
-      try {
-        const s = await api.posthog.getStatus(currentWorkspaceId);
-        if (!cancelled) setPostHogStatus(s);
-      } catch {
-        if (!cancelled) setPostHogStatus({ connected: false });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    api.posthog
+      .getStatus(currentWorkspaceId)
+      .then(setPostHogStatus)
+      // Leave the last-known status in place on a transient failure rather than
+      // flashing "Not Connected" at someone who is connected.
+      .catch(() => {});
   }, [currentWorkspaceId, setPostHogStatus]);
+
+  useEffect(() => {
+    refreshPostHogStatus();
+  }, [refreshPostHogStatus]);
+
+  // The OAuth connect flow leaves the app (a full-page hop to PostHog's consent
+  // screen and back), so re-check on focus as well as on mount — that also covers
+  // the case where it was completed in another tab.
+  useEffect(() => {
+    const onFocus = () => refreshPostHogStatus();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refreshPostHogStatus]);
 
   const refreshCloudProviders = useCallback(() => {
     if (!currentWorkspaceId) {

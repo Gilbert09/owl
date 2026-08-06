@@ -3,7 +3,7 @@ import { workspaceRoutes } from './workspaces.js';
 import { environmentRoutes } from './environments.js';
 import { taskRoutes } from './tasks.js';
 import { githubRoutes, githubPublicRoutes } from './github.js';
-import { posthogRoutes } from './posthog.js';
+import { posthogRoutes, posthogPublicRoutes } from './posthog.js';
 import { cloudProviderRoutes } from './cloudProviders.js';
 import { repositoryRoutes } from './repositories.js';
 import { skillRoutes } from './skills.js';
@@ -50,6 +50,12 @@ export function setupRoutes(app: Express): void {
   // redirect, not by our authenticated desktop client, so it must stay
   // unauth'd. State-token validation inside the handler prevents CSRF.
   app.use(`${api}/github`, mount(githubPublicRoutes()));
+
+  // PostHog's OAuth redirect lands here at the end of the connect flow — a
+  // browser hop with no Authorization header, so it mounts alongside the GitHub
+  // callback rather than behind requireAuth. The single-use PKCE state row
+  // (posthog_oauth_states) is what authenticates it.
+  app.use(`${api}/posthog`, mount(posthogPublicRoutes()));
 
   // Fleet hosts PUSH their state here every ~15s. The caller is fleetd — a
   // daemon on bare metal with no Supabase session — so this mounts before

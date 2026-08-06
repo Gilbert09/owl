@@ -59,10 +59,10 @@ export const postHogCodeProvider: CloudTaskProvider = {
   },
 
   async testConnection(workspaceId) {
-    const creds = await getPostHogCodeCredentials(workspaceId);
-    if (!creds) return { connected: false, error: 'Not configured' };
+    const client = await getPostHogCodeClient(workspaceId);
+    if (!client) return { connected: false, error: 'Not configured' };
     try {
-      await new PostHogCodeClient(creds.apiKey, creds.projectId, creds.host).ping();
+      await client.ping();
       return { connected: true };
     } catch (err) {
       return { connected: false, error: err instanceof Error ? err.message : String(err) };

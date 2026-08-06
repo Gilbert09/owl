@@ -281,6 +281,13 @@
 			"when": 1784160000023,
 			"tag": "0039_admin_audit_log",
 			"breakpoints": true
+		},
+		{
+			"idx": 40,
+			"version": "7",
+			"when": 1784160000024,
+			"tag": "0040_posthog_oauth_states",
+			"breakpoints": true
 		}
 	]
 }

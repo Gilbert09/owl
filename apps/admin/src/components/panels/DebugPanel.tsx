@@ -60,6 +60,8 @@ const SERVICE_INFO: Record<string, string> = {
   github: 'GitHub REST + GraphQL API — PR data, checks, reviews, merges, and OAuth.',
   postgres: 'The Supabase Postgres database — every query funnels through here. Rows show the operation, target table, and estimated result size.',
   posthog_code: 'PostHog Code cloud-task API — creates and runs cloud agent tasks and streams their transcripts.',
+  posthog_oauth:
+    'PostHog’s OAuth endpoints — the code exchange when a workspace connects, the self-introspection that resolves its project, and every access-token refresh (they expire hourly, so a healthy connected workspace shows one per hour).',
   claude_managed_agents:
     'Claude Managed Agents API — creates agents/sessions in Anthropic’s sandbox, polls the event transcript, and opens PRs via the GitHub MCP.',
   posthog_analytics:

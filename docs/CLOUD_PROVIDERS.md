@@ -433,6 +433,79 @@ neutral shapes.
 
 ---
 
+## PostHog Code auth — OAuth alongside the personal API key (August 2026)
+
+PostHog Code originally authenticated with a **personal API key** the user pasted
+into Settings, plus a project id they had to go and find. Both are still
+supported, unchanged, forever-ish: a workspace connected that way is on
+`authMethod: 'personal_api_key'` (or has no `authMethod` at all, which reads the
+same — every install predating this change), and nothing migrates it or nags it.
+
+New connections default to **OAuth**, because PostHog is a full OAuth2/OIDC
+authorization server whose tasks API accepts `pha_` bearer tokens with exactly
+the same scope and per-project enforcement as a personal API key
+(`posthog/permissions.py` treats the two identically). What that buys:
+
+- **No credential passes through Talyn's UI.** The user authorizes on PostHog.
+- **The grant is narrow**: `openid task:read task:write`, on ONE project.
+- **The project id stops being a form field.** `required_access_level=project`
+  makes PostHog's consent screen render its single-project picker, and
+  self-introspection (RFC 7662, allowed with no `introspection` scope when a
+  token introspects itself) reports the chosen team back as `scoped_teams`.
+- **Revocable from PostHog** (Connected Apps), not just from here.
+
+### Client identity: CIMD, not registration
+
+`client_id` is `https://www.talyn.dev/oauth-client` — a document we serve
+(`apps/marketing/app/oauth-client/route.ts`) that PostHog fetches during the flow
+(draft-ietf-oauth-client-id-metadata-document). No registration, no client secret;
+Talyn is a **public client** and PKCE is the protection (PostHog requires PKCE of
+every client, and prod advertises no `private_key_jwt`). Setup + the three ways to
+misconfigure the pair are in [`docs/SETUP.md`](./SETUP.md) §6b.
+
+### The part that needs care: refresh-token rotation
+
+PostHog issues **1-hour access tokens** and **30-day refresh tokens**, rotates the
+refresh token on every use, and enforces **reuse protection** with a 120-second
+grace — past which presenting a spent refresh token revokes *the entire token
+family*. Talyn calls this API from a poll loop, a streamer and the dispatcher, on
+two instances during every deploy, so an unguarded refresh doesn't fail: it logs
+the workspace out of a connection nobody touched.
+
+`services/posthogCode/oauth.ts` single-flights refreshes twice over:
+
+1. an **in-process promise map** collapses the common case (many callers, one
+   instance) with no round-trip, and
+2. a **blocking Postgres advisory lock** (`posthog-oauth-refresh:<workspaceId>`)
+   covers the cross-instance overlap. The winner's tokens are re-read inside the
+   lock, so the loser uses the rotated pair rather than replaying a spent one.
+
+Refresh happens 5 minutes ahead of expiry, so it stays off the request path; a
+`401` on a token we believed valid forces exactly one refresh-and-retry
+(`client.ts`). An `invalid_grant` is terminal — it sets `oauth.reauthRequiredAt`
+on the integration row so every surface agrees, the UI says "Reconnect needed",
+and nothing keeps hammering a grant that cannot come back. A 5xx or a network
+blip explicitly does NOT set that flag.
+
+### Where it lives
+
+| File | Role |
+|---|---|
+| `services/posthogCode/oauthConfig.ts` | The env pair + the feature gate (`isPostHogOAuthEnabled`) |
+| `services/posthogCode/oauth.ts` | PKCE, authorize URL, code exchange, project resolution, refresh |
+| `services/posthogCode/integrationRow.ts` | The `posthog` integration row's shape, read + upsert, shared by both auth paths |
+| `services/posthogCode/credentials.ts` | One `getToken()` for both paths, so nothing downstream branches on auth method |
+| `routes/posthog.ts` | `POST /oauth/start` (authenticated) + `GET /oauth/callback` (public, state-authenticated) |
+| `db/migrations/0040_posthog_oauth_states.sql` | In-flight PKCE states — in Postgres, not a Map, because the callback can land on the other instance mid-deploy |
+| `__tests__/posthogOauth.test.ts` | The lifecycle, incl. the concurrent-refresh case |
+
+**Deliberately not done:** no `project:read` in the scope ask, so a grant that
+covers a whole organization (or several projects) is refused at connect time with
+a message rather than guessed at. If that turns out to be common, adding the scope
+and a project picker is the fix — not silently filing tasks into the wrong project.
+
+---
+
 ## Two integration models (scope clarification)
 
 This plan covers **cloud delegation** (vendor hosts the sandbox + agent loop; Owl
