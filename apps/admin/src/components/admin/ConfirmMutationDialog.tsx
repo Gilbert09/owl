@@ -13,6 +13,15 @@ import { cn } from '../../lib/utils';
  *  - A REASON is mandatory and goes into the audit log verbatim. "Who drained
  *    prod at 2am" is answerable from timestamps; "why" is only answerable
  *    because this refuses to submit without it.
+ *  - EXCEPT in `simple` mode, for the routine reversible actions (cancel a run,
+ *    delete a golden) where the operator asked for a plain "are you sure".
+ *    Typing a sentence to cancel your own stuck run is friction that buys
+ *    nothing: there is one operator, the action is not escalating, and the row
+ *    already names its target. The audit row is still written — actor, action,
+ *    target, timestamp — with the reason recording that none was asked for,
+ *    which is honest, unlike a mandatory field people fill with "asdf". The
+ *    escalating and cross-tenant actions (grant admin, plan override, kill
+ *    another tenant's task) keep the reason and the typed confirmation.
  *  - A TYPED CONFIRMATION for the destructive and escalating actions. The
  *    "type the repo name to delete it" pattern: a mis-clicked row can't
  *    execute, because it would have to already know which host or account it
@@ -29,6 +38,9 @@ import { cn } from '../../lib/utils';
 /** Long enough to be a sentence, short enough not to be a chore. */
 export const MIN_REASON_LENGTH = 10;
 
+/** What lands on the audit row when the dialog didn't ask for a reason. */
+export const SIMPLE_CONFIRM_REASON = 'Confirmed in the operator console (no reason requested)';
+
 export interface ConfirmMutationProps {
   open: boolean;
   onClose: () => void;
@@ -42,6 +54,12 @@ export interface ConfirmMutationProps {
   /** What the confirm field is asking for, e.g. "the host name". */
   confirmLabel?: string;
   destructive?: boolean;
+  /**
+   * Plain "are you sure": no reason field, no typed confirmation, just the
+   * description and the two buttons. `confirmText` is ignored. Use for routine,
+   * reversible, single-target actions.
+   */
+  simple?: boolean;
   /** For analytics only. Never the reason text. */
   analyticsAction: string;
   analyticsTargetType: string;
@@ -70,6 +88,7 @@ function MutationDialog({
   confirmText,
   confirmLabel,
   destructive,
+  simple,
   analyticsAction,
   analyticsTargetType,
   onConfirm,
@@ -92,8 +111,9 @@ function MutationDialog({
     setBusy(false);
   }, [open]);
 
-  const reasonOk = reason.trim().length >= MIN_REASON_LENGTH;
-  const confirmOk = !confirmText || confirm.trim().toLowerCase() === confirmText.trim().toLowerCase();
+  const reasonOk = simple || reason.trim().length >= MIN_REASON_LENGTH;
+  const confirmOk =
+    simple || !confirmText || confirm.trim().toLowerCase() === confirmText.trim().toLowerCase();
   const canSubmit = reasonOk && confirmOk && !busy;
 
   const remaining = useMemo(
@@ -106,13 +126,20 @@ function MutationDialog({
     setBusy(true);
     setError(null);
     try {
-      await onConfirm({ reason: reason.trim(), confirm: confirmText ? confirm.trim() : undefined });
+      // The backend requires a non-empty reason on every mutating route
+      // (routes/admin/guards.ts) and persists it verbatim, so simple mode sends
+      // a value that says exactly what happened rather than inventing one.
+      await onConfirm({
+        reason: simple ? SIMPLE_CONFIRM_REASON : reason.trim(),
+        confirm: !simple && confirmText ? confirm.trim() : undefined,
+      });
       // Never the reason text: it can carry customer identifiers, and PostHog
       // is not the audit log — the backend is.
       trackEvent('admin_mutation', {
         action: analyticsAction,
         target_type: analyticsTargetType,
-        reason_length: reason.trim().length,
+        reason_length: simple ? 0 : reason.trim().length,
+        simple_confirm: Boolean(simple),
         request_id: requestId,
       });
       onClose();
@@ -134,6 +161,7 @@ function MutationDialog({
           </div>
         </div>
 
+        {!simple && (
         <label className="mt-4 block">
           <span className="text-xs font-medium">Reason</span>
           <span className="ml-1 text-xs text-muted-foreground">(recorded in the audit log)</span>
@@ -152,8 +180,9 @@ function MutationDialog({
             </span>
           )}
         </label>
+        )}
 
-        {confirmText && (
+        {!simple && confirmText && (
           <label className="mt-3 block">
             <span className="text-xs font-medium">
               Type {confirmLabel ?? 'the name'} to confirm

@@ -34,6 +34,7 @@ import {
   withGuards,
 } from './guards.js';
 import { ADMIN_FLEET_UNREACHABLE, SSE_KEEPALIVE_FRAME, formatSseFrame } from '@talyn/shared';
+import { FleetRunNotFoundError } from '../../services/selfHosted/client.js';
 
 /**
  * Fleet reads for the operator console.
@@ -411,7 +412,21 @@ export function adminFleetRoutes(): Router {
         },
         async () => {
           const { client } = await fleetClientForHost(req.params.name);
-          await client.cancelRun(req.params.runId);
+          try {
+            await client.cancelRun(req.params.runId);
+          } catch (err) {
+            // A run the host does not have cannot be cancelled, and reporting
+            // that as a failure leaves the operator pressing a button that can
+            // never succeed on a row they can plainly see. The intent — "make
+            // this go away" — is satisfiable: the run is already gone. So this
+            // resolves rather than 502s, and the audit row still records the
+            // attempt (settled by withRemoteAudit either way).
+            if (!(err instanceof FleetRunNotFoundError)) throw err;
+            console.warn(
+              `[admin] cancel ${req.params.runId} on ${req.params.name}: run already gone — ` +
+                'nothing to cancel on the host',
+            );
+          }
         }
       );
       res.json({ success: true, data: { cancelled: true } });

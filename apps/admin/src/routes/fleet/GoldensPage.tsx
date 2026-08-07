@@ -338,8 +338,7 @@ export function GoldensPage() {
           </>
         }
         actionLabel="Delete"
-        confirmText={del.pending?.target.contentSha ?? undefined}
-        confirmLabel="the content SHA"
+        simple
         destructive
         analyticsAction="fleet.golden.delete"
         analyticsTargetType="golden"

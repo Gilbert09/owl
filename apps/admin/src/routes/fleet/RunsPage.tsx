@@ -283,8 +283,10 @@ export function RunsPage() {
           </>
         }
         actionLabel="Cancel run"
-        confirmText={cancel.pending?.target.runId}
-        confirmLabel="the run id"
+        // Plain confirm: one operator, one named target on the row, and the
+        // action is not escalating. Typing a 36-character run id to stop your own
+        // stuck run was friction with nothing behind it.
+        simple
         destructive
         analyticsAction="fleet.run.cancel"
         analyticsTargetType="run"

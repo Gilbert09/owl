@@ -405,6 +405,24 @@ class SelfHostedPoller {
       .update(tasksTable)
       .set({ status: 'failed', result, completedAt: null, updatedAt: now })
       .where(eq(tasksTable.id, row.id));
+
+    // Stamp the CLOUD status too, not just the task's own.
+    //
+    // The operator console's run list reads `run?.status ?? task.cloudStatus`
+    // (services/admin/runIndex.ts): with the run gone from the host there is no
+    // live status, so it falls through to this metadata — which every normal
+    // reconcile keeps fresh from the run, and which a vanished run leaves frozen
+    // at whatever it last said. Updating only `tasks.status` left the Runs page
+    // showing two rows as `queued` and `running` for 32 hours after they had
+    // already been failed, with a Cancel button that could only ever error.
+    await patchTaskMetadata(row.id, (existing) => {
+      const prev = (existing.cloudTask as CloudTaskMetadata | undefined) ?? undefined;
+      return {
+        ...existing,
+        cloudTask: { ...(prev ?? {}), status: 'failed' },
+      };
+    });
+
     emitTaskStatus(row.workspaceId, row.id, 'failed', result);
     console.warn(
       `[selfhosted] task ${row.id.slice(0, 8)}: run ${runId.slice(0, 8)} is gone — failing it (${detail})`,

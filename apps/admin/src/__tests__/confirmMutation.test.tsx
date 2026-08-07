@@ -19,7 +19,7 @@ vi.mock('../components/auth/AuthProvider', () => ({
   useAuth: () => ({ user: { email: 'op@talyn.dev' } }),
 }));
 
-const { ConfirmMutationDialog, MIN_REASON_LENGTH } = await import(
+const { ConfirmMutationDialog, MIN_REASON_LENGTH, SIMPLE_CONFIRM_REASON } = await import(
   '../components/admin/ConfirmMutationDialog'
 );
 
@@ -50,6 +50,68 @@ const action = (label = 'Drain host') => screen.getByText(label).closest('button
 
 beforeEach(() => vi.clearAllMocks());
 afterEach(cleanup);
+
+/**
+ * `simple` mode: the plain "are you sure" used for routine reversible actions
+ * (cancel a run, delete a golden). The point of these cases is that the audit
+ * trail survives the simplification — a dialog that asks for nothing must still
+ * send something the backend's reason gate accepts and a reader can interpret.
+ */
+describe('simple mode', () => {
+  it('asks for nothing and submits immediately', async () => {
+    const { onConfirm } = setup({ simple: true, actionLabel: 'Cancel run' });
+
+    expect(screen.queryByLabelText('Reason')).toBeNull();
+    expect(action('Cancel run').disabled).toBe(false);
+
+    fireEvent.click(action('Cancel run'));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    // Non-empty, or routes/admin/guards.ts rejects it with 400 — and it says
+    // that no reason was requested rather than fabricating one.
+    expect(onConfirm.mock.calls[0][0]).toEqual({
+      reason: SIMPLE_CONFIRM_REASON,
+      confirm: undefined,
+    });
+    expect(SIMPLE_CONFIRM_REASON.trim().length).toBeGreaterThan(0);
+  });
+
+  it('ignores confirmText instead of silently blocking on a hidden field', async () => {
+    // The failure this prevents: a call site passes both `simple` and a leftover
+    // `confirmText`, the typed-confirm input isn't rendered, and the action stays
+    // disabled forever with nothing on screen explaining why.
+    const { onConfirm } = setup({
+      simple: true,
+      confirmText: 'talyn-242e6d2d-8ffb-4ea4-a655-2aedb153c0f9',
+      actionLabel: 'Cancel run',
+    });
+
+    expect(screen.queryByLabelText('Confirmation')).toBeNull();
+    expect(action('Cancel run').disabled).toBe(false);
+    fireEvent.click(action('Cancel run'));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledTimes(1));
+    expect(onConfirm.mock.calls[0][0].confirm).toBeUndefined();
+  });
+
+  it('still keeps the dialog open, with its error, on failure', async () => {
+    const onConfirm = vi.fn().mockRejectedValue(new Error('run already gone'));
+    render(
+      <ConfirmMutationDialog
+        open
+        simple
+        onClose={vi.fn()}
+        title="Cancel this run?"
+        description="The microVM will be torn down."
+        actionLabel="Cancel run"
+        analyticsAction="fleet.run.cancel"
+        analyticsTargetType="run"
+        onConfirm={onConfirm}
+      />
+    );
+    fireEvent.click(action('Cancel run'));
+    await waitFor(() => expect(screen.getByText('run already gone')).toBeTruthy());
+    expect(action('Cancel run').disabled).toBe(false);
+  });
+});
 
 describe('the reason gate', () => {
   it('disables the action until the reason is long enough', () => {
