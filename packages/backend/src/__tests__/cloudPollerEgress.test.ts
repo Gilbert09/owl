@@ -137,4 +137,51 @@ describe('cloud poller task selection (in-flight + revival candidates)', () => {
 
     expect(rows.map((r) => r.id).sort()).toEqual(['inflight', 'revivable']);
   });
+
+  /**
+   * The transcript-backfill window (services/cloudProviders/poller.ts).
+   *
+   * A provider's "terminal but no transcript → pull the durable log" branch used
+   * to get one attempt, on the tick that saw the run finish — which is the moment
+   * the provider's log is least likely to have been flushed yet. Miss it and the
+   * task was never selected again, so its transcript stayed null forever. This
+   * clause re-selects recently-finished tasks that still have nothing.
+   */
+  it('re-selects recently-finished tasks with no transcript, and drops them once filled', async () => {
+    const BACKFILL_WINDOW_MS = 30 * 60 * 1000;
+    const now = Date.now();
+    const justNow = new Date(now - 60 * 1000); // 1m ago — inside the window
+    const oldish = new Date(now - 2 * 60 * 60 * 1000); // 2h ago — outside it
+
+    await seedRow('empty-recent', 'completed', { completedAt: justNow });
+    await seedRow('empty-old', 'completed', { completedAt: oldish });
+    await seedRow('filled-recent', 'completed', { completedAt: justNow });
+    await db
+      .update(tasksTable)
+      .set({ transcript: [{ id: 'e1', type: 'text' }] })
+      .where(eq(tasksTable.id, 'filled-recent'));
+    // An empty ARRAY must count as empty too, not just SQL NULL.
+    await seedRow('emptyarray-recent', 'completed', { completedAt: justNow });
+    await db
+      .update(tasksTable)
+      .set({ transcript: [] })
+      .where(eq(tasksTable.id, 'emptyarray-recent'));
+
+    const backfillCutoff = new Date(now - BACKFILL_WINDOW_MS);
+    const rows = await db
+      .select({ id: tasksTable.id })
+      .from(tasksTable)
+      .where(
+        and(
+          eq(tasksTable.status, 'completed'),
+          gte(tasksTable.completedAt, backfillCutoff),
+          sql`CASE WHEN jsonb_typeof(${tasksTable.transcript}) = 'array' THEN jsonb_array_length(${tasksTable.transcript}) = 0 ELSE true END`,
+        ),
+      );
+
+    // `filled-recent` is excluded because it already has what we'd be fetching —
+    // that is what stops this clause re-polling every finished task forever.
+    // `empty-old` is excluded by the window; opening it is its recovery path.
+    expect(rows.map((r) => r.id).sort()).toEqual(['empty-recent', 'emptyarray-recent']);
+  });
 });

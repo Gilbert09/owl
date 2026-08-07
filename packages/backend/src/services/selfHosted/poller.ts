@@ -12,6 +12,7 @@ import { TranscriptCursors } from '../cloudProviders/transcriptStore.js';
 import type { CloudTaskRow } from '../cloudProviders/types.js';
 import { githubService } from '../github.js';
 import { getSelfHostedClient, getSelfHostedCredentials } from './credentials.js';
+import { FleetRunNotFoundError } from './client.js';
 import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 
 // Re-exported, not redeclared. This module and claudeCode/poller.ts each had a
@@ -113,7 +114,22 @@ class SelfHostedPoller {
     // Any error here (including the capacity/throttle types) propagates to the
     // generic poller, which logs it and retries next tick. A failed poll must
     // never fail the task — the run is still going on the metal.
-    const { run } = await client.getRun(runId);
+    //
+    // The exception is a reachable host telling us the run does not exist. That
+    // is terminal: the VM is gone (fleetd restarted without adopting it, or it
+    // was reclaimed) and no future tick can change the answer. Retrying it is an
+    // infinite loop — two tasks sat in it for 21 hours on 2026-08-06, filling the
+    // log with one identical failure per tick while the host sat idle.
+    let run: FleetRun;
+    try {
+      ({ run } = await client.getRun(runId));
+    } catch (err) {
+      if (err instanceof FleetRunNotFoundError) {
+        await this.failVanishedRun(row, runId, err.message);
+        return;
+      }
+      throw err;
+    }
     const terminal = isFleetRunTerminal(run.status);
 
     // An ADOPTED run survived a fleetd restart, but its credentials did not:
@@ -360,6 +376,39 @@ class SelfHostedPoller {
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  /**
+   * Fail a task whose run no longer exists on the host.
+   *
+   * Deliberately not routed through `finalize`, which needs a FleetRun to derive
+   * status and summary from — there is no run to describe. The summary names the
+   * cause, because "Fleet run ended failed" would send someone looking for a
+   * failure on the metal that never happened.
+   */
+  private async failVanishedRun(
+    row: CloudTaskRow,
+    runId: string,
+    detail: string,
+  ): Promise<void> {
+    this.stopStreaming(row.id);
+    clearWatched(row.id);
+    this.cursor.delete(row.id);
+
+    const summary =
+      'The fleet host no longer has this run — it was lost when the host restarted ' +
+      'or the sandbox was reclaimed. Retry the task to start a fresh run.';
+    const result: TaskResult = { success: false, summary, error: `run ${runId} not found: ${detail}` };
+
+    const now = new Date();
+    await getDbClient()
+      .update(tasksTable)
+      .set({ status: 'failed', result, completedAt: null, updatedAt: now })
+      .where(eq(tasksTable.id, row.id));
+    emitTaskStatus(row.workspaceId, row.id, 'failed', result);
+    console.warn(
+      `[selfhosted] task ${row.id.slice(0, 8)}: run ${runId.slice(0, 8)} is gone — failing it (${detail})`,
+    );
   }
 
   private async finalize(

@@ -23,6 +23,26 @@ const POLL_INTERVAL_MS = 10_000;
 const REVIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * How long after a task finishes we keep re-attempting a transcript backfill for
+ * one that has none.
+ *
+ * A provider's "terminal but empty transcript → fetch the durable log" branch
+ * used to get exactly ONE attempt: the tick that observed the terminal status.
+ * That tick happens the moment the run ends, which is the moment the provider's
+ * durable log is least likely to exist yet (PostHog flushes session logs to S3
+ * asynchronously). Miss it and the task is finalised, never selected again, and
+ * its transcript stays null forever — which is why most completed PostHog tasks
+ * had no transcript at all while the two someone happened to be watching live
+ * did.
+ *
+ * 30 minutes of retries at the poll interval is far more than an async flush
+ * needs, and the set is naturally tiny (only finished tasks that still have
+ * nothing). Past the window, opening the task remains the recovery path: its
+ * `refresh-logs` call runs the same backfill on demand.
+ */
+const TRANSCRIPT_BACKFILL_WINDOW_MS = 30 * 60 * 1000;
+
+/**
  * Drives every in-progress cloud task to a terminal state. Each tick it
  * loads `in_progress` tasks, resolves the owning provider from the task's
  * metadata, and hands the row to `provider.reconcile`. Provider-specific
@@ -106,6 +126,7 @@ class CloudTaskPoller {
         // set tiny — genuinely-completed tasks (remote reached a terminal state)
         // never carry it, so they're not re-polled.
         const reviveCutoff = new Date(Date.now() - REVIVE_WINDOW_MS);
+        const backfillCutoff = new Date(Date.now() - TRANSCRIPT_BACKFILL_WINDOW_MS);
         const rows = await db
           .select({
             id: tasksTable.id,
@@ -125,6 +146,16 @@ class CloudTaskPoller {
                 eq(tasksTable.status, 'completed'),
                 gte(tasksTable.completedAt, reviveCutoff),
                 sql`${tasksTable.metadata} @> '{"reviveEligible":true}'::jsonb`,
+              ),
+              // Recently-finished tasks that still have no transcript, so the
+              // durable-log backfill gets more than the single attempt it had at
+              // the instant the run ended (see TRANSCRIPT_BACKFILL_WINDOW_MS).
+              // Bounded by completedAt so it cannot grow into a re-poll of every
+              // task we ever ran, and it drops out the moment a transcript lands.
+              and(
+                eq(tasksTable.status, 'completed'),
+                gte(tasksTable.completedAt, backfillCutoff),
+                sql`CASE WHEN jsonb_typeof(${tasksTable.transcript}) = 'array' THEN jsonb_array_length(${tasksTable.transcript}) = 0 ELSE true END`,
               ),
             ),
           );

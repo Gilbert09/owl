@@ -474,12 +474,19 @@ document would widen the production client for every user; don't. Recipe in
 
 ### The part that needs care: refresh-token rotation
 
-PostHog issues **1-hour access tokens** and **30-day refresh tokens**, rotates the
-refresh token on every use, and enforces **reuse protection** with a 120-second
-grace — past which presenting a spent refresh token revokes *the entire token
-family*. Talyn calls this API from a poll loop, a streamer and the dispatcher, on
-two instances during every deploy, so an unguarded refresh doesn't fail: it logs
-the workspace out of a connection nobody touched.
+PostHog rotates the refresh token on every use and enforces **reuse protection**
+with a 120-second grace — past which presenting a spent refresh token revokes *the
+entire token family*. Talyn calls this API from a poll loop, a streamer and the
+dispatcher, on two instances during every deploy, so an unguarded refresh doesn't
+fail: it logs the workspace out of a connection nobody touched.
+
+**Don't trust a number for the access-token lifetime.** `ACCESS_TOKEN_EXPIRE_SECONDS`
+in the PostHog repo says 1 hour, but us.posthog.com issued a **7-day** access token
+on 2026-08-06 (measured on the live grant). Nothing in the implementation assumes
+either: `expiresAt` is computed from each response's `expires_in`. The practical
+consequence is that on Cloud the refresh path runs roughly weekly, so a newly
+connected workspace won't exercise it for days — which is why it's worth having the
+unit tests rather than waiting to see it work in production.
 
 `services/posthogCode/oauth.ts` single-flights refreshes twice over:
 

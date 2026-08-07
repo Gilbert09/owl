@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Square, Loader2 } from 'lucide-react';
+import { Square, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { AgentConversation } from '../terminal/AgentConversation';
@@ -22,6 +22,8 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
   const { stopTask } = useTaskActions();
   const environments = useWorkspaceStore((s) => s.environments);
   const [isStopping, setIsStopping] = useState(false);
+  /** Why the transcript is empty, when we know. Null = nothing to report. */
+  const [transcriptError, setTranscriptError] = useState<string | null>(null);
 
   const assignedEnv = environments.find((e) => e.id === task.assignedEnvironmentId);
   const envName = assignedEnv?.name;
@@ -40,13 +42,32 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
   const hasCloudRun = Boolean(cloudMeta?.remoteTaskId);
   const hydrateTranscript = useCallback(async () => {
     if (!hasCloudRun) return;
+    // The two steps are caught SEPARATELY, and that is the whole point. They used
+    // to share one try, so any refresh failure — a 409 on a run that never
+    // started, a 502 from the provider, an unconfigured workspace — also skipped
+    // the fetch, and the screen showed nothing for a task whose transcript was
+    // sitting in the database. Fetching what is already stored must not depend on
+    // a remote call succeeding.
+    let refreshError: string | null = null;
     try {
       await api.tasks.refreshLogs(task.id);
-      const full = await api.tasks.get(task.id);
-      if (full.transcript?.length) mergeTaskTranscript(task.id, full.transcript);
-    } catch {
-      // Best-effort — the live stream still populates the transcript.
+    } catch (err) {
+      refreshError = err instanceof Error ? err.message : 'Could not refresh logs.';
     }
+    try {
+      const full = await api.tasks.get(task.id);
+      if (full.transcript?.length) {
+        mergeTaskTranscript(task.id, full.transcript);
+        // Stored events made it to the screen, so a failed refresh was only a
+        // failure to fetch anything NEWER — not worth alarming anyone about.
+        refreshError = null;
+      }
+    } catch (err) {
+      refreshError ??= err instanceof Error ? err.message : 'Could not load this task’s logs.';
+    }
+    // Surfaced rather than swallowed: an empty transcript with no explanation is
+    // indistinguishable from a run that produced no output.
+    setTranscriptError(refreshError);
   }, [task.id, hasCloudRun]);
 
   // Once per open: without this, an in-progress run shows only the
@@ -120,6 +141,17 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
           )}
         </div>
       </div>
+
+      {/* An empty transcript with no explanation is indistinguishable from a run
+          that produced no output, so say which it is. Only shown when we have
+          nothing to display — a partial transcript plus a stale-fetch warning
+          would be noise. */}
+      {transcriptError && !task.transcript?.length && (
+        <div className="px-3 py-2 text-xs text-destructive bg-destructive/10 border-b border-destructive/20 flex items-start gap-2">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+          <span>Couldn’t load this run’s logs: {transcriptError}</span>
+        </div>
+      )}
 
       {/* Terminal Content — read-only transcript. Users no longer message
           cloud agents directly (cloud-only PR-management direction). */}

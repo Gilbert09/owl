@@ -192,6 +192,36 @@ export class FleetCapacityError extends Error {
   }
 }
 
+/**
+ * The host is reachable and says the run does not exist.
+ *
+ * Unlike every other fleet error, this one is TERMINAL: capacity, throttle and
+ * unreachable all mean "ask again later, the run is still going on the metal",
+ * but a healthy host is authoritative about its own runs. A run disappears when
+ * fleetd restarts without adopting it, or the microVM is reclaimed — and the task
+ * can never progress again, so retrying is a loop with no exit. Two of them ran
+ * for 21 hours on 2026-08-06, reconciling every tick and failing identically.
+ *
+ * Matched on the status AND the message on purpose: fleetd's source is not in
+ * this repo, so which status it pairs with "no such run" is unverified here, and
+ * the message is the only part actually observed in production. Either signal is
+ * enough; neither alone is trustworthy.
+ */
+export class FleetRunNotFoundError extends Error {
+  readonly isRunNotFound = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'FleetRunNotFoundError';
+  }
+}
+
+/** Whether a fleet error response means "no such run". Exported for the poller,
+ *  which must distinguish terminal from retryable without string-matching at the
+ *  call site. */
+export function isRunNotFoundResponse(status: number, message: string): boolean {
+  return status === 404 || /no such run|run not found|unknown run/i.test(message);
+}
+
 /** A rate-limit response. Shaped for the generic poller's ThrottleBackoff,
  *  which duck-types on `status === 429` and an optional `retryAfterMs`. */
 export class FleetThrottleError extends Error {
@@ -318,7 +348,12 @@ export class FleetClient {
       throw new FleetThrottleError(await errorMessage(resp, 'rate limited'), parseRetryAfterMs(resp));
     }
     if (!resp.ok) {
-      throw new Error(await errorMessage(resp, `fleet returned ${resp.status}`));
+      const message = await errorMessage(resp, `fleet returned ${resp.status}`);
+      // Terminal, not retryable — see FleetRunNotFoundError.
+      if (isRunNotFoundResponse(resp.status, message)) {
+        throw new FleetRunNotFoundError(message);
+      }
+      throw new Error(message);
     }
     if (resp.status === 204) return undefined as T;
     return (await resp.json()) as T;

@@ -168,43 +168,53 @@ describe('fleet host registry', () => {
   });
 
   describe('hostIsDispatchable', () => {
-    const base = {
+    /**
+     * Built per case, NOT once at describe time.
+     *
+     * `reportedAt` was a single `new Date()` evaluated when the suite was
+     * collected, so in a slow full-suite run (each pglite file spins up its own
+     * Postgres) it aged past HOST_STALE_AFTER_MS before the later cases ran —
+     * and every one of them then failed for staleness rather than the thing it
+     * was testing. It looked exactly like a broken dispatch predicate, and cost
+     * a real investigation on 2026-08-06 while a fleet host was genuinely down.
+     */
+    const freshHost = () => ({
       reportedAt: new Date(),
       draining: false,
       runsLive: 0,
       runsMax: 4,
       apiEndpoint: 'http://10.9.0.2:8080',
-    };
+    });
 
     it('is true for a live host with room and an address', () => {
-      expect(hostIsDispatchable(base)).toBe(true);
+      expect(hostIsDispatchable(freshHost())).toBe(true);
     });
 
     it('is FALSE for a healthy, idle host that advertised no address', () => {
       // The easy one to forget, and the whole reason registration and
       // reachability are separate: there is nowhere to send the run, so
       // treating it as available means picking it and failing on connect.
-      expect(hostIsDispatchable({ ...base, apiEndpoint: null })).toBe(false);
+      expect(hostIsDispatchable({ ...freshHost(), apiEndpoint: null })).toBe(false);
     });
 
     it('is false while draining', () => {
-      expect(hostIsDispatchable({ ...base, draining: true })).toBe(false);
+      expect(hostIsDispatchable({ ...freshHost(), draining: true })).toBe(false);
     });
 
     it('is false once the host has stopped reporting', () => {
-      expect(hostIsDispatchable({ ...base, reportedAt: new Date(Date.now() - HOST_STALE_AFTER_MS - 1) })).toBe(false);
+      expect(hostIsDispatchable({ ...freshHost(), reportedAt: new Date(Date.now() - HOST_STALE_AFTER_MS - 1) })).toBe(false);
     });
 
     it('is false at capacity and true below it', () => {
-      expect(hostIsDispatchable({ ...base, runsLive: 4, runsMax: 4 })).toBe(false);
-      expect(hostIsDispatchable({ ...base, runsLive: 3, runsMax: 4 })).toBe(true);
+      expect(hostIsDispatchable({ ...freshHost(), runsLive: 4, runsMax: 4 })).toBe(false);
+      expect(hostIsDispatchable({ ...freshHost(), runsLive: 3, runsMax: 4 })).toBe(true);
     });
 
     it('treats an unknown cap as unknown rather than full', () => {
       // A host reporting at all is a host that is running. Reading "no cap
       // declared" as "full" would make a host that never sends runsMax
       // permanently undispatchable and give no clue why.
-      expect(hostIsDispatchable({ ...base, runsLive: 99, runsMax: 0 })).toBe(true);
+      expect(hostIsDispatchable({ ...freshHost(), runsLive: 99, runsMax: 0 })).toBe(true);
     });
   });
 

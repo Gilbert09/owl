@@ -23,11 +23,18 @@ import {
  * key: the user never handles a credential, the grant is scoped to ONE project
  * and only `task:*`, and it is revocable from PostHog's own settings.
  *
- * What it costs, and what most of this module is about: PostHog access tokens
- * live 1 hour, and refresh tokens ROTATE with reuse protection (a 120-second
- * grace, after which reusing a spent refresh token revokes the entire token
- * family). Their lifetime is a ROLLING window that each refresh renews, not a
- * countdown from first consent — see REFRESH_SKEW_MS. Talyn hits this API from a
+ * What it costs, and what most of this module is about: refresh tokens ROTATE
+ * with reuse protection (a 120-second grace, after which reusing a spent refresh
+ * token revokes the entire token family), and their lifetime is a ROLLING window
+ * that each refresh renews rather than a countdown from first consent — see
+ * REFRESH_SKEW_MS.
+ *
+ * Access-token lifetime is whatever the instance says, and nothing here assumes a
+ * number: `expiresAt` comes from the `expires_in` of each response. Worth knowing
+ * when reasoning about this code, though — us.posthog.com issued a SEVEN DAY
+ * access token on 2026-08-06, not the 1 hour its `ACCESS_TOKEN_EXPIRE_SECONDS`
+ * default suggests. So on Cloud the refresh path runs about weekly, not hourly,
+ * and a freshly connected workspace will not exercise it for days. Talyn hits this API from a
  * poll loop, a streamer, and the dispatcher — across two instances during every
  * deploy — so an unguarded refresh would eventually revoke a workspace's own
  * connection.

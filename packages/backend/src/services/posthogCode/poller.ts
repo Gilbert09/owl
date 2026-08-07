@@ -117,7 +117,24 @@ class PostHogCodePoller {
     // `in_progress` and we fall through to normal reconcile below.
     if (reviving) {
       const revived = await this.maybeRevive(task, run, status);
-      if (!revived) return;
+      if (!revived) {
+        // Not resuming — but a finished run with NO transcript is exactly what
+        // the generic poller's backfill window re-selects this task for, and
+        // returning here is what made that window pointless. PostHog flushes its
+        // durable session log asynchronously, so the single attempt made at the
+        // instant the run ended often found nothing; this is the retry.
+        const terminalRunId = run?.id;
+        if (terminalRunId && TERMINAL.has(status) && task.transcriptEmpty) {
+          postHogCodeStreamer.ensure({
+            taskId: task.id,
+            workspaceId: task.workspaceId,
+            posthogTaskId: task.posthogTaskId,
+            posthogRunId: terminalRunId,
+            backfillOnly: true,
+          });
+        }
+        return;
+      }
     }
 
     // The real run id lives on `latest_run.id`. Early FastOwl builds
@@ -138,11 +155,20 @@ class PostHogCodePoller {
     //     down any lingering stream — `stop` persists what's buffered.
     const isTerminal = TERMINAL.has(status);
     if (runId && isTerminal && task.transcriptEmpty) {
+      // `backfillOnly` is what makes this the "one-shot durable backfill" the
+      // comment above describes. Without it, `ensure` opens the LIVE SSE stream
+      // first — and for a finished run whose Redis stream has been trimmed that
+      // endpoint answers 200 with nothing, so the tail loop reconnects four
+      // times, finds nothing new, breaks, and never reads the S3 log at all. The
+      // fallback only triggers on an explicit 404 / "Stream not available", which
+      // a trimmed-but-alive stream doesn't produce. Result: a silently empty
+      // transcript, which is what most completed tasks had.
       postHogCodeStreamer.ensure({
         taskId: task.id,
         workspaceId: task.workspaceId,
         posthogTaskId: task.posthogTaskId,
         posthogRunId: runId,
+        backfillOnly: true,
       });
     } else if (runId && !isTerminal && task.watched) {
       postHogCodeStreamer.ensure({
