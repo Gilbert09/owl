@@ -1558,16 +1558,58 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).not.toContain('submit_external');
     });
 
-    it('blocks (self-healing) once the resubmit budget is spent', () => {
-      const d = decide(submitted({ submitAttempts: 3 }), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
+    /**
+     * A queue FAILURE on a locally-clean PR is fixable, it just needs a
+     * different starting point.
+     *
+     * This used to block once the resubmit budget was spent and wait for a
+     * human to push. But the PR's checks are green — what failed is the PR
+     * MERGED WITH TRUNK, which exists only inside the queue — so the run is
+     * started from the provider's failure output instead of the PR's own state.
+     * An ordinary fix run would re-read the green checks and conclude there was
+     * nothing to do.
+     */
+    it('dispatches a queue-failure run once the resubmit budget is spent', () => {
+      const d = decide(
+        submitted({ submitAttempts: 3, fixAttempts: 0 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed' })
+      );
+      const fire = d.actions.find((a) => a.kind === 'fire_fix_run');
+      expect(fire).toBeTruthy();
+      expect(fire).toMatchObject({ resign: false, queueFailure: { provider: expect.any(String) } });
+      // NEVER the resubmit path: `submitAttempts >= maxAttempts` is the only
+      // guard against an eject → resubmit → eject loop.
+      expect(kinds(d)).not.toContain('submit_external');
+      // A Talyn-armed auto-merge must not survive this either — a half-fixed
+      // PR would merge itself behind the queue's back.
+      expect(kinds(d)).toContain('disarm_automerge');
+      expect(lastTransition(d)!.event.code).toBe('external_queue_failed_fixing');
+    });
+
+    it('blocks (self-healing) once the FIX budget is spent too', () => {
+      const d = decide(
+        submitted({ submitAttempts: 3, fixAttempts: 3 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed' })
+      );
       const t = lastTransition(d)!;
       expect(t.to).toBe('blocked');
       expect(t.blockedCode).toBe('external_queue_rejected');
       expect(t.blockedReason).toContain('rejected this PR 3×');
       expect(kinds(d)).toContain('notify_blocked');
-      // A Talyn-armed auto-merge must not survive the block — it would re-submit
-      // the PR behind the queue's back.
       expect(kinds(d)).toContain('disarm_automerge');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+    });
+
+    it('holds rather than dispatching when no cloud provider is connected', () => {
+      const d = decide(
+        submitted({ submitAttempts: 3, fixAttempts: 0 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed', cloudEnvAvailable: false })
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(lastTransition(d)!.blockedCode).toBe('external_queue_rejected');
     });
 
     it('does NOT resubmit a cancelled PR — someone pulled it out on purpose', () => {

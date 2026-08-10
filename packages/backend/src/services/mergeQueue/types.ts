@@ -106,7 +106,7 @@ export type BlockedCode =
    */
   | 'external_queue_rejected';
 
-export type FixKind = 'blockers' | 'resign';
+export type FixKind = 'blockers' | 'resign' | 'queue_failure';
 
 /**
  * How a PR was handed to an external merge queue: the provider's own submit
@@ -349,7 +349,16 @@ export type Action =
    * resignAttempts+1 when resign); TaskLimitError or no cloud env →
    * ensure 'queued' and burn NOTHING (a slot frees when a task ends).
    */
-  | { kind: 'fire_fix_run'; resign: boolean }
+  | {
+      kind: 'fire_fix_run';
+      resign: boolean;
+      /**
+       * Set when the PR is clean on its own branch but the external queue
+       * failed it merged with trunk. The run has no local blocker to work
+       * from, so it is started from the provider's failure output instead.
+       */
+      queueFailure?: { provider: string; evidence: string };
+    }
   /** Enable GitHub auto-merge on the head (expectedHeadOid-guarded; Push E). */
   | { kind: 'arm_automerge' }
   /**

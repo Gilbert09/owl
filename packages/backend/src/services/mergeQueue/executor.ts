@@ -56,6 +56,7 @@ import {
   type Action,
   type DecisionContext,
   type EntrySnapshot,
+  type FixKind,
   type MergeOutcome,
   type PrSnapshot,
   type RerunOutcome,
@@ -322,7 +323,7 @@ async function performAction(action: Action, ctx: ActionContext): Promise<Action
       return { redecide: true };
     }
     case 'fire_fix_run':
-      return fireFixRun(action.resign, ctx);
+      return fireFixRun(action.resign, ctx, action.queueFailure);
     case 'record_merged': {
       await recordMerged(ctx.entry, ctx.pr);
       return {};
@@ -909,14 +910,18 @@ async function rerequestFailedChecks(pr: PrEvalRow): Promise<RerunOutcome> {
 // at fixing+null; the reconciler's 120s staleness sweep re-evaluates it and
 // decide (which reads null fixTaskId as no active run) simply re-fires — natural
 // recovery, no wedge. See the 2026-07-17 runaway + Session 72.
-async function fireFixRun(resign: boolean, ctx: ActionContext): Promise<ActionOutcome> {
+async function fireFixRun(
+  resign: boolean,
+  ctx: ActionContext,
+  queueFailure?: { provider: string; evidence: string }
+): Promise<ActionOutcome> {
   const resolved = await resolveCloudEnv(ctx.pr.workspaceId);
   if (!resolved) {
     // decide gates on cloudEnvAvailable, but the env can disconnect between
     // context build and dispatch — hold as queued, burn nothing.
     return ensureQueuedDeferred(ctx, 'no_cloud_env', 'No connected cloud provider — deferring.');
   }
-  const fixKind: 'resign' | 'blockers' = resign ? 'resign' : 'blockers';
+  const fixKind: FixKind = queueFailure ? 'queue_failure' : resign ? 'resign' : 'blockers';
 
   // Phase A — claim. Whoever wins this CAS owns the dispatch; concurrent
   // evaluations at the same version lose here and create no task. No
@@ -961,10 +966,14 @@ async function fireFixRun(resign: boolean, ctx: ActionContext): Promise<ActionOu
     created = await createCloudTask({
       workspaceId: ctx.pr.workspaceId,
       type: 'pr_response',
-      title: `Get ${ref} mergeable (merge queue)`,
-      description: resign
-        ? `Merge queue: re-sign ${ref} ("${prTitle}") — the base requires signed commits — and take it to a clean, mergeable state.`
-        : `Merge queue: take ${ref} ("${prTitle}") to a clean, mergeable, up-to-date state.`,
+      title: queueFailure
+        ? `Fix ${ref} after a merge-queue failure`
+        : `Get ${ref} mergeable (merge queue)`,
+      description: queueFailure
+        ? `Merge queue: ${queueFailure.provider} failed ${ref} ("${prTitle}") merged with its base while the branch itself is green — investigate the queue's failure and fix it.`
+        : resign
+          ? `Merge queue: re-sign ${ref} ("${prTitle}") — the base requires signed commits — and take it to a clean, mergeable state.`
+          : `Merge queue: take ${ref} ("${prTitle}") to a clean, mergeable, up-to-date state.`,
       prompt: buildMergeablePrompt({
         owner: ctx.pr.owner,
         repo: ctx.pr.repo,
@@ -972,6 +981,9 @@ async function fireFixRun(resign: boolean, ctx: ActionContext): Promise<ActionOu
         summary,
         provider: resolved.provider,
         resignCommits: resign,
+        // Starts the run at the provider's failure output rather than the PR's
+        // own (green) checks — see queueFailureRule.
+        queueFailure,
       }),
       repositoryId: ctx.pr.repositoryId,
       assignedEnvironmentId: resolved.envId,

@@ -205,6 +205,37 @@ export interface MergeablePromptInput {
    * merge queue's signing gate; unset (false) leaves the prompt unchanged.
    */
   resignCommits?: boolean;
+  /**
+   * The PR was ejected by an external merge queue that FAILED it, while the PR
+   * itself looks clean locally.
+   *
+   * That combination is the whole reason this field exists: there is no local
+   * blocker to work from, because the thing that broke is the PR MERGED WITH
+   * TRUNK — a state that exists only inside the queue. A run started from the
+   * PR's own state would re-read green checks and conclude there is nothing to
+   * do, which is exactly what made these PRs sit blocked.
+   *
+   * `evidence` is the provider's own status sentence, verbatim.
+   */
+  queueFailure?: { provider: string; evidence: string };
+}
+
+/**
+ * What to tell a run whose PR passed on its own branch and failed in the queue.
+ *
+ * Deliberately starts by sending the agent to the QUEUE's output rather than
+ * the PR's checks: the checks are green, and treating them as the source of
+ * truth is how a run concludes "nothing to fix" on a PR that is demonstrably
+ * unmergeable. The queue tested a merge commit that does not exist on the
+ * branch, so reproducing it means merging trunk in locally.
+ */
+export function queueFailureRule(input: { provider: string; evidence: string; baseBranch: string }): string {
+  return `WHY THIS RUN EXISTS — THE MERGE QUEUE FAILED THIS PR, NOT ITS BRANCH:
+  - ${input.provider} took this PR into its merge queue, tested it MERGED WITH ${input.baseBranch}, and that merged result failed. The PR's own checks are green — do not take that as "nothing to fix", because the failure is not on the branch as it stands.
+  - What ${input.provider} reported: "${input.evidence}"
+  - START THERE, not with the PR's check list. Find the queue's failure output — the provider's comments on the PR, its check runs, and any linked CI job it names — and read what actually broke.
+  - REPRODUCE IT the way the queue did: merge the latest ${input.baseBranch} into this branch (or rebase onto it) and run the failing tests against that combination. A failure that only appears merged is usually a semantic conflict — two changes that are each fine alone and contradict together.
+  - If you genuinely cannot find any failure after merging ${input.baseBranch} and running the relevant tests, say so plainly in your summary rather than pushing a speculative change. A no-op run that explains itself is worth more than a guess.`;
 }
 
 /**
@@ -272,7 +303,7 @@ PR number: #${number}
 Branch: ${s.headBranch}
 
 ${postHogCodeGitRules(s.baseBranch)}
-${input.resignCommits ? `\n${postHogCodeResignRule(s.baseBranch)}\n` : ''}
+${input.resignCommits ? `\n${postHogCodeResignRule(s.baseBranch)}\n` : ''}${input.queueFailure ? `\n${queueFailureRule({ ...input.queueFailure, baseBranch: s.baseBranch })}\n` : ''}
 ${talynTaglineRule()}
 
 Current issues detected (verify by re-fetching — state may have changed since this task was created):
@@ -344,7 +375,7 @@ PR number: #${number}
 Branch: ${s.headBranch}
 
 ${claudeCodeGitRules(s.baseBranch)}
-${input.resignCommits ? `\n${claudeCodeResignRule(s.baseBranch)}\n` : ''}
+${input.resignCommits ? `\n${claudeCodeResignRule(s.baseBranch)}\n` : ''}${input.queueFailure ? `\n${queueFailureRule({ ...input.queueFailure, baseBranch: s.baseBranch })}\n` : ''}
 ${talynTaglineRule()}
 
 Current issues detected (verify by re-fetching — state may have changed since this task was created):

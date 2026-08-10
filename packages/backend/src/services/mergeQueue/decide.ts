@@ -795,6 +795,56 @@ function decideExternalEjection(
 ): Decision | null {
   const provider = externalQueueProviderLabel(ext.provider);
   if (ext.state === 'cancelled' || d.entry.submitAttempts >= ctx.maxAttempts) {
+    // A queue FAILURE on a locally-clean PR is fixable — it just needs a
+    // different starting point.
+    //
+    // The ordinary fix run works from the PR's own blockers, and this PR has
+    // none: its checks are green on its branch. What broke is the PR MERGED
+    // WITH TRUNK, a state that exists only inside the queue, so the run is
+    // started from the provider's failure output instead (fixKind
+    // 'queue_failure'). Without this the entry parked on "Failed in queue ·
+    // BLOCKED" and waited for a human to push, with a remedy available and
+    // idle.
+    //
+    // Dispatched DIRECTLY, never by falling through to the ordinary rules. The
+    // `submitAttempts >= maxAttempts` test above is the ONLY guard on
+    // resubmission, and a fall-through would bypass the one thing standing
+    // between a rejected PR and an eject → resubmit → eject loop.
+    //
+    // Bounded by fixAttempts, which is per-head and resets only on a new
+    // commit, so a PR that keeps failing costs at most maxAttempts runs per
+    // push. `cancelled` is excluded: somebody pulled the PR out deliberately
+    // and spending money to override that is not a repair. Auto-merge is
+    // disarmed on the way, exactly as the blocking path does — a half-fixed PR
+    // must not merge itself behind the queue's back.
+    const fixable =
+      ext.state === 'failed' &&
+      d.entry.fixAttempts < ctx.maxAttempts &&
+      ctx.cloudEnvAvailable;
+    if (fixable) {
+      d.transition('queued', {
+        set: {
+          externalSubmitVia: null,
+          externalSubmittedAt: null,
+          externalState: ext.state,
+        },
+        event: {
+          code: 'external_queue_failed_fixing',
+          message:
+            `${provider} failed this PR in its merge queue and the resubmit budget is spent — ` +
+            `dispatching a run from the queue's failure output ` +
+            `(fix ${d.entry.fixAttempts + 1}/${ctx.maxAttempts}).`,
+          detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
+        },
+      });
+      d.act({ kind: 'disarm_automerge' });
+      d.act({
+        kind: 'fire_fix_run',
+        resign: false,
+        queueFailure: { provider, evidence: ext.evidence },
+      });
+      return d.done('hold');
+    }
     d.transition('blocked', {
       blockedCode: 'external_queue_rejected',
       blockedReason: externalQueueRejectedReason(ext, ctx.maxAttempts),

@@ -662,7 +662,12 @@ describe('mergeQueue v2 pipeline', () => {
       expect(codes).toContain('external_queue_ejected');
     });
 
-    it('gives up (self-healing block) once the resubmit budget is spent', async () => {
+    /**
+     * The queue failed a PR whose own branch is green. That is fixable — but
+     * only from the queue's failure output, since the PR's checks say nothing
+     * is wrong. See queueFailureRule.
+     */
+    it('dispatches a queue-failure run once the resubmit budget is spent', async () => {
       gated();
       mockCapability.mockResolvedValue('available');
       const { prId, entryId } = await insertQueuedPr(db, {
@@ -671,7 +676,37 @@ describe('mergeQueue v2 pipeline', () => {
       });
       await db
         .update(mergeQueueEntries)
-        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3 } as never)
+        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3, fixAttempts: 0 } as never)
+        .where(eq(mergeQueueEntries.id, entryId));
+
+      const spy = vi
+        .spyOn(taskCreateModule, 'createCloudTask')
+        .mockResolvedValue({ id: 'task-queue-fix' } as never);
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(spy).toHaveBeenCalled();
+      const input = spy.mock.calls[0]![0] as { prompt: string; title: string };
+      // The run must be pointed at the QUEUE's failure, not the PR's checks.
+      expect(input.prompt).toContain('MERGE QUEUE FAILED THIS PR');
+      expect(input.title).toContain('after a merge-queue failure');
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.fixKind).toBe('queue_failure');
+      expect(mockEnableAutoMerge).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('gives up (self-healing block) once the FIX budget is spent too', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node', labels: ['trunk-failed'] },
+        entry: { status: 'awaiting_external' },
+      });
+      await db
+        .update(mergeQueueEntries)
+        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3, fixAttempts: 3 } as never)
         .where(eq(mergeQueueEntries.id, entryId));
 
       await evaluateGroupNow('repo1', 'main', 'test');
