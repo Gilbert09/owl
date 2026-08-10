@@ -120,6 +120,58 @@ describe('prMonitor — poll orchestration', () => {
     vi.restoreAllMocks();
   });
 
+  /**
+   * A renamed repo must be followed, not reported as a permissions problem.
+   *
+   * The search API has no redirect: `repo:acme/widgets` simply stops matching
+   * once the repo is renamed, and the failure comes back as "Could not resolve
+   * to a Repository" — the same string a repo the App cannot see produces. So a
+   * rename was reported as "the GitHub App has no access to <repo> — grant it
+   * on GitHub", asking for a permission grant that could never have fixed it.
+   * Gilbert09/owl sat in production logs saying exactly that.
+   */
+  it('follows a renamed repo instead of reporting it as a missing grant', async () => {
+    vi.spyOn(githubService, 'searchPullRequestNumbers').mockRejectedValue(
+      new Error('Could not resolve to a Repository with the name acme/widgets.')
+    );
+    // REST redirects a rename, so the repo lookup answers with the new name.
+    const repoSpy = vi.spyOn(githubService, 'getRepository').mockResolvedValue({
+      id: 1,
+      name: 'gadgets',
+      full_name: 'acme/gadgets',
+      private: false,
+      html_url: 'https://github.com/acme/gadgets',
+      default_branch: 'main',
+      owner: { login: 'acme', avatar_url: 'x' },
+    } as Awaited<ReturnType<typeof githubService.getRepository>>);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await prMonitorService.forcePoll();
+
+    expect(repoSpy).toHaveBeenCalled();
+    const rows = await db.select().from(repositoriesTable);
+    const row = rows.find((r) => r.id === 'repo1');
+    // Same row id: PRs already tracked against it stay attached.
+    expect(row?.name).toBe('acme/gadgets');
+    expect(row?.url).toBe('https://github.com/acme/gadgets');
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('has no access');
+  });
+
+  it('still reports a genuinely inaccessible repo as a missing grant', async () => {
+    vi.spyOn(githubService, 'searchPullRequestNumbers').mockRejectedValue(
+      new Error('Resource not accessible by integration')
+    );
+    // The probe fails too — the repo really is out of reach.
+    vi.spyOn(githubService, 'getRepository').mockRejectedValue(new Error('Not Found'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    await prMonitorService.forcePoll();
+
+    expect(warn.mock.calls.flat().join(' ')).toContain('has no access');
+    const rows = await db.select().from(repositoriesTable);
+    expect(rows.find((r) => r.id === 'repo1')?.name).toBe('acme/widgets');
+  });
+
   it('does nothing when there are no connected workspaces', async () => {
     vi.spyOn(githubService, 'getConnectedWorkspaces').mockReturnValue([]);
     const searchSpy = vi.spyOn(githubService, 'searchPullRequestNumbers');

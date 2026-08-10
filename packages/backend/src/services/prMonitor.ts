@@ -254,6 +254,15 @@ class PRMonitorService extends EventEmitter {
         // granted on GitHub. Log the actionable notice ONCE, then stay quiet —
         // don't spam this every 5-min sweep.
         if (isRepoAccessError(msg)) {
+          // "Cannot see it" and "it moved" are indistinguishable from the
+          // error alone, and they need opposite responses: one waits for a
+          // human to grant access, the other fixes itself. Ask before assuming.
+          const renamedTo = await this.detectRename(workspaceId, repo);
+          if (renamedTo) {
+            await this.applyRename(repo, renamedTo);
+            this.inaccessibleRepos.delete(accessKey);
+            continue;
+          }
           if (!this.inaccessibleRepos.has(accessKey)) {
             this.inaccessibleRepos.add(accessKey);
             console.warn(
@@ -265,6 +274,59 @@ class PRMonitorService extends EventEmitter {
         console.error(`PR monitor: ${repo.fullName} poll failed:`, msg);
       }
     }
+  }
+
+  /**
+   * Whether a repo we can no longer reach has simply been renamed.
+   *
+   * A rename leaves the stored `owner/repo` pointing at nothing. The search API
+   * has no redirect — `repo:Gilbert09/owl` just stops matching — so the failure
+   * arrives as "Could not resolve to a Repository", which reads identically to
+   * a repo the App was never granted. Gilbert09/owl sat in the logs asking for
+   * a permission grant that would never have helped.
+   *
+   * REST does redirect: GitHub answers /repos/{old} with a 301 to the current
+   * name, and fetch follows it, so the response carries the repo's CURRENT
+   * full_name. That is the cheapest reliable rename probe available, and unlike
+   * the `repository` webhook it needs no change to the App's event
+   * subscriptions and also catches renames that happened while we were down.
+   *
+   * Returns the new "owner/repo" only when it genuinely differs; null when the
+   * repo is unreachable for any other reason, which is the caller's cue to keep
+   * treating it as an access problem.
+   */
+  private async detectRename(
+    workspaceId: string,
+    repo: WatchedRepo
+  ): Promise<{ fullName: string; htmlUrl: string } | null> {
+    try {
+      const current = await githubService.getRepository(workspaceId, repo.owner, repo.repo);
+      if (!current?.full_name) return null;
+      if (current.full_name.toLowerCase() === repo.fullName.toLowerCase()) return null;
+      return { fullName: current.full_name, htmlUrl: current.html_url };
+    } catch {
+      // Still unreachable — a real access problem, or the repo is gone.
+      return null;
+    }
+  }
+
+  /**
+   * Point a watched repo at its new name. The row keeps its id, so every PR
+   * already tracked against it stays attached rather than being orphaned and
+   * re-discovered under a new row.
+   */
+  private async applyRename(
+    repo: WatchedRepo,
+    renamed: { fullName: string; htmlUrl: string }
+  ): Promise<void> {
+    await this.db
+      .update(repositoriesTable)
+      .set({ name: renamed.fullName, url: renamed.htmlUrl })
+      .where(eq(repositoriesTable.id, repo.id));
+    console.log(
+      `PR monitor: ${repo.fullName} was renamed to ${renamed.fullName} — following it. ` +
+        `Tracked PRs keep their history.`
+    );
   }
 
   private async pollRepo(
