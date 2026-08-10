@@ -38,14 +38,32 @@ export function Transcript({
   events: AdminRunEvent[];
   mode: TranscriptMode;
 }) {
-  // buildBlocks wants the agent events; the fleet wraps each one with seq/at.
-  // Carry seq INTO the event so block keys point back at a real frame.
+  // UNWRAP `raw` — this is the whole reason the readable view renders anything.
+  //
+  // A fleet frame is fvsp.Event: `{ type, subtype?, raw, guestSeq }`, where the
+  // SDK's own event — the one carrying `message.content[]` — sits in `raw`.
+  // apps/web receives that inner shape directly, so buildBlocks reads
+  // `event.message.content`. Handed a fleet frame it finds no `message`,
+  // produces no blocks, and the panel renders empty with a live event count
+  // beside it saying otherwise.
+  //
+  // Fall back to the frame itself when there is no `raw`: `raw` is
+  // `json.RawMessage` with `omitempty`, so a frame that carried no payload
+  // omits it entirely, and those still have a usable `type`/`subtype`.
   const agentEvents = useMemo<AgentEvent[]>(
     () =>
-      events.map((e) => ({
-        ...(e.event as Record<string, unknown>),
-        seq: e.seq,
-      })) as AgentEvent[],
+      events.map((e) => {
+        const frame = (e.event ?? {}) as Record<string, unknown>;
+        const inner = (frame.raw ?? frame) as Record<string, unknown>;
+        return {
+          // The frame's own type/subtype win: the host lifts them out for
+          // routing and they are the fields it guarantees.
+          ...inner,
+          type: (frame.type as string) ?? (inner.type as string),
+          ...(frame.subtype ? { subtype: frame.subtype } : {}),
+          seq: e.seq,
+        };
+      }) as AgentEvent[],
     [events]
   );
 
