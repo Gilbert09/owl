@@ -16,6 +16,7 @@ import {
   toAdminHost,
 } from '../../services/admin/fleetProxy.js';
 import { adminRunFromFleet, listAdminRuns } from '../../services/admin/runIndex.js';
+import { retiredEvents, retiredRun } from '../../services/admin/retiredRuns.js';
 import { listFleetIncidents } from '../../services/admin/incidents.js';
 import { getFleetHost } from '../../services/fleetHosts.js';
 import {
@@ -166,6 +167,11 @@ export function adminFleetRoutes(): Router {
     res.json({ success: true, data: index } as ApiResponse<typeof index>);
   });
 
+  /** Whether the host simply no longer has this run (retired, or never had it). */
+  const isRunNotFound = (err: unknown): boolean =>
+    err instanceof FleetRunNotFoundError ||
+    (err instanceof Error && /no such run|run not found|unknown run/i.test(err.message));
+
   router.get('/hosts/:name/runs/:runId', async (req, res) => {
     try {
       const { client } = await fleetClientForHost(req.params.name);
@@ -179,6 +185,15 @@ export function adminFleetRoutes(): Router {
       };
       res.json({ success: true, data } as ApiResponse<AdminRunDetail>);
     } catch (err) {
+      // The host retires a terminal run's record two hours after it ends, so
+      // "no such run" is the NORMAL answer for anything older than an
+      // afternoon — not an error worth showing. The task row outlives it.
+      const retired = isRunNotFound(err) ? await retiredRun(req.params.runId, req.params.name) : null;
+      if (retired) {
+        const data: AdminRunDetail = { run: retired, terminal: true };
+        res.json({ success: true, data } as ApiResponse<AdminRunDetail>);
+        return;
+      }
       if (!handleFleetProxyError(err, res)) {
         res.status(502).json({
           success: false,
@@ -202,6 +217,16 @@ export function adminFleetRoutes(): Router {
       );
       res.json({ success: true, data: page } as ApiResponse<AdminRunEventPage>);
     } catch (err) {
+      // Same fallback as the run itself: the transcript the streamer persisted
+      // to tasks.transcript is the durable copy, and it is what an operator
+      // came to read.
+      const stored = isRunNotFound(err)
+        ? await retiredEvents(req.params.runId, Number.isFinite(after) && after > 0 ? after : 0)
+        : null;
+      if (stored) {
+        res.json({ success: true, data: stored } as ApiResponse<AdminRunEventPage>);
+        return;
+      }
       if (!handleFleetProxyError(err, res)) {
         res.status(502).json({
           success: false,
