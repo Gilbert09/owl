@@ -26,6 +26,7 @@ interface FleetMetricsSnapshot {
   reaperOrphans?: Record<string, number>;
   wedgesDetected?: number;
   proxyDenied?: number;
+  proxyDeniedBy?: Record<string, number>;
   goldensStale?: number;
   rebakesFailed?: number;
 }
@@ -49,6 +50,21 @@ function incident(
   observedAt: string
 ): AdminIncident {
   return { kind, severity, host, detail, count, observedAt };
+}
+
+/**
+ * Severity for an egress refusal, by what was refused.
+ *
+ * A CONNECT to an unlisted host is the one that deserves attention: it is a
+ * guest trying to open a tunnel somewhere it was never given, which is the
+ * shape an exfiltration attempt has. A wrong route NAME is a prompt bug — the
+ * agent reaching for `api` instead of `/gh/` — and paging on it would train
+ * people to ignore the row that matters.
+ */
+function egressSeverity(target: string): AdminIncidentSeverity {
+  if (target.startsWith('connect')) return 'critical';
+  if (target.startsWith('unauthorized')) return 'warn';
+  return 'info';
 }
 
 /**
@@ -109,8 +125,22 @@ export async function listFleetIncidents(now: number = Date.now()): Promise<Admi
     if ((m.wedgesDetected ?? 0) > 0) {
       out.push(incident('wedged_run', 'warn', host.name, null, m.wedgesDetected!, at));
     }
-    if ((m.proxyDenied ?? 0) > 0) {
-      // A guest tried to reach something outside the egress allowlist.
+    // A guest tried to reach something outside the egress allowlist.
+    //
+    // One row per TARGET where the host reports the breakdown, because the
+    // total cannot be acted on: "the agent guessed the route name `api` 104
+    // times" is a prompt bug, "a CONNECT to pypi.org" is a missing toolchain,
+    // and "a request to an unknown host" is the exfiltration signal §12.3
+    // wants the counter for. A single number reports all three identically.
+    const deniedBy = counterEntries(m.proxyDeniedBy);
+    if (deniedBy.length > 0) {
+      for (const [target, n] of deniedBy) {
+        out.push(incident('egress_denied', egressSeverity(target), host.name, target, n, at));
+      }
+    } else if ((m.proxyDenied ?? 0) > 0) {
+      // A host on an older fleetd sends the total and no breakdown. Still worth
+      // one row — losing the incident entirely would be worse than losing its
+      // detail.
       out.push(incident('egress_denied', 'warn', host.name, null, m.proxyDenied!, at));
     }
     if ((m.goldensStale ?? 0) > 0) {
