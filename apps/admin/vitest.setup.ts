@@ -33,3 +33,18 @@ if (!window.matchMedia) {
     dispatchEvent: () => false,
   })) as unknown as typeof window.matchMedia;
 }
+
+// Unmount between tests.
+//
+// @testing-library/react only auto-cleans when a global `afterEach` exists —
+// vitest with `globals: false` (see vitest.config.ts) does not provide one, so
+// every render stayed in the document and each test inherited the DOM of the
+// ones before it. Queries then failed with "found multiple elements" on the
+// SECOND test to render the same thing, which reads as a component bug and is
+// not one.
+import { afterEach } from 'vitest';
+import { cleanup } from '@testing-library/react';
+
+afterEach(() => {
+  cleanup();
+});

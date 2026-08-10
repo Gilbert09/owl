@@ -8,6 +8,7 @@ import { CopyableId } from '../../components/ui/CopyableId';
 import { absolute, duration, relativeAge } from '../../lib/format';
 import { durationSeconds, idlePct, idleSeconds, isTerminal, looksWedged } from '../../lib/fleetView';
 import { ROUTES } from '../../lib/routes';
+import { Transcript, type TranscriptMode } from '../../components/fleet/Transcript';
 
 /**
  * One run's transcript.
@@ -16,10 +17,11 @@ import { ROUTES } from '../../lib/routes';
  * single most common thing an operator does with this page, and a modal has no
  * URL.
  *
- * Rendered as `<pre>`, not markdown. The fleet's transcript is a stream of
- * JSON frames, and this console holds cross-tenant data — re-introducing an
- * HTML-rendering path it does not need would undo one of the two mitigations
- * apps/web relies on for its localStorage session. See apps/admin/README.md.
+ * Two views of the same stream: readable blocks by default, raw frames on
+ * demand, and the raw JSON of any single block one click away. Both render as
+ * TEXT — this console holds cross-tenant data, and an HTML-rendering path it
+ * does not need would undo one of the two mitigations apps/web relies on for
+ * its localStorage session. See apps/admin/README.md and Transcript.tsx.
  */
 const POLL_MS = 5_000;
 /** The fleet buffers 20k events per run; render the tail, which is what matters. */
@@ -36,6 +38,7 @@ export function RunDetailPage() {
   );
 
   const events = useEventCursor(host, runId, Boolean(host && runId));
+  const [mode, setMode] = useState<TranscriptMode>('readable');
 
   if (!host) {
     // The run list always links with ?host=. Landing here without it means a
@@ -114,11 +117,28 @@ export function RunDetailPage() {
           <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
             Transcript
           </h2>
-          <span className="text-xs text-muted-foreground">
-            {events.items.length} event{events.items.length === 1 ? '' : 's'}
-            {events.truncated && ` · showing the last ${MAX_RENDERED}`}
-            {events.terminal && ' · run finished'}
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted-foreground">
+              {events.items.length} event{events.items.length === 1 ? '' : 's'}
+              {events.truncated && ` · showing the last ${MAX_RENDERED}`}
+              {events.terminal && ' · run finished'}
+            </span>
+            <div className="flex rounded-md border border-border text-xs">
+              {(['readable', 'raw'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={
+                    m === mode
+                      ? 'bg-accent px-2 py-0.5 font-medium'
+                      : 'px-2 py-0.5 text-muted-foreground hover:text-foreground'
+                  }
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {events.error && !events.items.length ? (
@@ -132,10 +152,8 @@ export function RunDetailPage() {
               : 'No events yet. The guest has not sent anything on the vsock.'}
           </div>
         ) : (
-          <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-border bg-card">
-            {events.items.map((event) => (
-              <EventRow key={event.seq} event={event} />
-            ))}
+          <div className="max-h-[70vh] overflow-y-auto rounded-lg border border-border bg-card">
+            <Transcript events={events.items} mode={mode} />
           </div>
         )}
       </section>
@@ -143,46 +161,7 @@ export function RunDetailPage() {
   );
 }
 
-function EventRow({ event }: { event: AdminRunEvent }) {
-  const [open, setOpen] = useState(false);
-  const type = typeof event.event?.type === 'string' ? (event.event.type as string) : 'event';
-  const summary = summarise(event.event);
 
-  return (
-    <div className="border-b border-border/60 last:border-0">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-start gap-2 px-3 py-1.5 text-left hover:bg-accent/40"
-      >
-        <span className="w-10 shrink-0 text-right font-mono text-[11px] text-muted-foreground tabular-nums">
-          {event.seq}
-        </span>
-        <span
-          className="w-16 shrink-0 font-mono text-[11px] text-muted-foreground"
-          title={absolute(event.at)}
-        >
-          {new Date(event.at).toLocaleTimeString()}
-        </span>
-        <span className="w-28 shrink-0 truncate text-xs font-medium">{type}</span>
-        <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
-      </button>
-      {open && (
-        // <pre>, not markdown — see the module docblock.
-        <pre className="overflow-x-auto whitespace-pre-wrap break-words border-t border-border/60 bg-muted/40 px-3 py-2 font-mono text-[11px]">
-          {JSON.stringify(event.event, null, 2)}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function summarise(event: Record<string, unknown>): string {
-  for (const key of ['text', 'message', 'summary', 'subtype', 'name', 'command']) {
-    const value = event[key];
-    if (typeof value === 'string' && value.trim()) return value.slice(0, 300);
-  }
-  return Object.keys(event).join(', ');
-}
 
 /**
  * Cursor-based transcript accumulation.

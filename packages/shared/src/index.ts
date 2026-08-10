@@ -13,6 +13,7 @@ export * from './skillPrompt.js';
 
 // The operator console's contract (admin.talyn.dev ⇄ /api/v1/admin).
 export * from './admin.js';
+export * from './transcript.js';
 
 // SSE framing, shared by the fleet client, the admin SSE proxy, and the
 // browser that reads the proxied stream.
