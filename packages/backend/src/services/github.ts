@@ -396,9 +396,41 @@ interface GitHubIntegrationConfig {
 function ownerFromEndpoint(endpoint: string): string | undefined {
   const repos = /\/repos\/([^/]+)\//.exec(endpoint);
   if (repos) return decodeURIComponent(repos[1]);
-  const search = /[?&]q=[^&]*repo:([^/%]+)(?:\/|%2F)/i.exec(endpoint);
-  if (search) return decodeURIComponent(search[1]);
+
+  // DECODE THE QUERY FIRST, then look for the qualifier.
+  //
+  // This used to regex the raw endpoint for a literal `repo:`. URLSearchParams
+  // percent-encodes the colon, so a search built as
+  //
+  //   new URLSearchParams({ q: 'repo:PostHog/charts is:pr is:open author:x' })
+  //
+  // reaches here as `q=repo%3APostHog%2Fcharts+is%3Apr…` and never matched. The
+  // old pattern allowed `%2F` for the slash but not `%3A` for the colon, so it
+  // looked handled and was not.
+  //
+  // The consequence was silent and specific: with no owner, resolveAuth falls
+  // back to the workspace's PRIMARY installation, whose token is for a
+  // different account and 403s with "Resource not accessible by integration" —
+  // which prMonitor reports as "the GitHub App has no access to <repo>". The
+  // App had access; we were asking with the wrong installation's token.
+  const q = queryParam(endpoint, 'q');
+  if (q) {
+    const m = /\brepo:([^/\s]+)\//i.exec(q);
+    if (m) return m[1];
+  }
   return undefined;
+}
+
+/** One decoded query-string value from a relative endpoint. */
+function queryParam(endpoint: string, name: string): string | undefined {
+  const qs = endpoint.indexOf('?');
+  if (qs === -1) return undefined;
+  // A relative endpoint needs a base for URL to parse it; the base is discarded.
+  try {
+    return new URL(endpoint, 'https://api.github.invalid').searchParams.get(name) ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Decrypt an envelope, returning undefined (not throwing) on failure. */

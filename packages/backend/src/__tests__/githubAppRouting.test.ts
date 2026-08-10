@@ -110,6 +110,61 @@ describe('github hybrid-auth routing', () => {
     expect(userCall?.authorization).toBe('bearer ghu_usertoken');
   });
 
+  /**
+   * A SEARCH must use the installation covering the repo it searches.
+   *
+   * The repo lives in the `q` qualifier, not the path, and URLSearchParams
+   * percent-encodes it: `q=repo%3APostHog%2Fcharts…`. ownerFromEndpoint matched
+   * a literal `repo:`, so it allowed `%2F` for the slash but never got past
+   * `%3A` for the colon — the owner came back undefined and every search fell
+   * back to the workspace's PRIMARY installation.
+   *
+   * That token belongs to another account, so GitHub answers 403 "Resource not
+   * accessible by integration", and prMonitor reports it as "the GitHub App has
+   * no access to <repo>". The App had access all along; the request carried the
+   * wrong installation's token.
+   */
+  it('searches with the installation that covers the searched repo, not the primary one', async () => {
+    // Two installations, and the workspace's primary is the WRONG one for the
+    // repo being searched.
+    await db.insert(githubInstallationsTable).values([
+      {
+        installationId: '555', accountLogin: 'acme', accountType: 'Organization',
+        repoFullNames: [], createdAt: new Date(), updatedAt: new Date(),
+      },
+      {
+        installationId: '888', accountLogin: 'PostHog', accountType: 'Organization',
+        repoFullNames: [], createdAt: new Date(), updatedAt: new Date(),
+      },
+    ]);
+    await githubService.refreshInstallationIndex();
+    await githubService.storeToken('ws1', 'ghu_usertoken', 'bearer', 'repo', {
+      installationId: '555',
+    });
+
+    const captured: Captured[] = [];
+    vi.stubGlobal(
+      'fetch',
+      capturingFetch(captured, {
+        '/app/installations/555/access_tokens': {
+          token: 'ghs_acme', expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+        '/app/installations/888/access_tokens': {
+          token: 'ghs_posthog', expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+        },
+        '/search/issues': { total_count: 0, items: [] },
+      }),
+    );
+
+    await githubService.searchPullRequestNumbers('ws1', 'repo:PostHog/charts is:pr is:open');
+
+    const search = captured.find((c) => c.url.includes('/search/issues'));
+    expect(search).toBeTruthy();
+    expect(search?.authorization).toBe('token ghs_posthog');
+    // The bug: acme's token on a PostHog search.
+    expect(search?.authorization).not.toBe('token ghs_acme');
+  });
+
   it('falls back to the stored token everywhere for a workspace without an installation', async () => {
     await githubService.storeToken('ws1', 'gho_legacy', 'bearer', 'repo');
 
