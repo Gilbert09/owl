@@ -123,3 +123,36 @@ describe('run ordering', () => {
     expect(sorted(rows)).toEqual(['real', 'timeless']);
   });
 });
+
+/**
+ * Memory carried through to the Runs page.
+ *
+ * Two numbers, because one is not enough under the fleet's elastic admission.
+ * `memMib` is what the guest was BOOTED at — a ceiling its balloon holds it
+ * well below — so a page showing only that reports what a run is ALLOWED to
+ * cost, not what it costs. Fifteen runs on a 4096 ceiling read as 60 GiB while
+ * actually using 23, which is exactly what the hosts page showed before this.
+ */
+describe('adminRunFromFleet memory', () => {
+  it('carries both what a run uses and what it may grow to', () => {
+    const row = adminRunFromFleet(fleetRun({ memUsedMib: 1463, memMib: 4096 }), 'hetzner-64');
+    expect(row.memUsedMib).toBe(1463);
+    expect(row.memMib).toBe(4096);
+  });
+
+  /**
+   * Absent is not zero. A terminal run's VMM is gone, and a host running a
+   * fleetd older than the field never sends it — rendering either as "0 MiB"
+   * would present a measurement that was never taken.
+   */
+  it('reports missing usage as null rather than zero', () => {
+    const row = adminRunFromFleet(fleetRun(), 'hetzner-64');
+    expect(row.memUsedMib).toBeNull();
+    expect(row.memMib).toBeNull();
+  });
+
+  it('keeps a genuine zero distinct from absent', () => {
+    const row = adminRunFromFleet(fleetRun({ memUsedMib: 0 }), 'hetzner-64');
+    expect(row.memUsedMib).toBe(0);
+  });
+});

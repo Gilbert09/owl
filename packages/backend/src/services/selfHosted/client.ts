@@ -33,7 +33,22 @@ export interface FleetRun {
   /** Per-run network slot + uid offset; unique among live runs. */
   slot?: number;
   deadline?: string;
+  /**
+   * What the guest was BOOTED at. Under the fleet's elastic admission this is a
+   * CEILING, not a cost: the balloon holds the guest well below it and lets it
+   * grow only as it proves it needs to. Fifteen runs on a 4096 ceiling read as
+   * 60 GiB while actually costing 23.
+   */
   memMib?: number;
+  /**
+   * What the run is spending right now — the VMM's resident size, so guest
+   * pages actually touched plus the VMM's own overhead.
+   *
+   * Absent on a terminal run (its VMM is gone) and on any host still running a
+   * fleetd that predates the field, so treat missing as "unknown" rather than
+   * as zero.
+   */
+  memUsedMib?: number;
   vcpuCount?: number;
   golden?: string;
   /** 'base' | 'repo' — which layer selection landed on. */

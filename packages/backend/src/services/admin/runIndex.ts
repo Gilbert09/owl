@@ -77,6 +77,8 @@ export function adminRunFromFleet(run: FleetRun, host: string): AdminRunRow {
     lastHeartbeat: iso(run.lastHeartbeat),
     lastActivity: iso(run.lastActivity),
     costUsd: typeof run.costUsd === 'number' ? run.costUsd : null,
+    memUsedMib: typeof run.memUsedMib === 'number' ? run.memUsedMib : null,
+    memMib: typeof run.memMib === 'number' ? run.memMib : null,
     prUrl: run.prUrl ?? null,
     error: run.error ?? null,
     orphan: true,
@@ -165,6 +167,10 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
       lastHeartbeat: iso(run?.lastHeartbeat),
       lastActivity: iso(run?.lastActivity),
       costUsd: run?.costUsd ?? task.costUsd,
+      // No task-side fallback: only the live host knows what a run is using
+      // right now, and a stale figure would be worse than an honest blank.
+      memUsedMib: typeof run?.memUsedMib === 'number' ? run.memUsedMib : null,
+      memMib: typeof run?.memMib === 'number' ? run.memMib : null,
       prUrl: run?.prUrl ?? null,
       error: run?.error ?? null,
       orphan: false,

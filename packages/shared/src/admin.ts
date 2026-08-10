@@ -238,6 +238,20 @@ export interface AdminRunRow {
   lastHeartbeat: string | null;
   lastActivity: string | null;
   costUsd: number | null;
+  /**
+   * Memory the run is spending right now, in MiB, and the size it was booted
+   * at.
+   *
+   * Two numbers because one is not enough under the fleet's elastic admission:
+   * `memMib` is a CEILING the guest is held well below by its balloon, so on
+   * its own it says nothing about cost — fifteen runs on a 4096 ceiling read as
+   * 60 GiB while actually using 23.
+   *
+   * `memUsedMib` is null on a terminal run (its VMM is gone) and on any host
+   * running a fleetd older than the field. Null means unknown, never zero.
+   */
+  memUsedMib: number | null;
+  memMib: number | null;
   prUrl: string | null;
   error: string | null;
   orphan: boolean;

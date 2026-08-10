@@ -5,7 +5,7 @@ import { useAdminQuery } from '../../hooks/useAdminQuery';
 import { Page, Pill } from '../../components/layout/Page';
 import { DataTable, type Column } from '../../components/ui/DataTable';
 import { CopyableId } from '../../components/ui/CopyableId';
-import { absolute, countdown, duration, relativeAge, usd } from '../../lib/format';
+import { absolute, countdown, duration, mib, pct, relativeAge, usd } from '../../lib/format';
 import {
   durationSeconds,
   idlePct,
@@ -164,6 +164,32 @@ export function RunsPage() {
           {countdown(r.deadline)}
         </span>
       ),
+    },
+    {
+      key: 'memory',
+      header: 'Memory',
+      cell: (r) => {
+        // Absent, not zero. A terminal run's VMM is gone and a host on an older
+        // fleetd never sends the field; showing "0 MiB" for either would be a
+        // measurement that was never taken.
+        if (r.memUsedMib == null) return <Muted />;
+        const share = pct(r.memUsedMib, r.memMib);
+        return (
+          <span
+            className="tabular-nums"
+            title={
+              r.memMib != null
+                ? `Using ${mib(r.memUsedMib)} of a ${mib(r.memMib)} ceiling. The ceiling is what the guest booted at; its balloon holds it below that and lets it grow only as it needs to.`
+                : `Using ${mib(r.memUsedMib)}`
+            }
+          >
+            {mib(r.memUsedMib)}
+            {share != null && (
+              <span className="ml-1 text-muted-foreground">({Math.round(share)}%)</span>
+            )}
+          </span>
+        );
+      },
     },
     { key: 'cost', header: 'Cost', cell: (r) => <span className="tabular-nums">{usd(r.costUsd)}</span> },
     {

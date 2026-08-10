@@ -70,6 +70,8 @@ function run(overrides: Partial<AdminRunRow> = {}): AdminRunRow {
     lastHeartbeat: new Date(NOW - 10_000).toISOString(),
     lastActivity: new Date(NOW - 5_000).toISOString(),
     costUsd: 0.25,
+    memUsedMib: 512,
+    memMib: 4096,
     prUrl: null,
     error: null,
     orphan: false,
