@@ -1,8 +1,19 @@
-import { eq } from 'drizzle-orm';
-import { readCloudTaskMeta, type CloudTaskMetadata, type Environment, type Task } from '@talyn/shared';
+import { eq, sql } from 'drizzle-orm';
+import {
+  DEFAULT_FLEET_MODEL_ID,
+  isStoredFleetModelId,
+  readCloudTaskMeta,
+  type CloudTaskMetadata,
+  type Environment,
+  type Task,
+} from '@talyn/shared';
 import { reconcileDefaultBranch } from '../repoDefaultBranch.js';
 import { getDbClient } from '../../db/client.js';
-import { tasks as tasksTable, repositories as repositoriesTable } from '../../db/schema.js';
+import {
+  tasks as tasksTable,
+  repositories as repositoriesTable,
+  workspaces as workspacesTable,
+} from '../../db/schema.js';
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { githubService } from '../github.js';
@@ -124,7 +135,15 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       taskType: task.type === 'pr_response' ? 'pr_response' : 'code_writing',
       prompt,
       systemPrompt: SYSTEM_PROMPT,
-      model: modelFromTask(task) ?? modelFromEnv(env),
+      // Per-task override, then the workspace's Settings → Talyn Fleet choice,
+      // then the environment's, then the default. Explicit rather than letting
+      // the SDK decide: an unset model was served by Opus 5 on every turn,
+      // which is how fleet runs came to cost ~$15.85 each.
+      model:
+        modelFromTask(task) ??
+        (await workspaceFleetModel(task.workspaceId)) ??
+        modelFromEnv(env) ??
+        DEFAULT_FLEET_MODEL_ID,
       repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
       githubToken,
       // Always sent, never optional. The workspace's own Claude credential is
@@ -221,6 +240,24 @@ function parseGitHubSlug(url: string): string | null {
 
 function sanitizeSlug(name: string): string | null {
   return /^[\w.-]+\/[\w.-]+$/.test(name) ? name : null;
+}
+
+/**
+ * The workspace's Settings → Talyn Fleet model choice, or undefined when unset
+ * or unrecognised. Extracted in SQL so the settings jsonb never ships.
+ *
+ * An unrecognised value falls through to the next source rather than to the
+ * default: a workspace that pinned a model the picker no longer offers should
+ * keep whatever its environment says, not be quietly moved.
+ */
+async function workspaceFleetModel(workspaceId: string): Promise<string | undefined> {
+  const db = getDbClient();
+  const [row] = await db
+    .select({ model: sql<string | null>`${workspacesTable.settings} ->> 'fleetModel'` })
+    .from(workspacesTable)
+    .where(eq(workspacesTable.id, workspaceId))
+    .limit(1);
+  return isStoredFleetModelId(row?.model) ? row.model : undefined;
 }
 
 function modelFromTask(task: Task): string | undefined {

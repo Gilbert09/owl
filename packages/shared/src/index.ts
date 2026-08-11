@@ -148,6 +148,28 @@ export type StoredPostHogCodeModelId = PostHogCodeModelId | LegacyPostHogCodeMod
 /** Default model for PostHog Code runs when the workspace hasn't picked one. */
 export const DEFAULT_POSTHOG_CODE_MODEL_ID: PostHogCodeModelId = 'claude-opus-5';
 
+/**
+ * Models a Talyn Fleet run may use.
+ *
+ * The same current-generation list as PostHog Code, because it is the same id
+ * space: a fleet run is the Claude Agent SDK inside a microVM, so it takes the
+ * Claude 5 ids rather than CLAUDE_MODELS' 4.x set.
+ */
+export const FLEET_MODELS = POSTHOG_CODE_MODELS;
+export type FleetModelId = PostHogCodeModelId;
+
+/**
+ * Default model for a fleet run.
+ *
+ * SONNET, not Opus, and the difference is not small. Fleet runs were served by
+ * Opus 5 on every turn and cost $348 in 18.5 hours — about $15.85 a run — on
+ * work that is mostly mechanical: rebase, resolve conflicts, re-run CI, answer
+ * review threads. Opus earns its price on the investigative runs (see the
+ * merge-queue `queue_failure` kind), and a workspace that wants it back can
+ * pick it in Settings → Talyn Fleet.
+ */
+export const DEFAULT_FLEET_MODEL_ID: FleetModelId = 'claude-sonnet-5';
+
 /** Type guard for a value being a model the pickers currently OFFER. */
 export function isPostHogCodeModelId(value: unknown): value is PostHogCodeModelId {
   return typeof value === 'string' && POSTHOG_CODE_MODELS.some((m) => m.id === value);
@@ -168,8 +190,22 @@ export function isStoredPostHogCodeModelId(
   );
 }
 
+/**
+ * Type guard for a stored fleet model setting. Same id space as PostHog Code,
+ * including the legacy ids, so a workspace that pinned an older model keeps it
+ * rather than being silently moved to the default.
+ */
+export function isStoredFleetModelId(value: unknown): value is StoredPostHogCodeModelId {
+  return isStoredPostHogCodeModelId(value);
+}
+
 export interface WorkspaceSettings {
   continuousBuild?: ContinuousBuildSettings;
+  /**
+   * Which model Talyn Fleet runs use. Unset means DEFAULT_FLEET_MODEL_ID
+   * (Sonnet 5) — see the note there on why it is not Opus.
+   */
+  fleetModel?: StoredPostHogCodeModelId;
   /**
    * Which cloud provider new tasks dispatch to when more than one is connected.
    * A specific provider pins it; `'ask'` makes the desktop prompt per task (and

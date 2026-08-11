@@ -65,7 +65,7 @@ import type {
   McpToken,
   BillingOrder,
 } from '@talyn/shared';
-import { CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL_ID, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID } from '@talyn/shared';
+import { DEFAULT_FLEET_MODEL_ID, FLEET_MODELS, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL_ID, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID } from '@talyn/shared';
 import { useWorkspaceStore, type Theme } from '../../stores/workspace';
 import { useBillingStore } from '../../stores/billing';
 import {
@@ -934,12 +934,12 @@ function WorkspaceModelSelector({
   defaultId,
   settingKey,
 }: {
-  providerType: 'claude_code' | 'posthog_code';
+  providerType: 'claude_code' | 'posthog_code' | 'selfhosted';
   title: string;
   description: string;
   models: ReadonlyArray<{ id: string; label: string }>;
   defaultId: string;
-  settingKey: 'claudeModel' | 'posthogCodeModel';
+  settingKey: 'claudeModel' | 'posthogCodeModel' | 'fleetModel';
 }) {
   const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -1096,6 +1096,16 @@ function SelfHostedFleetCard() {
         label: 'How to get a token',
         note: 'run `claude setup-token` for an OAuth token off your Claude subscription, or paste a Console API key (sk-ant-api\u2026) to be billed per token.',
       }}
+      connectedExtras={
+        <WorkspaceModelSelector
+          providerType="selfhosted"
+          title="Model"
+          description="Which model fleet runs use. Sonnet 5 handles the mechanical work — rebases, conflicts, re-running CI — at a fraction of Opus's cost; switch to Opus 5 for harder investigative runs."
+          models={FLEET_MODELS}
+          defaultId={DEFAULT_FLEET_MODEL_ID}
+          settingKey="fleetModel"
+        />
+      }
     />
   );
 }
