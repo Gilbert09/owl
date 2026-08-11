@@ -1,6 +1,7 @@
 import { eq, sql } from 'drizzle-orm';
 import {
   DEFAULT_FLEET_MODEL_ID,
+  fleetProviderForModel,
   isStoredFleetModelId,
   readCloudTaskMeta,
   type CloudTaskMetadata,
@@ -129,26 +130,40 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     if (!target) return { ok: false, error: 'Talyn Fleet is not configured for this workspace.' };
     const client = new FleetClient(target.endpoint, target.token);
 
+    // Per-task override, then the workspace's Settings → Talyn Fleet choice,
+    // then the environment's, then the default. Explicit rather than letting
+    // the SDK decide: an unset model was served by Opus 5 on every turn, which
+    // is how fleet runs came to cost ~$15.85 each.
+    const model =
+      modelFromTask(task) ??
+      (await workspaceFleetModel(task.workspaceId)) ??
+      modelFromEnv(env) ??
+      DEFAULT_FLEET_MODEL_ID;
+
+    // The model decides the provider, and the provider decides what the microVM
+    // can reach: the host builds the run's egress route table from it, so a run
+    // dispatched at an OpenAI model has no route to Anthropic's API at all.
+    // Sent explicitly rather than left to the host's default — the route table
+    // should be the one this dispatch chose.
+    const provider = fleetProviderForModel(model);
+
     const run = await client.createRun({
       runId,
       workspaceId: task.workspaceId,
       taskType: task.type === 'pr_response' ? 'pr_response' : 'code_writing',
       prompt,
       systemPrompt: SYSTEM_PROMPT,
-      // Per-task override, then the workspace's Settings → Talyn Fleet choice,
-      // then the environment's, then the default. Explicit rather than letting
-      // the SDK decide: an unset model was served by Opus 5 on every turn,
-      // which is how fleet runs came to cost ~$15.85 each.
-      model:
-        modelFromTask(task) ??
-        (await workspaceFleetModel(task.workspaceId)) ??
-        modelFromEnv(env) ??
-        DEFAULT_FLEET_MODEL_ID,
+      model,
+      provider,
       repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
       githubToken,
-      // Always sent, never optional. The workspace's own Claude credential is
-      // the only LLM key in play — the fleet has no house key to fall back on.
-      anthropicKey: creds.claudeToken,
+      // The credential for this run's provider, and only that one. Always sent,
+      // never optional: the workspace's own key is the only one in play, and
+      // the fleet has no house key to fall back on — it refuses a dispatch that
+      // arrives without one rather than booting a run that cannot call out.
+      ...(provider === 'openai'
+        ? { openaiKey: creds.openaiKey ?? '' }
+        : { anthropicKey: creds.claudeToken }),
     });
 
     const cloudTask: CloudTaskMetadata = {

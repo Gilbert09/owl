@@ -43,6 +43,7 @@ import { getSelfHostedCredentials } from './credentials.js';
 export interface FleetRunCredentials {
   githubToken: string;
   anthropicKey?: string;
+  openaiKey?: string;
   repo?: string;
 }
 
@@ -118,11 +119,17 @@ export async function resolveRunCredentials(
   // failure — worse than either waiting or failing honestly.
   if (!githubToken) return { ok: false, reason: 'credentials_unavailable' };
 
+  // Both LLM keys, when the workspace has both. Which one is spent is decided
+  // host-side by the run's own route table — it carries exactly one upstream —
+  // so scoping the answer by provider here would mean this endpoint had to
+  // re-derive the run's provider from its metadata to tell the host something
+  // the host already knows.
   return {
     ok: true,
     credentials: {
       githubToken,
       ...(creds?.claudeToken ? { anthropicKey: creds.claudeToken } : {}),
+      ...(creds?.openaiKey ? { openaiKey: creds.openaiKey } : {}),
       ...(extra.repo ? { repo: extra.repo } : {}),
     },
   };

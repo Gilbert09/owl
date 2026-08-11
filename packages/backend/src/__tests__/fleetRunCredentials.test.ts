@@ -24,6 +24,7 @@ let cleanup: () => Promise<void>;
 
 const GH_TOKEN = 'gho_workspace_token';
 const CLAUDE_TOKEN = 'sk-ant-oat-workspace';
+const OPENAI_KEY = 'sk-openai-workspace';
 
 vi.mock('../services/github.js', () => ({
   githubService: { getAccessToken: vi.fn(() => GH_TOKEN) },
@@ -171,5 +172,41 @@ describe('resolveRunCredentials', () => {
     const columns = spy.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
     expect(columns).toBeDefined();
     expect(Object.keys(columns!)).not.toContain('transcript');
+  });
+});
+
+/**
+ * An adopted run's provider decides which key it needs, and the host cannot ask
+ * for one by name — it authenticates with a token that says nothing about the
+ * run. So the answer carries whichever LLM keys the workspace has, and the host
+ * spends the one its route table has an upstream for.
+ *
+ * Deriving the provider here instead would mean this endpoint re-deriving from
+ * task metadata something the host already knows; getting it wrong leaves an
+ * adopted run unable to authenticate, with nothing saying why.
+ */
+describe('run credentials carry every LLM key the workspace has', () => {
+  it('includes the OpenAI key when the workspace has one', async () => {
+    const { getSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
+    vi.mocked(getSelfHostedCredentials).mockResolvedValueOnce({
+      claudeToken: CLAUDE_TOKEN,
+      openaiKey: OPENAI_KEY,
+    });
+
+    const res = await resolveRunCredentials('hetzner-64', 'talyn-live');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.credentials.anthropicKey).toBe(CLAUDE_TOKEN);
+    expect(res.credentials.openaiKey).toBe(OPENAI_KEY);
+  });
+
+  // A workspace with no OpenAI key — every workspace today — must not get the
+  // field at all. An empty string would be a credential as far as the fleet's
+  // dispatch check is concerned, and it would pass a run that cannot call out.
+  it('omits the OpenAI key when the workspace has none', async () => {
+    const res = await resolveRunCredentials('hetzner-64', 'talyn-live');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.credentials).not.toHaveProperty('openaiKey');
   });
 });

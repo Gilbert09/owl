@@ -170,6 +170,27 @@ export type FleetModelId = PostHogCodeModelId;
  */
 export const DEFAULT_FLEET_MODEL_ID: FleetModelId = 'claude-sonnet-5';
 
+/**
+ * Which LLM API a fleet model belongs to.
+ *
+ * The fleet builds a run's egress route table from this, and a run reaches
+ * exactly one provider — a run dispatched at an OpenAI model has no route to
+ * api.anthropic.com at all. So this is not a label: it decides what the microVM
+ * can talk to, and getting it wrong is a run that cannot make a single call.
+ *
+ * Every model in FLEET_MODELS is Anthropic's today, so this returns 'anthropic'
+ * for all of them. It exists as the seam: adding a Codex model means adding it
+ * to the catalogue and to the map below, not editing the dispatch path.
+ */
+export type FleetProvider = 'anthropic' | 'openai';
+
+const FLEET_MODEL_PROVIDERS: Record<string, FleetProvider> = {};
+
+export function fleetProviderForModel(modelId: string | undefined): FleetProvider {
+  if (!modelId) return 'anthropic';
+  return FLEET_MODEL_PROVIDERS[modelId] ?? 'anthropic';
+}
+
 /** Type guard for a value being a model the pickers currently OFFER. */
 export function isPostHogCodeModelId(value: unknown): value is PostHogCodeModelId {
   return typeof value === 'string' && POSTHOG_CODE_MODELS.some((m) => m.id === value);

@@ -18,6 +18,15 @@ interface SelfHostedIntegrationConfig {
    *  subscription, or a Console API key. This is the ONE secret a user supplies,
    *  and the only key this config carries. */
   anthropicKeyEnc?: EncryptedEnvelope;
+  /**
+   * The workspace's OpenAI credential, for runs dispatched at an OpenAI model.
+   *
+   * Absent on every workspace today: no OpenAI model is in FLEET_MODELS yet, so
+   * nothing can select one, and there is no settings field to put a key in. It
+   * is carried here so the dispatch and credential-pull paths are complete when
+   * the first one lands — see docs in talyn-fleet's HARNESS_PLAN.
+   */
+  openaiKeyEnc?: EncryptedEnvelope;
 
   // Legacy, read nowhere. Both were fields on the settings card and neither was
   // ever the workspace's to give: `fleetTokenEnc` authenticated the BACKEND to a
@@ -33,6 +42,9 @@ export interface SelfHostedCredentials {
   /** `sk-ant-oat…` (OAuth) or `sk-ant-api…` (Console key) — the fleet's
    *  credential proxy accepts either and picks the right auth header. */
   claudeToken: string;
+  /** Set only once a workspace can select an OpenAI model. See the config
+   *  field's note. */
+  openaiKey?: string;
 }
 
 /**
@@ -119,7 +131,12 @@ export async function getSelfHostedCredentials(
   const claudeToken = readEnc(config.anthropicKeyEnc, 'Claude token');
   if (!claudeToken) return null;
 
-  return { claudeToken };
+  // The Claude token still gates "is this workspace configured": every fleet
+  // model is Anthropic's, so a workspace with only an OpenAI key could not
+  // dispatch anything. That gate moves when the first OpenAI model lands.
+  const openaiKey = readEnc(config.openaiKeyEnc, 'OpenAI key');
+
+  return { claudeToken, ...(openaiKey ? { openaiKey } : {}) };
 }
 
 /** Build a client for a workspace, or null if it isn't configured. */

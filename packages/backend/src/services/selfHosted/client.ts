@@ -178,7 +178,21 @@ export interface CreateRunInput {
   maxBudgetUsd?: number;
   timeoutSec?: number;
   githubToken?: string;
+  /**
+   * The credential for THIS run's provider, and only that one. The fleet holds
+   * no key of its own and refuses a dispatch that arrives without the one its
+   * provider needs, so an omitted key is a 400 rather than a run that boots and
+   * then fails on its first call.
+   */
   anthropicKey?: string;
+  openaiKey?: string;
+  /**
+   * Which LLM API the model belongs to. Omitted means anthropic, which is what
+   * every dispatch predating the field meant — but it is sent explicitly so the
+   * route table the host builds is the one this dispatch chose, not a default
+   * it inherited.
+   */
+  provider?: string;
 }
 
 /**
