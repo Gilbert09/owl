@@ -19,7 +19,7 @@ import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { githubService } from '../github.js';
 import { FleetCapacityError, FleetClient } from './client.js';
-import { getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
+import { fleetHarnessFor, getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
 
 // Re-exported, not redeclared. A second definition of this contract is how the
 // two drift: the shared one grew a `capacity` discriminator and this copy
@@ -147,6 +147,13 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     // should be the one this dispatch chose.
     const provider = fleetProviderForModel(model);
 
+    // Which in-guest harness runs this. Gated to an allowlist of workspaces
+    // (FLEET_PI_WORKSPACES) because the Pi harness is proven only as far as the
+    // guest image: everything below the microVM has tests, and a task actually
+    // running on it has not been observed. Absent from the list means the
+    // Claude Agent SDK, which is what every dispatch has meant so far.
+    const harness = fleetHarnessFor(task.workspaceId);
+
     const run = await client.createRun({
       runId,
       workspaceId: task.workspaceId,
@@ -155,6 +162,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       systemPrompt: SYSTEM_PROMPT,
       model,
       provider,
+      harness,
       repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
       githubToken,
       // The credential for this run's provider, and only that one. Always sent,

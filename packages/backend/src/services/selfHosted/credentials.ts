@@ -64,6 +64,34 @@ export function fleetApiToken(): string {
 }
 
 /**
+ * Workspaces allowed to run on the Pi harness instead of the Claude Agent SDK.
+ *
+ * Deployment config, and deliberately not a workspace setting. The harness is
+ * new and only proven as far as the guest image — a workspace must not be able
+ * to opt itself onto it, and nobody should be able to enable it for everyone by
+ * editing a row. Set `FLEET_PI_WORKSPACES` to a comma-separated list of
+ * workspace ids; blank, the default, means every run uses the SDK.
+ *
+ * It gates the CAPABILITY, not the choice: a workspace on the list still has to
+ * be picked deliberately, and taking it off the list returns every one of its
+ * runs to the SDK on the next dispatch, with no migration and nothing to undo.
+ */
+export function fleetPiWorkspaces(): Set<string> {
+  const raw = process.env.FLEET_PI_WORKSPACES ?? '';
+  return new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+/** Whether this workspace may use the Pi harness. */
+export function fleetHarnessFor(workspaceId: string): 'sdk' | 'pi' {
+  return fleetPiWorkspaces().has(workspaceId) ? 'pi' : 'sdk';
+}
+
+/**
  * Force every run onto one host, bypassing the registry. Blank = registry.
  *
  * This is a DEBUGGING escape hatch and it is deployment-level for the same

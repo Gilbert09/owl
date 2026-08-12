@@ -193,6 +193,12 @@ export interface CreateRunInput {
    * it inherited.
    */
   provider?: string;
+  /**
+   * Which in-guest agent loop runs the task: `sdk` (the Claude Agent SDK, and
+   * what an absent value means) or `pi`. Gated per workspace by the backend —
+   * see fleetHarnessFor.
+   */
+  harness?: string;
 }
 
 /**
