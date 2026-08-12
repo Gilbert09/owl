@@ -14,12 +14,13 @@ import {
   tasks as tasksTable,
   repositories as repositoriesTable,
   workspaces as workspacesTable,
+  users as usersTable,
 } from '../../db/schema.js';
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { githubService } from '../github.js';
 import { FleetCapacityError, FleetClient } from './client.js';
-import { fleetHarnessFor, getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
+import { getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
 
 // Re-exported, not redeclared. A second definition of this contract is how the
 // two drift: the shared one grew a `capacity` discriminator and this copy
@@ -152,7 +153,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     // guest image: everything below the microVM has tests, and a task actually
     // running on it has not been observed. Absent from the list means the
     // Claude Agent SDK, which is what every dispatch has meant so far.
-    const harness = fleetHarnessFor(task.workspaceId);
+    const harness = await fleetHarnessFor(task.workspaceId);
 
     const run = await client.createRun({
       runId,
@@ -281,6 +282,36 @@ async function workspaceFleetModel(workspaceId: string): Promise<string | undefi
     .where(eq(workspacesTable.id, workspaceId))
     .limit(1);
   return isStoredFleetModelId(row?.model) ? row.model : undefined;
+}
+
+/**
+ * Which in-guest harness this workspace's runs use.
+ *
+ * Gated on the workspace owner being an admin, which is an existing privilege
+ * rather than a new switch: `users.is_admin` already gates draining a fleet
+ * host and granting admin, and it is bootstrapped from TALYN_ADMIN_EMAILS. So
+ * internal workspaces get the new harness and customers do not, with nothing to
+ * configure and nothing to remember to turn off.
+ *
+ * The coupling is deliberate but worth naming: granting somebody admin now also
+ * opts their workspaces onto a harness that has been proven only as far as the
+ * guest image. That is the right trade while this is being dogfooded by the
+ * people who can read a transcript and tell what went wrong — and the day it
+ * stops being, this function is the one place to sever it.
+ *
+ * Anything unexpected reads as `sdk`: an unknown workspace, a missing owner, a
+ * row that is not there. The default has to be the proven path, because this
+ * runs on every dispatch and a lookup that fails open would silently move
+ * customer traffic onto the new harness.
+ */
+async function fleetHarnessFor(workspaceId: string): Promise<'sdk' | 'pi'> {
+  const [row] = await getDbClient()
+    .select({ isAdmin: usersTable.isAdmin })
+    .from(workspacesTable)
+    .innerJoin(usersTable, eq(usersTable.id, workspacesTable.ownerId))
+    .where(eq(workspacesTable.id, workspaceId))
+    .limit(1);
+  return row?.isAdmin ? 'pi' : 'sdk';
 }
 
 function modelFromTask(task: Task): string | undefined {
