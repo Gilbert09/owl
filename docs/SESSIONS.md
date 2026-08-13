@@ -2,6 +2,20 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 82 — Mermaid diagrams in PR descriptions (2026-08-13)
+
+GitHub renders a ```` ```mermaid ```` fence as a diagram. Our PR detail sheet showed the source as a code block, so any PR that explains itself with a picture arrived as unreadable text. The fix is in `lib/markdown.tsx` (both forks), so the agent transcript and the review bodies get it too.
+
+Three decisions worth keeping:
+
+- **The swap happens at the `<pre>`, not the `<code>`.** react-markdown gives a fence as `<pre><code class="language-mermaid">`. If you intercept the inner `<code>`, the diagram stays trapped in a monospace, pre-wrapped box. `mermaidSourceFromPre` reads the child element's class and returns the source, or null for every other fence. The class test is anchored (`(^|\s)language-mermaid(\s|$)`), so `language-mermaidish` is still a code block.
+- **mermaid is loaded on demand.** It is megabytes of JavaScript, and most PR bodies hold no diagram. `lib/mermaid.tsx` imports it dynamically and caches the module promise. Verified in both builds: the Vite entry chunk contains no reference to mermaid, and the webpack renderer keeps it in split chunks. It also loads under the app CSP (`script-src 'self'`, no `unsafe-eval`) — checked in a real browser, because jsdom cannot run mermaid at all (no `getBBox`).
+- **`securityLevel: 'strict'` is what replaces the sanitizer.** Diagram source is untrusted: anyone who can open a PR against a watched repo controls the string. The SVG goes in with `dangerouslySetInnerHTML`, which walks straight past the `rehypeSanitize` pass that `markdownSanitize.test.tsx` pins. Strict mode runs mermaid's own DOMPurify over the output and turns off HTML labels and `click` directives. mermaid's `secure` list stops a `%%{init: …}%%` directive in the source from lowering it. Both test suites assert the setting, so a later "the diagram would look nicer with `loose`" has to argue with a red test.
+
+Failures are shown, not swallowed. A diagram that does not parse renders the reason and its source, so the body still reads the way it does on GitHub minus the picture. `suppressErrorRendering` stops mermaid appending its own error SVG to `<body>`, outside React's tree, where nothing would ever clean it up. The theme follows the app: a `MutationObserver` on the `dark` class re-renders on a theme flip, and the always-dark agent feed pins the dark mermaid theme whatever the app theme is.
+
+Tests: `apps/desktop/src/__tests__/mermaid.test.tsx` (18 cases, mermaid stubbed — it is ESM and jest transforms to CommonJS) and `apps/web/src/__tests__/markdownMermaid.test.tsx` (5 cases through the real markdown pipeline).
+
 ## Session 81 — Connect with PostHog: OAuth alongside the pasted API key (2026-08-06)
 
 Connecting PostHog Code asked the user for two things they shouldn't have to handle: a **personal API key**, pasted into our window, and a **project (team) id** they had to go and find. PostHog has been a full OAuth2/OIDC authorization server for a while, its tasks API accepts `pha_` bearer tokens with exactly the same scope and per-team enforcement as a personal key (`posthog/permissions.py` branches on neither), and it supports **CIMD** — so the `client_id` is a document we host at `https://www.talyn.dev/oauth-client` and there is nothing to register and no client secret to obtain. Talyn is a public client; PKCE is the protection, which PostHog requires of every client anyway.

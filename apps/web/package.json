@@ -23,6 +23,7 @@
     "@talyn/shared": "*",
     "jdenticon": "^3.3.0",
     "lucide-react": "^0.468.0",
+    "mermaid": "^11.16.1",
     "posthog-js": "^1.382.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",

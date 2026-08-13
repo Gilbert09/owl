@@ -3,6 +3,7 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+import { MermaidDiagram, mermaidSourceFromPre } from './mermaid';
 import { cn } from './utils';
 
 /**
@@ -10,7 +11,8 @@ import { cn } from './utils';
  * theme-adaptive panels (PR detail, etc.). Backed by react-markdown +
  * remark-gfm (tables, task lists, strikethrough, autolinks) and
  * rehype-raw → rehype-sanitize so raw HTML common in PR/review bodies
- * (e.g. collapsible `<details>` sections) renders safely.
+ * (e.g. collapsible `<details>` sections) renders safely. ```mermaid
+ * fences render as diagrams, as they do on GitHub — see `mermaid.tsx`.
  *
  * Two variants because the colour palette differs by surface:
  *   - `feed`    — the always-dark agent transcript (bg #1a1a1a).
@@ -26,6 +28,7 @@ interface MdClasses {
   blockquote: string;
   hr: string;
   border: string;
+  muted: string;
 }
 
 const FEED: MdClasses = {
@@ -36,6 +39,7 @@ const FEED: MdClasses = {
   blockquote: 'border-zinc-600 text-zinc-300',
   hr: 'border-zinc-700/60',
   border: 'border-zinc-700/60',
+  muted: 'text-zinc-400',
 };
 
 const SURFACE: MdClasses = {
@@ -46,6 +50,7 @@ const SURFACE: MdClasses = {
   blockquote: 'border-border text-muted-foreground',
   hr: 'border-border',
   border: 'border-border',
+  muted: 'text-muted-foreground',
 };
 
 // Allow GitHub's collapsible <details>/<summary> through the sanitizer
@@ -67,7 +72,7 @@ const REMARK_PLUGINS = [remarkGfm];
 // hast nodes, which sanitize then prunes against the schema.
 const REHYPE_PLUGINS = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA]] as const;
 
-function makeComponents(c: MdClasses): Components {
+function makeComponents(c: MdClasses, forceDark: boolean): Components {
   return {
     p: ({ children }) => (
       <p className="my-1 leading-relaxed [overflow-wrap:anywhere]">{children}</p>
@@ -111,16 +116,31 @@ function makeComponents(c: MdClasses): Components {
       </blockquote>
     ),
     hr: () => <hr className={cn('my-2', c.hr)} />,
-    pre: ({ children }) => (
-      <pre
-        className={cn(
-          'my-1 max-w-full overflow-x-auto whitespace-pre-wrap rounded p-2 font-mono text-xs [overflow-wrap:anywhere]',
-          c.fence
-        )}
-      >
-        {children}
-      </pre>
-    ),
+    pre: ({ children }) => {
+      // A ```mermaid fence becomes a diagram rather than a code block. The
+      // swap happens at the <pre> (not the <code>) so the diagram is not
+      // trapped inside a monospace, pre-wrapped box.
+      const diagram = mermaidSourceFromPre(children);
+      if (diagram !== null) {
+        return (
+          <MermaidDiagram
+            code={diagram}
+            forceDark={forceDark}
+            classes={{ fence: c.fence, border: c.border, muted: c.muted }}
+          />
+        );
+      }
+      return (
+        <pre
+          className={cn(
+            'my-1 max-w-full overflow-x-auto whitespace-pre-wrap rounded p-2 font-mono text-xs [overflow-wrap:anywhere]',
+            c.fence
+          )}
+        >
+          {children}
+        </pre>
+      );
+    },
     code: ({ className, children }) => {
       // Fenced blocks carry a `language-*` class and live inside <pre>
       // (styled above) — render them plain so they don't get the inline
@@ -162,8 +182,8 @@ function makeComponents(c: MdClasses): Components {
   };
 }
 
-const FEED_COMPONENTS = makeComponents(FEED);
-const SURFACE_COMPONENTS = makeComponents(SURFACE);
+const FEED_COMPONENTS = makeComponents(FEED, true);
+const SURFACE_COMPONENTS = makeComponents(SURFACE, false);
 
 export function Markdown({
   text,
