@@ -1,6 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { parseAutoKeepMergeableLabels } from '@talyn/shared';
+import { normalizeLabelNames, parseAutoKeepMergeableLabels } from '@talyn/shared';
 import { normalizeWatchLabels } from '../services/prAutoMergeWatcher.js';
+
+describe('normalizeLabelNames', () => {
+  it.each([
+    { input: [], expected: [] },
+    { input: ['', '  '], expected: [] },
+    { input: [' auto-review '], expected: ['auto-review'] },
+    { input: ['auto-review', 'stamp'], expected: ['auto-review', 'stamp'] },
+    { input: ['Auto-Review', 'auto-review'], expected: ['Auto-Review'] },
+    { input: ['a,b'], expected: ['a,b'] },
+  ])('normalizes $input', ({ input, expected }) => {
+    expect(normalizeLabelNames(input)).toEqual(expected);
+  });
+});
 
 describe('parseAutoKeepMergeableLabels', () => {
   it.each([

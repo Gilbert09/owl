@@ -2,12 +2,13 @@ import { and, eq } from 'drizzle-orm';
 import {
   prNeedsFollowup,
   buildMergeablePrompt,
-  parseAutoKeepMergeableLabels,
+  normalizeLabelNames,
   type PRMergeableSummary,
 } from '@talyn/shared';
 import { getDbClient } from '../db/client.js';
 import { guardCrossReplica } from './advisoryLock.js';
-import { pullRequests as pullRequestsTable, workspaces as workspacesTable } from '../db/schema.js';
+import { pullRequests as pullRequestsTable } from '../db/schema.js';
+import { readWorkspaceSettings } from './workspaceSettings.js';
 import { createCloudTask } from './taskCreate.js';
 import { TaskLimitError } from './billing/entitlements.js';
 import { githubService } from './github.js';
@@ -69,7 +70,7 @@ function readState(row: PRRow): AutoMergeState {
 
 export function normalizeWatchLabels(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return parseAutoKeepMergeableLabels(value.filter((v) => typeof v === 'string').join(','));
+  return normalizeLabelNames(value.filter((v): v is string => typeof v === 'string'));
 }
 
 /** Compact watcher state for the desktop (toggle + badge). */
@@ -152,10 +153,10 @@ class PRAutoMergeWatcher {
           );
         watched = rows.length;
 
-        const labels = new Map<string, string[]>();
+        const workspaceLabelsCache = new Map<string, string[]>();
         for (const row of rows) {
           try {
-            await this.processPr(row, labels);
+            await this.processPr(row, workspaceLabelsCache);
           } catch (err) {
             // One PR failing must never abort the tick — retry next time.
             console.warn(
@@ -191,7 +192,10 @@ class PRAutoMergeWatcher {
     }
   }
 
-  private async processPr(initialRow: PRRow, labels: Map<string, string[]>): Promise<void> {
+  private async processPr(
+    initialRow: PRRow,
+    workspaceLabelsCache: Map<string, string[]>
+  ): Promise<void> {
     const db = getDbClient();
 
     // 1. Freshness — refetch a stale summary so we don't fire (or pause) off
@@ -226,7 +230,7 @@ class PRAutoMergeWatcher {
     const needsFollowup = prNeedsFollowup(summary);
     const state = readState(row);
 
-    await this.ensureLabels(row, state, labels);
+    await this.ensureLabels(row, state, workspaceLabelsCache);
 
     // 2. Active-task guard — if the linked task is still running, leave it.
     const linkedStatus = await linkedTaskStatus(row.taskId);
@@ -301,14 +305,15 @@ class PRAutoMergeWatcher {
   private async ensureLabels(
     row: PRRow,
     state: AutoMergeState,
-    labels: Map<string, string[]>
+    workspaceLabelsCache: Map<string, string[]>
   ): Promise<void> {
-    const wanted = await this.labelsFor(row.workspaceId, labels);
+    const wanted = await this.labelsFor(row.workspaceId, workspaceLabelsCache);
     const applied = state.appliedLabels ?? [];
-    const missing = wanted.filter((l) => !applied.includes(l));
+    const appliedKeys = new Set(applied.map((l) => l.toLowerCase()));
+    const missing = wanted.filter((l) => !appliedKeys.has(l.toLowerCase()));
     if (missing.length === 0) return;
 
-    const repoKey = `${row.workspaceId}:${row.owner}/${row.repo}`;
+    const repoKey = `${row.workspaceId}:${row.owner.toLowerCase()}/${row.repo.toLowerCase()}`;
     const retryAt = this.labelRetryAt.get(repoKey);
     if (retryAt !== undefined && Date.now() < retryAt) return;
 
@@ -333,17 +338,15 @@ class PRAutoMergeWatcher {
     await this.persist(row, state);
   }
 
-  private async labelsFor(workspaceId: string, labels: Map<string, string[]>): Promise<string[]> {
-    const cached = labels.get(workspaceId);
+  private async labelsFor(
+    workspaceId: string,
+    workspaceLabelsCache: Map<string, string[]>
+  ): Promise<string[]> {
+    const cached = workspaceLabelsCache.get(workspaceId);
     if (cached) return cached;
-    const rows = await getDbClient()
-      .select({ settings: workspacesTable.settings })
-      .from(workspacesTable)
-      .where(eq(workspacesTable.id, workspaceId))
-      .limit(1);
-    const settings = (rows[0]?.settings as { autoKeepMergeableLabels?: unknown } | null) ?? {};
+    const settings = await readWorkspaceSettings(getDbClient(), workspaceId);
     const wanted = normalizeWatchLabels(settings.autoKeepMergeableLabels);
-    labels.set(workspaceId, wanted);
+    workspaceLabelsCache.set(workspaceId, wanted);
     return wanted;
   }
 

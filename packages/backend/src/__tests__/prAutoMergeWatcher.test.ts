@@ -229,6 +229,12 @@ describe('prAutoMergeWatcher', () => {
         applied: ['auto-review', 'stamp'],
         expectAdd: null,
       },
+      {
+        name: 'a casing change is not a new label',
+        configured: ['Auto-Review', 'stamp'],
+        applied: ['auto-review', 'stamp'],
+        expectAdd: null,
+      },
     ])('adds only the missing labels: $name', async ({ configured, applied, expectAdd }) => {
       await setLabels(configured);
       const prId = await insertPr(db, {
@@ -324,6 +330,77 @@ describe('prAutoMergeWatcher', () => {
       await prAutoMergeWatcher.runOnce();
 
       expect(addLabels).not.toHaveBeenCalled();
+    });
+
+    it('retries after the backoff window has passed', async () => {
+      await setLabels(['auto-review']);
+      addLabels.mockRejectedValue(new Error('boom'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const prId = await insertPr(db, { summary: cleanSummary() });
+      await prAutoMergeWatcher.runOnce();
+      expect(addLabels).toHaveBeenCalledTimes(1);
+
+      const realNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(realNow + 16 * 60_000);
+      await db
+        .update(pullRequestsTable)
+        .set({ lastPolledAt: new Date(Date.now()) })
+        .where(eq(pullRequestsTable.id, prId));
+      addLabels.mockResolvedValue(undefined);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledTimes(2);
+      expect(await appliedLabels(prId)).toEqual(['auto-review']);
+    });
+
+    it('applies each workspace its own labels within one tick', async () => {
+      await setLabels(['auto-review']);
+      await seedUser(db, { id: OWNER2 });
+      await db.insert(workspacesTable).values({
+        id: 'ws2',
+        ownerId: OWNER2,
+        name: 'ws2',
+        settings: { autoKeepMergeableLabels: ['stamp'] },
+      });
+      await db.insert(repositoriesTable).values({
+        id: 'repo2',
+        workspaceId: 'ws2',
+        name: 'c/d',
+        url: 'https://github.com/c/d',
+        defaultBranch: 'main',
+      });
+      const ws1Pr = await insertPr(db, { summary: cleanSummary() });
+      const ws2Pr = await insertPr(db, {
+        summary: cleanSummary(),
+        workspaceId: 'ws2',
+        repositoryId: 'repo2',
+      });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, ['auto-review']);
+      expect(addLabels).toHaveBeenCalledWith('ws2', 'a', 'b', 2, ['stamp']);
+      expect(await appliedLabels(ws1Pr)).toEqual(['auto-review']);
+      expect(await appliedLabels(ws2Pr)).toEqual(['stamp']);
+    });
+
+    it.each([
+      { name: 'a string', stored: 'auto-review' },
+      { name: 'an object', stored: { auto: true } },
+      { name: 'a mixed array', stored: ['auto-review', 42, null] },
+    ])('tolerates malformed stored appliedLabels: $name', async ({ stored }) => {
+      await setLabels(['auto-review', 'stamp']);
+      const prId = await insertPr(db, {
+        summary: cleanSummary(),
+        autoMergeState: { attempts: 0, accounted: true, appliedLabels: stored },
+      });
+
+      await prAutoMergeWatcher.runOnce();
+
+      const expectAdd = Array.isArray(stored) ? ['stamp'] : ['auto-review', 'stamp'];
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, expectAdd);
+      expect(await appliedLabels(prId)).toEqual(['auto-review', 'stamp']);
     });
   });
 

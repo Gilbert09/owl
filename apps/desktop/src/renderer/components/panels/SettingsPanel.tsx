@@ -1180,7 +1180,7 @@ function AutoKeepMergeableDefaultToggle() {
 }
 
 /** Persists to `workspace.settings.autoKeepMergeableLabels`; the watcher tick applies them and never removes them. */
-function AutoKeepMergeableLabelsField() {
+export function AutoKeepMergeableLabelsField() {
   const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const setWorkspaces = useWorkspaceStore((s) => s.setWorkspaces);
