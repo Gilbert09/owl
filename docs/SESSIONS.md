@@ -2,6 +2,16 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 83 — Label watched PRs (2026-08-17)
+
+Some orgs run a bot that reviews and stamps a PR once it carries a label. Talyn now adds a workspace-configured set of GitHub labels to every PR the auto-keep-mergeable watcher is watching, so that bot picks up exactly the PRs Talyn is driving. Setting: `workspace.settings.autoKeepMergeableLabels` (a `string[]`; the Settings card takes a comma-separated field under "Auto-keep new PRs mergeable" in both renderers, parsed by the shared `parseAutoKeepMergeableLabels`, deduped case-insensitively since GitHub label names are).
+
+The labels are applied inside the watcher tick (`prAutoMergeWatcher.ts` `ensureLabels`), not at arm time. One place covers every way a PR becomes watched (the toggle route, the workspace default on first sighting) and it also backfills PRs that were already watched when the setting was filled in, and picks up a label added to the list later. The watcher records what it has applied in `autoMergeState.labels` and adds only the diff, so a label the user removes from the setting stays on the PR: Talyn never removes labels, since the bot may already have acted on them. Cost is one settings read per workspace per tick and one `addPullRequestLabels` per PR that is missing something.
+
+Failure is best-effort and bounded: a refused write (typically the App lacking `issues: write`) is logged, nothing is recorded, and that repo is skipped for 15 minutes so a permission problem doesn't cost a GitHub call per watched PR per minute. Re-arming a PR resets its state and re-applies the labels, which is idempotent on GitHub's side.
+
+Tests: `prAutoMergeWatcher.test.ts` ("watch labels": the diff matrix incl. partial application, labelling while a run is in flight, backoff on refusal) and `autoKeepMergeableLabels.test.ts` (the parser and the stored-value normalizer).
+
 ## Session 82 — Mermaid diagrams in PR descriptions (2026-08-13)
 
 GitHub renders a ```` ```mermaid ```` fence as a diagram. Our PR detail sheet showed the source as a code block, so any PR that explains itself with a picture arrived as unreadable text. The fix is in `lib/markdown.tsx` (both forks), so the agent transcript and the review bodies get it too.

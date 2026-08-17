@@ -428,3 +428,17 @@ Efficiency — this run is metered, so be decisive and do not idle:
 
 Stop as soon as the PR is clean, or after your bounded attempts with a short summary comment. Start by checking out the PR branch (${ref}) and fetching review threads + CI in a single pass.`;
 }
+
+/** Comma-delimited input to the stored list; deduped ignoring case because GitHub label names are. */
+export function parseAutoKeepMergeableLabels(input: string): string[] {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const raw of input.split(',')) {
+    const label = raw.trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    labels.push(label);
+  }
+  return labels;
+}

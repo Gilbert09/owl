@@ -246,6 +246,8 @@ export interface WorkspaceSettings {
    * review-requested PR. Individual PRs can still be toggled by hand. Unset = off.
    */
   defaultAutoKeepMergeable?: boolean;
+  /** GitHub labels the watcher adds (never removes) to every open PR it watches. Empty = off. */
+  autoKeepMergeableLabels?: string[];
   /**
    * How the merge queue drains a (repo, base) group:
    * - `'ordered'` (default): FIFO — one merge in flight per group, each PR
