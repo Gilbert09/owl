@@ -109,6 +109,7 @@ async function insertPr(
     state?: string;
     workspaceId?: string;
     repositoryId?: string;
+    mergeQueued?: boolean;
   } = {}
 ): Promise<string> {
   const id = `pr-${++prCounter}`;
@@ -123,6 +124,7 @@ async function insertPr(
     state: overrides.state ?? 'open',
     autoKeepMergeable: overrides.autoKeepMergeable ?? true,
     autoMergeState: overrides.autoMergeState ?? null,
+    mergeQueued: overrides.mergeQueued ?? false,
     // Recent so the watcher's freshness refresh (which would call the live
     // GitHub poller) is skipped.
     lastPolledAt: new Date(),
@@ -544,6 +546,32 @@ describe('prAutoMergeWatcher', () => {
 
       expect(await countTasks(db)).toBe(4);
     });
+  });
+
+  // The merge queue expresses the SAME remediation on the same PR, with its
+  // own head-keyed retry budget. Running both meant each one's pushed fix
+  // reset the other's counter, so neither cap was ever reached and the pair
+  // ping-ponged paid runs indefinitely (the 2026-08-18 runaway).
+  it('stands down entirely on a PR the merge queue owns', async () => {
+    await insertPr(db, { mergeQueued: true });
+
+    await prAutoMergeWatcher.runOnce();
+
+    expect(await countTasks(db)).toBe(0);
+  });
+
+  it('fires again once the PR leaves the merge queue', async () => {
+    const prId = await insertPr(db, { mergeQueued: true });
+    await prAutoMergeWatcher.runOnce();
+    expect(await countTasks(db)).toBe(0);
+
+    await db
+      .update(pullRequestsTable)
+      .set({ mergeQueued: false })
+      .where(eq(pullRequestsTable.id, prId));
+    await prAutoMergeWatcher.runOnce();
+
+    expect(await countTasks(db)).toBe(1);
   });
 
   it('does not fire while a run is already in flight (no double-run)', async () => {

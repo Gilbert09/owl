@@ -1073,13 +1073,59 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).not.toContain('submit_external');
     });
 
-    it('still updates a BEHIND branch before submitting', () => {
+    // The 2026-08-18 runaway. Under a gate the external queue rebases and
+    // tests against the current base itself, so "behind master" is the steady
+    // state of every open PR on a busy repo — not work to be done. Updating
+    // the branch produced a new head, R2 reset the fix budget on it, and the
+    // next base advance bought another paid cloud run, forever.
+    it('submits a BEHIND branch instead of updating it — the queue owns that', () => {
       const d = decide(
         entry(),
         pr({ mergeStateStatus: 'BEHIND' }, { reviewDecision: 'APPROVED' }),
         ctx({ externalGate: 'confirmed', updateBranchAvailable: true })
       );
+      expect(kinds(d)).toEqual(['submit_external']);
+      expect(kinds(d)).not.toContain('update_branch');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+    });
+
+    it('still updates a BEHIND branch when there is NO gate (unchanged)', () => {
+      const d = decide(
+        entry(),
+        pr({ mergeStateStatus: 'BEHIND' }, { reviewDecision: 'APPROVED' }),
+        ctx({ updateBranchAvailable: true })
+      );
       expect(kinds(d)).toEqual(['update_branch']);
+    });
+
+    // The other half of the same runaway: BEHIND also dropped an already
+    // submitted PR out of the awaiting_external short-circuit, so every base
+    // advance pulled a PR trunk was happily testing back into remediation.
+    it('keeps a submitted PR tracked when its base moves under it', () => {
+      const d = decide(
+        entry({
+          status: 'awaiting_external',
+          externalSubmitVia: 'comment',
+          externalSubmittedAt: '2026-07-16T11:00:00.000Z',
+          externalState: 'testing',
+        }),
+        pr({ mergeStateStatus: 'BEHIND' }, { reviewDecision: 'APPROVED' }),
+        ctx({ externalGate: 'confirmed', updateBranchAvailable: true })
+      );
+      expect(d.verdict).toBe('advance');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('update_branch');
+    });
+
+    // The gate exemption is narrow on purpose: it drops BEHIND, nothing else.
+    it('still fixes a BEHIND PR that also has real work under a gate', () => {
+      const d = decide(
+        entry(),
+        pr({ mergeStateStatus: 'BEHIND' }, { mergeable: 'CONFLICTING', blockingReason: 'merge_conflicts' }),
+        ctx({ externalGate: 'confirmed', updateBranchAvailable: true })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
     });
 
     it('still waits for a missing required review rather than submitting', () => {

@@ -182,15 +182,27 @@ export function queueBlocked(pr: PrSnapshot): boolean {
  * fix run that could never help — the "blocker" is the ruleset.
  *
  * With a gate present, a bare BLOCKED IS the gate, so it doesn't block: the PR
- * is ready and belongs in the external queue. Everything else still counts —
- * conflicts, requested changes, failing REQUIRED checks (`prNeedsFollowup`) and
- * BEHIND are real work no matter who performs the merge. Pending CI and a
- * missing required review are handled upstream (R7/R7b) and never reach here.
+ * is ready and belongs in the external queue. BEHIND doesn't block either, for
+ * the same reason one step further on: an external merge queue exists precisely
+ * to REMOVE the up-to-date requirement — trunk.io tests each PR against the
+ * current base itself and merges from its own branch, so "behind master" is the
+ * steady state of every open PR on a busy repo, not work to be done. Acting on
+ * it was the 2026-08-18 runaway: master advances (constantly, on
+ * posthog/posthog), every submitted PR reads BEHIND, each one falls out of the
+ * `awaiting_external` short-circuit into remediation, updates its branch, and
+ * the resulting new head resets its budgets via R2 — so the fix-run cap can
+ * never be reached and each base advance buys another paid cloud run.
+ *
+ * Everything `prNeedsFollowup` covers still counts under a gate — conflicts,
+ * requested changes, unresolved threads and failing REQUIRED checks are real
+ * work no matter who performs the merge, and the provider will hold the PR at
+ * "not ready" forever until they're fixed. Pending CI and a missing required
+ * review are handled upstream (R7/R7b) and never reach here.
  */
 function queueBlockedFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
   if (prNeedsFollowup(pr.summary)) return true;
-  if (mergeStateOf(pr) === 'BEHIND') return true;
-  return mergeStateOf(pr) === 'BLOCKED' && ctx.externalGate === null;
+  if (ctx.externalGate !== null) return false;
+  return needsUpdate(pr);
 }
 
 /**
@@ -210,9 +222,17 @@ export function ciInFlight(pr: PrSnapshot): boolean {
  * or BEHIND the base. Deliberately excludes a bare `BLOCKED`, which is what
  * GitHub reports while required checks are merely pending — that case must
  * wait for CI, not be treated as blocked.
+ *
+ * Gate-aware, for the reason spelled out on {@link queueBlockedFor}: under an
+ * external merge queue, BEHIND is that queue's job, not a blocker Talyn should
+ * act on. That matters more here than it does there, because this predicate is
+ * what holds a submitted PR inside the `awaiting_external` short-circuit (R5b)
+ * — counting BEHIND dropped a PR trunk.io was happily testing straight back
+ * into remediation the moment master moved.
  */
-export function hasSettledBlocker(pr: PrSnapshot): boolean {
-  return prNeedsFollowup(pr.summary) || mergeStateOf(pr) === 'BEHIND';
+function hasSettledBlockerFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
+  if (prNeedsFollowup(pr.summary)) return true;
+  return mergeStateOf(pr) === 'BEHIND' && ctx.externalGate === null;
 }
 
 /**
@@ -221,10 +241,10 @@ export function hasSettledBlocker(pr: PrSnapshot): boolean {
  * remediation applies — an agent can't approve a PR — so the queue waits.
  * (v1 fired doomed fix runs at this state and blocked after 3 attempts.)
  */
-export function awaitingRequiredReview(pr: PrSnapshot): boolean {
+export function awaitingRequiredReview(pr: PrSnapshot, ctx: DecisionContext): boolean {
   return (
     mergeStateOf(pr) === 'BLOCKED' &&
-    !hasSettledBlocker(pr) &&
+    !hasSettledBlockerFor(pr, ctx) &&
     !ciInFlight(pr) &&
     pr.summary.reviewDecision === 'REVIEW_REQUIRED'
   );
@@ -492,7 +512,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
         },
       });
       // fall through to the normal rules below
-    } else if (!hasSettledBlocker(pr)) {
+    } else if (!hasSettledBlockerFor(pr, ctx)) {
       return d.done('advance'); // armed and unobstructed — GitHub will merge it
     }
     // armed WITH a settled blocker: fall through so the remediation rules run.
@@ -542,7 +562,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       // In the queue's hands. A settled blocker still deserves remediation —
       // the provider will hold a conflicting PR at "not ready" forever — so
       // only an unobstructed PR short-circuits here.
-      if (!hasSettledBlocker(pr)) return d.done('advance');
+      if (!hasSettledBlockerFor(pr, ctx)) return d.done('advance');
     } else if (d.entry.externalSubmitVia === 'comment') {
       // We posted the provider's own submit command and it never acknowledged
       // the PR. Resubmitting would just post the same comment again on someone
@@ -604,7 +624,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // pull_requests.taskId (a manual task, the keep-mergeable watcher) — which
   // v1 checked separately because taskId gets reassigned by other flows.
   const runActive = ctx.fixTaskState === 'active' || ctx.otherLinkedTaskActive;
-  if (runActive && queueBlockedFor(pr, ctx) && hasSettledBlocker(pr)) {
+  if (runActive && queueBlockedFor(pr, ctx) && hasSettledBlockerFor(pr, ctx)) {
     // An in-flight run only HOLDS BACK a PR with a SETTLED blocker — the
     // thing the run is actually fixing. A clean PR falls through to the merge
     // path, and a head whose only obstacle is in-flight CI falls through to
@@ -630,14 +650,14 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // a slow check on the head never freezes the ready PRs behind it. Only when
   // pending CI is the *sole* obstacle: a settled blocker still funnels into
   // the fix path below.
-  if (ciInFlight(pr) && !hasSettledBlocker(pr)) {
+  if (ciInFlight(pr) && !hasSettledBlockerFor(pr, ctx)) {
     return decideCleanButWaitingOnCi(d, pr, ctx, runActive);
   }
 
   // R7b — only a required review is missing. An agent can't approve a PR, so
   // no remediation applies; wait and self-heal on the review webhook. (v1
   // funneled this into fix runs via the bare-BLOCKED branch of needsUpdate.)
-  if (awaitingRequiredReview(pr)) {
+  if (awaitingRequiredReview(pr, ctx)) {
     d.ensure('awaiting_review');
     return d.done('advance');
   }

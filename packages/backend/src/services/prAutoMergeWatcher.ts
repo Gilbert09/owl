@@ -53,6 +53,7 @@ const WATCH_COLUMNS = {
   lastSummary: pullRequestsTable.lastSummary,
   autoKeepMergeable: pullRequestsTable.autoKeepMergeable,
   autoMergeState: pullRequestsTable.autoMergeState,
+  mergeQueued: pullRequestsTable.mergeQueued,
 } as const;
 
 type PRRow = Pick<typeof pullRequestsTable.$inferSelect, keyof typeof WATCH_COLUMNS>;
@@ -83,6 +84,8 @@ function publicState(s: AutoMergeState): { attempts: number; paused: boolean } {
  * Keeps every PR with `auto_keep_mergeable = true` in a mergeable state,
  * unattended and indefinitely. Each tick, per enabled open PR:
  *
+ *   0. Stand down entirely on a PR that's in the merge queue — that queue
+ *      owns remediation for it (see processPr).
  *   1. Refresh stale summaries so blocker detection is current, and add any of
  *      the workspace's watch labels (`settings.autoKeepMergeableLabels`) this
  *      PR hasn't received yet.
@@ -149,7 +152,10 @@ class PRAutoMergeWatcher {
           .where(
             and(
               eq(pullRequestsTable.autoKeepMergeable, true),
-              eq(pullRequestsTable.state, 'open')
+              eq(pullRequestsTable.state, 'open'),
+              // Excluded in SQL as well as in processPr so the `watched` count
+              // on the debug tile means "PRs this watcher actually drives".
+              eq(pullRequestsTable.mergeQueued, false)
             )
           );
         watched = rows.length;
@@ -199,6 +205,20 @@ class PRAutoMergeWatcher {
   ): Promise<void> {
     const db = getDbClient();
 
+    // 0. Merge-queue PRs belong to the merge queue, not here. Both systems
+    //    express the SAME remediation (`buildMergeablePrompt` via a
+    //    `pr_response` task), so running both on one PR buys nothing and costs
+    //    a second paid run — but the real damage is that their retry budgets
+    //    are independent AND head-keyed, so each one's pushed fix resets the
+    //    other's. Whichever finishes first pushes a commit; the other sees a
+    //    new head, zeroes its attempt counter, and fires again. Neither cap is
+    //    ever reached and the pair ping-pongs indefinitely (the 2026-08-18
+    //    runaway: the same posthog/posthog PRs alternating "Get … mergeable"
+    //    and "Get … mergeable (merge queue)" runs). The queue is the one to
+    //    keep: it is gate-aware, CAS-serialised across replicas, and it merges
+    //    at the end. The watcher resumes on its own if the PR is dequeued.
+    if (initialRow.mergeQueued) return;
+
     // 1. Freshness — refetch a stale summary so we don't fire (or pause) off
     //    outdated blocker state. refreshPr is a no-op if the repo isn't watched.
     let row = initialRow;
@@ -224,7 +244,7 @@ class PRAutoMergeWatcher {
         .limit(1);
       if (reread[0]) row = reread[0];
       // The refresh may have flipped the PR to merged/closed.
-      if (row.state !== 'open' || !row.autoKeepMergeable) return;
+      if (row.state !== 'open' || !row.autoKeepMergeable || row.mergeQueued) return;
     }
 
     const summary = row.lastSummary as PRMergeableSummary;
