@@ -50,7 +50,12 @@ import { debugBus } from '../debugBus.js';
 import { captureWorkspaceEvent } from '../analytics.js';
 import { decide } from './decide.js';
 import { toLegacyPublicState, toLegacyStateBlob, toPublicMergeQueue } from './legacy.js';
-import { casTransition, rowToEntrySnapshot, type EntryRow } from './store.js';
+import {
+  casTransition,
+  rowToEntrySnapshot,
+  type CasPatch,
+  type EntryRow,
+} from './store.js';
 import type { StackParent } from './stack.js';
 import {
   MAX_ATTEMPTS,
@@ -377,6 +382,8 @@ async function performAction(action: Action, ctx: ActionContext): Promise<Action
       );
       return { redecide: true };
     }
+    case 'retarget_base':
+      return retargetBase(action, ctx);
     case 'fire_fix_run':
       return fireFixRun(action.resign, ctx, action.queueFailure);
     case 'record_merged': {
@@ -868,6 +875,116 @@ async function probeSignatures(ctx: ActionContext): Promise<ActionOutcome> {
     entry: { ...ctx.entry, signingCheckedSha: ctx.prSnap.headSha, unsignedCount: count },
     versionDelta: 1,
     redecide: true,
+  };
+}
+
+/**
+ * Merge stack: point the PR at its stack parent's base now that the parent has
+ * landed, and move the entry into that group.
+ *
+ * On success this ABORTS the evaluation rather than redeciding. The whole
+ * decision context — requiresSignedCommits, getExternalMergeGate,
+ * getAutoMergeCapability — was probed against the base the PR just left, which
+ * is a feature branch with no protection. The base it moves TO is the real
+ * base, which is exactly where signing rules and external merge gates live.
+ * Redeciding here would send a freshly-retargeted PR straight at a
+ * trunk-gated master with an "unprotected" context. The new group's own walk
+ * builds a fresh one.
+ */
+async function retargetBase(
+  action: Extract<Action, { kind: 'retarget_base' }>,
+  ctx: ActionContext
+): Promise<ActionOutcome> {
+  const { pr, entry } = ctx;
+
+  // GitHub's own delete-branch auto-retarget may have beaten us here, and a
+  // double-delivered webhook certainly can. Either way there is nothing to do
+  // but move the entry.
+  let landed = ctx.prSnap.summary.baseBranch === action.toBase;
+
+  if (!landed) {
+    // Burn nothing while the account is in a REST backoff — the retarget budget
+    // counts attempts, and a rate-limited round is not an attempt.
+    if (ctx.base.restGateBlocked) {
+      ctx.extras.retargetOutcome = 'retry';
+      return { redecide: true };
+    }
+    try {
+      await githubService.updatePullRequest(pr.workspaceId, pr.owner, pr.repo, pr.number, {
+        base: action.toBase,
+      });
+      landed = true;
+    } catch (err) {
+      // The PATCH may have landed and only the response been lost. Ask.
+      const live = await githubService
+        .getPullRequest(pr.workspaceId, pr.owner, pr.repo, pr.number)
+        .catch(() => null);
+      landed = (live as { base?: { ref?: string } } | null)?.base?.ref === action.toBase;
+      if (!landed) {
+        console.warn(
+          `[mergeQueueV2] retarget ${pr.owner}/${pr.repo}#${pr.number} -> ${action.toBase} failed:`,
+          err instanceof Error ? err.message : err
+        );
+        ctx.extras.retargetOutcome = 'error';
+        return { redecide: true };
+      }
+    }
+  }
+
+  const patch: CasPatch = {
+    baseBranch: action.toBase,
+    status: 'queued',
+    blockedCode: null,
+    blockedReason: null,
+    stackParentNumber: null,
+    retargetAttempts: entry.retargetAttempts + 1,
+    // The PR faces a genuinely different base with genuinely different
+    // problems; attempts spent fighting the old one shouldn't count. Same
+    // reasoning as the new-head budget reset.
+    fixAttempts: 0,
+    rerunAttempts: 0,
+    resignAttempts: 0,
+    submitAttempts: 0,
+    fixTaskAccounted: true,
+    // Every memo below was probed against the OLD base. Signing requirements
+    // and external merge gates live on the real base, so a stale memo here is
+    // how a PR merges past a rule it was never checked against.
+    signingCheckedSha: null,
+    unsignedCount: null,
+    externalSubmitVia: null,
+    externalSubmittedAt: null,
+    externalState: null,
+    externalStateAt: null,
+  };
+  const ok = await casTransition(entry.id, ctx.version, patch, {
+    trigger: ctx.trigger,
+    fromStatus: entry.status,
+    toStatus: 'queued',
+    code: 'stack_retargeted',
+    message: `#${action.parentNumber} merged — retargeted this PR from ${entry.baseBranch} to ${action.toBase}.`,
+    detail: { from: entry.baseBranch, to: action.toBase, parent: action.parentNumber },
+  });
+  if (!ok) return { casLost: true };
+
+  // The next evaluation must read the new base and its mergeStateStatus
+  // (normally BEHIND, which the update-branch rule then handles).
+  await prMonitorService
+    .refreshPr(pr.workspaceId, pr.owner, pr.repo, pr.number, { resolveMergeable: true })
+    .catch(() => undefined);
+
+  return {
+    abort: 'advance',
+    movedToBase: action.toBase,
+    versionDelta: 1,
+    entry: {
+      ...entry,
+      baseBranch: action.toBase,
+      status: 'queued',
+      blockedCode: null,
+      blockedReason: null,
+      stackParentNumber: null,
+      retargetAttempts: entry.retargetAttempts + 1,
+    },
   };
 }
 

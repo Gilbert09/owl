@@ -24,6 +24,7 @@ import {
   type ExternalQueueStatus,
   type PRMergeableSummary,
 } from '@talyn/shared';
+import { MAX_RETARGETS } from './types.js';
 import type {
   Action,
   BlockedCode,
@@ -34,6 +35,7 @@ import type {
   EventDraft,
   PrSnapshot,
 } from './types.js';
+import type { StackParent } from './stack.js';
 
 export const DRAFT_BLOCK_REASON =
   'This PR is a draft — mark it ready for review and the merge queue will merge it automatically.';
@@ -440,6 +442,42 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     });
   }
 
+  // R4b — MERGE STACK gate. The PR this one is based on hasn't landed yet, so
+  // merging now would put it in the parent's branch instead of the real base.
+  //
+  // The placement is the whole design, because the group walk gives NO
+  // protection here: parent and child live in different (repo, base) groups
+  // and are walked by two independent, possibly concurrent evaluations, and
+  // decideCleanPath never reads ctx.isHead. So the gate must be an
+  // unconditional rule that consults nothing about mode, head-ness, or gates.
+  //
+  // Why here and not elsewhere:
+  //   after R0/R0b — a child merged or closed underneath us must terminate,
+  //                  never park.
+  //   after R1     — never interrupt a merge/submit aftermath mid-flight.
+  //   after R2     — budget resets keep working while parked.
+  //   after R3     — CRITICAL. A persisted `merging` must hit verify_merged
+  //                  first, or we strand a PR GitHub already merged.
+  //   after R4     — a draft is more actionable to the author than "waiting".
+  //   before R5..R11 — a parked child must never arm auto-merge, be submitted
+  //                  to trunk (which refuses stacks outright), fire a fix run,
+  //                  update its branch, or merge.
+  if (ctx.stackParent !== undefined && ctx.stackParent !== null) {
+    const parent = ctx.stackParent;
+    const stacked = decideStackGate(d, pr, parent, ctx);
+    if (stacked) return stacked;
+  } else if (ctx.stackParent === null && d.entry.status === 'awaiting_stack') {
+    // Self-heal: nothing owns this base any more — the parent landed and the
+    // retarget already moved us, or the parent PR was retargeted itself.
+    d.transition('queued', {
+      set: { stackParentNumber: null },
+      event: {
+        code: 'stack_parent_cleared',
+        message: 'No PR owns this base branch any more — back in line.',
+      },
+    });
+  }
+
   // R5 — auto-merge armed: GitHub owns the merge moment. If GitHub silently
   // disarmed it (draft conversion, base deleted, …) the snapshot shows no
   // armed request — re-arm the entry and fall through to a fresh decision.
@@ -722,6 +760,145 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
  * auto-merge so the merge happens the instant checks go green, with zero
  * queue latency and immune to our budget.
  */
+/**
+ * The merge-stack gate (R4b). Returns a Decision when this entry belongs to a
+ * stack and must not proceed on its own, or null to fall through to the normal
+ * rules.
+ *
+ * Every branch that parks or blocks ADVANCES rather than holds, mirroring the
+ * draft and awaiting-review rules: this entry can't merge, so it must not
+ * consume its group's turn in ordered mode.
+ */
+function decideStackGate(
+  d: DecisionBuilder,
+  pr: PrSnapshot,
+  parent: StackParent,
+  ctx: DecisionContext
+): Decision | null {
+  // A base/head cycle: no member of the ring can ever be first, and no
+  // remediation reaches it. Only the author can break it.
+  if (parent.cycle) {
+    if (d.entry.status !== 'blocked_manual' || d.entry.blockedCode !== 'stack_cycle') {
+      d.transition('blocked_manual', {
+        blockedCode: 'stack_cycle',
+        blockedReason:
+          `This PR is in a stack whose branches form a cycle (via #${parent.number}), ` +
+          'so no PR in it can merge first. Retarget one of them to break the loop.',
+        event: {
+          code: 'stack_cycle',
+          message: `Base/head cycle detected via #${parent.number}.`,
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+    }
+    return d.done('advance');
+  }
+
+  if (parent.state === 'merged') {
+    // The parent landed — move this PR onto the parent's base and let it
+    // re-enter the normal flow from the new group.
+    if (d.entry.retargetAttempts >= MAX_RETARGETS) {
+      if (d.entry.blockedCode !== 'stack_retarget_loop') {
+        d.transition('blocked_manual', {
+          blockedCode: 'stack_retarget_loop',
+          blockedReason:
+            'This PR has been retargeted too many times while draining its stack. ' +
+            'Retarget it by hand and requeue.',
+          event: {
+            code: 'stack_retarget_loop',
+            message: `Retarget budget spent (${d.entry.retargetAttempts}/${MAX_RETARGETS}).`,
+          },
+        });
+        d.act({ kind: 'notify_blocked' });
+      }
+      return d.done('advance');
+    }
+    if (ctx.retargetOutcome === 'error') {
+      if (d.entry.blockedCode !== 'stack_retarget_failed') {
+        d.transition('blocked', {
+          blockedCode: 'stack_retarget_failed',
+          blockedReason:
+            `#${parent.number} merged, but GitHub refused to retarget this PR onto ` +
+            `${parent.baseBranch}. Retarget it by hand, or push to retry.`,
+          event: {
+            code: 'stack_retarget_failed',
+            message: `Retarget to ${parent.baseBranch} was refused.`,
+          },
+        });
+        d.act({ kind: 'notify_blocked' });
+      }
+      return d.done('advance');
+    }
+    if (ctx.retargetOutcome === 'retry') {
+      // Rate-gated. Stay parked and burn nothing; the reconciler comes back.
+      d.ensure('awaiting_stack');
+      return d.done('hold');
+    }
+    // A base we can't use is not a retarget — it's a broken chain. Retargeting
+    // a PR onto its own head branch, or onto the base it already has, would
+    // either 422 or loop.
+    const toBase = parent.baseBranch;
+    if (!toBase || toBase === d.entry.baseBranch || toBase === pr.summary.headBranch) {
+      if (d.entry.blockedCode !== 'stack_retarget_failed') {
+        d.transition('blocked_manual', {
+          blockedCode: 'stack_retarget_failed',
+          blockedReason:
+            `#${parent.number} merged, but Talyn can't work out which branch this PR ` +
+            'should target now. Retarget it by hand and requeue.',
+          event: {
+            code: 'stack_retarget_failed',
+            message: `Unusable retarget target ${JSON.stringify(toBase)}.`,
+          },
+        });
+        d.act({ kind: 'notify_blocked' });
+      }
+      return d.done('advance');
+    }
+    d.act({ kind: 'retarget_base', toBase, parentNumber: parent.number });
+    return d.done('hold');
+  }
+
+  if (parent.state === 'closed') {
+    // Abandoned stack. NEVER auto-retarget here: this PR's branch still
+    // contains the closed parent's commits, so pointing it at the parent's
+    // base would smuggle abandoned work into the base branch. `blocked`, not
+    // `blocked_manual`, so reopening the parent self-heals it.
+    if (d.entry.blockedCode !== 'stack_parent_abandoned') {
+      d.transition('blocked', {
+        blockedCode: 'stack_parent_abandoned',
+        blockedReason:
+          `#${parent.number} was closed without merging, and this PR is based on its ` +
+          'branch. Retarget this PR, or reopen and merge that one.',
+        event: {
+          code: 'stack_parent_abandoned',
+          message: `Stack parent #${parent.number} was closed without merging.`,
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+    }
+    return d.done('advance');
+  }
+
+  // Parent still open — park. This covers the parent being blocked_manual and
+  // the parent not being queued at all, and deliberately does NOT propagate
+  // either downward: the parent already fires its own one-shot notification,
+  // and the right shape is one loud blocked PR with N quiet parked ones. A
+  // human merging the parent by hand resumes the whole stack.
+  if (d.entry.status !== 'awaiting_stack' || d.entry.stackParentNumber !== parent.number) {
+    d.transition('awaiting_stack', {
+      set: { stackParentNumber: parent.number },
+      event: {
+        code: parent.entryStatus === null ? 'stack_parent_not_queued' : 'awaiting_stack',
+        message:
+          parent.entryStatus === null
+            ? `Waiting for #${parent.number} — it is not in the merge queue, so it has to land another way.`
+            : `Waiting for #${parent.number} to merge.`,
+      },
+    });
+  }
+  return d.done('advance');
+}
+
 function decideCleanButWaitingOnCi(
   d: DecisionBuilder,
   pr: PrSnapshot,
@@ -1375,8 +1552,12 @@ class DecisionBuilder {
     // live on GitHub — GitHub would merge it out of FIFO order the moment its
     // checks pass, behind the queue's back. Disarm BEFORE the transition.
     // (User-armed auto-merges are never ours to disarm.)
+    // `awaiting_stack` needs the same treatment for the same reason, and it is
+    // the one that actually bites: a parked child holding a Talyn arm gets
+    // merged by GitHub INTO ITS PARENT'S BRANCH the instant its checks pass,
+    // which is precisely what the merge stack exists to prevent.
     if (
-      (to === 'blocked' || to === 'blocked_manual') &&
+      (to === 'blocked' || to === 'blocked_manual' || to === 'awaiting_stack') &&
       this.entry.automergeArmedBy === 'talyn'
     ) {
       this.actions.push({ kind: 'disarm_automerge' });
@@ -1421,6 +1602,12 @@ class DecisionBuilder {
         this.entry.signingCheckedSha = opts.set.signingCheckedSha;
       }
       if (opts.set.unsignedCount !== undefined) this.entry.unsignedCount = opts.set.unsignedCount;
+      if (opts.set.stackParentNumber !== undefined) {
+        this.entry.stackParentNumber = opts.set.stackParentNumber;
+      }
+      if (opts.set.retargetAttempts !== undefined) {
+        this.entry.retargetAttempts = opts.set.retargetAttempts;
+      }
     }
   }
 

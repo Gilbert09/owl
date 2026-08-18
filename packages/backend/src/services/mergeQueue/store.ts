@@ -96,6 +96,8 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     automergeArmedBy: (row.automergeArmedBy as 'talyn' | 'user' | null) ?? null,
     mergeMethod: (row.mergeMethod as MergeMethod) ?? 'squash',
     baseBranch: row.baseBranch,
+    stackParentNumber: row.stackParentNumber,
+    retargetAttempts: row.retargetAttempts,
   };
 }
 
@@ -300,6 +302,8 @@ export interface CasPatch {
   fixKind?: FixKind | null;
   signingCheckedSha?: string | null;
   unsignedCount?: number | null;
+  stackParentNumber?: number | null;
+  retargetAttempts?: number;
   automergeArmedAt?: Date | null;
   automergeArmedBy?: 'talyn' | 'user' | null;
   pendingDisarm?: boolean;

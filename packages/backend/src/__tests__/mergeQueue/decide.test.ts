@@ -21,6 +21,7 @@ import type {
   EntrySnapshot,
   PrSnapshot,
 } from '../../services/mergeQueue/types.js';
+import type { StackParent } from '../../services/mergeQueue/stack.js';
 import type { ExternalQueueState } from '@talyn/shared';
 
 const NOW = '2026-07-16T12:00:00.000Z';
@@ -47,6 +48,8 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
     automergeArmedBy: null,
     mergeMethod: 'squash',
     baseBranch: 'main',
+    stackParentNumber: null,
+    retargetAttempts: 0,
     ...o,
   };
 }
@@ -1698,5 +1701,295 @@ describe('decide — invariants', () => {
     for (const [, e, p, c] of scenarios) {
       expect(decide(e, p, c)).toEqual(decide(e, p, c));
     }
+  });
+});
+
+// R4b — the merge stack gate. The group walk gives no protection here: parent
+// and child live in different (repo, base) groups, are walked by two
+// independent evaluations, and decideCleanPath never reads ctx.isHead. So this
+// has to be an unconditional rule, and the ordering matrix below is what pins
+// that it really is one.
+describe('decide — merge stack', () => {
+  function parent(o: Partial<StackParent> = {}): StackParent {
+    return {
+      pullRequestId: 'pr-parent',
+      number: 41,
+      headBranch: 'feat-a',
+      baseBranch: 'main',
+      state: 'open',
+      entryStatus: 'queued',
+      targetBase: 'main',
+      depth: 1,
+      cycle: false,
+      ...o,
+    };
+  }
+  /** The child: based on feat-a, otherwise perfectly mergeable. */
+  const child = () => entry({ baseBranch: 'feat-a' });
+  const childPr = () => pr({}, { headBranch: 'feat-b', baseBranch: 'feat-a' });
+
+  describe('parent still open', () => {
+    it('parks the child instead of merging it into its parent branch', () => {
+      const d = decide(child(), childPr(), ctx({ stackParent: parent() }));
+
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+      expect(lastTransition(d)?.set?.stackParentNumber).toBe(41);
+      expect(kinds(d)).not.toContain('verify_live_then_merge');
+      expect(kinds(d)).not.toContain('arm_automerge');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('update_branch');
+    });
+
+    it('ADVANCES — a parked child must not consume its group turn', () => {
+      // Same reasoning as the draft and awaiting-review rules: this entry can
+      // never merge, so holding would stall everything behind it.
+      expect(decide(child(), childPr(), ctx({ stackParent: parent() })).verdict).toBe('advance');
+    });
+
+    it('disarms a Talyn auto-merge BEFORE parking', () => {
+      // The one that actually bites: GitHub would merge the parked child into
+      // its parent's branch the instant checks pass, behind the queue's back.
+      const d = decide(
+        entry({ baseBranch: 'feat-a', automergeArmedBy: 'talyn', status: 'automerge_armed' }),
+        pr({ autoMergeEnabledBy: 'talyn' }, { headBranch: 'feat-b', baseBranch: 'feat-a' }),
+        ctx({ stackParent: parent() })
+      );
+
+      expect(kinds(d).indexOf('disarm_automerge')).toBeLessThan(kinds(d).indexOf('transition'));
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+    });
+
+    it('never disarms a USER-armed auto-merge', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', automergeArmedBy: 'user' }),
+        pr({ autoMergeEnabledBy: 'user' }, { headBranch: 'feat-b', baseBranch: 'feat-a' }),
+        ctx({ stackParent: parent() })
+      );
+
+      expect(kinds(d)).not.toContain('disarm_automerge');
+    });
+
+    it('does not rewrite the entry once it is already parked on that PR', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', status: 'awaiting_stack', stackParentNumber: 41 }),
+        childPr(),
+        ctx({ stackParent: parent() })
+      );
+
+      expect(d.actions).toHaveLength(0);
+    });
+
+    it('re-parks when the parent PR changed', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', status: 'awaiting_stack', stackParentNumber: 7 }),
+        childPr(),
+        ctx({ stackParent: parent({ number: 41 }) })
+      );
+
+      expect(lastTransition(d)?.set?.stackParentNumber).toBe(41);
+    });
+
+    it('parks behind an unqueued parent, and says so in the timeline', () => {
+      // Do not auto-block: "I'll land that one by hand" is a normal flow, and
+      // the manual merge resumes the stack via the stack-advance trigger.
+      const d = decide(
+        child(),
+        childPr(),
+        ctx({ stackParent: parent({ entryStatus: null }) })
+      );
+
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+      expect(lastTransition(d)?.event.code).toBe('stack_parent_not_queued');
+    });
+
+    it('parks behind a blocked parent WITHOUT propagating the block', () => {
+      // One loud blocked PR and N quiet parked ones — the parent fires its own
+      // one-shot notification, and mirroring it N times is just noise.
+      const d = decide(
+        child(),
+        childPr(),
+        ctx({ stackParent: parent({ entryStatus: 'blocked_manual' }) })
+      );
+
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+      expect(kinds(d)).not.toContain('notify_blocked');
+    });
+  });
+
+  describe('parent merged', () => {
+    it('retargets onto the parent base and holds', () => {
+      const d = decide(child(), childPr(), ctx({ stackParent: parent({ state: 'merged' }) }));
+
+      const act = d.actions.find(
+        (a): a is Extract<Action, { kind: 'retarget_base' }> => a.kind === 'retarget_base'
+      );
+      expect(act).toMatchObject({ toBase: 'main', parentNumber: 41 });
+      expect(d.verdict).toBe('hold');
+      expect(kinds(d)).not.toContain('verify_live_then_merge');
+    });
+
+    it('blocks rather than retargeting onto a base it already has', () => {
+      const d = decide(
+        entry({ baseBranch: 'main' }),
+        pr({}, { headBranch: 'feat-b', baseBranch: 'main' }),
+        ctx({ stackParent: parent({ state: 'merged', baseBranch: 'main' }) })
+      );
+
+      expect(kinds(d)).not.toContain('retarget_base');
+      expect(lastTransition(d)?.blockedCode).toBe('stack_retarget_failed');
+    });
+
+    it('blocks rather than retargeting a PR onto its own head branch', () => {
+      const d = decide(
+        child(),
+        childPr(),
+        ctx({ stackParent: parent({ state: 'merged', baseBranch: 'feat-b' }) })
+      );
+
+      expect(kinds(d)).not.toContain('retarget_base');
+      expect(lastTransition(d)?.blockedCode).toBe('stack_retarget_failed');
+    });
+
+    it('blocks on a refused retarget, and notifies', () => {
+      const d = decide(
+        child(),
+        childPr(),
+        ctx({ stackParent: parent({ state: 'merged' }), retargetOutcome: 'error' })
+      );
+
+      expect(lastTransition(d)?.to).toBe('blocked');
+      expect(lastTransition(d)?.blockedCode).toBe('stack_retarget_failed');
+      expect(kinds(d)).toContain('notify_blocked');
+    });
+
+    it('holds without burning budget when the retarget was rate-gated', () => {
+      const d = decide(
+        child(),
+        childPr(),
+        ctx({ stackParent: parent({ state: 'merged' }), retargetOutcome: 'retry' })
+      );
+
+      expect(d.verdict).toBe('hold');
+      expect(kinds(d)).not.toContain('retarget_base');
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+    });
+
+    it('blocks_manual once the retarget budget is spent', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', retargetAttempts: 8 }),
+        childPr(),
+        ctx({ stackParent: parent({ state: 'merged' }) })
+      );
+
+      expect(lastTransition(d)?.to).toBe('blocked_manual');
+      expect(lastTransition(d)?.blockedCode).toBe('stack_retarget_loop');
+      expect(kinds(d)).not.toContain('retarget_base');
+    });
+  });
+
+  describe('parent closed without merging', () => {
+    it('blocks and never auto-retargets', () => {
+      // The child's branch still contains the abandoned parent's commits, so
+      // retargeting would smuggle them into the base branch.
+      const d = decide(child(), childPr(), ctx({ stackParent: parent({ state: 'closed' }) }));
+
+      expect(lastTransition(d)?.to).toBe('blocked');
+      expect(lastTransition(d)?.blockedCode).toBe('stack_parent_abandoned');
+      expect(kinds(d)).not.toContain('retarget_base');
+      expect(kinds(d)).toContain('notify_blocked');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('is blocked, not blocked_manual, so reopening the parent self-heals', () => {
+      const d = decide(child(), childPr(), ctx({ stackParent: parent({ state: 'closed' }) }));
+      expect(lastTransition(d)?.to).not.toBe('blocked_manual');
+    });
+  });
+
+  it('blocks_manual on a base/head cycle', () => {
+    const d = decide(child(), childPr(), ctx({ stackParent: parent({ cycle: true }) }));
+
+    expect(lastTransition(d)?.to).toBe('blocked_manual');
+    expect(lastTransition(d)?.blockedCode).toBe('stack_cycle');
+    expect(d.verdict).toBe('advance');
+  });
+
+  it('self-heals a parked entry once nothing owns its base', () => {
+    const d = decide(
+      entry({ baseBranch: 'main', status: 'awaiting_stack', stackParentNumber: 41 }),
+      pr(),
+      ctx({ stackParent: null })
+    );
+
+    expect(transitions(d)[0]?.to).toBe('queued');
+    expect(transitions(d)[0]?.set?.stackParentNumber).toBeNull();
+  });
+
+  it('is inert when the evaluator did not resolve a parent', () => {
+    const d = decide(entry(), pr(), ctx({}));
+    expect(kinds(d)).toContain('verify_live_then_merge');
+  });
+
+  // The gate must sit BELOW the terminal/aftermath/crash-recovery rules and
+  // ABOVE everything that acts on the PR. One case per boundary.
+  describe('rule ordering (every case has an open parent)', () => {
+    const withParent = (o: Partial<DecisionContext> = {}) =>
+      ctx({ stackParent: parent(), ...o });
+
+    it('R0 wins: a child merged underneath us terminates, never parks', () => {
+      const d = decide(child(), pr({ state: 'merged' }, { baseBranch: 'feat-a' }), withParent());
+      expect(lastTransition(d)?.to).toBe('merged');
+    });
+
+    it('R0 wins: a child closed underneath us terminates', () => {
+      const d = decide(child(), pr({ state: 'closed' }, { baseBranch: 'feat-a' }), withParent());
+      expect(lastTransition(d)?.to).toBe('removed');
+    });
+
+    it('R3 wins: a persisted `merging` verifies first — never park a merged PR', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', status: 'merging' }),
+        childPr(),
+        withParent()
+      );
+      expect(kinds(d)).toContain('verify_merged');
+      expect(lastTransition(d)?.to).not.toBe('awaiting_stack');
+    });
+
+    it('R4 wins: a draft reads as draft, which is the actionable message', () => {
+      const d = decide(child(), pr({}, { baseBranch: 'feat-a', draft: true }), withParent());
+      expect(lastTransition(d)?.blockedCode).toBe('draft');
+    });
+
+    it('beats R5b: a parked child is never submitted to an external queue', () => {
+      // trunk.io refuses stacked PRs outright, so submitting one is a
+      // guaranteed round trip to blocked_manual.
+      const d = decide(child(), childPr(), withParent({ externalGate: 'confirmed' }));
+      expect(kinds(d)).not.toContain('submit_external');
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+    });
+
+    it('is mode-agnostic: parks identically when not head and mid-merge', () => {
+      const d = decide(
+        child(),
+        childPr(),
+        withParent({ isHead: false, groupMergeInFlight: true })
+      );
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+    });
+
+    it('beats R11: a parked child with a settled blocker fires no fix run', () => {
+      const d = decide(
+        child(),
+        pr({ mergeStateStatus: 'DIRTY' }, {
+          baseBranch: 'feat-a',
+          mergeable: 'CONFLICTING',
+          blockingReason: 'merge_conflicts',
+        }),
+        withParent()
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(lastTransition(d)?.to).toBe('awaiting_stack');
+    });
   });
 });

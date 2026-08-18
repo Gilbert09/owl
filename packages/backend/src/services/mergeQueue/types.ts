@@ -26,6 +26,16 @@ export const MAX_ATTEMPTS = 3;
  */
 export const MAX_DECIDE_ROUNDS = 8;
 
+/**
+ * Retarget actions allowed per entry, ever. In the normal case an entry
+ * retargets exactly ONCE: its base is its parent's head, and when the parent
+ * lands it moves straight to the parent's base. This is the backstop, and it
+ * counts actions rather than successes so a PATCH that keeps failing is
+ * bounded too. Deliberately NOT reset by a new head — a push that reset the
+ * loop guard would defeat it.
+ */
+export const MAX_RETARGETS = 8;
+
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
 
 /**
@@ -41,6 +51,12 @@ export type MergeMethod = 'merge' | 'squash' | 'rebase';
  * - `automerge_armed`  — head; clean-but-awaiting-CI with GitHub native
  *                        auto-merge enabled. GitHub merges the instant checks
  *                        pass; we observe it via the closed webhook.
+ * - `awaiting_stack`   — the entry is a member of a stack and the PR its base
+ *                        branch belongs to has NOT merged yet. Nothing can be
+ *                        done to it: merging would land it in its parent's
+ *                        branch instead of the real base. Self-heals the moment
+ *                        the parent lands, which retargets this PR onto the
+ *                        parent's base and returns it to `queued`.
  * - `awaiting_external`— the base branch is behind an external merge gate
  *                        (trunk.io / GitHub's native queue) and the PR has been
  *                        SUBMITTED to it. That system owns the merge now; we
@@ -62,6 +78,7 @@ export type EntryStatus =
   | 'awaiting_review'
   | 'automerge_armed'
   | 'awaiting_external'
+  | 'awaiting_stack'
   | 'fixing'
   | 'merging'
   | 'blocked'
@@ -105,7 +122,32 @@ export type BlockedCode =
    * `trunk-cancelled`) more times than the per-head budget allows. Self-heals
    * on a new head, like every other budget — a fresh push earns fresh submits.
    */
-  | 'external_queue_rejected';
+  | 'external_queue_rejected'
+  /**
+   * The PR this one is stacked on was CLOSED without merging. Retargeting onto
+   * the abandoned parent's base would smuggle the parent's commits into the
+   * base branch — the child's head still contains them — so the queue refuses
+   * and hands it back. `blocked` rather than `blocked_manual`: it self-heals
+   * if the parent is reopened.
+   */
+  | 'stack_parent_abandoned'
+  /**
+   * The base retarget after a stack parent merged was refused by GitHub. Self-
+   * heals on a new head or a requeue, like every other `blocked`.
+   */
+  | 'stack_retarget_failed'
+  /**
+   * The stack's base/head links form a cycle, so no member can ever be first.
+   * `blocked_manual` — only the author can break it.
+   */
+  | 'stack_cycle'
+  /**
+   * More retargets attempted on one entry than any real stack needs. A
+   * retarget can only fire on a MERGED parent and moves the base one hop up a
+   * finite chain, so this should be unreachable; it exists so a resolver bug
+   * costs one blocked PR rather than an unbounded PATCH loop.
+   */
+  | 'stack_retarget_loop';
 
 export type FixKind = 'blockers' | 'resign' | 'queue_failure';
 
@@ -155,6 +197,10 @@ export interface EntrySnapshot {
   automergeArmedBy: 'talyn' | 'user' | null;
   mergeMethod: MergeMethod;
   baseBranch: string;
+  /** Merge stack: the PR this entry is parked behind. Display only. */
+  stackParentNumber: number | null;
+  /** Merge stack: retarget actions spent. See MAX_RETARGETS. */
+  retargetAttempts: number;
 }
 
 /**
@@ -274,6 +320,13 @@ export interface DecisionContext {
    * so one query answers it for every entry in the walk.
    */
   stackParent?: StackParent | null;
+  /**
+   * Outcome of a `retarget_base` action, folded back for the next round. Only
+   * the failures reach decide — a SUCCESSFUL retarget aborts the evaluation
+   * outright, because the whole context (signing, external gate, auto-merge
+   * capability) was probed against the base the PR just left.
+   */
+  retargetOutcome?: 'error' | 'retry';
 
   // ── I/O outcomes (present only after the executor ran the action) ──
   /** Result of `verify_merged` — GitHub's canonical merged_at signal. */
@@ -323,6 +376,8 @@ export type Action =
           | 'fixTaskAccounted'
           | 'signingCheckedSha'
           | 'unsignedCount'
+          | 'stackParentNumber'
+          | 'retargetAttempts'
         >
       > & { lastError?: string; lastErrorAt?: string };
       event: EventDraft;
@@ -355,6 +410,13 @@ export type Action =
   | { kind: 'rerequest_failed_checks' }
   /** PUT update-branch — merge the base into the head server-side (Push E). */
   | { kind: 'update_branch' }
+  /**
+   * Merge stack: point the PR at `toBase` (REST PATCH), then move the entry
+   * into that group. Fired only once the stack parent that owned the current
+   * base has MERGED. Idempotent — a base that already reads `toBase` (GitHub's
+   * own delete-branch auto-retarget beat us to it) skips the call.
+   */
+  | { kind: 'retarget_base'; toBase: string; parentNumber: number }
   /**
    * Create the "get this PR mergeable" cloud task. Executor contract:
    * fired → status 'fixing' + fixTaskId + fixTaskAccounted=false (+
