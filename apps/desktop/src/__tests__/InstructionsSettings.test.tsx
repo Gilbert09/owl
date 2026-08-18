@@ -107,6 +107,45 @@ describe('InstructionsSettings', () => {
     expect(screen.getByText(/https:\/\/github.com\/acme\/widgets\/pull\/128/)).toBeInTheDocument();
   });
 
+  it('re-renders the preview for the chosen provider', () => {
+    render(<InstructionsSettings />);
+    openEditor();
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(screen.getByText(/git_signed_commit/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Preview provider'), { target: { value: 'claude_code' } });
+    expect(screen.getByText(/`github` MCP server/)).toBeInTheDocument();
+    expect(screen.queryByText(/git_signed_commit/)).toBeNull();
+  });
+
+  it('marks a variable as in use once the template references it', () => {
+    render(<InstructionsSettings />);
+    const textarea = openEditor();
+    fireEvent.change(textarea, { target: { value: '{{pr.url}} {{gitRules}}' } });
+    expect(within(screen.getByTitle('Insert {{pr.title}}')).queryByLabelText('In use')).toBeNull();
+    fireEvent.click(screen.getByTitle('Insert {{pr.title}}'));
+    expect(within(screen.getByTitle('Insert {{pr.title}}')).getByLabelText('In use')).toBeInTheDocument();
+  });
+
+  it('keeps Save disabled until an existing override is edited', () => {
+    workspaces = [
+      workspace({
+        prompts: {
+          mergeable: {
+            template: 'Mine {{pr.url}} {{gitRules}}',
+            basedOnHash: defaultPromptTemplateHash('mergeable'),
+            updatedAt: '2026-08-01T00:00:00Z',
+          },
+        },
+      }),
+    ];
+    render(<InstructionsSettings />);
+    const textarea = openEditor();
+    const save = screen.getByRole('button', { name: 'Save changes' });
+    expect(save).toBeDisabled();
+    fireEvent.change(textarea, { target: { value: 'Mine {{pr.url}} {{gitRules}} and more' } });
+    expect(save).toBeEnabled();
+  });
+
   it('shows a customized prompt with Reset, and reset sends null for that kind', async () => {
     workspaces = [
       workspace({

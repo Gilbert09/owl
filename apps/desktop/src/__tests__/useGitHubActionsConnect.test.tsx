@@ -111,6 +111,72 @@ describe('useGitHubActions — connect-agent gating', () => {
     });
   });
 
+  it('createPostHogTask renders the shipped default when nothing is customized', async () => {
+    createTask.mockResolvedValue({ id: 't1' });
+    setStore({
+      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
+      environments: [{ id: 'env1', type: 'claude_code' }],
+    });
+    const { result } = renderHook(() => useGitHubActions());
+    await result.current.createPostHogTask(row);
+    const prompt = createTask.mock.calls[0][0].prompt as string;
+    expect(prompt).toContain('Every reviewer comment is resolved');
+    expect(prompt).toContain('https://github.com/acme/w/pull/7');
+  });
+
+  it('createPostHogTask renders the workspace mergeable prompt override', async () => {
+    createTask.mockResolvedValue({ id: 't1' });
+    setStore({
+      workspaces: [
+        {
+          id: 'ws1',
+          settings: {
+            prompts: {
+              mergeable: { template: 'Mine {{pr.ref}}\n{{gitRules}}', basedOnHash: '00000000', updatedAt: 'then' },
+            },
+          },
+        },
+      ],
+      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
+      environments: [{ id: 'env1', type: 'claude_code' }],
+    });
+    const { result } = renderHook(() => useGitHubActions());
+    await result.current.createPostHogTask(row);
+    const prompt = createTask.mock.calls[0][0].prompt as string;
+    expect(prompt.startsWith('Mine acme/w#7')).toBe(true);
+    expect(prompt).toContain('`github` MCP server');
+    expect(prompt).not.toContain('Every reviewer comment');
+  });
+
+  it('runSkillTask renders the workspace skill prompt override', async () => {
+    createTask.mockResolvedValue({ id: 't1' });
+    setStore({
+      workspaces: [
+        {
+          id: 'ws1',
+          settings: {
+            prompts: {
+              skill: {
+                template: 'Skill {{skill.name}} on {{pr.ref}}\n{{gitRules}}\n{{skill.content}}',
+                basedOnHash: '00000000',
+                updatedAt: 'then',
+              },
+            },
+          },
+        },
+      ],
+      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
+      environments: [{ id: 'env1', type: 'claude_code' }],
+    });
+    const { result } = renderHook(() => useGitHubActions());
+    const localSkill: SkillSummary = { ...skill, key: 'local:pr-review', source: 'local' };
+    await result.current.runSkillTask(row, localSkill, { localContent: 'body' });
+    const prompt = createTask.mock.calls[0][0].prompt as string;
+    expect(prompt.startsWith('Skill pr-review on acme/w#7')).toBe(true);
+    expect(prompt).toContain('body');
+    expect(prompt).not.toContain('## Your job');
+  });
+
   it('providerReady reflects whether a provider env resolves', () => {
     setStore();
     const { result: none } = renderHook(() => useGitHubActions());

@@ -46,16 +46,21 @@ const PREVIEW_PROVIDERS: { value: CloudProviderType; label: string }[] = [
   { value: 'claude_code', label: 'Claude Code' },
 ];
 
-const SAMPLE_SUMMARY: PRMergeableSummary = {
-  url: 'https://github.com/acme/widgets/pull/128',
-  title: 'Add retry to the webhook client',
-  headBranch: 'feat/webhook-retry',
-  baseBranch: 'main',
-  mergeable: 'CONFLICTING',
-  reviewDecision: 'CHANGES_REQUESTED',
-  blockingReason: 'merge_conflicts',
-  checks: { total: 6, failed: 1 },
-  unresolvedReviewThreads: 3,
+const SAMPLE_PR = {
+  owner: 'acme',
+  repo: 'widgets',
+  number: 128,
+  summary: {
+    url: 'https://github.com/acme/widgets/pull/128',
+    title: 'Add retry to the webhook client',
+    headBranch: 'feat/webhook-retry',
+    baseBranch: 'main',
+    mergeable: 'CONFLICTING',
+    reviewDecision: 'CHANGES_REQUESTED',
+    blockingReason: 'merge_conflicts',
+    checks: { total: 6, failed: 1 },
+    unresolvedReviewThreads: 3,
+  } as PRMergeableSummary,
 };
 
 const SAMPLE_SKILL = {
@@ -81,20 +86,21 @@ export function InstructionsSettings() {
   async function savePrompt(kind: PromptKind, override: PromptTemplateOverride | null) {
     if (!currentWorkspaceId) return;
     const updated = await api.workspaces.update(currentWorkspaceId, {
-      settings: { prompts: { [kind]: override } } as Workspace['settings'],
+      settings: { prompts: { [kind]: override } },
     });
     applyWorkspace(updated);
     trackEvent(override ? 'prompt_template_saved' : 'prompt_template_reset', {
       kind,
       ...(override ? { chars: override.template.length } : {}),
     });
+    const label = PROMPT_KIND_INFO[kind].label;
+    toast.success(override ? `${label} prompt saved` : `${label} prompt reset to Talyn's default`);
   }
 
-  async function resetPrompt(kind: PromptKind) {
+  async function resetFromCard(kind: PromptKind) {
     setResetting(kind);
     try {
       await savePrompt(kind, null);
-      toast.success(`${PROMPT_KIND_INFO[kind].label} prompt reset to Talyn's default`);
     } catch (err) {
       toast.error('Could not reset the prompt', err instanceof Error ? err.message : undefined);
     } finally {
@@ -156,7 +162,7 @@ export function InstructionsSettings() {
                     variant="ghost"
                     className="gap-1"
                     disabled={resetting === kind || !currentWorkspaceId}
-                    onClick={() => void resetPrompt(kind)}
+                    onClick={() => void resetFromCard(kind)}
                   >
                     {resetting === kind ? (
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -189,12 +195,10 @@ export function InstructionsSettings() {
           onClose={() => setEditing(null)}
           onSave={async (override) => {
             await savePrompt(editing, override);
-            toast.success(`${PROMPT_KIND_INFO[editing].label} prompt saved`);
             setEditing(null);
           }}
           onReset={async () => {
             await savePrompt(editing, null);
-            toast.success(`${PROMPT_KIND_INFO[editing].label} prompt reset to Talyn's default`);
             setEditing(null);
           }}
         />
@@ -434,7 +438,7 @@ function PromptTemplateEditor({
                                 required
                               </span>
                             )}
-                            {inUse && <Check className="w-3 h-3 ml-auto text-green-500 shrink-0" />}
+                            {inUse && <Check aria-label="In use" className="w-3 h-3 ml-auto text-green-500 shrink-0" />}
                           </div>
                           <div className="text-[11px] text-muted-foreground leading-snug mt-0.5">
                             {v.description}
@@ -462,7 +466,7 @@ function PromptTemplateEditor({
             <Button variant="outline" onClick={onClose} disabled={saving}>
               Cancel
             </Button>
-            <Button onClick={() => void handleSave()} disabled={saving || !validation.ok || (!dirty && !!override)}>
+            <Button onClick={() => void handleSave()} disabled={saving || !validation.ok || !dirty}>
               {saving && <Loader2 className="mr-1.5 w-3.5 h-3.5 animate-spin" />}
               {override ? 'Save changes' : 'Save as workspace prompt'}
             </Button>
@@ -480,10 +484,7 @@ function TemplatePreview({ kind, template }: { kind: PromptKind; template: strin
   const row: PRRow | undefined = rows.find((r) => r.id === prId) ?? rows[0];
 
   const rendered = useMemo(() => {
-    const owner = row?.owner ?? 'acme';
-    const repo = row?.repo ?? 'widgets';
-    const number = row?.number ?? 128;
-    const summary: PRMergeableSummary = row?.summary ?? SAMPLE_SUMMARY;
+    const { owner, repo, number, summary } = row ?? SAMPLE_PR;
     if (kind === 'mergeable') {
       return buildMergeablePrompt({ owner, repo, number, summary, provider, template });
     }
@@ -507,6 +508,7 @@ function TemplatePreview({ kind, template }: { kind: PromptKind; template: strin
     <>
       <div className="flex items-center gap-2 mb-2">
         <select
+          aria-label="Preview PR"
           value={row?.id ?? ''}
           onChange={(e) => setPrId(e.target.value)}
           className={cn(SELECT_CLASS, 'flex-1 min-w-0')}
@@ -523,6 +525,7 @@ function TemplatePreview({ kind, template }: { kind: PromptKind; template: strin
           )}
         </select>
         <select
+          aria-label="Preview provider"
           value={provider}
           onChange={(e) => setProvider(e.target.value as CloudProviderType)}
           className={cn(SELECT_CLASS, 'w-40')}
