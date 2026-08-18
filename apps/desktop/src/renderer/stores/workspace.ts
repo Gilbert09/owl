@@ -50,6 +50,7 @@ export type SettingsSection =
   | 'workspace'
   | 'integrations'
   | 'skills'
+  | 'instructions'
   | 'account'
   | 'billing'
   | 'appearance'

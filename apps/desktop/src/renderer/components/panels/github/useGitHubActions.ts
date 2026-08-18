@@ -3,6 +3,7 @@ import { api, type PRRow } from '../../../lib/api';
 import {
   buildMergeablePrompt,
   buildSkillPrompt,
+  promptTemplateFor,
   type CloudProviderType,
   type SkillSummary,
 } from '@talyn/shared';
@@ -49,8 +50,8 @@ export function useGitHubActions() {
   // The workspace's default-provider setting and whether starting a task should
   // prompt (a dropdown on the Task button) — only when "ask" AND there's an
   // actual choice (>1 connected).
-  const defaultCloudProvider = workspaces.find((w) => w.id === currentWorkspaceId)?.settings
-    ?.defaultCloudProvider;
+  const workspaceSettings = workspaces.find((w) => w.id === currentWorkspaceId)?.settings;
+  const defaultCloudProvider = workspaceSettings?.defaultCloudProvider;
   const taskAsk = defaultCloudProvider === 'ask' && connectedProviders.length > 1;
   const taskProviders = useMemo(
     () => connectedProviders.map((p) => ({ type: p.type, displayName: p.displayName })),
@@ -217,6 +218,7 @@ export function useGitHubActions() {
           number: row.number,
           summary: row.summary,
           provider,
+          template: promptTemplateFor(workspaceSettings, 'mergeable'),
         }),
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,
@@ -231,7 +233,7 @@ export function useGitHubActions() {
       patchRow(row.id, { taskId: created.id });
       return true;
     },
-    [currentWorkspaceId, resolveTaskEnvId, environments, createTask, patchRow, openConnectAgent]
+    [currentWorkspaceId, workspaceSettings, resolveTaskEnvId, environments, createTask, patchRow, openConnectAgent]
   );
 
   // Run an agent skill against a PR as a cloud task. Resolves the skill's
@@ -303,6 +305,7 @@ export function useGitHubActions() {
             repoPath,
           },
           provider,
+          template: promptTemplateFor(workspaceSettings, 'skill'),
         }),
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,
@@ -323,7 +326,7 @@ export function useGitHubActions() {
       patchRow(row.id, { taskId: created.id });
       return true;
     },
-    [currentWorkspaceId, resolveTaskEnvId, environments, createTask, patchRow, openConnectAgent]
+    [currentWorkspaceId, workspaceSettings, resolveTaskEnvId, environments, createTask, patchRow, openConnectAgent]
   );
 
   // Connect GitHub for the workspace via the GitHub App install flow.

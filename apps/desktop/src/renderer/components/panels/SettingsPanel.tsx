@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
+  FileText,
   Settings,
   FolderKanban,
   Github,
@@ -35,6 +36,7 @@ import {
   Server,
 } from 'lucide-react';
 import { SkillsSettings } from './SkillsSettings';
+import { InstructionsSettings } from './InstructionsSettings';
 import type { UpdaterEvent } from '../../../main/updaterEvents';
 import { api, GitHubRepo, getMcpEndpoint } from '../../lib/api';
 import { toast } from '../../stores/toast';
@@ -97,6 +99,7 @@ export function SettingsPanel() {
     { id: 'workspace' as const, icon: FolderKanban, label: 'Workspace' },
     { id: 'integrations' as const, icon: Settings, label: 'Integrations' },
     { id: 'skills' as const, icon: Wand2, label: 'Skills' },
+    { id: 'instructions' as const, icon: FileText, label: 'Instructions' },
     { id: 'account' as const, icon: User, label: 'Account' },
     { id: 'billing' as const, icon: CreditCard, label: 'Billing' },
     { id: 'appearance' as const, icon: Palette, label: 'Appearance' },
@@ -137,6 +140,7 @@ export function SettingsPanel() {
             {activeSection === 'workspace' && <WorkspaceSettings />}
             {activeSection === 'integrations' && <IntegrationsSettings />}
             {activeSection === 'skills' && <SkillsSettings />}
+            {activeSection === 'instructions' && <InstructionsSettings />}
             {activeSection === 'account' && <AccountSettings />}
             {activeSection === 'billing' && <BillingSettings />}
             {activeSection === 'appearance' && <AppearanceSettings />}
