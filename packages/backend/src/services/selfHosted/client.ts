@@ -342,6 +342,25 @@ export function targetBypassesProxy(target: string): boolean {
   }
 }
 
+/**
+ * Unwrap an Error's cause chain into something loggable.
+ *
+ * undici reports the interesting part here — ECONNREFUSED, EAI_AGAIN, a TLS
+ * failure, a proxy refusal — while the outer message stays generic. Dropping it
+ * is what made an unreachable gateway indistinguishable from a slow one.
+ */
+export function describeCause(err: unknown, depth = 0): string | undefined {
+  if (depth > 4 || !(err instanceof Error)) return undefined;
+  const cause = (err as { cause?: unknown }).cause;
+  if (cause === undefined) return undefined;
+  if (cause instanceof Error) {
+    const code = (cause as { code?: string }).code;
+    const inner = describeCause(cause, depth + 1);
+    return `${cause.name}${code ? `(${code})` : ''}: ${cause.message}${inner ? ` <- ${inner}` : ''}`;
+  }
+  return String(cause);
+}
+
 /** Exposed for tests, which change the env between cases. */
 export function resetFleetDispatcherCache(): void {
   cachedProxy = null;
@@ -393,6 +412,27 @@ export class FleetClient {
       // Network-level failure. Treated as capacity rather than terminal: an
       // unreachable host is an availability problem, and failing the user's
       // task because one box is down is exactly what fail-back exists to avoid.
+      //
+      // Logged with the CAUSE and the elapsed time, because the message alone
+      // is not diagnosable. "The operation was aborted due to timeout" is what
+      // AbortSignal says about any request that ran out of time, and it names
+      // neither what failed nor how long it really took — so a DNS failure, a
+      // refused connection, a proxy that cannot route, and a server that is
+      // simply slow all read identically. That ambiguity cost a whole afternoon
+      // on 2026-08-18: the same URL answered in 0.2s from a shell in the same
+      // container while every dispatch reported it unreachable.
+      const tookMs = Date.now() - started;
+      console.warn(
+        `[fleet] ${method} ${path} failed after ${tookMs}ms:`,
+        JSON.stringify({
+          url: this.url(path),
+          timeoutMs: this.timeoutMs,
+          proxied: fleetDispatcher(this.endpoint) !== undefined,
+          name: err instanceof Error ? err.name : typeof err,
+          message: err instanceof Error ? err.message : String(err),
+          cause: describeCause(err),
+        }),
+      );
       throw new FleetCapacityError(
         `Fleet unreachable at ${this.endpoint}: ${err instanceof Error ? err.message : String(err)}`,
         undefined,
