@@ -129,7 +129,7 @@ describe('buildMergeablePrompt — claude_code variant (GitHub MCP, no signed-gi
   });
 
   it('keeps the same goals and base-leak guard, threading the real base branch', () => {
-    expect(prompt).toContain('Every reviewer comment is resolved.');
+    expect(prompt).toContain('Every reviewer comment is resolved');
     expect(prompt).toContain('CI is fully green');
     expect(prompt).toContain('The branch merges cleanly');
     expect(prompt.toUpperCase()).toContain('ANCESTOR');

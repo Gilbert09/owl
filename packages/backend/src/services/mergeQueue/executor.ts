@@ -37,6 +37,7 @@ import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
 import { ACTIVE_STATUSES, linkedTaskStatus, resolveCloudEnv } from '../prCloudFix.js';
+import { workspacePromptTemplate } from '../promptTemplates.js';
 import { emitPullRequestUpdated, emitMergeQueueBlocked } from '../websocket.js';
 import { broadcastMergeQueuePositions, QUEUE_RESET_COLUMNS } from '../mergeQueueBroadcast.js';
 import {
@@ -984,6 +985,7 @@ async function fireFixRun(
         // Starts the run at the provider's failure output rather than the PR's
         // own (green) checks — see queueFailureRule.
         queueFailure,
+        template: await workspacePromptTemplate(ctx.pr.workspaceId, 'mergeable'),
       }),
       repositoryId: ctx.pr.repositoryId,
       assignedEnvironmentId: resolved.envId,

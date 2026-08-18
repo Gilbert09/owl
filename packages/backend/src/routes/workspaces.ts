@@ -8,14 +8,19 @@ import {
   integrations as integrationsTable,
 } from '../db/schema.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
-import type {
-  Workspace,
-  WorkspaceLogo,
-  Repository,
-  WorkspaceIntegrations,
-  CreateWorkspaceRequest,
-  UpdateWorkspaceRequest,
-  ApiResponse,
+import {
+  PROMPT_KINDS,
+  validatePromptTemplate,
+  type Workspace,
+  type WorkspaceLogo,
+  type Repository,
+  type WorkspaceIntegrations,
+  type CreateWorkspaceRequest,
+  type UpdateWorkspaceRequest,
+  type ApiResponse,
+  type PromptKind,
+  type PromptTemplateOverride,
+  type PromptTemplateSettings,
 } from '@talyn/shared';
 
 // Uploaded logos are stored inline as data URLs on the workspace row, so cap
@@ -52,6 +57,45 @@ function validateLogo(raw: unknown): WorkspaceLogo {
 /** A fresh auto-generated identicon logo. */
 function generatedLogo(): WorkspaceLogo {
   return { kind: 'identicon', seed: uuid() };
+}
+
+// Prompt overrides merge one level deeper than the rest of settings so a
+// client can save or reset one kind without resending the others. `null`
+// resets a kind (the key is dropped, not stored).
+function mergePromptSettings(
+  current: PromptTemplateSettings | undefined,
+  patch: unknown
+): PromptTemplateSettings {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error('settings.prompts must be an object');
+  }
+  const next: PromptTemplateSettings = { ...(current ?? {}) };
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    if (!(PROMPT_KINDS as string[]).includes(key)) {
+      throw new Error(`Unknown prompt kind "${key}"`);
+    }
+    const kind = key as PromptKind;
+    if (value === null) {
+      delete next[kind];
+      continue;
+    }
+    if (!value || typeof value !== 'object') {
+      throw new Error(`settings.prompts.${kind} must be an object or null`);
+    }
+    const o = value as Partial<PromptTemplateOverride>;
+    if (typeof o.template !== 'string') {
+      throw new Error(`settings.prompts.${kind}.template must be a string`);
+    }
+    const validation = validatePromptTemplate(kind, o.template);
+    if (!validation.ok) {
+      throw new Error(`Invalid ${kind} prompt: ${validation.errors.join(' ')}`);
+    }
+    if (typeof o.basedOnHash !== 'string' || !/^[0-9a-f]{8}$/.test(o.basedOnHash)) {
+      throw new Error(`settings.prompts.${kind}.basedOnHash must be an 8-char hex hash`);
+    }
+    next[kind] = { template: o.template, basedOnHash: o.basedOnHash, updatedAt: new Date().toISOString() };
+  }
+  return next;
 }
 
 export function workspaceRoutes(): Router {
@@ -159,7 +203,19 @@ export function workspaceRoutes(): Router {
     }
     if (body.settings !== undefined) {
       const currentSettings = (existing[0].settings as Record<string, unknown>) ?? {};
-      updates.settings = { ...currentSettings, ...body.settings };
+      const merged: Record<string, unknown> = { ...currentSettings, ...body.settings };
+      if (body.settings.prompts !== undefined) {
+        try {
+          merged.prompts = mergePromptSettings(
+            currentSettings.prompts as PromptTemplateSettings | undefined,
+            body.settings.prompts
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'invalid prompts';
+          return res.status(400).json({ success: false, error: msg });
+        }
+      }
+      updates.settings = merged;
     }
 
     if (Object.keys(updates).length > 0) {

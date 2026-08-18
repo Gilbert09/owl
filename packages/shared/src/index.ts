@@ -11,6 +11,9 @@ export * from './externalMergeQueue.js';
 export * from './skills.js';
 export * from './skillPrompt.js';
 
+// Editable prompt templates (Settings → Instructions) + the shipped defaults.
+export * from './promptTemplates.js';
+
 // The operator console's contract (admin.talyn.dev ⇄ /api/v1/admin).
 export * from './admin.js';
 export * from './transcript.js';
@@ -20,6 +23,7 @@ export * from './transcript.js';
 export * from './sse.js';
 
 import type { SkillKey, SkillSource, SkillSummary, SkillUsageEntry } from './skills.js';
+import type { PromptTemplateSettings } from './promptTemplates.js';
 
 // ============================================================================
 // Workspace
@@ -257,6 +261,11 @@ export interface WorkspaceSettings {
    *   sibling CI churn after each merge.
    */
   mergeQueueMode?: MergeQueueMode;
+  /**
+   * Workspace overrides for the prompts Talyn hands to cloud agents, keyed by
+   * prompt kind (Settings → Instructions). Absent kind = the shipped default.
+   */
+  prompts?: PromptTemplateSettings;
 }
 
 export type MergeQueueMode = 'ordered' | 'eager';

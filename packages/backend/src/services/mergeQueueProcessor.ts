@@ -24,6 +24,7 @@ import {
 import { debugBus } from './debugBus.js';
 import { TickGuard } from './tickGuard.js';
 import { ACTIVE_STATUSES, linkedTaskStatus, resolveCloudEnv } from './prCloudFix.js';
+import { workspacePromptTemplate } from './promptTemplates.js';
 import { getMergeQueueEngine } from './mergeQueue/store.js';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -955,6 +956,7 @@ class MergeQueueProcessor {
           summary,
           provider,
           resignCommits: opts.resign ?? false,
+          template: await workspacePromptTemplate(row.workspaceId, 'mergeable'),
         }),
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,
