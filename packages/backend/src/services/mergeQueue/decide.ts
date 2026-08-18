@@ -58,6 +58,13 @@ export function externalQueueRejectedReason(
       `resubmit a cancelled PR automatically — push a fix, or re-queue the PR to submit it again.`
     );
   }
+  if (status.state === 'ejected') {
+    return (
+      `${provider}'s merge queue sent this PR back ${maxAttempts}× on this commit ` +
+      `(${status.evidence}) without ever testing it. Push a fix (the queue resubmits ` +
+      `automatically on a new commit), or re-queue to retry now.`
+    );
+  }
   return (
     `${provider}'s merge queue rejected this PR ${maxAttempts}× on this commit ` +
     `(${status.evidence}) — its tests fail when the PR is merged with the base. ` +
@@ -613,6 +620,45 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
             `${provider}'s merge queue has this PR after all ` +
             `(${externalQueueStateLabel(ext.state).toLowerCase()}) — tracking it there.`,
           detail: { evidence: ext.evidence, source: ext.source },
+        },
+      });
+      return d.done('advance');
+    }
+    // The provider is still saying it gave the PR back, but it is no longer
+    // saying the SAME thing it was blocked on. The block is only ever as good
+    // as the reading behind it, and the response differs sharply by state (a
+    // `failed` is fixable from the queue's own output; a `cancelled` is not),
+    // so a disagreement means the verdict was reached on evidence that no
+    // longer holds. Hand the entry back to the ordinary rules with the fresh
+    // state recorded.
+    //
+    // This converges: the transition persists what was just read, so the next
+    // evaluation agrees and the heal cannot fire twice on one reading. It is
+    // also what releases the PRs blocked by the classification bug — trunk's
+    // "removed from the merge queue because it failed tests" parsed as
+    // `cancelled` (terminal) instead of `failed` (fixable), and every entry it
+    // hit would otherwise sit blocked until a human pushed (2026-08-18).
+    if (
+      ext &&
+      d.entry.blockedCode === 'external_queue_rejected' &&
+      isExternalQueueEjected(ext.state) &&
+      d.entry.externalState !== ext.state
+    ) {
+      const provider = externalQueueProviderLabel(ext.provider);
+      d.transition('queued', {
+        blockedCode: null,
+        blockedReason: null,
+        set: { externalState: ext.state },
+        event: {
+          code: 'external_queue_state_changed',
+          message:
+            `${provider}'s merge queue now reports ` +
+            `"${externalQueueStateLabel(ext.state).toLowerCase()}"` +
+            (d.entry.externalState
+              ? `, not "${externalQueueStateLabel(d.entry.externalState).toLowerCase()}"`
+              : ' (nothing was recorded when this was blocked)') +
+            ' — re-evaluating on the fresh reading.',
+          detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
         },
       });
       return d.done('advance');

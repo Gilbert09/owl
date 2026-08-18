@@ -1563,6 +1563,70 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       }
     });
 
+    // An eject the provider invited a resubmit for is NOT a cancellation: it
+    // goes round again on the ordinary budget instead of blocking on sight.
+    it('requeues an `ejected` PR for a resubmit rather than blocking it', () => {
+      const d = decide(
+        commented(longAgo, { submitAttempts: 1 }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('ejected') })
+      );
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('blocks an `ejected` PR only once the resubmit budget is spent', () => {
+      const d = decide(
+        commented(longAgo, { submitAttempts: 3 }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('ejected') })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('external_queue_rejected');
+      expect(t.blockedReason).toContain('sent this PR back');
+    });
+
+    // The release valve for every entry blocked on a reading that has since
+    // changed — including the ones the 2026-08-18 classification bug parked on
+    // `cancelled` when trunk had actually said "failed tests".
+    it('releases a block whose external reading no longer says what it did', () => {
+      const d = decide(
+        entry({
+          status: 'blocked',
+          blockedCode: 'external_queue_rejected',
+          blockedReason: "Trunk's merge queue cancelled this PR",
+          externalState: 'cancelled',
+          submitAttempts: 3,
+        }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('failed') })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('queued');
+      expect(t.blockedCode).toBeNull();
+      expect(t.set?.externalState).toBe('failed');
+      expect(t.event.code).toBe('external_queue_state_changed');
+    });
+
+    // Convergence: once the fresh state is persisted the heal must not fire
+    // again, or a blocked entry would flap on every evaluation.
+    it('does not re-release when the reading already matches what was blocked on', () => {
+      const d = decide(
+        entry({
+          status: 'blocked',
+          blockedCode: 'external_queue_rejected',
+          externalState: 'cancelled',
+          submitAttempts: 3,
+        }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: observed('cancelled') })
+      );
+      expect(transitions(d).map((t) => t.event.code)).not.toContain(
+        'external_queue_state_changed'
+      );
+    });
+
     it('leaves an unrelated blocked_manual alone even while the provider holds the PR', () => {
       const d = decide(
         entry({ status: 'blocked_manual', blockedCode: 'app_refused_hard' }),

@@ -30,12 +30,25 @@ export type ExternalQueueProvider = 'trunk';
 /**
  * Where a submitted PR sits in the external queue.
  *
- * `failed`/`cancelled` are the EJECTED states — the provider gave the PR back,
- * and Talyn's queue takes over again (fix run → resubmit). `not_submitted` and
- * `rejected` are only ever read off the provider's comment: the first says its
- * submit box is untouched (it does NOT have the PR), the second that it refuses
- * to merge this PR at all — neither is something a fix run or a resubmit can
- * move, so both need a human.
+ * `failed`/`ejected`/`cancelled` are the EJECTED states — the provider gave the
+ * PR back, and Talyn's queue takes over again. They differ in what it gave back
+ * WITH, which is what decides the response:
+ *
+ *   `failed`    — it tested the PR and the tests failed. There is failure
+ *                 output to start a fix run from.
+ *   `ejected`   — it handed the PR back for a reason that is not a test
+ *                 failure (a push landed on the branch, it waited too long for
+ *                 the PR to become mergeable) and asked for a resubmit. Nothing
+ *                 to read; remediate whatever the PR's own blockers are and go
+ *                 round again.
+ *   `cancelled` — it was removed for a reason this parser doesn't recognise,
+ *                 which may be a human pulling it out deliberately. Terminal:
+ *                 overriding that is not a repair.
+ *
+ * `not_submitted` and `rejected` are only ever read off the provider's comment:
+ * the first says its submit box is untouched (it does NOT have the PR), the
+ * second that it refuses to merge this PR at all — neither is something a fix
+ * run or a resubmit can move, so both need a human.
  */
 export type ExternalQueueState =
   | 'not_submitted'
@@ -44,6 +57,7 @@ export type ExternalQueueState =
   | 'testing'
   | 'passed'
   | 'failed'
+  | 'ejected'
   | 'cancelled'
   | 'rejected'
   | 'merged';
@@ -139,8 +153,26 @@ const TRUNK_TEST_ANALYTICS_MARKER = '<!-- Trunk Test Analytics -->';
 const TRUNK_STATUS_PATTERNS: Array<{ re: RegExp; state: ExternalQueueState }> = [
   // "😎 Merged successfully - [details](…)"
   { re: /merged successfully/i, state: 'merged' },
-  // "🚫 This pull request was removed from the merge queue because it was
-  //  pushed to by @x. Please re-submit it in order to merge."
+  // "removed from the merge queue because …" is a PREFIX trunk shares across
+  // outcomes that need OPPOSITE handling, so every known reason must be matched
+  // before the bare sentence below. Reading the prefix first classified every
+  // queue test failure on posthog/posthog as a deliberate cancellation — the
+  // one state `decideExternalEjection` refuses to fix or resubmit — which is
+  // what left the queue full of permanently blocked PRs (2026-08-18).
+  //
+  // "❌ This pull request was removed from the merge queue because it failed
+  //  tests. PR #x was used for testing. |Failed Required Status|Conclusion|…"
+  { re: /removed from the merge queue because it failed tests/i, state: 'failed' },
+  // "🚫 … because it was waiting to become mergeable for too long (for example:
+  //  missing required approvals or checks, or a merge conflict). Submit it
+  //  again once it's ready" — trunk gave up waiting and asks for a resubmit.
+  { re: /waiting to become mergeable for too long/i, state: 'ejected' },
+  // "🚫 … because it was pushed to by @x. Please re-submit it in order to
+  //  merge." — a new commit invalidated what trunk accepted.
+  { re: /removed from the merge queue because it was pushed to/i, state: 'ejected' },
+  // Any OTHER removal reason. Unrecognised means possibly a human pulling the
+  // PR out on purpose, so this stays the conservative terminal state — fixing
+  // or resubmitting over a deliberate removal is not a repair.
   { re: /removed from the merge queue/i, state: 'cancelled' },
   // "❌ This pull request could not start testing because there was a merge
   //  conflict." — ejected, and exactly what Talyn's fix runs are for.
@@ -330,7 +362,7 @@ export function externalQueueStatusFromLabels(
 
 /** The provider handed the PR back — Talyn's queue owns it again. */
 export function isExternalQueueEjected(state: ExternalQueueState): boolean {
-  return state === 'failed' || state === 'cancelled';
+  return state === 'failed' || state === 'ejected' || state === 'cancelled';
 }
 
 /**
@@ -359,6 +391,8 @@ export function externalQueueStateLabel(state: ExternalQueueState): string {
       return 'Tests passed';
     case 'failed':
       return 'Failed in queue';
+    case 'ejected':
+      return 'Sent back by the queue';
     case 'cancelled':
       return 'Cancelled in queue';
     case 'merged':

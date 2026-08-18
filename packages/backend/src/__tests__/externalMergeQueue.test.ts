@@ -86,6 +86,7 @@ describe('externalQueueStatusFromLabels', () => {
 
   it.each([
     ['failed', true],
+    ['ejected', true],
     ['cancelled', true],
     ['queued', false],
     ['testing', false],
@@ -104,6 +105,7 @@ describe('externalQueueStatusFromLabels', () => {
     ['passed', true],
     ['not_ready', true],
     ['failed', false],
+    ['ejected', false],
     ['cancelled', false],
     ['merged', false],
     ['not_submitted', false],
@@ -151,8 +153,23 @@ describe('externalQueueStatusFromComment — trunk states, as trunk writes them'
       `\u{26A0}\u{FE0F} The required check [\`LLM Services Tests Pass\`](https://github.com/PostHog/posthog/actions/runs/1) (Failure) has failed. Pull request failed tests and is waiting for other pull requests to finish testing. See more details [here]${LINK}.`],
     ['merge conflict', 'failed',
       `\u{274C} This pull request could not start testing because there was a merge conflict. See more details [here]${LINK}.\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`],
-    ['ejected by a push', 'cancelled',
+    ['ejected by a push', 'ejected',
       `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by @dmarchuk. Please re-submit it in order to merge. See more details [here]${LINK}.\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`],
+    // Verbatim off PostHog/posthog#77129, #78858, #73765, #73758, #77141 and
+    // #73763 (2026-08-18) — every one of them was sitting permanently blocked
+    // because this body matched the bare "removed from the merge queue" rule
+    // and read as `cancelled`, the one state Talyn will neither fix nor
+    // resubmit. It is a TEST FAILURE, and the failure table is what a
+    // queue_failure fix run is started from.
+    ['removed for failing tests', 'failed',
+      `\u{274C} This pull request was removed from the merge queue because it failed tests. PR [#84396](https://www.github.com/PostHog/posthog/pull/84396) was used for testing. See more details [here]${LINK}.\n|Failed Required Status|Conclusion|\n|-|-|\n|Semgrep Checks Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/1)|\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`],
+    // Verbatim off PostHog/posthog#82677 and #82676 (2026-08-18). Trunk gave
+    // up waiting and asks for a resubmit — an eject, not a cancellation.
+    ['removed for waiting too long to become mergeable', 'ejected',
+      `\u{1F6AB} This pull request was removed from the merge queue because it was waiting to become mergeable for too long (for example: missing required approvals or checks, or a merge conflict). Submit it again once it's ready. See more details [here]${LINK}.`],
+    // Any OTHER removal reason stays terminal — it may be a human.
+    ['removed for an unrecognised reason', 'cancelled',
+      `\u{1F6AB} This pull request was removed from the merge queue by @someone. See more details [here]${LINK}.`],
   ])('reads %s as %s', (_name, state, body) => {
     expect(externalQueueStatusFromComment(trunk(body))).toMatchObject({
       provider: 'trunk',
