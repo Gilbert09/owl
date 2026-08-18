@@ -13,9 +13,13 @@
 // one query per group walk, because the group key IS the base branch: every
 // entry in a walk shares it.
 
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, sql } from 'drizzle-orm';
 import { getDbClient, type Database } from '../../db/client.js';
-import { pullRequests as pullRequestsTable, mergeQueueEntries } from '../../db/schema.js';
+import {
+  pullRequests as pullRequestsTable,
+  mergeQueueEntries,
+  repositories as repositoriesTable,
+} from '../../db/schema.js';
 import { TERMINAL_STATUSES } from './store.js';
 import type { EntryStatus } from './types.js';
 
@@ -81,9 +85,41 @@ async function prsByHeadBranch(
         // Scoped by workspace as well as repo: the same repo can be tracked by
         // two workspaces, and a branch name must never link across them.
         eq(pullRequestsTable.workspaceId, workspaceId),
-        inArray(sql`${pullRequestsTable.lastSummary} ->> 'headBranch'`, branches)
+        inArray(sql`${pullRequestsTable.lastSummary} ->> 'headBranch'`, branches),
+        // A PR that targets the branch it is FROM is not a stack link. The
+        // model is child.base == parent.head, so a parent with head == base
+        // makes the "parent" target the same branch as the child — a sibling
+        // at best, never something to wait for. In practice these are
+        // master → master PRs (a mistaken open, or a fork sync), and
+        // PostHog/posthog#69000 was exactly that: closed, head `master`, base
+        // `master`. It made the resolver name it the owner of `master`, so
+        // every PR in the repo read as stacked on an abandoned parent and
+        // blocked with "retarget this PR, or reopen and merge that one"
+        // (2026-08-18).
+        ne(
+          sql`${pullRequestsTable.lastSummary} ->> 'headBranch'`,
+          sql`${pullRequestsTable.lastSummary} ->> 'baseBranch'`
+        )
       )
     );
+}
+
+/**
+ * The repo's default branch, which can never be a stack parent's HEAD.
+ *
+ * The rule the self-targeting filter above cannot express: a PR opened FROM
+ * the trunk onto some other branch (a release branch, a fork sync) has
+ * head == the trunk, and would make every PR targeting the trunk read as
+ * stacked on it. A stack is topic branches; the trunk is where stacks land,
+ * never a link inside one.
+ */
+async function defaultBranchOf(db: Db, repositoryId: string): Promise<string | null> {
+  const rows = await db
+    .select({ defaultBranch: repositoriesTable.defaultBranch })
+    .from(repositoriesTable)
+    .where(eq(repositoriesTable.id, repositoryId))
+    .limit(1);
+  return rows[0]?.defaultBranch ?? null;
 }
 
 /** Active queue-entry status per PR id, for the PRs we resolved as parents. */
@@ -127,7 +163,9 @@ export async function resolveStackParents(
   baseBranches: string[],
   db: Db = getDbClient()
 ): Promise<Map<string, StackParent>> {
-  const seeds = [...new Set(baseBranches.filter((b) => b))];
+  const trunk = await defaultBranchOf(db, repositoryId);
+  // Nothing is stacked ON the trunk — drop it before it can seed a chain.
+  const seeds = [...new Set(baseBranches.filter((b) => b && b !== trunk))];
   if (seeds.length === 0) return new Map();
 
   const hop1 = await prsByHeadBranch(db, repositoryId, workspaceId, seeds);
@@ -148,6 +186,7 @@ export async function resolveStackParents(
   // Cached across seeds: sibling entries in one group share most of the chain.
   const openParentCache = new Map<string, PrBranchRow | null>();
   const lookupOpenParent = async (branch: string): Promise<PrBranchRow | null> => {
+    if (branch === trunk) return null; // the chain ends at the trunk
     if (openParentCache.has(branch)) return openParentCache.get(branch)!;
     const found = (await prsByHeadBranch(db, repositoryId, workspaceId, [branch])).find(
       (r) => r.state === 'open'

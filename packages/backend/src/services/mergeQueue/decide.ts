@@ -310,6 +310,22 @@ export function queueSignature(status: ExternalQueueStatus): string {
   return ['queue', status.provider, status.state, status.evidence].join('|');
 }
 
+/**
+ * Is this entry in a state a STACK LINK put it in? Those are the verdicts that
+ * must be released the moment the link stops resolving — they are all derived
+ * from an edge, never from the PR itself.
+ */
+function isStackState(entry: EntrySnapshot): boolean {
+  if (entry.status === 'awaiting_stack') return true;
+  return (
+    (entry.status === 'blocked' || entry.status === 'blocked_manual') &&
+    (entry.blockedCode === 'stack_parent_abandoned' ||
+      entry.blockedCode === 'stack_cycle' ||
+      entry.blockedCode === 'stack_retarget_failed' ||
+      entry.blockedCode === 'stack_retarget_loop')
+  );
+}
+
 /** Has this exact problem already defeated a completed remediation on this head? */
 export function signatureSeen(entry: EntrySnapshot, signature: string): boolean {
   // Defensive on the array itself: the column is nullable (every row written
@@ -576,10 +592,19 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     const parent = ctx.stackParent;
     const stacked = decideStackGate(d, pr, parent, ctx);
     if (stacked) return stacked;
-  } else if (ctx.stackParent === null && d.entry.status === 'awaiting_stack') {
+  } else if (ctx.stackParent === null && isStackState(d.entry)) {
     // Self-heal: nothing owns this base any more — the parent landed and the
-    // retarget already moved us, or the parent PR was retargeted itself.
+    // retarget already moved us, the parent PR was retargeted itself, or the
+    // edge was never real. Every stack verdict is derived from a link that is
+    // re-resolved each evaluation, so when the link goes the verdict must go
+    // with it: a `blocked` reached from an edge that no longer exists has no
+    // evidence left behind it and would otherwise sit there until a human
+    // requeued. That is what stranded 30+ PostHog/posthog PRs on
+    // "#69000 was closed without merging" (2026-08-18) — the parent was a
+    // master → master PR the resolver should never have followed.
     d.transition('queued', {
+      blockedCode: null,
+      blockedReason: null,
       set: { stackParentNumber: null },
       event: {
         code: 'stack_parent_cleared',

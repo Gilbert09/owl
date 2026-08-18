@@ -595,5 +595,43 @@ describe('mergeQueue store', () => {
 
       expect((await resolveStackParents('repo1', 'ws1', [''], db)).size).toBe(0);
     });
+
+    // PostHog/posthog#69000, verbatim: closed, head `master`, base `master`.
+    // It made the resolver name it the owner of the trunk, so every PR in the
+    // repo read as stacked on an abandoned parent (2026-08-18).
+    it('never treats a PR that targets its own branch as a parent', async () => {
+      await insertBranchPr({ head: 'main', base: 'main', state: 'closed' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['main'], db);
+
+      expect(got.has('main')).toBe(false);
+    });
+
+    it('never treats the default branch as a stack parent, whatever it targets', async () => {
+      // A PR opened FROM the trunk onto a release branch: head is the trunk, so
+      // without the guard every PR targeting the trunk reads as stacked on it.
+      await insertBranchPr({ head: 'main', base: 'release-1' });
+
+      expect((await resolveStackParents('repo1', 'ws1', ['main'], db)).size).toBe(0);
+    });
+
+    it('stops climbing at the trunk instead of following a PR whose head is it', async () => {
+      await insertBranchPr({ head: 'main', base: 'release-1' });
+      await insertBranchPr({ head: 'feat-a', base: 'main' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+
+      // feat-a IS owned by a real parent, and that chain lands on the trunk —
+      // it must not climb through the trunk onto release-1.
+      expect(got.get('feat-a')?.number).toBeDefined();
+      expect(got.get('feat-a')?.targetBase).toBe('main');
+    });
+
+    it('still resolves a genuine stack (regression guard on the new filters)', async () => {
+      const parent = await insertBranchPr({ head: 'feat-a', base: 'main' });
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+      expect(got.get('feat-a')?.pullRequestId).toBe(parent);
+      expect(got.get('feat-a')?.targetBase).toBe('main');
+    });
   });
 });

@@ -2016,6 +2016,47 @@ describe('decide — merge stack', () => {
   const child = () => entry({ baseBranch: 'feat-a' });
   const childPr = () => pr({}, { headBranch: 'feat-b', baseBranch: 'feat-a' });
 
+  // Every stack verdict is derived from a link that is re-resolved on each
+  // evaluation. When the link stops resolving the verdict has no evidence left
+  // behind it, so it must be released — otherwise a PR blocked on an edge that
+  // was never real sits there until a human requeues, which is what stranded
+  // 30+ PostHog/posthog PRs on "#69000 was closed without merging".
+  describe('the link stops resolving', () => {
+    it.each([
+      ['awaiting_stack', null],
+      ['blocked', 'stack_parent_abandoned'],
+      ['blocked', 'stack_cycle'],
+      ['blocked', 'stack_retarget_failed'],
+      ['blocked_manual', 'stack_cycle'],
+      ['blocked_manual', 'stack_retarget_loop'],
+    ] as const)('releases a %s/%s entry back into the queue', (status, code) => {
+      const d = decide(
+        entry({
+          baseBranch: 'feat-a',
+          status,
+          blockedCode: code,
+          blockedReason: 'x',
+          stackParentNumber: 41,
+        }),
+        childPr(),
+        ctx({ stackParent: null })
+      );
+      const t = transitions(d).find((x) => x.event.code === 'stack_parent_cleared')!;
+      expect(t.to).toBe('queued');
+      expect(t.blockedCode).toBeNull();
+      expect(t.set?.stackParentNumber).toBeNull();
+    });
+
+    it('leaves a NON-stack block alone when no parent resolves', () => {
+      const d = decide(
+        entry({ baseBranch: 'feat-a', status: 'blocked_manual', blockedCode: 'app_refused_hard' }),
+        childPr(),
+        ctx({ stackParent: null })
+      );
+      expect(transitions(d).map((t) => t.event.code)).not.toContain('stack_parent_cleared');
+    });
+  });
+
   describe('parent still open', () => {
     it('parks the child instead of merging it into its parent branch', () => {
       const d = decide(child(), childPr(), ctx({ stackParent: parent() }));
