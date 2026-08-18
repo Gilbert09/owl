@@ -292,9 +292,20 @@ let cachedProxy: { url: string; dispatcher: unknown } | null = null;
 
 /** Exported for tests: proving this CONSTRUCTS is the only check that catches
  *  a missing `undici` before production does. */
-export function fleetDispatcher(): unknown | undefined {
+export function fleetDispatcher(target?: string): unknown | undefined {
   const url = process.env.FLEET_HTTP_PROXY ?? '';
   if (!url) return undefined;
+  // FLEET_HTTP_PROXY reaches the TAILNET. A fleet host is a tailnet name with no
+  // route from here, which is the whole reason it exists — but the sandbox
+  // GATEWAY is on the public internet, and sending its requests into a tailscale
+  // SOCKS proxy is a guaranteed timeout.
+  //
+  // That took Talyn's dispatch down on 2026-08-18: every task queued behind
+  // "Fleet unreachable at https://yasctl-...: The operation was aborted due to
+  // timeout", while the same URL answered in half a second from a shell. The
+  // proxy was applied to every fleet request unconditionally, and nothing about
+  // a public URL made it opt out.
+  if (target && targetBypassesProxy(target)) return undefined;
   if (cachedProxy?.url === url) return cachedProxy.dispatcher;
   // `undici` is a DECLARED DEPENDENCY of this package, not something Node
   // provides. Node bundles undici to implement global `fetch`, but only as an
@@ -311,6 +322,24 @@ export function fleetDispatcher(): unknown | undefined {
   const { ProxyAgent } = require('undici') as { ProxyAgent: new (u: string) => unknown };
   cachedProxy = { url, dispatcher: new ProxyAgent(url) };
   return cachedProxy.dispatcher;
+}
+
+/**
+ * Whether this target must NOT go through FLEET_HTTP_PROXY.
+ *
+ * Decided by comparing hosts with the configured pin rather than by guessing
+ * from the shape of the name: "is it a tailnet address" is a heuristic that
+ * would be wrong the first time a host is reached some other way, and this is
+ * the one decision that silently converts into a total dispatch outage.
+ */
+export function targetBypassesProxy(target: string): boolean {
+  const pinned = (process.env.FLEET_PINNED_ENDPOINT ?? '').trim();
+  if (!pinned) return false;
+  try {
+    return new URL(target).host === new URL(pinned).host;
+  } catch {
+    return false;
+  }
 }
 
 /** Exposed for tests, which change the env between cases. */
@@ -357,7 +386,7 @@ export class FleetClient {
         },
         signal: AbortSignal.timeout(this.timeoutMs),
         // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
-        dispatcher: fleetDispatcher(),
+        dispatcher: fleetDispatcher(this.endpoint),
       });
     } catch (err) {
       this.recordHttp(method, path, 0, started, false, err);
@@ -461,7 +490,7 @@ export class FleetClient {
         headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/plain' },
         signal: AbortSignal.timeout(this.timeoutMs),
         // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
-        dispatcher: fleetDispatcher(),
+        dispatcher: fleetDispatcher(this.endpoint),
       });
     } catch (err) {
       this.recordHttp('GET', '/metrics', 0, started, false, err);
@@ -565,7 +594,7 @@ export class FleetClient {
         headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/event-stream' },
         signal,
         // @ts-expect-error `dispatcher` is undici's, not in the DOM fetch types
-        dispatcher: fleetDispatcher(),
+        dispatcher: fleetDispatcher(this.endpoint),
       },
     );
     if (!resp.ok || !resp.body) {

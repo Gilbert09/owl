@@ -87,3 +87,56 @@ describe('fleetDispatcher', () => {
     expect(fleetDispatcher()).toBeUndefined();
   });
 });
+
+describe('the gateway must not be reached through the tailnet proxy', () => {
+  const saved = {
+    proxy: process.env.FLEET_HTTP_PROXY,
+    pin: process.env.FLEET_PINNED_ENDPOINT,
+  };
+  beforeEach(() => {
+    process.env.FLEET_HTTP_PROXY = 'http://localhost:1055';
+    process.env.FLEET_PINNED_ENDPOINT = 'https://yasctl-production.up.railway.app';
+  });
+  afterEach(async () => {
+    if (saved.proxy === undefined) delete process.env.FLEET_HTTP_PROXY;
+    else process.env.FLEET_HTTP_PROXY = saved.proxy;
+    if (saved.pin === undefined) delete process.env.FLEET_PINNED_ENDPOINT;
+    else process.env.FLEET_PINNED_ENDPOINT = saved.pin;
+    const { resetFleetDispatcherCache } = await import('../services/selfHosted/client.js');
+    resetFleetDispatcherCache();
+  });
+
+  // The outage of 2026-08-18: every task queued behind "Fleet unreachable ...
+  // aborted due to timeout" while the same URL answered in half a second from a
+  // shell. FLEET_HTTP_PROXY reaches the TAILNET; the gateway is on the public
+  // internet, and sending its requests into a tailscale SOCKS proxy cannot work.
+  it('sends the pinned gateway direct, not through the proxy', async () => {
+    const { fleetDispatcher } = await import('../services/selfHosted/client.js');
+    expect(fleetDispatcher('https://yasctl-production.up.railway.app')).toBeUndefined();
+  });
+
+  // And the proxy must still be used for a HOST, which is the only reason it
+  // exists. Bypassing everything would break the operator console instead.
+  it('still proxies a fleet host on the tailnet', async () => {
+    const { fleetDispatcher } = await import('../services/selfHosted/client.js');
+    expect(fleetDispatcher('http://fleet-hetzner-64.tail1b09e.ts.net:8080')).toBeDefined();
+  });
+
+  // A path-only difference is the same host and must still bypass.
+  it('matches on host, not on the whole URL', async () => {
+    const { targetBypassesProxy } = await import('../services/selfHosted/client.js');
+    expect(targetBypassesProxy('https://yasctl-production.up.railway.app/v1/runs')).toBe(true);
+  });
+
+  // With no pin configured nothing bypasses: the deployment has no gateway.
+  it('bypasses nothing when no gateway is pinned', async () => {
+    delete process.env.FLEET_PINNED_ENDPOINT;
+    const { targetBypassesProxy } = await import('../services/selfHosted/client.js');
+    expect(targetBypassesProxy('https://yasctl-production.up.railway.app')).toBe(false);
+  });
+
+  it('treats an unparseable target as needing the proxy', async () => {
+    const { targetBypassesProxy } = await import('../services/selfHosted/client.js');
+    expect(targetBypassesProxy('not a url')).toBe(false);
+  });
+});
