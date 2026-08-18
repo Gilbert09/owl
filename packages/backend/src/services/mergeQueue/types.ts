@@ -11,6 +11,7 @@ import type {
   ExternalQueueStatus,
   PRMergeableSummary,
 } from '@talyn/shared';
+import type { StackParent } from './stack.js';
 
 /** Stop auto-firing a given remediation after this many attempts per head. */
 export const MAX_ATTEMPTS = 3;
@@ -262,6 +263,17 @@ export interface DecisionContext {
   /** graphqlBudget.shouldDefer(account, 'queue') — points are scarce. */
   graphqlBudgetLow: boolean;
   maxAttempts: number;
+  /**
+   * The PR that owns this entry's base branch — the stack parent.
+   *
+   * `undefined` — the evaluator didn't resolve it (nothing to say).
+   * `null`      — resolved, and no PR owns this base: the entry is a stack
+   *               root, or it has already been retargeted onto a real branch.
+   *
+   * Derived per group walk, never persisted: the group key IS the base branch,
+   * so one query answers it for every entry in the walk.
+   */
+  stackParent?: StackParent | null;
 
   // ── I/O outcomes (present only after the executor ran the action) ──
   /** Result of `verify_merged` — GitHub's canonical merged_at signal. */

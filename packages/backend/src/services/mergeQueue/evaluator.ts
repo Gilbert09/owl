@@ -30,6 +30,7 @@ import {
   touchEvaluated,
 } from './store.js';
 import { evaluateEntry, PR_EVAL_COLUMNS, type PrEvalRow } from './executor.js';
+import { resolveStackParents } from './stack.js';
 
 /** Hard bound on one group evaluation — a hung GitHub call must not hold the
  *  group's coalescing slot (or its advisory lock) for minutes. Abandoned work
@@ -226,6 +227,12 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
     return;
   }
 
+  // Who owns this group's base branch? One query for the whole walk — the
+  // group key IS the base branch, so every entry here shares the answer. A
+  // stack member's parent is what R4b parks it behind and retargets it off.
+  const stackParents = await resolveStackParents(repositoryId, workspaceId, [baseBranch], db);
+  const stackParent = stackParents.get(baseBranch) ?? null;
+
   const positions = computeEntryPositions(entries);
   const evaluated: string[] = [];
   // Entries that left this group mid-walk (their PR was retargeted). Their new
@@ -270,6 +277,7 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
         isHead: eager || (evaluated.length === 0 && i === 0),
         groupMergeInFlight,
         trigger,
+        stackParent,
       });
       if (result.casLost) {
         // Someone newer is writing this group — stop walking; their

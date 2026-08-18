@@ -26,6 +26,7 @@ import {
   getMergeQueueEngine,
   loadActiveGroup,
 } from '../../services/mergeQueue/store.js';
+import { resolveStackParents } from '../../services/mergeQueue/stack.js';
 
 const MIGRATION_0031 = path.resolve(
   __dirname,
@@ -64,6 +65,32 @@ describe('mergeQueue store', () => {
       mergeQueueState: opts.mergeQueueState ?? null,
       lastPolledAt: new Date(),
       lastSummary: opts.lastSummary ?? { baseBranch: 'main', headSha: 'sha1' },
+    });
+    return id;
+  }
+
+  /** A PR with explicit head/base branches, for the stack-resolver cases. */
+  async function insertBranchPr(opts: {
+    head: string;
+    base: string;
+    state?: string;
+    repositoryId?: string;
+    workspaceId?: string;
+  }): Promise<string> {
+    const id = `pr-${++prSeq}`;
+    await db.insert(pullRequestsTable).values({
+      id,
+      workspaceId: opts.workspaceId ?? 'ws1',
+      repositoryId: opts.repositoryId ?? 'repo1',
+      taskId: null,
+      owner: 'a',
+      repo: 'b',
+      number: prSeq,
+      state: opts.state ?? 'open',
+      mergeQueued: false,
+      mergeMethod: 'squash',
+      lastPolledAt: new Date(),
+      lastSummary: { headBranch: opts.head, baseBranch: opts.base, headSha: `sha-${id}` },
     });
     return id;
   }
@@ -438,6 +465,135 @@ describe('mergeQueue store', () => {
         .where(eq(mergeQueueEntries.pullRequestId, prId));
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ status: 'queued', fixAttempts: 2 });
+    });
+  });
+
+  // The stack parent edge is derived per walk, never persisted — a stored edge
+  // would rot the way base_branch did. These pin the derivation.
+  describe('resolveStackParents', () => {
+    it('resolves the open PR whose head is the queried base branch', async () => {
+      const parent = await insertBranchPr({ head: 'feat-a', base: 'main' });
+      await insertBranchPr({ head: 'feat-b', base: 'feat-a' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+
+      expect(got.get('feat-a')).toMatchObject({
+        pullRequestId: parent,
+        baseBranch: 'main',
+        state: 'open',
+        targetBase: 'main',
+        depth: 1,
+        cycle: false,
+      });
+    });
+
+    it('resolves a MERGED parent — that is what triggers the retarget', async () => {
+      // Seeding on open PRs only would break the feature outright: the child
+      // is retargeted precisely because its parent has landed.
+      await insertBranchPr({ head: 'feat-a', base: 'main', state: 'merged' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+
+      expect(got.get('feat-a')).toMatchObject({ state: 'merged', baseBranch: 'main' });
+    });
+
+    it('resolves a CLOSED parent, so an abandoned stack can be reported', async () => {
+      await insertBranchPr({ head: 'feat-a', base: 'main', state: 'closed' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+
+      expect(got.get('feat-a')?.state).toBe('closed');
+    });
+
+    it('climbs to the bottom of the chain for targetBase', async () => {
+      // main <- A <- B <- C. Asking about C's base must report main, not feat-a:
+      // targetBase is where the whole stack lands, and it is the group identity
+      // the UI needs to stay stable while the stack drains.
+      await insertBranchPr({ head: 'feat-a', base: 'main' });
+      await insertBranchPr({ head: 'feat-b', base: 'feat-a' });
+      await insertBranchPr({ head: 'feat-c', base: 'feat-b' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-c'], db);
+
+      expect(got.get('feat-c')).toMatchObject({ targetBase: 'main', depth: 3 });
+    });
+
+    it('stops climbing at a landed ancestor — it has left the stack', async () => {
+      await insertBranchPr({ head: 'feat-a', base: 'main', state: 'merged' });
+      await insertBranchPr({ head: 'feat-b', base: 'feat-a' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-b'], db);
+
+      expect(got.get('feat-b')).toMatchObject({ targetBase: 'feat-a', depth: 1 });
+    });
+
+    it('reports a base/head cycle instead of climbing forever', async () => {
+      await insertBranchPr({ head: 'feat-x', base: 'feat-y' });
+      await insertBranchPr({ head: 'feat-y', base: 'feat-x' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-x'], db);
+
+      expect(got.get('feat-x')?.cycle).toBe(true);
+    });
+
+    it('returns no entry for a branch no PR owns (a stack root)', async () => {
+      await insertBranchPr({ head: 'feat-a', base: 'main' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['main'], db);
+
+      expect(got.has('main')).toBe(false);
+    });
+
+    it('never links across repositories with the same branch name', async () => {
+      await db.insert(repositoriesTable).values({
+        id: 'repo2',
+        workspaceId: 'ws1',
+        name: 'c',
+        url: 'https://github.com/a/c',
+        defaultBranch: 'main',
+      });
+      await insertBranchPr({ head: 'feat-a', base: 'main', repositoryId: 'repo2' });
+
+      expect((await resolveStackParents('repo1', 'ws1', ['feat-a'], db)).size).toBe(0);
+    });
+
+    it('never links across workspaces tracking the same repo', async () => {
+      await db.insert(workspacesTable).values({
+        id: 'ws2',
+        ownerId: TEST_USER_ID,
+        name: 'ws2',
+        settings: {},
+      });
+      await insertBranchPr({ head: 'feat-a', base: 'main', workspaceId: 'ws2' });
+
+      expect((await resolveStackParents('repo1', 'ws1', ['feat-a'], db)).size).toBe(0);
+    });
+
+    it('prefers the open PR when two share a head branch', async () => {
+      await insertBranchPr({ head: 'feat-a', base: 'old-base', state: 'closed' });
+      const open = await insertBranchPr({ head: 'feat-a', base: 'main' });
+
+      const got = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+
+      expect(got.get('feat-a')?.pullRequestId).toBe(open);
+    });
+
+    it('carries the parent active queue-entry status, and drops terminal ones', async () => {
+      const parent = await insertBranchPr({ head: 'feat-a', base: 'main' });
+      await ensureActiveEntry({ ...enqueueInput(parent), baseBranch: 'main' }, db);
+
+      const queued = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+      expect(queued.get('feat-a')?.entryStatus).toBe('queued');
+
+      await closeActiveEntry(parent, 'merged', { trigger: 't', message: 'm' }, db);
+      const done = await resolveStackParents('repo1', 'ws1', ['feat-a'], db);
+      expect(done.get('feat-a')?.entryStatus).toBeNull();
+    });
+
+    it('ignores empty seed branches rather than matching every blank summary', async () => {
+      await insertBranchPr({ head: '', base: 'main' });
+
+      expect((await resolveStackParents('repo1', 'ws1', [''], db)).size).toBe(0);
     });
   });
 });

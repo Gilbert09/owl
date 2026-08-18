@@ -51,6 +51,7 @@ import { captureWorkspaceEvent } from '../analytics.js';
 import { decide } from './decide.js';
 import { toLegacyPublicState, toLegacyStateBlob, toPublicMergeQueue } from './legacy.js';
 import { casTransition, rowToEntrySnapshot, type EntryRow } from './store.js';
+import type { StackParent } from './stack.js';
 import {
   MAX_ATTEMPTS,
   MAX_DECIDE_ROUNDS,
@@ -88,6 +89,8 @@ export interface EvaluateEntryInput {
   isHead: boolean;
   groupMergeInFlight: boolean;
   trigger: string;
+  /** Resolved once per group walk — see resolveStackParents. */
+  stackParent?: StackParent | null;
 }
 
 export interface EvaluateEntryResult {
@@ -231,6 +234,17 @@ async function buildBaseContext(
     graphqlGateBlocked,
     graphqlBudgetLow,
     maxAttempts: MAX_ATTEMPTS,
+    // A PR is never its own parent. A self-targeting summary can't exist on
+    // GitHub, but a half-written one can, and a self-edge would park the entry
+    // behind itself forever.
+    ...(input.stackParent !== undefined
+      ? {
+          stackParent:
+            input.stackParent && input.stackParent.pullRequestId === pr.id
+              ? null
+              : input.stackParent,
+        }
+      : {}),
   };
 }
 
