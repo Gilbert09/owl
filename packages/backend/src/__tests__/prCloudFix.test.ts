@@ -6,6 +6,7 @@ import {
   resolvePostHogEnvId,
   resolveCloudEnvId,
   linkedTaskStatus,
+  startPrMergeableRun,
 } from '../services/prCloudFix.js';
 import { createTestDb, seedUser, TEST_USER_ID } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
@@ -13,6 +14,7 @@ import {
   workspaces as workspacesTable,
   environments as environmentsTable,
   integrations as integrationsTable,
+  repositories as repositoriesTable,
   tasks as tasksTable,
 } from '../db/schema.js';
 import { encryptString } from '../services/tokenCrypto.js';
@@ -202,5 +204,90 @@ describe('prCloudFix helpers', () => {
         expect(await linkedTaskStatus(`task-${status}`)).toBe(status);
       }
     );
+  });
+
+  describe('startPrMergeableRun', () => {
+    let priorKey: string | undefined;
+    beforeAll(() => {
+      priorKey = process.env.TALYN_TOKEN_KEY;
+      process.env.TALYN_TOKEN_KEY = randomBytes(32).toString('base64');
+    });
+    afterAll(() => {
+      if (priorKey === undefined) delete process.env.TALYN_TOKEN_KEY;
+      else process.env.TALYN_TOKEN_KEY = priorKey;
+    });
+
+    const prRow = {
+      id: 'pr-1',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'a',
+      repo: 'b',
+      number: 1,
+      lastSummary: {
+        title: 'PR title',
+        url: 'https://github.com/a/b/pull/1',
+        headBranch: 'feat',
+        baseBranch: 'main',
+        mergeable: 'CONFLICTING',
+        blockingReason: 'merge_conflicts',
+        checks: { total: 1, passed: 1, failed: 0, inProgress: 0, skipped: 0 },
+        unresolvedReviewThreads: 0,
+      },
+    };
+
+    beforeEach(async () => {
+      await db.insert(environmentsTable).values({
+        id: 'env-ph', ownerId: TEST_USER_ID, name: 'PostHog Code', type: 'posthog_code', config: {},
+      });
+      await db.insert(integrationsTable).values({
+        id: 'int-ph', workspaceId: 'ws1', type: 'posthog', enabled: true,
+        config: { apiKeyEnc: encryptString('k'), projectId: '1' },
+      });
+      await db.insert(repositoriesTable).values({
+        id: 'repo1', workspaceId: 'ws1', name: 'a/b', url: 'https://github.com/a/b', defaultBranch: 'main',
+      });
+    });
+
+    it('renders the default mergeable prompt when the workspace has no override', async () => {
+      const result = await startPrMergeableRun(prRow);
+      expect(result.ok).toBe(true);
+      const tasks = await db.select({ prompt: tasksTable.prompt }).from(tasksTable);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].prompt).toContain('Every reviewer comment is resolved');
+      expect(tasks[0].prompt).toContain('https://github.com/a/b/pull/1');
+    });
+
+    it('renders the workspace mergeable prompt override when one is set', async () => {
+      await db
+        .update(workspacesTable)
+        .set({
+          settings: {
+            prompts: {
+              mergeable: {
+                template: 'Custom for {{pr.ref}} on {{pr.headBranch}}\n{{gitRules}}',
+                basedOnHash: '00000000',
+                updatedAt: 'then',
+              },
+            },
+          },
+        })
+        .where(eq(workspacesTable.id, 'ws1'));
+
+      const result = await startPrMergeableRun(prRow);
+      expect(result.ok).toBe(true);
+      const tasks = await db.select({ prompt: tasksTable.prompt }).from(tasksTable);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].prompt?.startsWith('Custom for a/b#1 on feat')).toBe(true);
+      expect(tasks[0].prompt).toContain('git_signed_commit');
+      expect(tasks[0].prompt).not.toContain('Every reviewer comment');
+    });
+
+    it('reports no_cloud_provider when the workspace has none connected', async () => {
+      await db.delete(integrationsTable).where(eq(integrationsTable.id, 'int-ph'));
+      const result = await startPrMergeableRun(prRow);
+      expect(result).toEqual({ ok: false, reason: 'no_cloud_provider' });
+      expect(await db.select({ id: tasksTable.id }).from(tasksTable)).toHaveLength(0);
+    });
   });
 });

@@ -387,6 +387,33 @@ describe('mergeQueue v2 pipeline', () => {
     expect((await entryOf(db, behind.prId))?.status).toBe('queued');
   });
 
+  it('renders the workspace mergeable prompt override into the fix run', async () => {
+    await db
+      .update(workspacesTable)
+      .set({
+        settings: {
+          prompts: {
+            mergeable: {
+              template: 'Custom for {{pr.ref}} on {{pr.headBranch}}\n{{gitRules}}',
+              basedOnHash: '00000000',
+              updatedAt: 'then',
+            },
+          },
+        },
+      })
+      .where(eq(workspacesTable.id, 'ws1'));
+    const head = await insertQueuedPr(db, { summary: conflictSummary() });
+    const number = head.prId.replace('pr-', '');
+
+    await evaluateGroupNow('repo1', 'main', 'test');
+
+    const tasks = await db.select({ prompt: tasksTable.prompt }).from(tasksTable);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].prompt?.startsWith(`Custom for a/b#${number} on feat`)).toBe(true);
+    expect(tasks[0].prompt).toContain('git_signed_commit');
+    expect(tasks[0].prompt).not.toContain('Every reviewer comment');
+  });
+
   it('advances past a draft head so the ready sibling merges in the same evaluation', async () => {
     const draft = await insertQueuedPr(db, { summary: draftSummary() });
     const ready = await insertQueuedPr(db);

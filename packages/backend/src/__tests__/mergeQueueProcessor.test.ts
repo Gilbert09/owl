@@ -363,6 +363,33 @@ describe('mergeQueueProcessor', () => {
     );
   });
 
+  it('renders the workspace mergeable prompt override into the fix run', async () => {
+    await db
+      .update(workspacesTable)
+      .set({
+        settings: {
+          prompts: {
+            mergeable: {
+              template: 'Custom for {{pr.ref}} on {{pr.headBranch}}\n{{gitRules}}',
+              basedOnHash: '00000000',
+              updatedAt: 'then',
+            },
+          },
+        },
+      })
+      .where(eq(workspacesTable.id, 'ws1'));
+    await insertPr(db, { summary: conflictSummary() });
+
+    await mergeQueueProcessor.runOnce();
+
+    const tasks = await db.select({ prompt: tasksTable.prompt }).from(tasksTable);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].prompt?.startsWith('Custom for a/b#')).toBe(true);
+    expect(tasks[0].prompt).toContain(' on feat');
+    expect(tasks[0].prompt).toContain('git_signed_commit');
+    expect(tasks[0].prompt).not.toContain('Every reviewer comment');
+  });
+
   describe('free-plan task limit', () => {
     const savedPolarToken = process.env.POLAR_ACCESS_TOKEN;
 

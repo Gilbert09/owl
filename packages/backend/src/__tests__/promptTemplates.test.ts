@@ -64,6 +64,14 @@ describe('renderPromptTemplate', () => {
   it('keeps a value that is only whitespace-adjacent intact', () => {
     expect(renderPromptTemplate('- {{a}}\n- {{b}}', { a: 'one', b: 'two' })).toBe('- one\n- two');
   });
+
+  it('collapses whitespace-only lines left behind by an empty block', () => {
+    expect(renderPromptTemplate('A\n  \n{{gone}}\n \t\nB', { gone: '' })).toBe('A\n\nB');
+  });
+
+  it('substitutes a variable used more than once', () => {
+    expect(renderPromptTemplate('{{x}} and {{x}}', { x: 'y' })).toBe('y and y');
+  });
 });
 
 describe('promptTemplateVariables', () => {
@@ -88,6 +96,16 @@ describe('validatePromptTemplate', () => {
     expect(v.ok).toBe(false);
     expect(v.unknownVariables).toEqual(['bogus', 'skill.content']);
     expect(v.errors.join(' ')).toContain('{{bogus}}');
+  });
+
+  it.each([
+    ['skill', '{{pr.url}} {{gitRules}} {{skill.content}} {{issues}}', ['issues']],
+    ['skill', '{{pr.url}} {{gitRules}} {{skill.content}} {{loopRules}} {{baseUpdateFlow}}', ['loopRules', 'baseUpdateFlow']],
+    ['mergeable', '{{pr.url}} {{gitRules}} {{skill.location}}', ['skill.location']],
+  ] as const)('%s: treats variables scoped to the other kind as unknown (%s)', (kind, template, unknown) => {
+    const v = validatePromptTemplate(kind, template);
+    expect(v.ok).toBe(false);
+    expect(v.unknownVariables).toEqual(unknown);
   });
 
   it.each([
@@ -244,5 +262,18 @@ describe('buildSkillPrompt with a workspace template', () => {
       skill: { ...skillInput.skill, source: 'repo', repoPath: '.claude/skills/pr-review/SKILL.md' },
     });
     expect(prompt).toContain('This skill also lives in your checkout at `.claude/skills/pr-review/SKILL.md`');
+  });
+
+  it('exposes every documented skill variable', () => {
+    const template = promptVariablesFor('skill').map((v) => `[${v.name}]={{${v.name}}}`).join('\n');
+    const prompt = buildSkillPrompt({
+      ...skillInput,
+      skill: { ...skillInput.skill, source: 'repo', repoPath: '.claude/skills/pr-review/SKILL.md' },
+      template,
+    });
+    expect(prompt).toContain('[skill.name]=pr-review');
+    expect(prompt).toContain('[skill.description]=Thorough review');
+    expect(prompt).toContain('[pr.ref]=acme/widgets#42');
+    expect(prompt).not.toMatch(/\{\{[\w.]+\}\}/);
   });
 });
