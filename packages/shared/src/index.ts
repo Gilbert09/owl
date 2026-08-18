@@ -7,6 +7,10 @@ export * from './prMergeable.js';
 // the backend pipeline and the desktop badges.
 export * from './externalMergeQueue.js';
 
+// Stacked-PR linking — the one definition of "B is stacked on A", shared by the
+// merge queue's stack drain and both front ends' indented PR lists.
+export * from './stacks.js';
+
 // Agent skills (SKILL.md) + the run-skill-on-PR prompt builder.
 export * from './skills.js';
 export * from './skillPrompt.js';

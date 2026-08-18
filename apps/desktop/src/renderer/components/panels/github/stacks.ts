@@ -1,3 +1,4 @@
+import { linkStack, type StackNode } from '@talyn/shared';
 import type { PRRow } from '../../../lib/api';
 import { escapeHtml } from '../../../lib/prClipboard';
 import { compareByCreated, type SortDir } from './filters';
@@ -8,6 +9,17 @@ import { compareByCreated, type SortDir } from './filters';
  * PR's base branch is another PR's head branch (PR B is stacked on PR A when
  * `B.baseBranch === A.headBranch` in the same repo).
  */
+/** Adapt the client's PR shape to the structural node @talyn/shared links on. */
+function toStackNodes(rows: PRRow[]): StackNode[] {
+  return rows.map((r) => ({
+    id: r.id,
+    repositoryId: r.repositoryId,
+    state: r.state,
+    headBranch: r.summary.headBranch,
+    baseBranch: r.summary.baseBranch,
+  }));
+}
+
 export interface StackMeta {
   /** 0 = stack root, 1 = first dependent, … (used for indentation). */
   depth: number;
@@ -33,19 +45,20 @@ export function buildStackedRows(
   rows: PRRow[],
   sortDir: SortDir
 ): { ordered: PRRow[]; meta: Map<string, StackMeta> } {
-  // Index open rows by repo + head branch so a child can find its parent by its
-  // own base branch. First writer wins on the rare duplicate-head collision.
-  const byHead = new Map<string, PRRow>();
-  for (const r of rows) {
-    if (r.state !== 'open') continue;
-    const key = `${r.repositoryId}|${r.summary.headBranch}`;
-    if (!byHead.has(key)) byHead.set(key, r);
-  }
+  // Linking itself lives in @talyn/shared — the backend's merge-stack drain
+  // resolves parents by the same rule, and two copies of it would diverge into
+  // "the UI says these are stacked but the queue doesn't". Ordering and depth
+  // stay here: they're presentation.
+  const links = linkStack(toStackNodes(rows));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const rowOf = (node: { id: string } | undefined): PRRow | undefined =>
+    node ? byId.get(node.id) : undefined;
 
   const parentOf = (r: PRRow): PRRow | undefined => {
+    // A closed/merged child keeps no parent link in the display: nothing should
+    // indent under a row that has left the stack.
     if (r.state !== 'open') return undefined;
-    const parent = byHead.get(`${r.repositoryId}|${r.summary.baseBranch}`);
-    return parent && parent.id !== r.id ? parent : undefined;
+    return rowOf(links.parentOf.get(r.id));
   };
 
   // children[parentId] → its dependent rows, sorted by the active direction.

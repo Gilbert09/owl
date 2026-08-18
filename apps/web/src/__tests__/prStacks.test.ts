@@ -1,0 +1,213 @@
+import { describe, it, expect } from 'vitest';
+import type { PRRow, PRState } from '../lib/api';
+import { buildStackedRows, buildCopyListPayload } from '../components/panels/github/stacks';
+
+/**
+ * Minimal PRRow factory — the stack helper only reads `id`, `repositoryId`,
+ * `state`, `summary.headBranch`, `summary.baseBranch`, and the created-at used
+ * by the sort. Everything else is filler.
+ */
+function makeRow(opts: {
+  id: string;
+  head: string;
+  base: string;
+  repo?: string;
+  state?: PRState;
+  createdAt?: string;
+}): PRRow {
+  const createdAt = opts.createdAt ?? '2026-06-05T00:00:00Z';
+  return {
+    id: opts.id,
+    workspaceId: 'ws1',
+    repositoryId: opts.repo ?? 'repo1',
+    taskId: null,
+    owner: 'acme',
+    repo: 'app',
+    number: 1,
+    state: opts.state ?? 'open',
+    reviewRequested: false,
+    authored: true,
+    mergedAt: null,
+    lastPolledAt: createdAt,
+    summary: {
+      title: opts.id,
+      draft: false,
+      headBranch: opts.head,
+      baseBranch: opts.base,
+      createdAt,
+    } as PRRow['summary'],
+    autoKeepMergeable: false,
+    autoMergeState: null,
+    mergeQueued: false,
+    mergeMethod: 'squash',
+    mergeQueueState: null,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
+/** Convenience: ordered ids out of buildStackedRows. */
+function order(rows: PRRow[], dir: 'asc' | 'desc' = 'desc'): string[] {
+  return buildStackedRows(rows, dir).ordered.map((r) => r.id);
+}
+
+describe('buildStackedRows', () => {
+  it('orders a simple chain root-first with increasing depth, all stacked', () => {
+    const a = makeRow({ id: 'A', head: 'a', base: 'main' });
+    const b = makeRow({ id: 'B', head: 'b', base: 'a' });
+    const c = makeRow({ id: 'C', head: 'c', base: 'b' });
+    // Deliberately shuffled input.
+    const { ordered, meta } = buildStackedRows([c, a, b], 'desc');
+
+    expect(ordered.map((r) => r.id)).toEqual(['A', 'B', 'C']);
+    expect(meta.get('A')).toEqual({ depth: 0, stacked: true });
+    expect(meta.get('B')).toEqual({ depth: 1, stacked: true });
+    expect(meta.get('C')).toEqual({ depth: 2, stacked: true });
+  });
+
+  it('handles a branching stack: two dependents share the parent depth', () => {
+    const a = makeRow({ id: 'A', head: 'a', base: 'main' });
+    const b = makeRow({ id: 'B', head: 'b', base: 'a', createdAt: '2026-06-05T01:00:00Z' });
+    const c = makeRow({ id: 'C', head: 'c', base: 'a', createdAt: '2026-06-05T02:00:00Z' });
+    const { ordered, meta } = buildStackedRows([a, b, c], 'desc');
+
+    expect(ordered[0].id).toBe('A');
+    // desc → newer sibling (C) first.
+    expect(ordered.map((r) => r.id)).toEqual(['A', 'C', 'B']);
+    expect(meta.get('B')).toEqual({ depth: 1, stacked: true });
+    expect(meta.get('C')).toEqual({ depth: 1, stacked: true });
+
+    // asc flips the sibling order.
+    expect(order([a, b, c], 'asc')).toEqual(['A', 'B', 'C']);
+  });
+
+  it('keeps independent stacks contiguous, newer root first under desc', () => {
+    const a = makeRow({ id: 'A', head: 'a', base: 'main', createdAt: '2026-06-05T00:00:00Z' });
+    const a2 = makeRow({ id: 'A2', head: 'a2', base: 'a' });
+    const x = makeRow({ id: 'X', head: 'x', base: 'main', createdAt: '2026-06-06T00:00:00Z' });
+    const x2 = makeRow({ id: 'X2', head: 'x2', base: 'x' });
+    const { ordered } = buildStackedRows([a, a2, x, x2], 'desc');
+
+    expect(ordered.map((r) => r.id)).toEqual(['X', 'X2', 'A', 'A2']);
+  });
+
+  it('leaves standalone PRs unstacked and interleaved by sort', () => {
+    const a = makeRow({ id: 'A', head: 'a', base: 'main', createdAt: '2026-06-05T00:00:00Z' });
+    const b = makeRow({ id: 'B', head: 'b', base: 'main', createdAt: '2026-06-06T00:00:00Z' });
+    const { ordered, meta } = buildStackedRows([a, b], 'desc');
+
+    expect(ordered.map((r) => r.id)).toEqual(['B', 'A']);
+    expect(meta.get('A')).toEqual({ depth: 0, stacked: false });
+    expect(meta.get('B')).toEqual({ depth: 0, stacked: false });
+  });
+
+  it('does not link matching branch names across different repositories', () => {
+    const a = makeRow({ id: 'A', head: 'shared', base: 'main', repo: 'repo1' });
+    const b = makeRow({ id: 'B', head: 'b', base: 'shared', repo: 'repo2' });
+    const { meta } = buildStackedRows([a, b], 'desc');
+
+    expect(meta.get('A')).toMatchObject({ stacked: false });
+    expect(meta.get('B')).toMatchObject({ depth: 0, stacked: false });
+  });
+
+  it.each<PRState>(['merged', 'closed'])(
+    'treats a %s parent as absent so the child is a root',
+    (parentState) => {
+      const a = makeRow({ id: 'A', head: 'a', base: 'main', state: parentState });
+      const b = makeRow({ id: 'B', head: 'b', base: 'a' });
+      const { meta } = buildStackedRows([a, b], 'desc');
+
+      expect(meta.get('B')).toMatchObject({ depth: 0, stacked: false });
+    }
+  );
+
+  it('terminates on a base/head cycle without infinite recursion', () => {
+    const a = makeRow({ id: 'A', head: 'a', base: 'b' });
+    const b = makeRow({ id: 'B', head: 'b', base: 'a' });
+    const { ordered } = buildStackedRows([a, b], 'desc');
+
+    // Both rows are emitted exactly once regardless of the cycle.
+    expect(ordered.map((r) => r.id).sort()).toEqual(['A', 'B']);
+    expect(new Set(ordered.map((r) => r.id)).size).toBe(2);
+  });
+});
+
+/** makeRow + a URL so the row participates in Copy list. */
+function makeLinkedRow(opts: Parameters<typeof makeRow>[0]): PRRow {
+  const row = makeRow(opts);
+  row.summary = { ...row.summary, url: `https://github.com/acme/app/pull/${opts.id}` };
+  return row;
+}
+
+describe('buildCopyListPayload', () => {
+  it('renders a flat list when no stack meta is given', () => {
+    const rows = [makeLinkedRow({ id: 'A', head: 'a', base: 'main' })];
+    const payload = buildCopyListPayload(rows);
+
+    expect(payload?.count).toBe(1);
+    expect(payload?.markdown).toBe('- [A](https://github.com/acme/app/pull/A)');
+    expect(payload?.html).toBe(
+      '<ul><li><a href="https://github.com/acme/app/pull/A">A</a></li></ul>'
+    );
+  });
+
+  it('indents stacked PRs under their parent in both flavours', () => {
+    // A ← B ← C is a stack; D is an older independent root (so desc keeps
+    // the A stack first).
+    const a = makeLinkedRow({ id: 'A', head: 'a', base: 'main', createdAt: '2026-06-06T00:00:00Z' });
+    const b = makeLinkedRow({ id: 'B', head: 'b', base: 'a' });
+    const c = makeLinkedRow({ id: 'C', head: 'c', base: 'b' });
+    const d = makeLinkedRow({ id: 'D', head: 'd', base: 'main', createdAt: '2026-06-05T00:00:00Z' });
+    const { ordered, meta } = buildStackedRows([d, c, b, a], 'desc');
+    const payload = buildCopyListPayload(ordered, meta);
+
+    expect(payload?.markdown.split('\n')).toEqual([
+      '- [A](https://github.com/acme/app/pull/A)',
+      '  - [B](https://github.com/acme/app/pull/B)',
+      '    - [C](https://github.com/acme/app/pull/C)',
+      '- [D](https://github.com/acme/app/pull/D)',
+    ]);
+    expect(payload?.html).toBe(
+      '<ul>' +
+        '<li><a href="https://github.com/acme/app/pull/A">A</a>' +
+        '<ul><li><a href="https://github.com/acme/app/pull/B">B</a>' +
+        '<ul><li><a href="https://github.com/acme/app/pull/C">C</a></li></ul>' +
+        '</li></ul>' +
+        '</li>' +
+        '<li><a href="https://github.com/acme/app/pull/D">D</a></li>' +
+        '</ul>'
+    );
+  });
+
+  it('clamps depth when filtering hid a parent, keeping the output well-formed', () => {
+    // Meta says B sits at depth 2, but its ancestors were filtered out of the
+    // displayed rows — it must render as a root, and E (depth 3 in meta) as
+    // its direct child, never skipping list levels.
+    const b = makeLinkedRow({ id: 'B', head: 'b', base: 'a' });
+    const e = makeLinkedRow({ id: 'E', head: 'e', base: 'b' });
+    const meta = new Map([
+      ['B', { depth: 2, stacked: true }],
+      ['E', { depth: 3, stacked: true }],
+    ]);
+    const payload = buildCopyListPayload([b, e], meta);
+
+    expect(payload?.markdown.split('\n')).toEqual([
+      '- [B](https://github.com/acme/app/pull/B)',
+      '  - [E](https://github.com/acme/app/pull/E)',
+    ]);
+    expect(payload?.html).toBe(
+      '<ul><li><a href="https://github.com/acme/app/pull/B">B</a>' +
+        '<ul><li><a href="https://github.com/acme/app/pull/E">E</a></li></ul>' +
+        '</li></ul>'
+    );
+  });
+
+  it('skips rows without a URL and returns null when nothing is copyable', () => {
+    const noUrl = makeRow({ id: 'X', head: 'x', base: 'main' }); // no url
+    const linked = makeLinkedRow({ id: 'A', head: 'a', base: 'main' });
+
+    expect(buildCopyListPayload([noUrl, linked])?.count).toBe(1);
+    expect(buildCopyListPayload([noUrl])).toBeNull();
+    expect(buildCopyListPayload([])).toBeNull();
+  });
+});
