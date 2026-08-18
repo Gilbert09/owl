@@ -293,6 +293,7 @@ describe('resolveFleetTarget', () => {
     delete process.env.FLEET_REPORT_TOKEN;
     delete process.env.FLEET_API_TOKEN;
     delete process.env.FLEET_PINNED_ENDPOINT;
+    delete process.env.FLEET_GATEWAY_TOKEN;
   });
 
   async function seedWorkspaceWithFleetCreds(): Promise<void> {
@@ -325,6 +326,48 @@ describe('resolveFleetTarget', () => {
     // doubles its separator.
     expect(target?.endpoint).toBe('http://pinned.example:8080');
     expect(target?.host).toBeUndefined();
+  });
+
+  // A gateway and a host are different trust domains with different
+  // credentials, and BOTH destinations are live: dispatch goes to the gateway
+  // while the operator console keeps talking to hosts directly. So the pin has
+  // to carry its own bearer, or pointing dispatch at a gateway silently blanks
+  // the console — the two share one variable otherwise.
+  it('presents the gateway token to a pinned endpoint, not the host token', async () => {
+    await seedWorkspaceWithFleetCreds();
+    process.env.FLEET_PINNED_ENDPOINT = 'https://gateway.example';
+    process.env.FLEET_GATEWAY_TOKEN = 'yas_sk_gateway';
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const target = await resolveFleetTarget('ws1');
+    expect(target?.endpoint).toBe('https://gateway.example');
+    expect(target?.token).toBe('yas_sk_gateway');
+    expect(target?.token).not.toBe('fleet-token');
+  });
+
+  // The registry path is a HOST and must keep the host credential. If the
+  // gateway key leaked into it, every unpinned dispatch would 401 against
+  // fleetd, which is the same outage in the other direction.
+  it('keeps the host token for a registry-resolved host even when a gateway token exists', async () => {
+    await seedWorkspaceWithFleetCreds();
+    process.env.FLEET_GATEWAY_TOKEN = 'yas_sk_gateway';
+    await recordFleetHostReport({ host: 'idle', apiEndpoint: 'http://idle:8080', runsMax: 4 });
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const target = await resolveFleetTarget('ws1');
+    expect(target?.host).toBe('idle');
+    expect(target?.token).toBe('fleet-token');
+  });
+
+  // Absent the new variable, nothing changes. Every deployment that predates
+  // the gateway keeps working with the single token it already has.
+  it('falls back to the host token when no gateway token is set', async () => {
+    await seedWorkspaceWithFleetCreds();
+    process.env.FLEET_PINNED_ENDPOINT = 'https://gateway.example';
+
+    const { resolveFleetTarget } = await import('../services/selfHosted/credentials.js');
+    const target = await resolveFleetTarget('ws1');
+    expect(target?.token).toBe('fleet-token');
   });
 
   it('falls back to the least-loaded registered host when nothing is pinned', async () => {

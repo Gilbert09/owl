@@ -67,7 +67,7 @@ import type {
   McpToken,
   BillingOrder,
 } from '@talyn/shared';
-import { DEFAULT_FLEET_MODEL_ID, FLEET_MODELS, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL_ID, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID } from '@talyn/shared';
+import { DEFAULT_FLEET_MODEL_ID, FLEET_MODELS, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL_ID, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID, parseAutoKeepMergeableLabels } from '@talyn/shared';
 import { useWorkspaceStore, type Theme } from '../../stores/workspace';
 import { useBillingStore } from '../../stores/billing';
 import {
@@ -158,29 +158,22 @@ export function SettingsPanel() {
  * Load an image file, downscale it to fit within `maxDim` px (preserving
  * aspect ratio), and return a PNG data URL. Keeps inline-stored logos small.
  */
-function downscaleImage(file: File, maxDim: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-      const w = Math.max(1, Math.round(img.width * scale));
-      const h = Math.max(1, Math.round(img.height * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      URL.revokeObjectURL(url);
-      if (!ctx) return reject(new Error('no canvas context'));
-      ctx.drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL('image/png'));
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('could not load image'));
-    };
-    img.src = url;
-  });
+async function downscaleImage(file: File, maxDim: number): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas context');
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    return canvas.toDataURL('image/png');
+  } finally {
+    bitmap.close();
+  }
 }
 
 function WorkspaceSettings() {
@@ -1156,7 +1149,7 @@ function AutoKeepMergeableDefaultToggle() {
   };
 
   return (
-    <Card className="p-4">
+    <Card className="p-4 space-y-4">
       <label className="flex items-start gap-3 cursor-pointer">
         <input
           type="checkbox"
@@ -1175,7 +1168,69 @@ function AutoKeepMergeableDefaultToggle() {
           </p>
         </div>
       </label>
+      <AutoKeepMergeableLabelsField />
     </Card>
+  );
+}
+
+/** Persists to `workspace.settings.autoKeepMergeableLabels`; the watcher tick applies them and never removes them. */
+export function AutoKeepMergeableLabelsField() {
+  const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const setWorkspaces = useWorkspaceStore((s) => s.setWorkspaces);
+  const [saving, setSaving] = useState(false);
+
+  const workspace = workspaces.find((w) => w.id === currentWorkspaceId);
+  const saved = (workspace?.settings?.autoKeepMergeableLabels ?? []).join(', ');
+  const [draft, setDraft] = useState(saved);
+  useEffect(() => setDraft(saved), [saved, currentWorkspaceId]);
+
+  const commit = async () => {
+    const labels = parseAutoKeepMergeableLabels(draft);
+    if (!currentWorkspaceId || labels.join(', ') === saved) {
+      setDraft(saved);
+      return;
+    }
+    setSaving(true);
+    try {
+      const settings = { autoKeepMergeableLabels: labels } as Workspace['settings'];
+      await api.workspaces.update(currentWorkspaceId, { settings });
+      setWorkspaces(
+        workspaces.map((w) =>
+          w.id === currentWorkspaceId
+            ? { ...w, settings: { ...w.settings, ...settings } as Workspace['settings'] }
+            : w,
+        ),
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save labels');
+      setDraft(saved);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="border-t border-border pt-4">
+      <div className="font-medium text-sm">Label watched PRs</div>
+      <p className="text-xs text-muted-foreground mt-1 mb-2">
+        Add these GitHub labels to every PR that “Auto-keep mergeable” is watching, so a bot in
+        your org that keys off a label (auto-review, stamping) picks them up. Comma-separated.
+        Applied within a minute, including to PRs already being watched, and never removed. Leave
+        blank to turn off. Needs the GitHub App’s “Issues: Read &amp; write” permission.
+      </p>
+      <Input
+        placeholder="e.g. auto-review, needs-stamp"
+        value={draft}
+        disabled={saving || !currentWorkspaceId}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+        }}
+        className="max-w-sm"
+      />
+    </div>
   );
 }
 

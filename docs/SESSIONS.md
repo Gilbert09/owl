@@ -2,7 +2,7 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
-## Session 83 — Editable prompts: Settings → Instructions (2026-08-17)
+## Session 84 — Editable prompts: Settings → Instructions (2026-08-17)
 
 A customer using auto-keep-mergeable reported that the run applied every bot review comment without pushback. Two things were true: the default prompt said "if the feedback is correct or reasonable, implement it" (an agent will almost never "disagree" unless told that is an expected outcome, and nothing distinguished Greptile from a human reviewer), and there was no way for a workspace to change any prompt Talyn builds.
 
@@ -12,6 +12,16 @@ A customer using auto-keep-mergeable reported that the run applied every bot rev
 - **The default step 1 changed too.** Bot and automated reviewers are advisory: verify the claim against the code, apply only real defects / security / correctness / clear convention violations, push back with a reason otherwise, never widen scope on a bot's say-so. Human reviewer feedback keeps priority.
 
 Tests: `promptTemplates.test.ts` (renderer, validation, hash, overrides through both builders, the bot policy), `routes/workspaces.test.ts` (PATCH validation matrix, overlapping PATCHes), the override reaching the created task from every backend caller (`prAutoMergeWatcher.test.ts`, `prCloudFix.test.ts`, `mergeQueue/evaluator.test.ts`, `mergeQueueProcessor.test.ts`) and both front-end fix/skill buttons (`useGitHubActionsConnect.test.tsx`, `useGitHubActionsPrompts.test.tsx`), `InstructionsSettings.test.tsx` + `promptEditor.test.ts` in both front ends.
+
+## Session 83 — Label watched PRs (2026-08-17)
+
+Some orgs run a bot that reviews and stamps a PR once it carries a label. Talyn now adds a workspace-configured set of GitHub labels to every PR the auto-keep-mergeable watcher is watching, so that bot picks up exactly the PRs Talyn is driving. Setting: `workspace.settings.autoKeepMergeableLabels` (a `string[]`; the Settings card takes a comma-separated field under "Auto-keep new PRs mergeable" in both renderers, parsed by the shared `parseAutoKeepMergeableLabels`, deduped case-insensitively since GitHub label names are).
+
+The labels are applied inside the watcher tick (`prAutoMergeWatcher.ts` `ensureLabels`), not at arm time. One place covers every way a PR becomes watched (the toggle route, the workspace default on first sighting) and it also backfills PRs that were already watched when the setting was filled in, and picks up a label added to the list later. The watcher records what it has applied in `autoMergeState.appliedLabels` and adds only the diff (compared ignoring case, since GitHub label names are), so a label the user removes from the setting stays on the PR: Talyn never removes labels, since the bot may already have acted on them. Cost is one settings read per workspace per tick and one `addPullRequestLabels` per PR that is missing something.
+
+Failure is best-effort and bounded: a refused write (typically the App lacking `issues: write`) is logged, nothing is recorded, and that repo is skipped for 15 minutes so a permission problem doesn't cost a GitHub call per watched PR per minute. Re-arming a PR resets its state and re-applies the labels, which is idempotent on GitHub's side.
+
+Tests: `prAutoMergeWatcher.test.ts` ("watch labels": the diff matrix incl. partial application and casing changes, labelling while a run is in flight, backoff on refusal and its expiry, per-workspace lists in one tick, malformed stored state), `autoKeepMergeableLabels.test.ts` (the parser and the stored-value normalizer) and `autoKeepMergeableLabelsField.test.tsx` in both renderers (commit on blur/Enter, no-op when unchanged, clear sends `[]`, failed save toasts and resets).
 
 ## Session 82 — Mermaid diagrams in PR descriptions (2026-08-13)
 

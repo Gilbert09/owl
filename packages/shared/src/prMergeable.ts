@@ -392,3 +392,21 @@ export function buildMergeablePrompt(
 export function buildPostHogPrompt(input: MergeablePromptInput & { template?: string }): string {
   return buildMergeablePrompt({ ...input, provider: 'posthog_code' });
 }
+
+/** Trimmed, empties dropped, deduped ignoring case because GitHub label names are. */
+export function normalizeLabelNames(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const labels: string[] = [];
+  for (const raw of values) {
+    const label = raw.trim();
+    const key = label.toLowerCase();
+    if (!label || seen.has(key)) continue;
+    seen.add(key);
+    labels.push(label);
+  }
+  return labels;
+}
+
+export function parseAutoKeepMergeableLabels(input: string): string[] {
+  return normalizeLabelNames(input.split(','));
+}

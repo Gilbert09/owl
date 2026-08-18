@@ -5,6 +5,7 @@ import { encryptString } from '../services/tokenCrypto.js';
 import { prAutoMergeWatcher } from '../services/prAutoMergeWatcher.js';
 import { prMonitorService } from '../services/prMonitor.js';
 import { graphqlBudget } from '../services/graphqlBudget.js';
+import { githubService } from '../services/github.js';
 import { createTestDb, seedUser } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
@@ -179,6 +180,228 @@ describe('prAutoMergeWatcher', () => {
   afterEach(async () => {
     await cleanup();
     vi.restoreAllMocks();
+    prAutoMergeWatcher._resetLabelRetries();
+  });
+
+  describe('watch labels', () => {
+    let addLabels: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      addLabels = vi.spyOn(githubService, 'addPullRequestLabels').mockResolvedValue(undefined);
+    });
+
+    async function setLabels(labels: string[] | undefined) {
+      await db
+        .update(workspacesTable)
+        .set({ settings: labels === undefined ? {} : { autoKeepMergeableLabels: labels } })
+        .where(eq(workspacesTable.id, 'ws1'));
+    }
+
+    async function appliedLabels(prId: string): Promise<string[] | undefined> {
+      const pr = await getPr(db, prId);
+      return (pr.autoMergeState as { appliedLabels?: string[] } | null)?.appliedLabels;
+    }
+
+    it.each([
+      { name: 'no labels configured', configured: undefined, applied: undefined, expectAdd: null },
+      { name: 'an empty list', configured: [], applied: undefined, expectAdd: null },
+      {
+        name: 'nothing applied yet',
+        configured: ['auto-review', 'stamp'],
+        applied: undefined,
+        expectAdd: ['auto-review', 'stamp'],
+      },
+      {
+        name: 'one of two already applied',
+        configured: ['auto-review', 'stamp'],
+        applied: ['auto-review'],
+        expectAdd: ['stamp'],
+      },
+      {
+        name: 'everything already applied',
+        configured: ['auto-review', 'stamp'],
+        applied: ['auto-review', 'stamp'],
+        expectAdd: null,
+      },
+      {
+        name: 'a label removed from the setting stays applied',
+        configured: ['stamp'],
+        applied: ['auto-review', 'stamp'],
+        expectAdd: null,
+      },
+      {
+        name: 'a casing change is not a new label',
+        configured: ['Auto-Review', 'stamp'],
+        applied: ['auto-review', 'stamp'],
+        expectAdd: null,
+      },
+    ])('adds only the missing labels: $name', async ({ configured, applied, expectAdd }) => {
+      await setLabels(configured);
+      const prId = await insertPr(db, {
+        summary: cleanSummary(),
+        autoMergeState: { attempts: 0, accounted: true, ...(applied ? { appliedLabels: applied } : {}) },
+      });
+
+      await prAutoMergeWatcher.runOnce();
+
+      if (expectAdd === null) {
+        expect(addLabels).not.toHaveBeenCalled();
+        expect(await appliedLabels(prId)).toEqual(applied);
+      } else {
+        expect(addLabels).toHaveBeenCalledTimes(1);
+        expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, expectAdd);
+        expect(await appliedLabels(prId)).toEqual([...(applied ?? []), ...expectAdd]);
+      }
+    });
+
+    it('labels a PR whose fix run is still in flight', async () => {
+      await setLabels(['auto-review']);
+      const prId = await insertPr(db);
+      await insertTask(db, 'running', 'in_progress', prId);
+      await db
+        .update(pullRequestsTable)
+        .set({ taskId: 'running' })
+        .where(eq(pullRequestsTable.id, prId));
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, ['auto-review']);
+      expect(await appliedLabels(prId)).toEqual(['auto-review']);
+      expect(await countTasks(db)).toBe(1);
+    });
+
+    it('still fires the fix run on the same tick it labels', async () => {
+      await setLabels(['auto-review']);
+      const prId = await insertPr(db, { autoMergeState: { attempts: 0, accounted: true } });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(await countTasks(db)).toBe(1);
+      const pr = await getPr(db, prId);
+      const state = pr.autoMergeState as { appliedLabels?: string[]; lastAutoTaskId?: string };
+      expect(state.appliedLabels).toEqual(['auto-review']);
+      expect(state.lastAutoTaskId).toBeTruthy();
+    });
+
+    it('labels every watched PR in the workspace', async () => {
+      await setLabels(['auto-review']);
+      await insertPr(db, { summary: cleanSummary() });
+      await insertPr(db, { summary: cleanSummary() });
+      await insertPr(db, { summary: cleanSummary() });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledTimes(3);
+    });
+
+    it('records nothing and backs off for the repo when GitHub refuses', async () => {
+      await setLabels(['auto-review']);
+      addLabels.mockRejectedValue(new Error('Resource not accessible by integration'));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const prId = await insertPr(db, { summary: cleanSummary() });
+      const otherPrId = await insertPr(db, { summary: cleanSummary() });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledTimes(1);
+      expect(await appliedLabels(prId)).toBeUndefined();
+      expect(await appliedLabels(otherPrId)).toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('failed to add labels ["auto-review"]'),
+        'Resource not accessible by integration'
+      );
+
+      await prAutoMergeWatcher.runOnce();
+      expect(addLabels).toHaveBeenCalledTimes(1);
+
+      prAutoMergeWatcher._resetLabelRetries();
+      addLabels.mockResolvedValue(undefined);
+      await prAutoMergeWatcher.runOnce();
+      expect(addLabels).toHaveBeenCalledTimes(3);
+      expect(await appliedLabels(prId)).toEqual(['auto-review']);
+      expect(await appliedLabels(otherPrId)).toEqual(['auto-review']);
+    });
+
+    it('does not label PRs that are merged or not watched', async () => {
+      await setLabels(['auto-review']);
+      await insertPr(db, { state: 'merged' });
+      await insertPr(db, { autoKeepMergeable: false });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).not.toHaveBeenCalled();
+    });
+
+    it('retries after the backoff window has passed', async () => {
+      await setLabels(['auto-review']);
+      addLabels.mockRejectedValue(new Error('boom'));
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const prId = await insertPr(db, { summary: cleanSummary() });
+      await prAutoMergeWatcher.runOnce();
+      expect(addLabels).toHaveBeenCalledTimes(1);
+
+      const realNow = Date.now();
+      vi.spyOn(Date, 'now').mockReturnValue(realNow + 16 * 60_000);
+      await db
+        .update(pullRequestsTable)
+        .set({ lastPolledAt: new Date(Date.now()) })
+        .where(eq(pullRequestsTable.id, prId));
+      addLabels.mockResolvedValue(undefined);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledTimes(2);
+      expect(await appliedLabels(prId)).toEqual(['auto-review']);
+    });
+
+    it('applies each workspace its own labels within one tick', async () => {
+      await setLabels(['auto-review']);
+      await seedUser(db, { id: OWNER2 });
+      await db.insert(workspacesTable).values({
+        id: 'ws2',
+        ownerId: OWNER2,
+        name: 'ws2',
+        settings: { autoKeepMergeableLabels: ['stamp'] },
+      });
+      await db.insert(repositoriesTable).values({
+        id: 'repo2',
+        workspaceId: 'ws2',
+        name: 'c/d',
+        url: 'https://github.com/c/d',
+        defaultBranch: 'main',
+      });
+      const ws1Pr = await insertPr(db, { summary: cleanSummary() });
+      const ws2Pr = await insertPr(db, {
+        summary: cleanSummary(),
+        workspaceId: 'ws2',
+        repositoryId: 'repo2',
+      });
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, ['auto-review']);
+      expect(addLabels).toHaveBeenCalledWith('ws2', 'a', 'b', 2, ['stamp']);
+      expect(await appliedLabels(ws1Pr)).toEqual(['auto-review']);
+      expect(await appliedLabels(ws2Pr)).toEqual(['stamp']);
+    });
+
+    it.each([
+      { name: 'a string', stored: 'auto-review' },
+      { name: 'an object', stored: { auto: true } },
+      { name: 'a mixed array', stored: ['auto-review', 42, null] },
+    ])('tolerates malformed stored appliedLabels: $name', async ({ stored }) => {
+      await setLabels(['auto-review', 'stamp']);
+      const prId = await insertPr(db, {
+        summary: cleanSummary(),
+        autoMergeState: { attempts: 0, accounted: true, appliedLabels: stored },
+      });
+
+      await prAutoMergeWatcher.runOnce();
+
+      const expectAdd = Array.isArray(stored) ? ['stamp'] : ['auto-review', 'stamp'];
+      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', 1, expectAdd);
+      expect(await appliedLabels(prId)).toEqual(['auto-review', 'stamp']);
+    });
   });
 
   // The top-of-tick freshness refetch is an opportunistic GraphQL poll — it must

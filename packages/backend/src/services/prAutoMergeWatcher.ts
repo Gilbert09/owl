@@ -1,8 +1,14 @@
 import { and, eq } from 'drizzle-orm';
-import { prNeedsFollowup, buildMergeablePrompt, type PRMergeableSummary } from '@talyn/shared';
+import {
+  prNeedsFollowup,
+  buildMergeablePrompt,
+  normalizeLabelNames,
+  type PRMergeableSummary,
+} from '@talyn/shared';
 import { getDbClient } from '../db/client.js';
 import { guardCrossReplica } from './advisoryLock.js';
 import { pullRequests as pullRequestsTable } from '../db/schema.js';
+import { readWorkspaceSettings } from './workspaceSettings.js';
 import { createCloudTask } from './taskCreate.js';
 import { TaskLimitError } from './billing/entitlements.js';
 import { githubService } from './github.js';
@@ -19,6 +25,7 @@ const POLL_INTERVAL_MS = 60_000;
 const FRESHNESS_MS = 90_000;
 /** Pause auto-firing after this many consecutive un-mergeable auto-runs. */
 const MAX_ATTEMPTS = 3;
+const LABEL_FAILURE_BACKOFF_MS = 15 * 60_000;
 
 interface AutoMergeState {
   attempts: number;
@@ -26,6 +33,7 @@ interface AutoMergeState {
   /** Whether `lastAutoTaskId`'s terminal result has been folded into attempts. */
   accounted?: boolean;
   pausedAt?: string;
+  appliedLabels?: string[];
 }
 
 // Only the columns this watcher touches — avoids `select()`-ing every PR
@@ -51,12 +59,19 @@ type PRRow = Pick<typeof pullRequestsTable.$inferSelect, keyof typeof WATCH_COLU
 
 function readState(row: PRRow): AutoMergeState {
   const s = (row.autoMergeState as AutoMergeState | null) ?? null;
+  const applied = s?.appliedLabels;
   return {
     attempts: s?.attempts ?? 0,
     lastAutoTaskId: s?.lastAutoTaskId,
     accounted: s?.accounted ?? true,
     pausedAt: s?.pausedAt,
+    appliedLabels: Array.isArray(applied) ? applied.filter((l) => typeof l === 'string') : undefined,
   };
+}
+
+export function normalizeWatchLabels(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return normalizeLabelNames(value.filter((v): v is string => typeof v === 'string'));
 }
 
 /** Compact watcher state for the desktop (toggle + badge). */
@@ -68,7 +83,9 @@ function publicState(s: AutoMergeState): { attempts: number; paused: boolean } {
  * Keeps every PR with `auto_keep_mergeable = true` in a mergeable state,
  * unattended and indefinitely. Each tick, per enabled open PR:
  *
- *   1. Refresh stale summaries so blocker detection is current.
+ *   1. Refresh stale summaries so blocker detection is current, and add any of
+ *      the workspace's watch labels (`settings.autoKeepMergeableLabels`) this
+ *      PR hasn't received yet.
  *   2. Skip if a run is already in flight (never two at once).
  *   3. Fold the last auto-run's outcome into the attempt counter.
  *   4. Reset the counter whenever the PR is observed mergeable (re-arm) — so a
@@ -84,13 +101,14 @@ function publicState(s: AutoMergeState): { attempts: number; paused: boolean } {
 class PRAutoMergeWatcher {
   private interval: NodeJS.Timeout | null = null;
   private guard = new TickGuard('prAutoMergeWatcher');
+  private labelRetryAt = new Map<string, number>();
 
   init(): void {
     if (this.interval) return;
     debugBus.registerPoller(
       'auto_merge',
       POLL_INTERVAL_MS,
-      'Keeps every PR with auto-keep-mergeable enabled in a mergeable state — refreshes blockers and fires a cloud fix run when one is found, pausing after repeated failed attempts.',
+      'Keeps every PR with auto-keep-mergeable enabled in a mergeable state — refreshes blockers, applies the workspace watch labels, and fires a cloud fix run when a blocker is found, pausing after repeated failed attempts.',
     );
     this.interval = setInterval(() => {
       void this.tick();
@@ -107,6 +125,10 @@ class PRAutoMergeWatcher {
   /** Test entry point — run a single tick synchronously. */
   async runOnce(): Promise<void> {
     await this.tick();
+  }
+
+  _resetLabelRetries(): void {
+    this.labelRetryAt.clear();
   }
 
   private async tick(): Promise<void> {
@@ -132,9 +154,10 @@ class PRAutoMergeWatcher {
           );
         watched = rows.length;
 
+        const workspaceLabelsCache = new Map<string, string[]>();
         for (const row of rows) {
           try {
-            await this.processPr(row);
+            await this.processPr(row, workspaceLabelsCache);
           } catch (err) {
             // One PR failing must never abort the tick — retry next time.
             console.warn(
@@ -170,7 +193,10 @@ class PRAutoMergeWatcher {
     }
   }
 
-  private async processPr(initialRow: PRRow): Promise<void> {
+  private async processPr(
+    initialRow: PRRow,
+    workspaceLabelsCache: Map<string, string[]>
+  ): Promise<void> {
     const db = getDbClient();
 
     // 1. Freshness — refetch a stale summary so we don't fire (or pause) off
@@ -204,6 +230,8 @@ class PRAutoMergeWatcher {
     const summary = row.lastSummary as PRMergeableSummary;
     const needsFollowup = prNeedsFollowup(summary);
     const state = readState(row);
+
+    await this.ensureLabels(row, state, workspaceLabelsCache);
 
     // 2. Active-task guard — if the linked task is still running, leave it.
     const linkedStatus = await linkedTaskStatus(row.taskId);
@@ -275,6 +303,54 @@ class PRAutoMergeWatcher {
     state.lastAutoTaskId = created.id;
     state.accounted = false;
     await this.persist(row, state);
+  }
+
+  private async ensureLabels(
+    row: PRRow,
+    state: AutoMergeState,
+    workspaceLabelsCache: Map<string, string[]>
+  ): Promise<void> {
+    const wanted = await this.labelsFor(row.workspaceId, workspaceLabelsCache);
+    const applied = state.appliedLabels ?? [];
+    const appliedKeys = new Set(applied.map((l) => l.toLowerCase()));
+    const missing = wanted.filter((l) => !appliedKeys.has(l.toLowerCase()));
+    if (missing.length === 0) return;
+
+    const repoKey = `${row.workspaceId}:${row.owner.toLowerCase()}/${row.repo.toLowerCase()}`;
+    const retryAt = this.labelRetryAt.get(repoKey);
+    if (retryAt !== undefined && Date.now() < retryAt) return;
+
+    try {
+      await githubService.addPullRequestLabels(
+        row.workspaceId,
+        row.owner,
+        row.repo,
+        row.number,
+        missing
+      );
+    } catch (err) {
+      this.labelRetryAt.set(repoKey, Date.now() + LABEL_FAILURE_BACKOFF_MS);
+      console.warn(
+        `[prAutoMergeWatcher] failed to add labels ${JSON.stringify(missing)} to ${row.owner}/${row.repo}#${row.number}:`,
+        err instanceof Error ? err.message : err
+      );
+      return;
+    }
+    this.labelRetryAt.delete(repoKey);
+    state.appliedLabels = [...applied, ...missing];
+    await this.persist(row, state);
+  }
+
+  private async labelsFor(
+    workspaceId: string,
+    workspaceLabelsCache: Map<string, string[]>
+  ): Promise<string[]> {
+    const cached = workspaceLabelsCache.get(workspaceId);
+    if (cached) return cached;
+    const settings = await readWorkspaceSettings(getDbClient(), workspaceId);
+    const wanted = normalizeWatchLabels(settings.autoKeepMergeableLabels);
+    workspaceLabelsCache.set(workspaceId, wanted);
+    return wanted;
   }
 
   private async persist(row: PRRow, state: AutoMergeState): Promise<void> {

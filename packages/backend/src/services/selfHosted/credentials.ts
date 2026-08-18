@@ -64,6 +64,28 @@ export function fleetApiToken(): string {
 }
 
 /**
+ * The bearer the backend presents to the SANDBOX GATEWAY, when one is pinned.
+ *
+ * A gateway and a fleet host are different trust domains and issue different
+ * credentials. `FLEET_API_TOKEN` is a deployment-wide operator secret shared
+ * with every host's `/etc/fleet/secrets.env`; a gateway key is a per-tenant API
+ * key the gateway minted and can revoke on its own. Sending either one to the
+ * other simply 401s.
+ *
+ * They cannot be the same variable because BOTH destinations are still in use:
+ * dispatch goes to the gateway, while the operator console keeps talking to
+ * hosts directly — deliberately, since draining a specific box and reading its
+ * goldens are host operations that no gateway route covers. Reusing
+ * FLEET_API_TOKEN for the pin therefore fixes dispatch and blanks the console.
+ *
+ * Falls back to `fleetApiToken()`, so a deployment that has not been given a
+ * gateway key behaves exactly as it did before this existed.
+ */
+export function fleetGatewayToken(): string {
+  return process.env.FLEET_GATEWAY_TOKEN?.trim() || fleetApiToken();
+}
+
+/**
  * Force every run onto one host, bypassing the registry. Blank = registry.
  *
  * This is a DEBUGGING escape hatch and it is deployment-level for the same
@@ -183,11 +205,19 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
   // an operator error and every workspace hits it identically. Reporting it as
   // "not configured" would send the user back to a settings form they have
   // already filled in correctly.
+  // The pin is resolved BEFORE the host token, because a pinned endpoint is
+  // authenticated by a different credential — see fleetGatewayToken. Reading
+  // FLEET_API_TOKEN first would make a gateway-only deployment fail on a
+  // variable it has no reason to set.
+  const pinned = fleetPinnedEndpoint();
+  if (pinned) {
+    const gatewayToken = fleetGatewayToken();
+    if (!gatewayToken) throw new FleetNotDeployedError();
+    return { endpoint: pinned, token: gatewayToken };
+  }
+
   const token = fleetApiToken();
   if (!token) throw new FleetNotDeployedError();
-
-  const pinned = fleetPinnedEndpoint();
-  if (pinned) return { endpoint: pinned, token };
 
   const host = await pickFleetHost();
   if (!host?.apiEndpoint) {
