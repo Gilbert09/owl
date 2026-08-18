@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   workspaces as workspacesTable,
@@ -21,6 +21,7 @@ import {
   type PromptKind,
   type PromptTemplateOverride,
   type PromptTemplateSettings,
+  type WorkspaceSettings,
 } from '@talyn/shared';
 
 // Uploaded logos are stored inline as data URLs on the workspace row, so cap
@@ -59,24 +60,20 @@ function generatedLogo(): WorkspaceLogo {
   return { kind: 'identicon', seed: uuid() };
 }
 
-// Prompt overrides merge one level deeper than the rest of settings so a
-// client can save or reset one kind without resending the others. `null`
-// resets a kind (the key is dropped, not stored).
-function mergePromptSettings(
-  current: PromptTemplateSettings | undefined,
-  patch: unknown
-): PromptTemplateSettings {
+// Validated per-kind patch, nulls kept: the merge itself happens in SQL so
+// two concurrent PATCHes cannot clobber each other's kinds.
+function promptSettingsPatch(patch: unknown): PromptTemplateSettings {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new Error('settings.prompts must be an object');
   }
-  const next: PromptTemplateSettings = { ...(current ?? {}) };
+  const next: PromptTemplateSettings = {};
   for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
     if (!(PROMPT_KINDS as string[]).includes(key)) {
       throw new Error(`Unknown prompt kind "${key}"`);
     }
     const kind = key as PromptKind;
     if (value === null) {
-      delete next[kind];
+      next[kind] = null;
       continue;
     }
     if (!value || typeof value !== 'object') {
@@ -96,6 +93,24 @@ function mergePromptSettings(
     next[kind] = { template: o.template, basedOnHash: o.basedOnHash, updatedAt: new Date().toISOString() };
   }
   return next;
+}
+
+// jsonb `||` merges the top level in the row itself; prompts merge one level
+// deeper, and jsonb_strip_nulls turns a `null` kind into a reset.
+function mergedSettingsSql(patch: Partial<WorkspaceSettings>, prompts: PromptTemplateSettings | undefined) {
+  const rest = { ...patch };
+  delete rest.prompts;
+  const topLevel = sql`${workspacesTable.settings} || ${JSON.stringify(rest)}::jsonb`;
+  if (!prompts) return topLevel;
+  return sql`jsonb_set(
+    ${topLevel},
+    '{prompts}',
+    jsonb_strip_nulls(
+      CASE WHEN jsonb_typeof(${workspacesTable.settings} -> 'prompts') = 'object'
+        THEN ${workspacesTable.settings} -> 'prompts' ELSE '{}'::jsonb END
+      || ${JSON.stringify(prompts)}::jsonb
+    )
+  )`;
 }
 
 export function workspaceRoutes(): Router {
@@ -182,7 +197,7 @@ export function workspaceRoutes(): Router {
     const db = getDbClient();
     const body = req.body as UpdateWorkspaceRequest;
     const existing = await db
-      .select()
+      .select({ id: workspacesTable.id })
       .from(workspacesTable)
       .where(eq(workspacesTable.id, req.params.id))
       .limit(1);
@@ -202,20 +217,16 @@ export function workspaceRoutes(): Router {
       }
     }
     if (body.settings !== undefined) {
-      const currentSettings = (existing[0].settings as Record<string, unknown>) ?? {};
-      const merged: Record<string, unknown> = { ...currentSettings, ...body.settings };
+      let prompts: PromptTemplateSettings | undefined;
       if (body.settings.prompts !== undefined) {
         try {
-          merged.prompts = mergePromptSettings(
-            currentSettings.prompts as PromptTemplateSettings | undefined,
-            body.settings.prompts
-          );
+          prompts = promptSettingsPatch(body.settings.prompts);
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'invalid prompts';
           return res.status(400).json({ success: false, error: msg });
         }
       }
-      updates.settings = merged;
+      updates.settings = mergedSettingsSql(body.settings, prompts);
     }
 
     if (Object.keys(updates).length > 0) {
