@@ -456,6 +456,32 @@ describe('prAutoMergeWatcher', () => {
     expect(pr.taskId).toBe(tasks[0].id);
   });
 
+  it('renders the workspace mergeable prompt override when one is set', async () => {
+    await db
+      .update(workspacesTable)
+      .set({
+        settings: {
+          prompts: {
+            mergeable: {
+              template: 'Custom for {{pr.ref}} on {{pr.headBranch}}\n{{gitRules}}',
+              basedOnHash: '00000000',
+              updatedAt: 'then',
+            },
+          },
+        },
+      })
+      .where(eq(workspacesTable.id, 'ws1'));
+    await insertPr(db, { autoMergeState: { attempts: 0, accounted: true } });
+
+    await prAutoMergeWatcher.runOnce();
+
+    const tasks = await db.select({ prompt: tasksTable.prompt }).from(tasksTable);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0].prompt?.startsWith('Custom for a/b#1 on feat')).toBe(true);
+    expect(tasks[0].prompt).toContain('git_signed_commit');
+    expect(tasks[0].prompt).not.toContain('Every reviewer comment');
+  });
+
   describe('free-plan task limit', () => {
     const savedPolarToken = process.env.POLAR_ACCESS_TOKEN;
 

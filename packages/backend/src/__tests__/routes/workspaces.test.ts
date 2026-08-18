@@ -3,6 +3,7 @@ import express from 'express';
 import { createServer, type Server } from 'http';
 import { AddressInfo } from 'net';
 import { eq } from 'drizzle-orm';
+import { PROMPT_TEMPLATE_MAX_CHARS, defaultPromptTemplateHash } from '@talyn/shared';
 import { workspaceRoutes } from '../../routes/workspaces.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
@@ -246,6 +247,97 @@ describe('routes/workspaces', () => {
       const body = await res.json();
       expect(body.data.name).toBe('Renamed');
       expect(body.data.description).toBe('old');
+    });
+
+    describe('settings.prompts', () => {
+      const validTemplate = 'Fix {{pr.url}}\n{{gitRules}}';
+      const hash = defaultPromptTemplateHash('mergeable');
+
+      async function patchPrompts(prompts: unknown) {
+        return fetch(`${serverUrl}/workspaces/a`, {
+          method: 'PATCH',
+          headers: authHeaders,
+          body: JSON.stringify({ settings: { prompts } }),
+        });
+      }
+
+      beforeEach(async () => {
+        await db.insert(workspacesTable).values({
+          id: 'a',
+          ownerId: TEST_USER_ID,
+          name: 'Alpha',
+          settings: {
+            defaultCloudProvider: 'claude_code',
+            prompts: { skill: { template: 'Run {{pr.url}} {{gitRules}} {{skill.content}}', basedOnHash: 'aaaaaaaa', updatedAt: 'then' } },
+          },
+        });
+      });
+
+      it('stores a valid override with a server-side updatedAt and keeps the other kinds', async () => {
+        const res = await patchPrompts({ mergeable: { template: validTemplate, basedOnHash: hash } });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data.settings.defaultCloudProvider).toBe('claude_code');
+        expect(body.data.settings.prompts.mergeable).toMatchObject({ template: validTemplate, basedOnHash: hash });
+        expect(typeof body.data.settings.prompts.mergeable.updatedAt).toBe('string');
+        expect(body.data.settings.prompts.skill.basedOnHash).toBe('aaaaaaaa');
+      });
+
+      it('null resets a kind by dropping the key', async () => {
+        const res = await patchPrompts({ skill: null });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.data.settings.prompts).toEqual({});
+      });
+
+      it('keeps every write when PATCHes overlap: two kinds and a top-level key', async () => {
+        const responses = await Promise.all([
+          patchPrompts({ mergeable: { template: validTemplate, basedOnHash: hash } }),
+          patchPrompts({ skill: null }),
+          fetch(`${serverUrl}/workspaces/a`, {
+            method: 'PATCH',
+            headers: authHeaders,
+            body: JSON.stringify({ settings: { defaultCloudProvider: 'posthog_code' } }),
+          }),
+        ]);
+        expect(responses.map((r) => r.status)).toEqual([200, 200, 200]);
+        const rows = await db
+          .select({ settings: workspacesTable.settings })
+          .from(workspacesTable)
+          .where(eq(workspacesTable.id, 'a'));
+        const settings = rows[0].settings as {
+          defaultCloudProvider: string;
+          prompts: { mergeable?: { template: string }; skill?: unknown };
+        };
+        expect(settings.defaultCloudProvider).toBe('posthog_code');
+        expect(settings.prompts.mergeable?.template).toBe(validTemplate);
+        expect(settings.prompts.skill).toBeUndefined();
+      });
+
+      it.each([
+        ['an unknown kind', { bogus: { template: validTemplate, basedOnHash: hash } }, /Unknown prompt kind/],
+        ['a non-object kind', { mergeable: 'text' }, /must be an object/],
+        ['a missing template', { mergeable: { basedOnHash: hash } }, /template must be a string/],
+        ['an unknown variable', { mergeable: { template: `${validTemplate} {{nope}}`, basedOnHash: hash } }, /Unknown variable/],
+        ['a missing required variable', { mergeable: { template: 'no rules {{pr.url}}', basedOnHash: hash } }, /Missing required/],
+        ['a bad hash', { mergeable: { template: validTemplate, basedOnHash: 'nope' } }, /hex hash/],
+        [
+          'a template over the size cap',
+          { mergeable: { template: validTemplate + 'x'.repeat(PROMPT_TEMPLATE_MAX_CHARS), basedOnHash: hash } },
+          /the limit is/,
+        ],
+        ['a non-object prompts value', 'nope', /must be an object/],
+      ])('rejects %s with a 400 and leaves settings untouched', async (_label, prompts, message) => {
+        const res = await patchPrompts(prompts);
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.error).toMatch(message);
+        const rows = await db
+          .select({ settings: workspacesTable.settings })
+          .from(workspacesTable)
+          .where(eq(workspacesTable.id, 'a'));
+        expect((rows[0].settings as { prompts: { mergeable?: unknown } }).prompts.mergeable).toBeUndefined();
+      });
     });
 
     it('404s a workspace owned by someone else', async () => {

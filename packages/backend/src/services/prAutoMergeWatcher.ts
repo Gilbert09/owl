@@ -18,6 +18,7 @@ import { emitPullRequestUpdated } from './websocket.js';
 import { debugBus } from './debugBus.js';
 import { TickGuard } from './tickGuard.js';
 import { ACTIVE_STATUSES, linkedTaskStatus, resolveCloudEnv } from './prCloudFix.js';
+import { workspacePromptTemplate } from './promptTemplates.js';
 
 const POLL_INTERVAL_MS = 60_000;
 /** Re-poll a watched PR if its cached summary is older than this. */
@@ -269,6 +270,7 @@ class PRAutoMergeWatcher {
 
     const ref = `${row.owner}/${row.repo}#${row.number}`;
     const prTitle = (row.lastSummary as { title?: string } | null)?.title ?? '';
+    const template = await workspacePromptTemplate(row.workspaceId, 'mergeable');
     let created;
     try {
       created = await createCloudTask({
@@ -282,6 +284,7 @@ class PRAutoMergeWatcher {
           number: row.number,
           summary,
           provider,
+          template,
         }),
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { v4 as uuid } from 'uuid';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { getDbClient, type Database } from '../db/client.js';
 import {
   workspaces as workspacesTable,
@@ -8,14 +8,20 @@ import {
   integrations as integrationsTable,
 } from '../db/schema.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
-import type {
-  Workspace,
-  WorkspaceLogo,
-  Repository,
-  WorkspaceIntegrations,
-  CreateWorkspaceRequest,
-  UpdateWorkspaceRequest,
-  ApiResponse,
+import {
+  PROMPT_KINDS,
+  validatePromptTemplate,
+  type Workspace,
+  type WorkspaceLogo,
+  type Repository,
+  type WorkspaceIntegrations,
+  type CreateWorkspaceRequest,
+  type UpdateWorkspaceRequest,
+  type ApiResponse,
+  type PromptKind,
+  type PromptTemplateOverride,
+  type PromptTemplateSettings,
+  type WorkspaceSettings,
 } from '@talyn/shared';
 
 // Uploaded logos are stored inline as data URLs on the workspace row, so cap
@@ -52,6 +58,59 @@ function validateLogo(raw: unknown): WorkspaceLogo {
 /** A fresh auto-generated identicon logo. */
 function generatedLogo(): WorkspaceLogo {
   return { kind: 'identicon', seed: uuid() };
+}
+
+// Validated per-kind patch, nulls kept: the merge itself happens in SQL so
+// two concurrent PATCHes cannot clobber each other's kinds.
+function promptSettingsPatch(patch: unknown): PromptTemplateSettings {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new Error('settings.prompts must be an object');
+  }
+  const next: PromptTemplateSettings = {};
+  for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
+    if (!(PROMPT_KINDS as string[]).includes(key)) {
+      throw new Error(`Unknown prompt kind "${key}"`);
+    }
+    const kind = key as PromptKind;
+    if (value === null) {
+      next[kind] = null;
+      continue;
+    }
+    if (!value || typeof value !== 'object') {
+      throw new Error(`settings.prompts.${kind} must be an object or null`);
+    }
+    const o = value as Partial<PromptTemplateOverride>;
+    if (typeof o.template !== 'string') {
+      throw new Error(`settings.prompts.${kind}.template must be a string`);
+    }
+    const validation = validatePromptTemplate(kind, o.template);
+    if (!validation.ok) {
+      throw new Error(`Invalid ${kind} prompt: ${validation.errors.join(' ')}`);
+    }
+    if (typeof o.basedOnHash !== 'string' || !/^[0-9a-f]{8}$/.test(o.basedOnHash)) {
+      throw new Error(`settings.prompts.${kind}.basedOnHash must be an 8-char hex hash`);
+    }
+    next[kind] = { template: o.template, basedOnHash: o.basedOnHash, updatedAt: new Date().toISOString() };
+  }
+  return next;
+}
+
+// jsonb `||` merges the top level in the row itself; prompts merge one level
+// deeper, and jsonb_strip_nulls turns a `null` kind into a reset.
+function mergedSettingsSql(patch: Partial<WorkspaceSettings>, prompts: PromptTemplateSettings | undefined) {
+  const rest = { ...patch };
+  delete rest.prompts;
+  const topLevel = sql`${workspacesTable.settings} || ${JSON.stringify(rest)}::jsonb`;
+  if (!prompts) return topLevel;
+  return sql`jsonb_set(
+    ${topLevel},
+    '{prompts}',
+    jsonb_strip_nulls(
+      CASE WHEN jsonb_typeof(${workspacesTable.settings} -> 'prompts') = 'object'
+        THEN ${workspacesTable.settings} -> 'prompts' ELSE '{}'::jsonb END
+      || ${JSON.stringify(prompts)}::jsonb
+    )
+  )`;
 }
 
 export function workspaceRoutes(): Router {
@@ -138,7 +197,7 @@ export function workspaceRoutes(): Router {
     const db = getDbClient();
     const body = req.body as UpdateWorkspaceRequest;
     const existing = await db
-      .select()
+      .select({ id: workspacesTable.id })
       .from(workspacesTable)
       .where(eq(workspacesTable.id, req.params.id))
       .limit(1);
@@ -158,8 +217,16 @@ export function workspaceRoutes(): Router {
       }
     }
     if (body.settings !== undefined) {
-      const currentSettings = (existing[0].settings as Record<string, unknown>) ?? {};
-      updates.settings = { ...currentSettings, ...body.settings };
+      let prompts: PromptTemplateSettings | undefined;
+      if (body.settings.prompts !== undefined) {
+        try {
+          prompts = promptSettingsPatch(body.settings.prompts);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'invalid prompts';
+          return res.status(400).json({ success: false, error: msg });
+        }
+      }
+      updates.settings = mergedSettingsSql(body.settings, prompts);
     }
 
     if (Object.keys(updates).length > 0) {
