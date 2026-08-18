@@ -47,10 +47,7 @@ export const EXTERNAL_GATE_BLOCK_REASON =
   'GitHub auto-merge and defines no submit label. Merge it through that system, ' +
   'or remove it from the queue.';
 
-export function externalQueueRejectedReason(
-  status: ExternalQueueStatus,
-  maxAttempts: number
-): string {
+export function externalQueueRejectedReason(status: ExternalQueueStatus): string {
   const provider = externalQueueProviderLabel(status.provider);
   if (status.state === 'cancelled') {
     return (
@@ -60,15 +57,29 @@ export function externalQueueRejectedReason(
   }
   if (status.state === 'ejected') {
     return (
-      `${provider}'s merge queue sent this PR back ${maxAttempts}× on this commit ` +
-      `(${status.evidence}) without ever testing it. Push a fix (the queue resubmits ` +
-      `automatically on a new commit), or re-queue to retry now.`
+      `${provider}'s merge queue sent this PR back for the same reason twice on this ` +
+      `commit (${status.evidence}) without ever testing it. Push a fix (the queue ` +
+      `resubmits automatically on a new commit), or re-queue to retry now.`
     );
   }
   return (
-    `${provider}'s merge queue rejected this PR ${maxAttempts}× on this commit ` +
-    `(${status.evidence}) — its tests fail when the PR is merged with the base. ` +
-    `Push a fix (the queue resubmits automatically on a new commit), or re-queue to retry now.`
+    `${provider}'s merge queue sent this PR back for the same reason twice on this ` +
+    `commit (${status.evidence}) — its tests fail when the PR is merged with the base, ` +
+    `and nothing here changed that. Push a fix (the queue resubmits automatically on a ` +
+    `new commit), or re-queue to retry now.`
+  );
+}
+
+/**
+ * Why the queue stopped. Deliberately names the blocker AND says the attempt
+ * changed nothing — "3 attempts" told a user how many times we tried but never
+ * what we learned, and the honest answer is that the same thing is still wrong.
+ */
+export function noProgressReason(pr: PrSnapshot): string {
+  return (
+    `${blockerReason(pr)}. A fix run already ran against this exact problem on this ` +
+    `commit and left it unchanged, so the queue stopped rather than repeat it. ` +
+    `Push a fix (that resets it automatically), or re-queue to try again.`
   );
 }
 
@@ -240,6 +251,78 @@ export function ciInFlight(pr: PrSnapshot): boolean {
 function hasSettledBlockerFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
   if (prNeedsFollowup(pr.summary)) return true;
   return mergeStateOf(pr) === 'BEHIND' && ctx.externalGate === null;
+}
+
+// ── Progress, not retries ──
+//
+// Remediation used to be capped at `maxAttempts` runs per head. That number was
+// arbitrary and wrong in both directions: a PR clearing one blocker per run and
+// landing on the fourth was declared blocked, while a PR whose runs changed
+// nothing still burned three paid cloud runs first.
+//
+// What actually distinguishes "keep going" from "give up" is whether the last
+// attempt CHANGED anything. So each completed remediation records a SIGNATURE of
+// what is blocking the PR afterwards. A signature never seen on this head means
+// the attempt moved the problem — continue. A signature already recorded means
+// the attempt failed at something it already failed at — block.
+//
+// This terminates with no constant in it: the list only grows, and it can only
+// grow as far as the PR has distinct ways of being blocked. A new head clears it
+// (R2), exactly as it cleared the counters.
+
+/**
+ * What is blocking this PR, as a comparable token.
+ *
+ * `failingChecksDigest` is the load-bearing part: `checks.failed` alone reads
+ * 4 → 4 whether the run fixed nothing or fixed one check and uncovered another,
+ * and calling the second case "no progress" is precisely the judgement a retry
+ * budget gets wrong. It is absent on summaries cached before it shipped and on
+ * the by-branch fetch path, so `?? '?'` keeps those rows comparable on the
+ * coarser fields rather than making every one of them look identical.
+ */
+export function blockerSignature(pr: PrSnapshot): string {
+  const s = pr.summary;
+  return [
+    'fix',
+    s.blockingReason,
+    s.mergeable,
+    mergeStateOf(pr),
+    s.reviewDecision ?? '-',
+    // FAILING count only — never `checks.total`, and never `inProgress`. Both
+    // move on their own as a CI run registers and finishes jobs, and a
+    // signature that drifts without the PR changing manufactures fake progress:
+    // the bound here is "we have seen this before", so anything that churns on
+    // its own makes it unreachable. A failure appearing or clearing IS a real
+    // change and is meant to count.
+    `failing=${s.checks?.failed ?? 0}`,
+    `which=${s.failingChecksDigest ?? '?'}`,
+    `threads=${s.unresolvedReviewThreads ?? 0}`,
+  ].join('|');
+}
+
+/**
+ * The same idea for an external merge queue, whose verdict is its own and says
+ * nothing about the PR's local state — trunk fails a PR on the merge WITH the
+ * base, which is green on the branch. Its evidence sentence names the checks
+ * that failed, so it discriminates a repeat failure from a different one.
+ */
+export function queueSignature(status: ExternalQueueStatus): string {
+  return ['queue', status.provider, status.state, status.evidence].join('|');
+}
+
+/** Has this exact problem already defeated a completed remediation on this head? */
+export function signatureSeen(entry: EntrySnapshot, signature: string): boolean {
+  // Defensive on the array itself: the column is nullable (every row written
+  // before it shipped) and this predicate now gates the whole remediation path.
+  // A throw here would abort the evaluation on every tick and wedge the entry —
+  // a far worse failure than reading an unknown history as empty.
+  return Array.isArray(entry.seenSignatures) && entry.seenSignatures.includes(signature);
+}
+
+/** The recorded history plus `signature`, tolerating a legacy null column. */
+function withSignature(entry: EntrySnapshot, signature: string): string[] {
+  const seen = Array.isArray(entry.seenSignatures) ? entry.seenSignatures : [];
+  return [...seen, signature];
 }
 
 /**
@@ -561,7 +644,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       return d.done('advance');
     }
     if (ext && isExternalQueueEjected(ext.state) && !staleEjection) {
-      const verdict = decideExternalEjection(d, ext, ctx);
+      const verdict = decideExternalEjection(d, pr, ext, ctx);
       if (verdict) return verdict;
       // null → requeued for a resubmit; fall through to the normal rules so a
       // PR that came back broken gets remediated before it goes round again.
@@ -717,27 +800,41 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // and leaves the queue; budgets reset ONLY on a new head (R2) or requeue.
   if (d.entry.fixTaskId && !d.entry.fixTaskAccounted && !runActive) {
     const wasBlocked = d.entry.status === 'blocked';
-    let to: EntryStatus = d.entry.status;
-    let attempts = d.entry.fixAttempts;
-    if (queueBlockedFor(pr, ctx)) {
-      attempts += 1;
-      if (attempts >= ctx.maxAttempts) to = 'blocked';
-    }
+    const stillBlocked = queueBlockedFor(pr, ctx);
+    const signature = blockerSignature(pr);
+    // Did this run move the problem? A signature we have already been left
+    // with by a completed remediation means it did not — the run failed at
+    // something it had failed at before, on the same head.
+    const recurred = stillBlocked && signatureSeen(d.entry, signature);
+    const attempts = stillBlocked ? d.entry.fixAttempts + 1 : d.entry.fixAttempts;
+    const to: EntryStatus = recurred ? 'blocked' : d.entry.status;
     const justBlocked = !wasBlocked && to === 'blocked';
     d.transition(to, {
-      blockedCode: justBlocked ? 'attempts_exhausted' : d.entry.blockedCode,
-      blockedReason: justBlocked ? blockerReason(pr) : d.entry.blockedReason,
-      set: { fixAttempts: attempts, fixTaskAccounted: true },
+      blockedCode: justBlocked ? 'no_progress' : d.entry.blockedCode,
+      blockedReason: justBlocked ? noProgressReason(pr) : d.entry.blockedReason,
+      set: {
+        fixAttempts: attempts,
+        fixTaskAccounted: true,
+        // Only RECORD a signature we are going to act on again. Recording the
+        // recurrence too would be a no-op (it is already there), and recording
+        // on a clean read would poison the list with a state that is not a
+        // blocker at all.
+        ...(stillBlocked && !recurred
+          ? { seenSignatures: withSignature(d.entry, signature) }
+          : {}),
+      },
       event: {
         code: 'fix_run_accounted',
-        message: queueBlockedFor(pr, ctx)
-          ? `Fix run finished but the PR is still blocked (attempt ${attempts}/${ctx.maxAttempts}).`
-          : 'Fix run finished; PR reads clean.',
-        detail: { taskId: d.entry.fixTaskId },
+        message: !stillBlocked
+          ? 'Fix run finished; PR reads clean.'
+          : recurred
+            ? `Fix run finished and the PR is blocked by the same thing as before (${blockerReason(pr)}) — no progress, stopping.`
+            : `Fix run finished; the PR is still blocked but by a different problem (${blockerReason(pr)}) — continuing.`,
+        detail: { taskId: d.entry.fixTaskId, attempt: attempts, signature },
       },
     });
-    // Fire-once notification: the queue exhausted its retries and needs a
-    // human (or a new push — R2 re-arms it).
+    // Fire-once notification: the queue has stopped making progress and needs
+    // a human (or a new push — R2 re-arms it).
     if (justBlocked) d.act({ kind: 'notify_blocked' });
   }
 
@@ -761,19 +858,22 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   }
 
   // R11 — settled blocker: conflict / changes / failing required CI /
-  // unresolved threads / BEHIND. Hard cap first — the absolute guard against
-  // firing past the retry budget, even if a transient clean reading + failed
-  // merge flapped the status back to queued. fixAttempts only ever increments
-  // in R8 (which already notified at the cap), so re-settle the badge silently
-  // and hand the turn to the next queued PR.
-  if (d.entry.fixAttempts >= ctx.maxAttempts) {
+  // unresolved threads / BEHIND. The recurrence guard comes first — the
+  // absolute stop against dispatching a run at a problem a completed run has
+  // already failed to move, even if a transient clean reading + a failed merge
+  // flapped the status back to queued between R8 and here. R8 has already
+  // notified when it first blocked, so re-settle the badge silently and hand
+  // the turn to the next queued PR.
+  if (signatureSeen(d.entry, blockerSignature(pr))) {
     if (d.entry.status !== 'blocked') {
       d.transition('blocked', {
-        blockedCode: 'attempts_exhausted',
-        blockedReason: d.entry.blockedReason ?? blockerReason(pr),
+        blockedCode: 'no_progress',
+        blockedReason: d.entry.blockedReason ?? noProgressReason(pr),
         event: {
-          code: 'attempts_exhausted',
-          message: 'Fix-run budget spent on this head — waiting for a new push or requeue.',
+          code: 'no_progress',
+          message:
+            'This head is blocked by a problem a fix run already failed to move — ' +
+            'waiting for a new push or requeue.',
         },
       });
     }
@@ -1033,11 +1133,18 @@ function decideCleanButWaitingOnCi(
  */
 function decideExternalEjection(
   d: DecisionBuilder,
+  pr: PrSnapshot,
   ext: ExternalQueueStatus,
   ctx: DecisionContext
 ): Decision | null {
   const provider = externalQueueProviderLabel(ext.provider);
-  if (ext.state === 'cancelled' || d.entry.submitAttempts >= ctx.maxAttempts) {
+  // Has the queue already sent this head back for this exact reason, AFTER we
+  // resubmitted it? Then resubmitting again is repeating a move that did not
+  // work. A DIFFERENT reason each time is the queue making progress through the
+  // PR's problems, and keeps its resubmits.
+  const signature = queueSignature(ext);
+  const recurred = signatureSeen(d.entry, signature);
+  if (ext.state === 'cancelled' || recurred) {
     // A queue FAILURE on a locally-clean PR is fixable — it just needs a
     // different starting point.
     //
@@ -1050,19 +1157,23 @@ function decideExternalEjection(
     // idle.
     //
     // Dispatched DIRECTLY, never by falling through to the ordinary rules. The
-    // `submitAttempts >= maxAttempts` test above is the ONLY guard on
-    // resubmission, and a fall-through would bypass the one thing standing
-    // between a rejected PR and an eject → resubmit → eject loop.
+    // recurrence test above is the ONLY guard on resubmission, and a
+    // fall-through would bypass the one thing standing between a rejected PR
+    // and an eject → resubmit → eject loop.
     //
-    // Bounded by fixAttempts, which is per-head and resets only on a new
-    // commit, so a PR that keeps failing costs at most maxAttempts runs per
-    // push. `cancelled` is excluded: somebody pulled the PR out deliberately
-    // and spending money to override that is not a repair. Auto-merge is
-    // disarmed on the way, exactly as the blocking path does — a half-fixed PR
-    // must not merge itself behind the queue's back.
+    // Bounded by the same progress rule, one lane over: the local blocker
+    // signature this run will be judged on is recorded when it completes, so a
+    // PR that keeps failing the same way stops on the repeat rather than after
+    // a fixed number of tries. `cancelled` is excluded: somebody may have
+    // pulled the PR out deliberately and spending money to override that is not
+    // a repair. Auto-merge is disarmed on the way, exactly as the blocking path
+    // does — a half-fixed PR must not merge itself behind the queue's back.
+    // Escalate to a fix run seeded with the queue's failure output — unless a
+    // fix run has already been left with this same local blocker on this head,
+    // in which case it is the same dead end one lane over.
     const fixable =
       ext.state === 'failed' &&
-      d.entry.fixAttempts < ctx.maxAttempts &&
+      !signatureSeen(d.entry, blockerSignature(pr)) &&
       ctx.cloudEnvAvailable;
     if (fixable) {
       d.transition('queued', {
@@ -1070,13 +1181,13 @@ function decideExternalEjection(
           externalSubmitVia: null,
           externalSubmittedAt: null,
           externalState: ext.state,
+          seenSignatures: withSignature(d.entry, signature),
         },
         event: {
           code: 'external_queue_failed_fixing',
           message:
-            `${provider} failed this PR in its merge queue and the resubmit budget is spent — ` +
-            `dispatching a run from the queue's failure output ` +
-            `(fix ${d.entry.fixAttempts + 1}/${ctx.maxAttempts}).`,
+            `${provider} failed this PR in its merge queue for the same reason as before — ` +
+            "resubmitting won't change it, so dispatching a run from the queue's failure output.",
           detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
         },
       });
@@ -1090,14 +1201,19 @@ function decideExternalEjection(
     }
     d.transition('blocked', {
       blockedCode: 'external_queue_rejected',
-      blockedReason: externalQueueRejectedReason(ext, ctx.maxAttempts),
-      set: { externalSubmitVia: null, externalSubmittedAt: null, externalState: ext.state },
+      blockedReason: externalQueueRejectedReason(ext),
+      set: {
+        externalSubmitVia: null,
+        externalSubmittedAt: null,
+        externalState: ext.state,
+        ...(recurred ? {} : { seenSignatures: withSignature(d.entry, signature) }),
+      },
       event: {
         code: 'external_queue_rejected',
         message:
           ext.state === 'cancelled'
             ? `${provider} cancelled this PR in its merge queue.`
-            : `${provider} rejected this PR ${d.entry.submitAttempts}× on this commit — giving up until a new push.`,
+            : `${provider} sent this PR back for the same reason twice and nothing here can move it — giving up until a new push.`,
         detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
       },
     });
@@ -1105,7 +1221,14 @@ function decideExternalEjection(
     return d.done('advance');
   }
   d.transition('queued', {
-    set: { externalSubmitVia: null, externalSubmittedAt: null, externalState: ext.state },
+    set: {
+      externalSubmitVia: null,
+      externalSubmittedAt: null,
+      externalState: ext.state,
+      // Record the reason so a SECOND identical ejection is recognised as the
+      // repeat it is. A different reason next time is progress and resubmits.
+      seenSignatures: withSignature(d.entry, signature),
+    },
     event: {
       code: 'external_queue_ejected',
       message: `${provider} ejected this PR (${externalQueueStateLabel(ext.state).toLowerCase()}) — re-evaluating before resubmitting.`,
@@ -1239,11 +1362,13 @@ function decideBlockedGate(
     return null;
   }
 
-  if (code === 'attempts_exhausted') {
-    // Gave up after MAX_ATTEMPTS — wait for a human or a new push. We do NOT
-    // auto-reset on a momentary clean reading (the transient-UNKNOWN trap): a
-    // genuinely-clean blocked PR falls through to the merge path below and
-    // leaves the queue; a still-blocked one waits here.
+  if (code === 'no_progress' || code === 'attempts_exhausted') {
+    // Remediation stopped moving the problem ('attempts_exhausted' is the same
+    // state on entries blocked before the progress rule shipped) — wait for a
+    // human or a new push. We do NOT auto-reset on a momentary clean reading
+    // (the transient-UNKNOWN trap): a genuinely-clean blocked PR falls through
+    // to the merge path below and leaves the queue; a still-blocked one waits
+    // here.
     if (queueBlockedFor(pr, ctx)) return d.done('advance');
     return null; // clean → let it merge
   }
@@ -1717,7 +1842,7 @@ class DecisionBuilder {
       newHeadSha,
       event: {
         code: 'new_head_reset',
-        message: 'New head commit — fix/re-run/re-sign budgets reset.',
+        message: 'New head commit — progress history and re-run/re-sign budgets reset.',
         detail: { headSha: newHeadSha },
       },
     });
@@ -1726,6 +1851,9 @@ class DecisionBuilder {
     this.entry.rerunAttempts = 0;
     this.entry.resignAttempts = 0;
     this.entry.submitAttempts = 0;
+    // New code, new problems: what defeated a run on the old head says nothing
+    // about this one. This is what makes 'no_progress' self-heal on a push.
+    this.entry.seenSignatures = [];
     this.entry.signingCheckedSha = null;
     this.entry.unsignedCount = null;
     // New code invalidates any external-queue submission: the provider tests

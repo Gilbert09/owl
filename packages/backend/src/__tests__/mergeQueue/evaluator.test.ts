@@ -13,6 +13,7 @@ import { githubRateGate } from '../../services/githubRateGate.js';
 import { prMonitorService } from '../../services/prMonitor.js';
 import * as websocketModule from '../../services/websocket.js';
 import { domainEvents } from '../../services/events.js';
+import { blockerSignature, queueSignature } from '../../services/mergeQueue/decide.js';
 import { createTestDb, seedUser } from '../helpers/testDb.js';
 import type { Database } from '../../db/client.js';
 import {
@@ -111,6 +112,35 @@ function cleanSummary(base = 'main', headSha = 'abc') {
     unresolvedReviewThreads: 0,
   };
 }
+
+/**
+ * The two signatures the external-queue tests seed, built with the SAME helpers
+ * the engine uses rather than hand-written strings — a literal would silently
+ * stop matching the moment a field joins the signature.
+ */
+const TRUNK_FAILED_SIGNATURE = queueSignature({
+  provider: 'trunk',
+  state: 'failed',
+  source: 'label',
+  evidence: 'trunk-failed',
+});
+/** What a fix run would be left with on a PR whose own branch reads clean. */
+const CLEAN_BLOCKED_SIGNATURE = blockerSignature({
+  state: 'open',
+  headSha: 'abc',
+  mergeStateStatus: 'CLEAN',
+  autoMergeEnabledBy: null,
+  summary: {
+    url: 'https://github.com/a/b/pull/1',
+    headBranch: 'feat',
+    baseBranch: 'main',
+    mergeable: 'MERGEABLE',
+    reviewDecision: null,
+    blockingReason: 'mergeable',
+    checks: { total: 1, failed: 0, inProgress: 0 },
+    unresolvedReviewThreads: 0,
+  },
+});
 
 function conflictSummary(base = 'main', headSha = 'abc') {
   return {
@@ -427,21 +457,43 @@ describe('mergeQueue v2 pipeline', () => {
     expect(blockedSpy).not.toHaveBeenCalled(); // drafts never notify
   });
 
-  it('accounts a terminal fix run, re-fires while budget remains, blocks + notifies at the cap', async () => {
+  // End-to-end shape of the progress rule: the FIRST completed run records what
+  // it was left with and re-fires; the SECOND, left with the identical problem,
+  // blocks. Driven through the real lifecycle rather than a seeded counter, so
+  // it also proves the signature actually round-trips through the column.
+  it('re-fires after one failed run, then blocks when the same problem recurs', async () => {
     await insertTask(db, 'task-1', 'completed');
     const { prId } = await insertQueuedPr(db, {
       summary: conflictSummary(),
-      entry: { status: 'fixing', fixTaskId: 'task-1', fixTaskAccounted: false, fixAttempts: 2 },
+      entry: { status: 'fixing', fixTaskId: 'task-1', fixTaskAccounted: false },
     });
 
+    // Run 1 accounted: the conflict is new to this head → record it and re-fire.
     await evaluateGroupNow('repo1', 'main', 'test');
+    const afterFirst = await entryOf(db, prId);
+    expect(afterFirst?.status).toBe('fixing');
+    expect(afterFirst?.fixAttempts).toBe(1);
+    expect(afterFirst?.seenSignatures).toHaveLength(1);
+    expect(blockedSpy).not.toHaveBeenCalled();
+    expect(await countTasks(db)).toBe(2); // the re-fire
 
+    // Run 2 finishes and leaves the PR conflicting in exactly the same way.
+    await db
+      .update(tasksTable)
+      .set({ status: 'completed' })
+      .where(eq(tasksTable.id, afterFirst!.fixTaskId!));
+    await db
+      .update(mergeQueueEntries)
+      .set({ fixTaskAccounted: false })
+      .where(eq(mergeQueueEntries.id, afterFirst!.id));
+
+    await evaluateGroupNow('repo1', 'main', 'test');
     const entry = await entryOf(db, prId);
     expect(entry?.status).toBe('blocked');
-    expect(entry?.blockedCode).toBe('attempts_exhausted');
-    expect(entry?.fixAttempts).toBe(3);
+    expect(entry?.blockedCode).toBe('no_progress');
+    expect(entry?.seenSignatures).toHaveLength(1); // not grown by the repeat
     expect(blockedSpy).toHaveBeenCalledTimes(1);
-    expect(await countTasks(db)).toBe(1); // no 4th run
+    expect(await countTasks(db)).toBe(2); // no 3rd run
 
     // Re-evaluation while still blocked: no re-notify, no churn.
     await evaluateGroupNow('repo1', 'main', 'test');
@@ -453,10 +505,11 @@ describe('mergeQueue v2 pipeline', () => {
       summary: conflictSummary('main', 'sha-NEW'),
       entry: {
         status: 'blocked',
-        blockedCode: 'attempts_exhausted',
+        blockedCode: 'no_progress',
         blockedReason: 'x',
         headSha: 'sha-OLD',
         fixAttempts: 3,
+        seenSignatures: ['fix|merge_conflicts|CONFLICTING|DIRTY|-|checks=0/0|failing=?|threads=0'],
       },
     });
 
@@ -465,6 +518,7 @@ describe('mergeQueue v2 pipeline', () => {
     const entry = await entryOf(db, prId);
     expect(entry?.headSha).toBe('sha-NEW');
     expect(entry?.fixAttempts).toBe(0);
+    expect(entry?.seenSignatures).toEqual([]);
     expect(entry?.status).toBe('fixing'); // fresh budget → fix run fired
     expect(await countTasks(db)).toBe(1);
   });
@@ -695,7 +749,7 @@ describe('mergeQueue v2 pipeline', () => {
      * only from the queue's failure output, since the PR's checks say nothing
      * is wrong. See queueFailureRule.
      */
-    it('dispatches a queue-failure run once the resubmit budget is spent', async () => {
+    it('dispatches a queue-failure run when the queue fails it the same way twice', async () => {
       gated();
       mockCapability.mockResolvedValue('available');
       const { prId, entryId } = await insertQueuedPr(db, {
@@ -704,7 +758,11 @@ describe('mergeQueue v2 pipeline', () => {
       });
       await db
         .update(mergeQueueEntries)
-        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3, fixAttempts: 0 } as never)
+        .set({
+          externalSubmitVia: 'auto_merge',
+          submitAttempts: 1,
+          seenSignatures: [TRUNK_FAILED_SIGNATURE],
+        } as never)
         .where(eq(mergeQueueEntries.id, entryId));
 
       const spy = vi
@@ -725,7 +783,7 @@ describe('mergeQueue v2 pipeline', () => {
       spy.mockRestore();
     });
 
-    it('gives up (self-healing block) once the FIX budget is spent too', async () => {
+    it('gives up (self-healing block) once a fix run has failed this blocker too', async () => {
       gated();
       mockCapability.mockResolvedValue('available');
       const { prId, entryId } = await insertQueuedPr(db, {
@@ -734,7 +792,11 @@ describe('mergeQueue v2 pipeline', () => {
       });
       await db
         .update(mergeQueueEntries)
-        .set({ externalSubmitVia: 'auto_merge', submitAttempts: 3, fixAttempts: 3 } as never)
+        .set({
+          externalSubmitVia: 'auto_merge',
+          submitAttempts: 1,
+          seenSignatures: [TRUNK_FAILED_SIGNATURE, CLEAN_BLOCKED_SIGNATURE],
+        } as never)
         .where(eq(mergeQueueEntries.id, entryId));
 
       await evaluateGroupNow('repo1', 'main', 'test');

@@ -842,6 +842,9 @@ function rowToSummary(row: PullRequestRow, owner: string, repo: string): PRSumma
     },
     unresolvedReviewThreads: (meta.unresolvedReviewThreads as number) ?? 0,
     reviewRequestVia: meta.reviewRequestVia as PRSummary['reviewRequestVia'],
+    // Left undefined (not '') on rows cached before it shipped: the merge
+    // queue reads absent as "unknown", and '' would claim "nothing failing".
+    failingChecksDigest: meta.failingChecksDigest as string | undefined,
     checkContexts: [], // not cached — only the live detail fetch carries per-check rows
     checkDigest: row.lastCheckDigest ?? '',
     recentReviews: [],

@@ -56,6 +56,21 @@ export interface PRMergeableSummary {
    * shipped in the summary.
    */
   labels?: string[];
+  /**
+   * Stable identity of the SET of currently-failing checks — the sorted check
+   * names, hashed. The merge queue compares it across remediation attempts to
+   * tell "the run fixed nothing" from "the run fixed one thing and uncovered
+   * another": `checks.failed` alone reads 4 → 4 for both, and treating a
+   * different four as no progress is what a retry budget gets wrong.
+   *
+   * Hashed rather than listed because posthog/posthog runs ~280 checks per PR
+   * and this rides in `last_summary`, which every poll loop ships (see the
+   * DB-egress rules). Equality is the only thing asked of it.
+   *
+   * Absent on rows cached before it shipped, and on the by-branch fetch path;
+   * callers must treat `undefined` as "unknown", never as "no failures".
+   */
+  failingChecksDigest?: string;
 }
 
 /**

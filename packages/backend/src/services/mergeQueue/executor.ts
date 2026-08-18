@@ -739,6 +739,9 @@ async function applyBudgetReset(
     rerunAttempts: 0,
     resignAttempts: 0,
     submitAttempts: 0,
+    // New code, new problems — what defeated a run on the old head says
+    // nothing about this one. This is what makes 'no_progress' self-heal.
+    seenSignatures: [],
     externalSubmitVia: null,
     externalSubmittedAt: null,
     externalState: null,
@@ -755,6 +758,7 @@ async function applyBudgetReset(
       rerunAttempts: 0,
       resignAttempts: 0,
       submitAttempts: 0,
+      seenSignatures: [],
       externalSubmitVia: null,
       externalSubmittedAt: null,
       externalState: null,

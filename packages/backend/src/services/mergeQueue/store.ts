@@ -50,6 +50,7 @@ export const ENTRY_COLUMNS = {
   rerunAttempts: mergeQueueEntries.rerunAttempts,
   resignAttempts: mergeQueueEntries.resignAttempts,
   submitAttempts: mergeQueueEntries.submitAttempts,
+  seenSignatures: mergeQueueEntries.seenSignatures,
   externalSubmitVia: mergeQueueEntries.externalSubmitVia,
   externalSubmittedAt: mergeQueueEntries.externalSubmittedAt,
   externalState: mergeQueueEntries.externalState,
@@ -86,6 +87,12 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     rerunAttempts: row.rerunAttempts,
     resignAttempts: row.resignAttempts,
     submitAttempts: row.submitAttempts,
+    // A null column (rows written before the progress rule shipped) reads as
+    // "nothing has defeated a run yet", so those entries get a clean start
+    // rather than an unexplained instant block.
+    seenSignatures: Array.isArray(row.seenSignatures)
+      ? (row.seenSignatures as unknown[]).filter((v): v is string => typeof v === 'string')
+      : [],
     externalSubmitVia: (row.externalSubmitVia as ExternalSubmitVia | null) ?? null,
     externalSubmittedAt: row.externalSubmittedAt ? row.externalSubmittedAt.toISOString() : null,
     externalState: (row.externalState as ExternalQueueState | null) ?? null,
@@ -294,6 +301,8 @@ export interface CasPatch {
   rerunAttempts?: number;
   resignAttempts?: number;
   submitAttempts?: number;
+  /** Blocker signatures already defeated on this head — see decide.ts. */
+  seenSignatures?: string[];
   externalSubmitVia?: ExternalSubmitVia | null;
   externalSubmittedAt?: Date | null;
   externalState?: ExternalQueueState | null;

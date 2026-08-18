@@ -90,8 +90,16 @@ export type EntryStatus =
 export type BlockedCode =
   /** Draft PR — GitHub 405s a draft merge. Self-heals on ready_for_review. */
   | 'draft'
-  /** Fix-run budget spent on this head. Self-heals on a new head (push). */
+  /** Fix-run budget spent on this head. Self-heals on a new head (push).
+   *  Superseded by 'no_progress'; still read on entries blocked before it. */
   | 'attempts_exhausted'
+  /**
+   * A remediation completed and left the PR blocked by a problem that had
+   * already defeated a remediation on this head — recurring, and not something
+   * the queue can fix. Self-heals on a new head (push), which clears the
+   * signature list, or on a requeue. See `blockerSignature` in decide.ts.
+   */
+  | 'no_progress'
   /** Re-sign budget spent on a signed-commits-required base. Self-heals on a new head. */
   | 'unsigned_commits'
   /**
@@ -171,6 +179,13 @@ export interface EntrySnapshot {
   resignAttempts: number;
   /** External-queue submissions spent on this head (ejected → resubmit). */
   submitAttempts: number;
+  /**
+   * Blocker signatures a COMPLETED remediation has already left this head with.
+   * This — not the counters above — is what stops remediation: see the
+   * "Progress, not retries" note in decide.ts. Always an array; a null column
+   * (rows predating it) reads as empty.
+   */
+  seenSignatures: string[];
   /** How the current external submission was made; null when not submitted. */
   externalSubmitVia: ExternalSubmitVia | null;
   /**
@@ -369,6 +384,7 @@ export type Action =
           | 'rerunAttempts'
           | 'resignAttempts'
           | 'submitAttempts'
+          | 'seenSignatures'
           | 'externalSubmitVia'
           | 'externalSubmittedAt'
           | 'externalState'

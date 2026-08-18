@@ -104,6 +104,8 @@ export interface PRSummary {
   effectiveReviewDecision: ReviewDecision;
   blockingReason: BlockingReason;
   checks: CheckBreakdown;
+  /** Identity of the SET of failing checks — see {@link computeFailingChecksDigest}. */
+  failingChecksDigest?: string;
   /** Count of unresolved review threads (capped at the first 100 threads). */
   unresolvedReviewThreads: number;
   /**
@@ -758,6 +760,37 @@ export function computeCheckDigest(
   return `${headSha}:${sorted}`;
 }
 
+/**
+ * Stable identity of the SET of failing checks, independent of the commit they
+ * ran on. Head-independent ON PURPOSE: the merge queue compares it ACROSS a
+ * remediation, and a fix run pushes a commit, so anything keyed on headSha
+ * (like {@link computeCheckDigest}) would read every comparison as "changed".
+ *
+ * Failures only. A pending check going green is not a change in what BLOCKS
+ * the PR, and folding it in would make an unrelated CI finish look like
+ * progress.
+ *
+ * FNV-1a over the sorted names — not crypto, just a compact stable equality
+ * token. Empty string means "nothing is failing", which is a real answer;
+ * callers distinguish it from `undefined` ("we don't know").
+ */
+export function computeFailingChecksDigest(
+  contexts: Array<{ name: string; state: CheckState }>
+): string {
+  const failing = contexts
+    .filter((c) => c.state === 'failure')
+    .map((c) => c.name)
+    .sort();
+  if (failing.length === 0) return '';
+  const joined = failing.join('|');
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < joined.length; i++) {
+    hash ^= joined.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${failing.length}:${hash.toString(36)}`;
+}
+
 /** Latest of a set of ISO timestamps as epoch ms; 0 when none are parseable. */
 function latestTimestamp(values: Array<string | null | undefined>): number {
   let max = 0;
@@ -1334,6 +1367,7 @@ function rawToSummary(raw: RawPullRequest, owner: string, repo: string): PRSumma
     reviewRequests,
     checkContexts: normalizedContexts,
     checkDigest: computeCheckDigest(raw.headRefOid, normalizedContexts),
+    failingChecksDigest: computeFailingChecksDigest(normalizedContexts),
     recentReviews,
     recentReviewComments: raw.reviewThreads.nodes
       .flatMap((thread) => thread.comments.nodes)

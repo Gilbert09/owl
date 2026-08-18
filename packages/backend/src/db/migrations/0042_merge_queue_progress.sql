@@ -1,0 +1,24 @@
+-- Bound merge-queue remediation by PROGRESS, not by a retry count.
+--
+-- fix_attempts / submit_attempts capped remediation at 3 per head. The number
+-- was arbitrary, and it was wrong in both directions: a PR that fixed one
+-- blocker per run and would have landed on the fourth was declared blocked,
+-- while a PR whose runs changed nothing still cost three paid cloud runs
+-- before anyone noticed.
+--
+-- The replacement asks whether the last attempt CHANGED anything. Each
+-- completed remediation records the signature of what is blocking the PR
+-- afterwards. A signature not seen before means the attempt moved the problem,
+-- so the queue continues. A signature already in the list means the attempt
+-- failed at something it already failed at — a recurring problem we cannot
+-- fix — and the entry blocks (blocked_code 'no_progress').
+--
+-- This terminates without a constant: the list only ever grows, and it can only
+-- grow as far as the PR has distinct ways of being blocked. It is reset by the
+-- existing new-head rule, exactly as the counters were.
+--
+-- The counters are KEPT. They no longer gate anything, but they are what the
+-- timeline and the badge report ("2 fix runs on this head"), and dropping them
+-- would rewrite history that is still being read.
+ALTER TABLE "merge_queue_entries"
+  ADD COLUMN IF NOT EXISTS "seen_signatures" jsonb;

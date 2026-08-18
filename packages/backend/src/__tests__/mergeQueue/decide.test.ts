@@ -10,8 +10,10 @@ import { describe, expect, it } from 'vitest';
 import type { PRMergeableSummary } from '@talyn/shared';
 import {
   DRAFT_BLOCK_REASON,
+  blockerSignature,
   buildFailingChecksBlockReason,
   decide,
+  queueSignature,
   unsignedCommitsBlockReason,
 } from '../../services/mergeQueue/decide.js';
 import type {
@@ -37,6 +39,7 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
     rerunAttempts: 0,
     resignAttempts: 0,
     submitAttempts: 0,
+    seenSignatures: [],
     externalSubmitVia: null,
     externalSubmittedAt: null,
     externalState: null,
@@ -415,8 +418,10 @@ describe('decide — active-run guard', () => {
   });
 });
 
-describe('decide — fix-run accounting and the attempts budget', () => {
-  it('increments attempts when a terminal fix run left the PR blocked, then re-fires', () => {
+describe('decide — fix-run accounting bounded by PROGRESS, not a retry count', () => {
+  const sigOf = (snapshot: PrSnapshot) => blockerSignature(snapshot);
+
+  it('records the blocker signature and re-fires when a run leaves a NEW problem', () => {
     const d = decide(
       entry({ status: 'fixing', fixTaskId: 't1', fixTaskAccounted: false, fixAttempts: 0 }),
       conflictingPr(),
@@ -425,28 +430,84 @@ describe('decide — fix-run accounting and the attempts budget', () => {
     const acct = transitions(d)[0]!;
     expect(acct.set?.fixAttempts).toBe(1);
     expect(acct.set?.fixTaskAccounted).toBe(true);
-    expect(fixRun(d)).toBeTruthy(); // budget left → next run fires
+    expect(acct.set?.seenSignatures).toEqual([sigOf(conflictingPr())]);
+    expect(fixRun(d)).toBeTruthy();
     expect(d.verdict).toBe('hold');
   });
 
-  it('blocks after MAX_ATTEMPTS consecutive failed fix runs and notifies once with the reason', () => {
+  // THE point of the rewrite: a PR clearing one blocker per run used to be
+  // declared blocked on the 4th, however well it was going.
+  it('keeps going indefinitely while each run changes what is blocking the PR', () => {
+    let e = entry({ status: 'fixing', fixTaskId: 't1', fixTaskAccounted: false });
+    // Ten runs, each leaving a different number of failing checks.
+    for (let i = 0; i < 10; i++) {
+      const snapshot = pr(
+        { mergeStateStatus: 'BLOCKED' },
+        {
+          blockingReason: 'checks_failed',
+          checks: { total: 20, failed: 20 - i, inProgress: 0 },
+          failingChecksDigest: `d${i}`,
+        }
+      );
+      const d = decide(e, snapshot, ctx({ fixTaskState: 'terminal' }));
+      expect(fixRun(d)).toBeTruthy();
+      const acct = transitions(d)[0]!;
+      e = entry({
+        status: 'fixing',
+        fixTaskId: `t${i + 2}`,
+        fixTaskAccounted: false,
+        fixAttempts: acct.set?.fixAttempts ?? 0,
+        seenSignatures: acct.set?.seenSignatures ?? e.seenSignatures,
+      });
+    }
+    expect(e.fixAttempts).toBe(10);
+    expect(e.seenSignatures).toHaveLength(10);
+  });
+
+  it('blocks the moment a run reproduces a problem it already failed at', () => {
+    const stuck = conflictingPr();
     const d = decide(
-      entry({ status: 'fixing', fixTaskId: 't3', fixTaskAccounted: false, fixAttempts: 2 }),
-      conflictingPr(),
+      entry({
+        status: 'fixing',
+        fixTaskId: 't2',
+        fixTaskAccounted: false,
+        fixAttempts: 1,
+        seenSignatures: [sigOf(stuck)],
+      }),
+      stuck,
       ctx({ fixTaskState: 'terminal' })
     );
     const t = transitions(d)[0]!;
     expect(t.to).toBe('blocked');
-    expect(t.blockedCode).toBe('attempts_exhausted');
-    expect(t.blockedReason).toBe('merge conflicts with the base branch');
+    expect(t.blockedCode).toBe('no_progress');
+    expect(t.blockedReason).toContain('merge conflicts with the base branch');
+    expect(t.blockedReason).toContain('left it unchanged');
     expect(kinds(d)).toContain('notify_blocked');
     expect(fixRun(d)).toBeUndefined();
     expect(d.verdict).toBe('advance');
+    // Already recorded — don't grow the list with a duplicate.
+    expect(t.set?.seenSignatures).toBeUndefined();
+  });
+
+  it('does not record a signature when the run left the PR clean', () => {
+    const d = decide(
+      entry({ status: 'fixing', fixTaskId: 't1', fixTaskAccounted: false }),
+      cleanPr(),
+      ctx({ fixTaskState: 'terminal' })
+    );
+    const acct = transitions(d)[0]!;
+    expect(acct.set?.seenSignatures).toBeUndefined();
+    expect(acct.set?.fixAttempts).toBe(0);
   });
 
   it('does not re-notify or churn writes on re-evaluation while already blocked', () => {
     const d = decide(
-      entry({ status: 'blocked', blockedCode: 'attempts_exhausted', fixAttempts: 3, fixTaskId: 't3' }),
+      entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        seenSignatures: [sigOf(conflictingPr())],
+        fixTaskId: 't3',
+      }),
       conflictingPr(),
       ctx()
     );
@@ -454,37 +515,99 @@ describe('decide — fix-run accounting and the attempts budget', () => {
     expect(d.verdict).toBe('advance');
   });
 
-  it('does not reset the attempt counter on a transient clean reading (cap-evasion)', () => {
-    // Clean reading: the blocked entry falls through to the merge path — but
-    // attempts stay at 3. If the merge then bounces and the PR re-reads
-    // blocked, the hard cap below re-settles it without a 4th run.
-    const clean = decide(
-      entry({ status: 'blocked', blockedCode: 'attempts_exhausted', fixAttempts: 3 }),
-      cleanPr(),
+  it('never fires at a known-dead problem, even after a failed-merge flap downgraded the status', () => {
+    const d = decide(
+      entry({ status: 'queued', seenSignatures: [sigOf(conflictingPr())] }),
+      conflictingPr(),
       ctx()
     );
-    expect(kinds(clean)).toContain('verify_live_then_merge');
-    expect(transitions(clean).some((t) => t.set?.fixAttempts === 0)).toBe(false);
-  });
-
-  it('never fires past the retry budget, even after a failed-merge flap downgraded the status', () => {
-    const d = decide(entry({ status: 'queued', fixAttempts: 3 }), conflictingPr(), ctx());
     expect(fixRun(d)).toBeUndefined();
     const t = lastTransition(d)!;
     expect(t.to).toBe('blocked');
-    expect(t.blockedCode).toBe('attempts_exhausted');
+    expect(t.blockedCode).toBe('no_progress');
     expect(kinds(d)).not.toContain('notify_blocked'); // silent re-settle — R8 already notified
     expect(d.verdict).toBe('advance');
   });
 
+  // A flapped status must not wipe the history the block was reached on.
+  it('does not clear the signature history on a transient clean reading', () => {
+    const clean = decide(
+      entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        seenSignatures: [sigOf(conflictingPr())],
+      }),
+      cleanPr(),
+      ctx()
+    );
+    expect(kinds(clean)).toContain('verify_live_then_merge');
+    expect(transitions(clean).some((t) => t.set?.seenSignatures?.length === 0)).toBe(false);
+  });
+
   it('re-arms a blocked PR that reads clean and merges it', () => {
     const d = decide(
-      entry({ status: 'blocked', blockedCode: 'attempts_exhausted', fixAttempts: 3 }),
+      entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        seenSignatures: [sigOf(conflictingPr())],
+      }),
       cleanPr(),
       ctx()
     );
     expect(kinds(d)).toContain('verify_live_then_merge');
     expect(d.verdict).toBe('hold');
+  });
+
+  // The bound is "have we seen this before", so a signature that drifts on its
+  // own would make it unreachable — and check totals drift constantly as a CI
+  // run registers jobs.
+  it('ignores check counts that move on their own (total, in-progress)', () => {
+    const withCounts = (total: number, inProgress: number) =>
+      pr(
+        { mergeStateStatus: 'DIRTY' },
+        {
+          mergeable: 'CONFLICTING',
+          blockingReason: 'merge_conflicts',
+          checks: { total, failed: 2, inProgress },
+          failingChecksDigest: 'same',
+        }
+      );
+    expect(sigOf(withCounts(10, 0))).toBe(sigOf(withCounts(280, 74)));
+  });
+
+  it('still treats a NEW failure as a change', () => {
+    const failing = (n: number, digest: string) =>
+      pr(
+        { mergeStateStatus: 'BLOCKED' },
+        {
+          blockingReason: 'checks_failed',
+          checks: { total: 20, failed: n, inProgress: 0 },
+          failingChecksDigest: digest,
+        }
+      );
+    expect(sigOf(failing(2, 'ab'))).not.toBe(sigOf(failing(3, 'abc')));
+  });
+
+  it('tells "fixed one thing, uncovered another" apart from "changed nothing"', () => {
+    const four = (digest: string) =>
+      pr(
+        { mergeStateStatus: 'BLOCKED' },
+        {
+          blockingReason: 'checks_failed',
+          checks: { total: 10, failed: 4, inProgress: 0 },
+          failingChecksDigest: digest,
+        }
+      );
+    // Same COUNT, different checks — a retry budget calls this no progress.
+    expect(sigOf(four('aaa'))).not.toBe(sigOf(four('bbb')));
+    expect(sigOf(four('aaa'))).toBe(sigOf(four('aaa')));
+  });
+
+  // Rows written before the column shipped read as null, not [].
+  it('treats a legacy null signature list as no history rather than throwing', () => {
+    const legacy = { ...entry({ status: 'queued' }), seenSignatures: undefined } as never;
+    const d = decide(legacy, conflictingPr(), ctx());
+    expect(fixRun(d)).toBeTruthy();
   });
 });
 
@@ -542,17 +665,27 @@ describe('decide — a head pushed by our OWN fix run does NOT reset budgets', (
     expect(fixRun(d)).toBeFalsy(); // an active run holds — never fire a second on top
   });
 
-  it('accounts the just-finished run against its own push so the cap still bites', () => {
+  it('accounts the just-finished run against its own push so the recurrence still bites', () => {
+    // The run pushed a commit, so the head moved — but it pushed a fix that did
+    // NOT change what is blocking the PR. Adopting the head must not wipe the
+    // history, or the same dead end reads as a fresh start on every push.
     const d = decide(
-      entry({ status: 'fixing', fixTaskId: 't1', fixTaskAccounted: false, fixAttempts: 2, headSha: 'sha1' }),
+      entry({
+        status: 'fixing',
+        fixTaskId: 't1',
+        fixTaskAccounted: false,
+        headSha: 'sha1',
+        seenSignatures: [blockerSignature(conflictAt('sha2'))],
+      }),
       conflictAt('sha2'),
-      ctx({ fixTaskState: 'terminal', maxAttempts: 3 })
+      ctx({ fixTaskState: 'terminal' })
     );
     expect(kinds(d)).toContain('adopt_head');
     expect(kinds(d)).not.toContain('reset_budgets');
     const acct = transitions(d).find((t) => t.set?.fixTaskAccounted);
-    expect(acct?.set?.fixAttempts).toBe(3); // 2 → 3 (NOT reset to 0)
-    expect(fixRun(d)).toBeFalsy(); // budget spent → blocked, not re-fired
+    expect(acct?.to).toBe('blocked');
+    expect(acct?.blockedCode).toBe('no_progress');
+    expect(fixRun(d)).toBeFalsy();
   });
 
   it('still resets on a genuine external push once the fix run is accounted', () => {
@@ -952,7 +1085,14 @@ describe('decide — GitHub native auto-merge', () => {
         status: 'fixing',
         fixTaskId: 't3',
         fixTaskAccounted: false,
-        fixAttempts: 2,
+        seenSignatures: [
+          blockerSignature(
+            pr(
+              { mergeStateStatus: 'DIRTY', autoMergeEnabledBy: 'talyn' },
+              { mergeable: 'CONFLICTING', blockingReason: 'merge_conflicts' }
+            )
+          ),
+        ],
         automergeArmedBy: 'talyn',
       }),
       pr({ mergeStateStatus: 'DIRTY', autoMergeEnabledBy: 'talyn' }, { mergeable: 'CONFLICTING', blockingReason: 'merge_conflicts' }),
@@ -966,7 +1106,11 @@ describe('decide — GitHub native auto-merge', () => {
 
   it('never disarms a USER-armed auto-merge', () => {
     const d = decide(
-      entry({ status: 'queued', fixAttempts: 3, automergeArmedBy: 'user' }),
+      entry({
+        status: 'queued',
+        seenSignatures: [blockerSignature(conflictingPr())],
+        automergeArmedBy: 'user',
+      }),
       conflictingPr(),
       ctx()
     );
@@ -1575,11 +1719,12 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).toContain('submit_external');
     });
 
-    it('blocks an `ejected` PR only once the resubmit budget is spent', () => {
+    it('blocks an `ejected` PR only once the SAME ejection repeats', () => {
+      const ejected = observed('ejected');
       const d = decide(
-        commented(longAgo, { submitAttempts: 3 }),
+        commented(longAgo, { seenSignatures: [queueSignature(ejected)] }),
         cleanPr(),
-        ctx({ externalGate: 'confirmed', externalQueue: observed('ejected') })
+        ctx({ externalGate: 'confirmed', externalQueue: ejected })
       );
       const t = lastTransition(d)!;
       expect(t.to).toBe('blocked');
@@ -1682,17 +1827,39 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
      * An ordinary fix run would re-read the green checks and conclude there was
      * nothing to do.
      */
-    it('dispatches a queue-failure run once the resubmit budget is spent', () => {
+    // The queue's reason is the budget. A FIRST failure resubmits (it may have
+    // been a flake); the SAME failure again means resubmitting won't change it.
+    const failedBefore = queueSignature({
+      provider: 'trunk',
+      state: 'failed',
+      source: 'label',
+      evidence: 'trunk-failed',
+    });
+
+    it('resubmits the FIRST time the queue fails a PR — it may have been a flake', () => {
       const d = decide(
-        submitted({ submitAttempts: 3, fixAttempts: 0 }),
+        submitted({ submitAttempts: 1 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('submit_external');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      // …and records the reason, so the next identical one is recognised.
+      const eject = transitions(d).find((t) => t.event.code === 'external_queue_ejected')!;
+      expect(eject.set?.seenSignatures).toContain(failedBefore);
+    });
+
+    it('dispatches a queue-failure run when the queue fails it the SAME way twice', () => {
+      const d = decide(
+        submitted({ seenSignatures: [failedBefore] }),
         trunkPr('trunk-failed'),
         ctx({ externalGate: 'confirmed' })
       );
       const fire = d.actions.find((a) => a.kind === 'fire_fix_run');
       expect(fire).toBeTruthy();
       expect(fire).toMatchObject({ resign: false, queueFailure: { provider: expect.any(String) } });
-      // NEVER the resubmit path: `submitAttempts >= maxAttempts` is the only
-      // guard against an eject → resubmit → eject loop.
+      // NEVER the resubmit path: the recurrence test is the only guard against
+      // an eject → resubmit → eject loop.
       expect(kinds(d)).not.toContain('submit_external');
       // A Talyn-armed auto-merge must not survive this either — a half-fixed
       // PR would merge itself behind the queue's back.
@@ -1700,16 +1867,27 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(lastTransition(d)!.event.code).toBe('external_queue_failed_fixing');
     });
 
-    it('blocks (self-healing) once the FIX budget is spent too', () => {
+    it('keeps resubmitting while the queue fails it for a DIFFERENT reason each time', () => {
       const d = decide(
-        submitted({ submitAttempts: 3, fixAttempts: 3 }),
-        trunkPr('trunk-failed'),
+        submitted({ seenSignatures: [failedBefore] }),
+        trunkPr('trunk-pending-failure'),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('submit_external');
+      expect(kinds(d)).not.toContain('fire_fix_run');
+    });
+
+    it('blocks (self-healing) once a fix run has already failed this local blocker', () => {
+      const stuck = trunkPr('trunk-failed');
+      const d = decide(
+        submitted({ seenSignatures: [failedBefore, blockerSignature(stuck)] }),
+        stuck,
         ctx({ externalGate: 'confirmed' })
       );
       const t = lastTransition(d)!;
       expect(t.to).toBe('blocked');
       expect(t.blockedCode).toBe('external_queue_rejected');
-      expect(t.blockedReason).toContain('rejected this PR 3×');
+      expect(t.blockedReason).toContain('same reason twice');
       expect(kinds(d)).toContain('notify_blocked');
       expect(kinds(d)).toContain('disarm_automerge');
       expect(kinds(d)).not.toContain('fire_fix_run');
@@ -1717,7 +1895,7 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
 
     it('holds rather than dispatching when no cloud provider is connected', () => {
       const d = decide(
-        submitted({ submitAttempts: 3, fixAttempts: 0 }),
+        submitted({ seenSignatures: [failedBefore] }),
         trunkPr('trunk-failed'),
         ctx({ externalGate: 'confirmed', cloudEnvAvailable: false })
       );

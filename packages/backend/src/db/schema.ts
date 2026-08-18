@@ -636,6 +636,19 @@ export const mergeQueueEntries = pgTable(
      * fix runs.
      */
     submitAttempts: integer('submit_attempts').notNull().default(0),
+    /**
+     * Every distinct blocker signature this head has been left with by a
+     * COMPLETED remediation (`string[]`, lane-prefixed — see
+     * `blockerSignature` / `queueSignature` in mergeQueue/decide.ts).
+     *
+     * This is what bounds remediation instead of a retry count. A run that
+     * leaves a signature not in this list changed something, so the queue
+     * keeps going; one that reproduces a signature already here has failed at
+     * a problem it already failed at, and the entry blocks. That terminates
+     * without a constant: the list only grows, and it can only grow as far as
+     * the PR has distinct ways of being blocked.
+     */
+    seenSignatures: jsonb('seen_signatures'),
     /** How the live external submission was made: 'comment' | 'label' | 'auto_merge'. */
     externalSubmitVia: text('external_submit_via'),
     /** When it was made — the fallback for telling "not picked up yet" from
