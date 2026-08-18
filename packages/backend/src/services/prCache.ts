@@ -5,8 +5,8 @@ import { getDbClient, type Database } from '../db/client.js';
 import {
   pullRequests as pullRequestsTable,
   repositories as repositoriesTable,
-  workspaces as workspacesTable,
 } from '../db/schema.js';
+import { readWorkspaceSettings } from './workspaceSettings.js';
 import { emitPullRequestUpdated } from './websocket.js';
 import { domainEvents } from './events.js';
 import {
@@ -560,13 +560,7 @@ async function workspaceDefaultAutoKeepMergeable(
   db: Database,
   workspaceId: string
 ): Promise<boolean> {
-  const rows = await db
-    .select({ settings: workspacesTable.settings })
-    .from(workspacesTable)
-    .where(eq(workspacesTable.id, workspaceId))
-    .limit(1);
-  const settings = (rows[0]?.settings as { defaultAutoKeepMergeable?: boolean } | null) ?? {};
-  return settings.defaultAutoKeepMergeable === true;
+  return (await readWorkspaceSettings(db, workspaceId)).defaultAutoKeepMergeable === true;
 }
 
 async function upsertRow(
