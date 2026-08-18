@@ -154,29 +154,22 @@ export function SettingsPanel() {
  * Load an image file, downscale it to fit within `maxDim` px (preserving
  * aspect ratio), and return a PNG data URL. Keeps inline-stored logos small.
  */
-function downscaleImage(file: File, maxDim: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-      const w = Math.max(1, Math.round(img.width * scale));
-      const h = Math.max(1, Math.round(img.height * scale));
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      URL.revokeObjectURL(url);
-      if (!ctx) return reject(new Error('no canvas context'));
-      ctx.drawImage(img, 0, 0, w, h);
-      resolve(canvas.toDataURL('image/png'));
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error('could not load image'));
-    };
-    img.src = url;
-  });
+async function downscaleImage(file: File, maxDim: number): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('no canvas context');
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    return canvas.toDataURL('image/png');
+  } finally {
+    bitmap.close();
+  }
 }
 
 function WorkspaceSettings() {
