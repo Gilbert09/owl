@@ -28,6 +28,7 @@ import {
   getActiveEntriesForPrs,
   getActiveEntryForPr,
   hasActiveEntries,
+  headBranchOfPr,
 } from './store.js';
 import { mergeQueueV2Active, scheduleGroupEvaluation } from './evaluator.js';
 
@@ -78,6 +79,21 @@ async function handlePrSnapshot(evt: DomainPrSnapshotEvent): Promise<void> {
     (await hasActiveEntries(evt.repositoryId, evt.baseBranch))
   ) {
     scheduleGroupEvaluation(evt.repositoryId, evt.baseBranch, `${evt.trigger}:group-advance`);
+  }
+  // Stack advance: this PR's HEAD branch is the group key of every entry
+  // stacked on it. NOTHING else schedules that group when the parent lands —
+  // every trigger those entries have keys on the base they are parked on, which
+  // is this PR's head, and this PR's own events are about a different pair.
+  // Without this the whole stack sits parked until the 2-minute reconciler.
+  if (evt.state !== 'open') {
+    const headBranch = evt.headBranch || (await headBranchOfPr(evt.prId));
+    if (headBranch && (await hasActiveEntries(evt.repositoryId, headBranch))) {
+      scheduleGroupEvaluation(
+        evt.repositoryId,
+        headBranch,
+        `${evt.trigger}:stack-advance`
+      );
+    }
   }
 }
 

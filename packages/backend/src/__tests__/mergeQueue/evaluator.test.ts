@@ -850,6 +850,257 @@ describe('mergeQueue v2 pipeline', () => {
     });
   });
 
+
+  // The feature end to end: a chain of PRs where each one's base is the
+  // previous one's head, drained bottom-up into the real base one at a time.
+  describe('merge stack', () => {
+    /** A(feat-a→main) <- B(feat-b→feat-a) <- C(feat-c→feat-b), all queued. */
+    async function seedStack() {
+      const a = await insertQueuedPr(db, {
+        summary: { ...cleanSummary('main'), headBranch: 'feat-a' },
+      });
+      const b = await insertQueuedPr(db, {
+        summary: { ...cleanSummary('feat-a'), headBranch: 'feat-b' },
+      });
+      const c = await insertQueuedPr(db, {
+        summary: { ...cleanSummary('feat-b'), headBranch: 'feat-c' },
+      });
+      return { a, b, c };
+    }
+
+    /** Mark a PR merged the way the real merge path leaves it. */
+    async function markMerged(prId: string): Promise<void> {
+      await db
+        .update(pullRequestsTable)
+        .set({ state: 'merged', mergedAt: new Date(), mergeQueued: false })
+        .where(eq(pullRequestsTable.id, prId));
+    }
+
+    it('merges only the root — the two above it park', async () => {
+      const { a, b, c } = await seedStack();
+
+      // While the root is still open, neither child may do anything.
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+      await evaluateGroupNow('repo1', 'feat-b', 'test');
+
+      expect(mergeSpy).not.toHaveBeenCalled();
+      expect((await entryOf(db, b.prId))?.status).toBe('awaiting_stack');
+      expect((await entryOf(db, b.prId))?.stackParentNumber).toBe(1);
+      expect((await entryOf(db, c.prId))?.status).toBe('awaiting_stack');
+
+      // The root itself merges normally.
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(mergeSpy).toHaveBeenCalledTimes(1);
+      expect(await entryOf(db, a.prId)).toBeNull();
+    });
+
+    it('retargets the child onto the real base once the root lands', async () => {
+      const { a, b } = await seedStack();
+      const patchSpy = vi
+        .spyOn(githubService, 'updatePullRequest')
+        .mockResolvedValue({} as never);
+      await evaluateGroupNow('repo1', 'main', 'test');
+      await markMerged(a.prId);
+      mergeSpy.mockClear();
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect(patchSpy).toHaveBeenCalledTimes(1);
+      expect(patchSpy).toHaveBeenCalledWith('ws1', 'a', 'b', 2, { base: 'main' });
+      const entry = await entryOf(db, b.prId);
+      expect(entry).toMatchObject({
+        baseBranch: 'main',
+        status: 'queued',
+        retargetAttempts: 1,
+        stackParentNumber: null,
+      });
+      // The context was built against feat-a, an unprotected feature branch —
+      // merging in the same walk would use signing/gate probes from the wrong
+      // base. The new group's own walk does the merge.
+      expect(mergeSpy).not.toHaveBeenCalled();
+      const codes = (await eventsOf(db, b.entryId)).map((e) => e.code);
+      expect(codes).toContain('stack_retargeted');
+    });
+
+    it('clears the memos probed against the old base on retarget', async () => {
+      const { a, b } = await seedStack();
+      vi.spyOn(githubService, 'updatePullRequest').mockResolvedValue({} as never);
+      await db
+        .update(mergeQueueEntries)
+        .set({ signingCheckedSha: 'abc', unsignedCount: 3, fixAttempts: 2 })
+        .where(eq(mergeQueueEntries.id, b.entryId));
+      await markMerged(a.prId);
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      // Signing rules and external gates live on the REAL base, so a memo
+      // taken against a feature branch is how a PR merges past a rule it was
+      // never checked against.
+      expect(await entryOf(db, b.prId)).toMatchObject({
+        signingCheckedSha: null,
+        unsignedCount: null,
+        fixAttempts: 0,
+      });
+    });
+
+    it('issues no PATCH when GitHub already retargeted the PR itself', async () => {
+      // GitHub retargets children when the parent's head branch is deleted. The
+      // base reconcile absorbs that before decide ever sees a stack parent, so
+      // the queue follows GitHub rather than fighting it.
+      const { a, b } = await seedStack();
+      const patchSpy = vi
+        .spyOn(githubService, 'updatePullRequest')
+        .mockResolvedValue({} as never);
+      await markMerged(a.prId);
+      await db
+        .update(pullRequestsTable)
+        .set({ lastSummary: { ...cleanSummary('main'), headBranch: 'feat-b' } })
+        .where(eq(pullRequestsTable.id, b.prId));
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect(patchSpy).not.toHaveBeenCalled();
+      await vi.waitFor(async () =>
+        expect((await entryOf(db, b.prId))?.baseBranch).toBe('main')
+      );
+    });
+
+    it('the parent merging schedules the parked child group', async () => {
+      // Nothing else would: every trigger the child has keys on feat-a, and
+      // the parent's own events are about main.
+      initMergeQueueTriggers();
+      const { a } = await seedStack();
+      const patchSpy = vi
+        .spyOn(githubService, 'updatePullRequest')
+        .mockResolvedValue({} as never);
+      await markMerged(a.prId);
+
+      domainEvents.emit('pr:snapshot', {
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        prId: a.prId,
+        baseBranch: 'main',
+        headBranch: 'feat-a',
+        state: 'merged',
+        trigger: 'test:webhook',
+      });
+
+      // The retarget is proof the feat-a group was walked at all.
+      await vi.waitFor(() =>
+        expect(patchSpy).toHaveBeenCalledWith('ws1', 'a', 'b', 2, { base: 'main' })
+      );
+    });
+
+    it('drains the whole stack bottom-up, one at a time', async () => {
+      // Each rung is walked once; the retarget schedules the next group itself,
+      // so the merges after rung 1 come from the pipeline rather than the test
+      // driving them. That IS the feature.
+      const { a, b, c } = await seedStack();
+      vi.spyOn(githubService, 'updatePullRequest').mockResolvedValue({} as never);
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+      await vi.waitFor(() => expect(mergeSpy).toHaveBeenCalledTimes(1));
+      await markMerged(a.prId);
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+      await vi.waitFor(() => expect(mergeSpy).toHaveBeenCalledTimes(2));
+      await markMerged(b.prId);
+
+      await evaluateGroupNow('repo1', 'feat-b', 'test');
+      await vi.waitFor(() => expect(mergeSpy).toHaveBeenCalledTimes(3));
+      await vi.waitFor(async () => expect(await entryOf(db, c.prId)).toBeNull());
+    });
+
+    it('parks a child even in eager mode', async () => {
+      await db
+        .update(workspacesTable)
+        .set({ settings: { mergeQueueMode: 'eager' } })
+        .where(eq(workspacesTable.id, 'ws1'));
+      const { b } = await seedStack();
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect((await entryOf(db, b.prId))?.status).toBe('awaiting_stack');
+    });
+
+    it('never submits a parked child to an external merge queue', async () => {
+      // trunk.io refuses stacked PRs outright, so submitting one is a
+      // guaranteed round trip to blocked_manual.
+      mockGetGate.mockResolvedValue('confirmed');
+      const { b } = await seedStack();
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect(mockSubmitLabel).not.toHaveBeenCalled();
+      expect((await entryOf(db, b.prId))?.status).toBe('awaiting_stack');
+    });
+
+    it('disarms a Talyn auto-merge when parking, so GitHub cannot land it early', async () => {
+      const { b } = await seedStack();
+      await db
+        .update(mergeQueueEntries)
+        .set({ status: 'automerge_armed', automergeArmedBy: 'talyn' })
+        .where(eq(mergeQueueEntries.id, b.entryId));
+      await db
+        .update(pullRequestsTable)
+        .set({
+          lastSummary: {
+            ...cleanSummary('feat-a'),
+            headBranch: 'feat-b',
+            nodeId: 'PR_node',
+            autoMergeBy: 'talyn',
+          },
+        })
+        .where(eq(pullRequestsTable.id, b.prId));
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect(mockDisableAutoMerge).toHaveBeenCalled();
+      expect((await entryOf(db, b.prId))?.status).toBe('awaiting_stack');
+    });
+
+    it('blocks a child whose parent was closed without merging', async () => {
+      const { a, b } = await seedStack();
+      await db
+        .update(pullRequestsTable)
+        .set({ state: 'closed' })
+        .where(eq(pullRequestsTable.id, a.prId));
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      const entry = await entryOf(db, b.prId);
+      expect(entry?.status).toBe('blocked');
+      expect(entry?.blockedCode).toBe('stack_parent_abandoned');
+      expect(blockedSpy).toHaveBeenCalled();
+    });
+
+    it('blocks, and does not merge, when the retarget is refused', async () => {
+      const { a, b } = await seedStack();
+      vi.spyOn(githubService, 'updatePullRequest').mockRejectedValue(new Error('422'));
+      getPrSpy.mockResolvedValue({ state: 'open', base: { ref: 'feat-a' } } as never);
+      await markMerged(a.prId);
+      mergeSpy.mockClear();
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      const entry = await entryOf(db, b.prId);
+      expect(entry?.blockedCode).toBe('stack_retarget_failed');
+      expect(mergeSpy).not.toHaveBeenCalled();
+    });
+
+    it('treats a lost PATCH response as success when GitHub already moved the base', async () => {
+      const { a, b } = await seedStack();
+      vi.spyOn(githubService, 'updatePullRequest').mockRejectedValue(new Error('boom'));
+      getPrSpy.mockResolvedValue({ state: 'open', base: { ref: 'main' } } as never);
+      await markMerged(a.prId);
+
+      await evaluateGroupNow('repo1', 'feat-a', 'test');
+
+      expect((await entryOf(db, b.prId))?.baseBranch).toBe('main');
+    });
+  });
+
   describe('merge-queue mode (workspace setting)', () => {
     async function setMode(mode: 'ordered' | 'eager'): Promise<void> {
       await db

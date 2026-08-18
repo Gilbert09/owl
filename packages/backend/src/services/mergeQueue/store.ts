@@ -12,6 +12,7 @@ import { getDbClient } from '../../db/client.js';
 import {
   mergeQueueEntries,
   mergeQueueEvents,
+  pullRequests as pullRequestsTable,
   settings as settingsTable,
   workspaces as workspacesTable,
 } from '../../db/schema.js';
@@ -377,6 +378,22 @@ export async function appendEntryEvent(
     message: event.message,
     detail: event.detail ?? null,
   });
+}
+
+/**
+ * The PR's head branch, straight off the summary jsonb. Projection-only — the
+ * blob never ships. The fallback for the stack-advance trigger when the domain
+ * event didn't carry it.
+ */
+export async function headBranchOfPr(prId: string, db: Db = getDbClient()): Promise<string | null> {
+  const rows = await db
+    .select({
+      headBranch: sql<string | null>`${pullRequestsTable.lastSummary} ->> 'headBranch'`,
+    })
+    .from(pullRequestsTable)
+    .where(eq(pullRequestsTable.id, prId))
+    .limit(1);
+  return rows[0]?.headBranch ?? null;
 }
 
 // ── Group loading + positions ──

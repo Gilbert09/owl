@@ -717,6 +717,7 @@ async function upsertRow(
     repositoryId: opts.repositoryId,
     prId: id,
     baseBranch: summary.baseBranch ?? '',
+    headBranch: summary.headBranch ?? '',
     state: opts.summary.state,
     trigger: 'prcache:upsert',
   });

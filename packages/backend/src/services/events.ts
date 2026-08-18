@@ -20,6 +20,14 @@ export interface DomainPrSnapshotEvent {
   prId: string;
   /** From the fresh summary — the merge-queue group key. */
   baseBranch: string;
+  /**
+   * From the fresh summary. When this PR goes terminal, its HEAD branch is the
+   * group key of every entry stacked on it — and nothing else would ever
+   * schedule that group, because all of their triggers key on the base they're
+   * parked on. Optional: the check-count fast path has no summary in hand, and
+   * the trigger falls back to a PK lookup there.
+   */
+  headBranch?: string;
   state: 'open' | 'closed' | 'merged';
   /** What produced the snapshot ('prcache:upsert', 'webhook:patch', …). */
   trigger: string;

@@ -12,7 +12,7 @@
 // may write state unconditionally except record_merged (GitHub having merged
 // is ground truth that must never be lost to a version race).
 
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { buildMergeablePrompt, type PRMergeableSummary } from '@talyn/shared';
 import { getDbClient } from '../../db/client.js';
 import {
@@ -663,86 +663,43 @@ async function applyTransition(
   action: Extract<Action, { kind: 'transition' }>,
   ctx: ActionContext
 ): Promise<ActionOutcome> {
+  // `set` carries plain column writes straight through to the snapshot. Copy
+  // every defined key rather than listing them: this used to be a hand-written
+  // spread per field, and adding a column meant remembering four separate
+  // places — the merge-stack columns were silently dropped exactly that way.
+  const setEntries = Object.entries(action.set ?? {}).filter(([, v]) => v !== undefined);
   const next: EntrySnapshot = {
     ...ctx.entry,
     status: action.to,
     blockedCode: action.blockedCode ?? null,
     blockedReason: action.blockedReason ?? null,
-    ...(action.set?.fixAttempts !== undefined ? { fixAttempts: action.set.fixAttempts } : {}),
-    ...(action.set?.rerunAttempts !== undefined ? { rerunAttempts: action.set.rerunAttempts } : {}),
-    ...(action.set?.resignAttempts !== undefined
-      ? { resignAttempts: action.set.resignAttempts }
-      : {}),
-    ...(action.set?.submitAttempts !== undefined
-      ? { submitAttempts: action.set.submitAttempts }
-      : {}),
-    ...(action.set?.externalSubmitVia !== undefined
-      ? { externalSubmitVia: action.set.externalSubmitVia }
-      : {}),
-    ...(action.set?.externalSubmittedAt !== undefined
-      ? { externalSubmittedAt: action.set.externalSubmittedAt }
-      : {}),
-    ...(action.set?.externalState !== undefined ? { externalState: action.set.externalState } : {}),
-    ...(action.set?.automergeArmedBy !== undefined
-      ? { automergeArmedBy: action.set.automergeArmedBy }
-      : {}),
-    ...(action.set?.fixTaskAccounted !== undefined
-      ? { fixTaskAccounted: action.set.fixTaskAccounted }
-      : {}),
-    ...(action.set?.signingCheckedSha !== undefined
-      ? { signingCheckedSha: action.set.signingCheckedSha }
-      : {}),
-    ...(action.set?.unsignedCount !== undefined ? { unsignedCount: action.set.unsignedCount } : {}),
+    ...(Object.fromEntries(setEntries) as Partial<EntrySnapshot>),
   };
+  // The DB shape differs from the snapshot in three places: two ISO strings
+  // become Dates, and two writes carry an implicit "…At" stamp with them.
+  const { lastError, lastErrorAt, externalSubmittedAt, externalState, automergeArmedBy } =
+    action.set ?? {};
   const ok = await casTransition(
     ctx.entry.id,
     ctx.version,
     {
+      ...(Object.fromEntries(
+        setEntries.filter(
+          ([k]) => !['lastError', 'lastErrorAt', 'externalSubmittedAt'].includes(k)
+        )
+      ) as CasPatch),
       status: action.to,
       blockedCode: next.blockedCode,
       blockedReason: next.blockedReason,
-      ...(action.set?.fixAttempts !== undefined ? { fixAttempts: action.set.fixAttempts } : {}),
-      ...(action.set?.rerunAttempts !== undefined
-        ? { rerunAttempts: action.set.rerunAttempts }
+      ...(externalSubmittedAt !== undefined
+        ? { externalSubmittedAt: externalSubmittedAt ? new Date(externalSubmittedAt) : null }
         : {}),
-      ...(action.set?.resignAttempts !== undefined
-        ? { resignAttempts: action.set.resignAttempts }
+      ...(externalState !== undefined ? { externalStateAt: new Date() } : {}),
+      ...(automergeArmedBy !== undefined
+        ? { automergeArmedAt: automergeArmedBy ? new Date() : null }
         : {}),
-      ...(action.set?.submitAttempts !== undefined
-        ? { submitAttempts: action.set.submitAttempts }
-        : {}),
-      ...(action.set?.externalSubmitVia !== undefined
-        ? { externalSubmitVia: action.set.externalSubmitVia }
-        : {}),
-      ...(action.set?.externalSubmittedAt !== undefined
-        ? {
-            externalSubmittedAt: action.set.externalSubmittedAt
-              ? new Date(action.set.externalSubmittedAt)
-              : null,
-          }
-        : {}),
-      ...(action.set?.externalState !== undefined
-        ? { externalState: action.set.externalState, externalStateAt: new Date() }
-        : {}),
-      ...(action.set?.automergeArmedBy !== undefined
-        ? {
-            automergeArmedBy: action.set.automergeArmedBy,
-            automergeArmedAt: action.set.automergeArmedBy ? new Date() : null,
-          }
-        : {}),
-      ...(action.set?.fixTaskAccounted !== undefined
-        ? { fixTaskAccounted: action.set.fixTaskAccounted }
-        : {}),
-      ...(action.set?.signingCheckedSha !== undefined
-        ? { signingCheckedSha: action.set.signingCheckedSha }
-        : {}),
-      ...(action.set?.unsignedCount !== undefined
-        ? { unsignedCount: action.set.unsignedCount }
-        : {}),
-      ...(action.set?.lastError !== undefined ? { lastError: action.set.lastError } : {}),
-      ...(action.set?.lastErrorAt !== undefined
-        ? { lastErrorAt: new Date(action.set.lastErrorAt) }
-        : {}),
+      ...(lastError !== undefined ? { lastError } : {}),
+      ...(lastErrorAt !== undefined ? { lastErrorAt: new Date(lastErrorAt) } : {}),
       ...(action.to === 'merging' ? { mergeStartedAt: new Date() } : {}),
       lastEvaluatedAt: new Date(),
     },
@@ -956,6 +913,20 @@ async function retargetBase(
     externalState: null,
     externalStateAt: null,
   };
+  // Move the PR row's summary in the same breath. Without this the entry says
+  // `main` while the row still says `feat-a`, and the next evaluation's
+  // base-branch reconcile dutifully flips the entry BACK — a ping-pong that
+  // burns the retarget budget until the entry blocks. refreshPr below would
+  // normally fix it, but it is asynchronous and allowed to fail, so the two
+  // must not be left disagreeing even briefly. Writes the one key; never reads
+  // the blob back.
+  await getDbClient()
+    .update(pullRequestsTable)
+    .set({
+      lastSummary: sql`jsonb_set(coalesce(${pullRequestsTable.lastSummary}, '{}'::jsonb), '{baseBranch}', ${JSON.stringify(action.toBase)}::jsonb, true)`,
+    })
+    .where(eq(pullRequestsTable.id, pr.id));
+
   const ok = await casTransition(entry.id, ctx.version, patch, {
     trigger: ctx.trigger,
     fromStatus: entry.status,
