@@ -228,6 +228,10 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
 
   const positions = computeEntryPositions(entries);
   const evaluated: string[] = [];
+  // Entries that left this group mid-walk (their PR was retargeted). Their new
+  // group must be scheduled explicitly — every trigger for them keys on the
+  // base they just left, so nothing else would ever walk them again.
+  const movedBases = new Set<string>();
   // A sibling counts as "merge in flight" while merging, while its entry is
   // armed, or while GitHub still holds ANY armed auto-merge on it (the
   // armedBy mirror can outlive the status during remediation) — merging past
@@ -273,6 +277,9 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
         return;
       }
       verdict = result.verdict;
+      if (result.movedToBase && result.movedToBase !== baseBranch) {
+        movedBases.add(result.movedToBase);
+      }
       if (result.finalEntry) {
         if (inFlight(result.finalEntry)) inFlightIds.add(entry.id);
         else inFlightIds.delete(entry.id);
@@ -291,4 +298,9 @@ async function walkGroup(repositoryId: string, baseBranch: string, trigger: stri
     if (!eager && verdict === 'hold') break;
   }
   await touchEvaluated(evaluated, db);
+  // Scheduled from the evaluator, not the executor: the executor must not
+  // import this module (evaluator -> executor is the only legal direction).
+  for (const moved of movedBases) {
+    scheduleGroupEvaluation(repositoryId, moved, `${trigger}:base-changed`);
+  }
 }

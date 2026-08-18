@@ -606,8 +606,12 @@ export const mergeQueueEntries = pgTable(
       .notNull()
       .references(() => repositories.id, { onDelete: 'cascade' }),
     /**
-     * Group key, denormalized at enqueue (kept current by the evaluator on a
-     * base-change event) so grouping/positions never read the summary jsonb.
+     * Group key, denormalized so grouping/positions never read the summary
+     * jsonb. Written at enqueue, refreshed on re-arm, and reconciled against
+     * the PR's live base at the top of every evaluation (`evaluateEntry`) —
+     * a PR can be retargeted by the user, by GitHub's delete-branch
+     * auto-retarget, or by the merge stack's own retarget, and a stale key
+     * strands the entry in a group nothing walks.
      */
     baseBranch: text('base_branch').notNull().default(''),
     /** Snapshot of the user's merge-method preference at enqueue. */

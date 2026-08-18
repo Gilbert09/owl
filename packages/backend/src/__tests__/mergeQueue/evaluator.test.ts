@@ -170,6 +170,7 @@ async function insertQueuedPr(
     taskId?: string | null;
     entry?: Partial<{
       status: string;
+      baseBranch: string;
       blockedCode: string | null;
       blockedReason: string | null;
       headSha: string;
@@ -1046,6 +1047,92 @@ describe('mergeQueue v2 pipeline', () => {
       await mergeQueueReconciler.runOnce();
 
       expect(mergeSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  // The entry's base_branch is a denormalized group key. It used to be written
+  // only at enqueue, so a retargeted PR was stranded in a group nothing walked
+  // — and worse, its signing/gate probes ran against a base it no longer
+  // targeted. The evaluation now reconciles it and bails before probing.
+  describe('base branch reconciliation', () => {
+    it('rewrites a stale group key and merges nothing on that walk', async () => {
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: cleanSummary('main'),
+        entry: { baseBranch: 'stale' },
+      });
+
+      await evaluateGroupNow('repo1', 'stale', 'test');
+
+      expect(mergeSpy).not.toHaveBeenCalled();
+      expect((await entryOf(db, prId))?.baseBranch).toBe('main');
+      const events = await eventsOf(db, entryId);
+      const moved = events.find((e) => e.code === 'base_branch_changed');
+      expect(moved).toBeDefined();
+      expect(moved?.detail).toMatchObject({ from: 'stale', to: 'main' });
+    });
+
+    it('schedules the group the entry moved to, so it is not stranded', async () => {
+      await insertQueuedPr(db, {
+        summary: cleanSummary('main'),
+        entry: { baseBranch: 'stale' },
+      });
+
+      await evaluateGroupNow('repo1', 'stale', 'test');
+
+      // Nothing else keys on 'main' for this entry — if the walk didn't
+      // reschedule, the PR would sit queued forever.
+      await vi.waitFor(() => expect(mergeSpy).toHaveBeenCalledTimes(1));
+    });
+
+    it('leaves a matching base alone (no churn on the common path)', async () => {
+      const { entryId } = await insertQueuedPr(db, { summary: cleanSummary('main') });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(mergeSpy).toHaveBeenCalledTimes(1);
+      const events = await eventsOf(db, entryId);
+      expect(events.some((e) => e.code === 'base_branch_changed')).toBe(false);
+    });
+
+    it('ignores an empty live base rather than blanking the key', async () => {
+      const { baseBranch: _drop, ...noBase } = cleanSummary('main');
+      const { entryId } = await insertQueuedPr(db, {
+        summary: noBase,
+        entry: { baseBranch: 'main' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const entryRow = (
+        await db.select().from(mergeQueueEntries).where(eq(mergeQueueEntries.id, entryId))
+      )[0]!;
+      expect(entryRow.baseBranch).toBe('main');
+      const events = await eventsOf(db, entryId);
+      expect(events.some((e) => e.code === 'base_branch_changed')).toBe(false);
+    });
+
+    it('refreshes the key on re-arm, so a requeue un-strands a retargeted PR', async () => {
+      const { prId } = await insertQueuedPr(db, {
+        summary: cleanSummary('main'),
+        entry: { baseBranch: 'stale', status: 'blocked', blockedCode: 'app_refused_hard' },
+      });
+
+      await ensureActiveEntry(
+        {
+          pullRequestId: prId,
+          workspaceId: 'ws1',
+          repositoryId: 'repo1',
+          baseBranch: 'main',
+          mergeMethod: 'squash',
+          headSha: 'abc',
+          trigger: 'user:enqueue',
+        },
+        db
+      );
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.baseBranch).toBe('main');
+      expect(entry?.status).toBe('queued');
     });
   });
 });

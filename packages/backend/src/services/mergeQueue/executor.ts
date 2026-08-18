@@ -97,6 +97,12 @@ export interface EvaluateEntryResult {
   /** The entry as this evaluation left it — the walk uses it to keep its
    *  merge-in-flight view current (an arm mid-walk must gate the siblings). */
   finalEntry?: EntrySnapshot;
+  /**
+   * The entry left this group for another base branch. The walk must schedule
+   * an evaluation of `(repositoryId, movedToBase)` — nothing else will, because
+   * every trigger for this entry keys on the base it just left.
+   */
+  movedToBase?: string;
 }
 
 export function buildPrSnapshot(pr: PrEvalRow): PrSnapshot {
@@ -238,6 +244,36 @@ export async function evaluateEntry(input: EvaluateEntryInput): Promise<Evaluate
   let entry = rowToEntrySnapshot(input.entry);
   let version = input.entry.version;
   const prSnap = buildPrSnapshot(pr);
+
+  // Reconcile the denormalized group key BEFORE anything probes it. This has
+  // to sit above buildBaseContext, which keys requiresSignedCommits and
+  // getExternalMergeGate on entry.baseBranch — a retargeted PR probed against
+  // its old base reads the protection rules of a branch it no longer targets.
+  // Bail rather than continue: the whole decision context belongs to the base
+  // we just left, and the new group's own walk will build a fresh one.
+  const liveBase = prSnap.summary.baseBranch;
+  if (liveBase && liveBase !== entry.baseBranch) {
+    const ok = await casTransition(
+      entry.id,
+      version,
+      { baseBranch: liveBase },
+      {
+        trigger,
+        fromStatus: entry.status,
+        toStatus: entry.status,
+        code: 'base_branch_changed',
+        message: `Base branch changed from ${entry.baseBranch} to ${liveBase} — moved to that queue group.`,
+        detail: { from: entry.baseBranch, to: liveBase },
+      }
+    );
+    if (!ok) return { verdict: 'advance', casLost: true };
+    return {
+      verdict: 'advance',
+      movedToBase: liveBase,
+      finalEntry: { ...entry, baseBranch: liveBase },
+    };
+  }
+
   const base = await buildBaseContext(entry, pr, input);
   const extras: Partial<DecisionContext> = {};
 
@@ -257,7 +293,9 @@ export async function evaluateEntry(input: EvaluateEntryInput): Promise<Evaluate
         extras,
       });
       if (applied.casLost) return { verdict: 'advance', casLost: true };
-      if (applied.abort) return { verdict: applied.abort, finalEntry: entry };
+      if (applied.abort) {
+        return { verdict: applied.abort, finalEntry: entry, movedToBase: applied.movedToBase };
+      }
       if (applied.entry) entry = applied.entry;
       if (applied.versionDelta) version += applied.versionDelta;
       if (applied.redecide) {
@@ -292,6 +330,8 @@ interface ActionOutcome {
   casLost?: boolean;
   /** Stop the evaluation with this verdict (live pre-merge check failed). */
   abort?: 'hold' | 'advance';
+  /** Paired with `abort`: the entry now belongs to a different base group. */
+  movedToBase?: string;
 }
 
 async function performAction(action: Action, ctx: ActionContext): Promise<ActionOutcome> {

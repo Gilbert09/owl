@@ -185,6 +185,12 @@ export async function ensureActiveEntry(
           blockedCode: null,
           blockedReason: null,
           mergeMethod: input.mergeMethod,
+          // A re-arm must re-read the base: the PR may have been retargeted
+          // (by GitHub, by the user, or by the stack retarget) while the entry
+          // sat blocked, and a stale group key strands it in a phantom group.
+          // Only when we actually know it — a summary-less caller passing ''
+          // would blank a good key, which is worse than leaving it stale.
+          ...(input.baseBranch ? { baseBranch: input.baseBranch } : {}),
           fixAttempts: 0,
           rerunAttempts: 0,
           resignAttempts: 0,
@@ -273,6 +279,9 @@ export async function closeActiveEntry(
 
 export interface CasPatch {
   status?: EntryStatus;
+  /** The group key. Kept current against the PR's live base — see the
+   *  reconcile-and-bail at the top of `evaluateEntry`. */
+  baseBranch?: string;
   blockedCode?: BlockedCode | null;
   blockedReason?: string | null;
   headSha?: string;
