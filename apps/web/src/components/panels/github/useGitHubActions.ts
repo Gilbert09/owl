@@ -16,7 +16,12 @@ import { maybeHandleBillingLimit } from '../../../stores/billing';
 import { openGithubAppFlow } from '../../../lib/githubInstall';
 import { trackEvent } from '../../../lib/analytics';
 import { copyRich } from '../../../lib/prClipboard';
-import { buildCopyListPayload, type StackMeta } from './stacks';
+import {
+  buildCopyListPayload,
+  stackAncestors,
+  stackWithDescendants,
+  type StackMeta,
+} from './stacks';
 
 /**
  * The row/header action handlers shared by all three GitHub pages. They mutate
@@ -182,6 +187,72 @@ export function useGitHubActions() {
         if (maybeHandleBillingLimit(err, 'merge_queue')) return;
         toast.error(
           `Couldn't ${enabled ? 'queue' : 'dequeue'} ${row.owner}/${row.repo}#${row.number}`,
+          err instanceof Error ? err.message : undefined
+        );
+      }
+    },
+    [patchRow]
+  );
+
+  /**
+   * Queue or dequeue a whole stack of dependent PRs in one call.
+   *
+   * The server resolves the chain — the client's own derivation only decides
+   * which rows to patch optimistically, and the WS echo corrects it either way.
+   * On DEQUEUE this also takes every PR stacked above `row`, because each of
+   * them is parked on it and would otherwise wait forever.
+   */
+  const setMergeQueueStack = useCallback(
+    async (row: PRRow, enabled: boolean) => {
+      const rows = usePullRequestStore.getState().rows;
+      const affected = enabled
+        ? stackAncestors(rows, row.id)
+        : stackWithDescendants(rows, row.id);
+      // Snapshot exactly what we are about to overwrite, so a failure restores
+      // every row rather than leaving half the stack looking queued.
+      const before = affected.map((r) => ({
+        id: r.id,
+        mergeQueued: r.mergeQueued,
+        mergeQueueState: r.mergeQueueState ?? null,
+      }));
+      for (const r of affected) {
+        // Only the legacy fields. Never fabricate a `mergeQueue` v2 payload:
+        // the table prefers it whenever present, so an invented status/position
+        // would render and stick until the echo lands.
+        patchRow(r.id, {
+          mergeQueued: enabled,
+          mergeQueueState: enabled
+            ? { status: 'waiting', attempts: 0, position: r.mergeQueueState?.position ?? 0 }
+            : null,
+        });
+      }
+      try {
+        const result = await api.pullRequests.setMergeQueueStack(row.id, enabled);
+        trackEvent('merge_stack_toggled', {
+          enabled,
+          size: result.pullRequestIds.length,
+          repo: `${row.owner}/${row.repo}`,
+          pr_number: row.number,
+        });
+        // The server is the authority on membership; say so when it disagreed.
+        if (result.skipped.length > 0) {
+          toast.info(
+            `Queued ${result.pullRequestIds.length} of ${result.pullRequestIds.length + result.skipped.length}`,
+            result.skipped.map((s) => s.reason).join(', ')
+          );
+        }
+      } catch (err) {
+        for (const snap of before) {
+          patchRow(snap.id, {
+            mergeQueued: snap.mergeQueued,
+            mergeQueueState: snap.mergeQueueState,
+          });
+        }
+        // Free-plan queue cap → upgrade modal instead of a raw error toast. A
+        // separate trigger so the funnel can tell stack upgrades from single-PR.
+        if (maybeHandleBillingLimit(err, 'merge_stack')) return;
+        toast.error(
+          `Couldn't ${enabled ? 'queue' : 'dequeue'} the stack for ${row.owner}/${row.repo}#${row.number}`,
           err instanceof Error ? err.message : undefined
         );
       }
@@ -369,6 +440,7 @@ export function useGitHubActions() {
     openTask,
     mergeRow,
     setMergeQueue,
+    setMergeQueueStack,
     createPostHogTask,
     runSkillTask,
     connect,

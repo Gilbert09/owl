@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import type { PRRow, PRState } from '../lib/api';
-import { buildStackedRows, buildCopyListPayload } from '../components/panels/github/stacks';
+import {
+  buildStackedRows,
+  buildCopyListPayload,
+  stackAncestors,
+  stackWithDescendants,
+} from '../components/panels/github/stacks';
 
 /**
  * Minimal PRRow factory — the stack helper only reads `id`, `repositoryId`,
@@ -209,5 +214,78 @@ describe('buildCopyListPayload', () => {
     expect(buildCopyListPayload([noUrl, linked])?.count).toBe(1);
     expect(buildCopyListPayload([noUrl])).toBeNull();
     expect(buildCopyListPayload([])).toBeNull();
+  });
+});
+
+
+/**
+ * The two selections the merge-stack actions make. They are asymmetric on
+ * purpose: queuing takes what a PR DEPENDS ON, dequeuing takes what depends
+ * on IT — dropping one member of a live stack would strand everything above it.
+ */
+describe('stackAncestors / stackWithDescendants', () => {
+  // main <- A <- B <- C
+  const chain = () => [
+    makeRow({ id: 'A', head: 'a', base: 'main' }),
+    makeRow({ id: 'B', head: 'b', base: 'a' }),
+    makeRow({ id: 'C', head: 'c', base: 'b' }),
+  ];
+
+  it('resolves ancestors root-first — the order the queue merges them in', () => {
+    expect(stackAncestors(chain(), 'C').map((r) => r.id)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('resolves from the middle of a stack', () => {
+    expect(stackAncestors(chain(), 'B').map((r) => r.id)).toEqual(['A', 'B']);
+  });
+
+  it('returns a lone PR as a one-member chain', () => {
+    expect(stackAncestors([makeRow({ id: 'A', head: 'a', base: 'main' })], 'A').map((r) => r.id)).toEqual(['A']);
+  });
+
+  it('returns nothing for a row that is not on the page', () => {
+    expect(stackAncestors(chain(), 'zzz')).toEqual([]);
+  });
+
+  it('stops at a gap rather than inventing a parent', () => {
+    // Talyn only tracks PRs you authored or were asked to review, so the middle
+    // of a stack can legitimately be invisible.
+    const rows = [makeRow({ id: 'B', head: 'b', base: 'a' }), makeRow({ id: 'C', head: 'c', base: 'b' })];
+    expect(stackAncestors(rows, 'C').map((r) => r.id)).toEqual(['B', 'C']);
+  });
+
+  it('does not treat a merged parent as part of the stack', () => {
+    const rows = [
+      makeRow({ id: 'A', head: 'a', base: 'main', state: 'merged' }),
+      makeRow({ id: 'B', head: 'b', base: 'a' }),
+    ];
+    expect(stackAncestors(rows, 'B').map((r) => r.id)).toEqual(['B']);
+  });
+
+  it('degrades to just the row on a cycle — the server owns that refusal', () => {
+    const rows = [makeRow({ id: 'X', head: 'x', base: 'y' }), makeRow({ id: 'Y', head: 'y', base: 'x' })];
+    expect(stackAncestors(rows, 'X').map((r) => r.id)).toEqual(['X']);
+  });
+
+  it('takes the row and everything stacked on it, for a dequeue', () => {
+    expect(stackWithDescendants(chain(), 'A').map((r) => r.id)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('leaves the ancestors alone on a dequeue', () => {
+    expect(stackWithDescendants(chain(), 'C').map((r) => r.id)).toEqual(['C']);
+  });
+
+  it('covers a branching stack, not just a linear one', () => {
+    const rows = [...chain(), makeRow({ id: 'D', head: 'd', base: 'a' })];
+    expect(stackWithDescendants(rows, 'A').map((r) => r.id).sort()).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('never links branches across repositories', () => {
+    const rows = [
+      makeRow({ id: 'A', head: 'a', base: 'main' }),
+      makeRow({ id: 'B', head: 'b', base: 'a', repo: 'repo2' }),
+    ];
+    expect(stackAncestors(rows, 'B').map((r) => r.id)).toEqual(['B']);
+    expect(stackWithDescendants(rows, 'A').map((r) => r.id)).toEqual(['A']);
   });
 });

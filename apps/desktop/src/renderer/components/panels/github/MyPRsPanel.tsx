@@ -150,6 +150,7 @@ export function MyPRsPanel() {
           onOpenTask={actions.openTask}
           onMerge={actions.mergeRow}
           onSetMergeQueue={actions.setMergeQueue}
+          onSetMergeQueueStack={actions.setMergeQueueStack}
           onCreatePostHogTask={actions.createPostHogTask}
           onRunSkill={actions.runSkillTask}
           taskAsk={actions.taskAsk}

@@ -757,15 +757,25 @@ function OverviewTab({
 }
 
 /** Human labels for the merge-queue v2 status vocabulary. */
-const QUEUE_STATUS_LABEL: Record<string, string> = {
+/**
+ * Keyed by the status union rather than `string`, so adding a status to the
+ * engine is a compile error here instead of a raw enum name rendering in the
+ * sheet. That is not hypothetical: `awaiting_external`, `merged` and `removed`
+ * were all missing under the looser type and showed as-is.
+ */
+const QUEUE_STATUS_LABEL: Record<NonNullable<PRRow['mergeQueue']>['status'], string> = {
   queued: 'Waiting in line',
   awaiting_ci: 'Waiting for CI',
   awaiting_review: 'Waiting for a required review',
   automerge_armed: 'Auto-merge armed — GitHub merges when checks pass',
+  awaiting_external: 'Handed to the repo’s merge queue, which owns the merge now',
+  awaiting_stack: 'Waiting for the PR below it in the stack to merge',
   fixing: 'A cloud fix run is working this PR',
   merging: 'Merging',
   blocked: 'Blocked — retries on the next push, or re-queue now',
   blocked_manual: 'Blocked — needs you (merge manually or re-queue)',
+  merged: 'Merged',
+  removed: 'Removed from the queue',
 };
 
 /**
@@ -796,9 +806,14 @@ function MergeQueueSection({ row }: { row: PRRow }) {
 
   if (!queued) return null;
 
+  // `awaiting_stack` is deliberately NOT blocked: it self-heals the moment the
+  // PR below it lands, so offering Requeue would suggest an action that does
+  // nothing. Don't "helpfully" add it here.
   const blocked = v2?.status === 'blocked' || v2?.status === 'blocked_manual';
   const statusLabel = v2
-    ? (QUEUE_STATUS_LABEL[v2.status] ?? v2.status)
+    ? v2.status === 'awaiting_stack' && v2.stackParentNumber != null
+      ? `Waiting for #${v2.stackParentNumber} to merge — this PR is stacked on it`
+      : QUEUE_STATUS_LABEL[v2.status]
     : (row.mergeQueueState?.status ?? 'waiting');
   const budgets = v2?.budgets;
   const shown = events ? (showAll ? events : events.slice(0, 8)) : null;

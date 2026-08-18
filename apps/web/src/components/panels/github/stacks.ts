@@ -1,4 +1,4 @@
-import { linkStack, type StackNode } from '@talyn/shared';
+import { ancestorsOf, descendantsOf, linkStack, type StackNode } from '@talyn/shared';
 import type { PRRow } from '../../../lib/api';
 import { escapeHtml } from '../../../lib/prClipboard';
 import { compareByCreated, type SortDir } from './filters';
@@ -10,7 +10,7 @@ import { compareByCreated, type SortDir } from './filters';
  * `B.baseBranch === A.headBranch` in the same repo).
  */
 /** Adapt the client's PR shape to the structural node @talyn/shared links on. */
-function toStackNodes(rows: PRRow[]): StackNode[] {
+export function toStackNodes(rows: PRRow[]): StackNode[] {
   return rows.map((r) => ({
     id: r.id,
     repositoryId: r.repositoryId,
@@ -18,6 +18,44 @@ function toStackNodes(rows: PRRow[]): StackNode[] {
     headBranch: r.summary.headBranch,
     baseBranch: r.summary.baseBranch,
   }));
+}
+
+/**
+ * The PRs that must land before `id` can, root-first — which is also the order
+ * the queue will merge them in. Includes `id` itself. Empty when `id` isn't in
+ * `rows`, and truncated at any gap in the chain (Talyn only tracks PRs you
+ * authored or were asked to review, so a stack can legitimately have a middle
+ * PR it cannot see). A base/head cycle yields just `[id]` rather than throwing:
+ * the server refuses that case with a message, and it should say so, not the
+ * button.
+ */
+export function stackAncestors(rows: PRRow[], id: string): PRRow[] {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  try {
+    return ancestorsOf(toStackNodes(rows), id)
+      .map((n) => byId.get(n.id))
+      .filter((r): r is PRRow => !!r);
+  } catch {
+    const self = byId.get(id);
+    return self ? [self] : [];
+  }
+}
+
+/**
+ * `id` plus every PR stacked on top of it, transitively. This is the set a
+ * DEQUEUE has to take: each descendant is parked on `id` and would wait forever
+ * if only `id` came out.
+ */
+export function stackWithDescendants(rows: PRRow[], id: string): PRRow[] {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const self = byId.get(id);
+  if (!self) return [];
+  return [
+    self,
+    ...descendantsOf(toStackNodes(rows), id)
+      .map((n) => byId.get(n.id))
+      .filter((r): r is PRRow => !!r),
+  ];
 }
 
 export interface StackMeta {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ExternalLink,
   GitMerge,
@@ -16,10 +16,11 @@ import {
   Wand2,
   Zap,
   Clock,
+  Layers,
 } from 'lucide-react';
 import type { PRRow, PRSummaryShape } from '../../../lib/api';
 import { copyRich, prMarkdownLink } from '../../../lib/prClipboard';
-import type { StackMeta } from './stacks';
+import { stackAncestors, stackWithDescendants, type StackMeta } from './stacks';
 import {
   type TaskStatus,
   type AnyCloudProviderType,
@@ -58,6 +59,9 @@ interface PRTableProps {
   onOpenTask: (taskId: string) => void;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
+  /** Queue/dequeue a whole stack of dependent PRs. Enabling takes everything
+   *  `row` is based on; disabling takes `row` and everything stacked on it. */
+  onSetMergeQueueStack?: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Create a cloud task for the row. Resolves true when a task was actually
    *  created (false when nothing's connected / the user dismissed the picker),
    *  so the button only flashes its confirmation on a real start. An explicit
@@ -94,6 +98,7 @@ export function PRTable({
   onOpenTask,
   onMerge,
   onSetMergeQueue,
+  onSetMergeQueueStack,
   onCreatePostHogTask,
   onRunSkill,
   taskAsk,
@@ -112,6 +117,17 @@ export function PRTable({
   // per row — a row just records its id as "open".
   const [skillPickerRowId, setSkillPickerRowId] = useState<string | null>(null);
   const skillPickerRow = skillPickerRowId ? rows.find((r) => r.id === skillPickerRowId) : null;
+  // A parked stack member reads differently when the PR BELOW it is stuck, so
+  // each row needs its parent's queue status. Resolved once per table, keyed by
+  // repo + PR number — subscribing to the store inside every cell would
+  // re-render the whole table on any PR change.
+  const queueStatusByNumber = useMemo(() => {
+    const m = new Map<string, NonNullable<PRRow['mergeQueue']>['status']>();
+    for (const r of rows) {
+      if (r.mergeQueue) m.set(`${r.repositoryId}|${r.number}`, r.mergeQueue.status);
+    }
+    return m;
+  }, [rows]);
   return (
     <>
     <table className="w-full text-sm">
@@ -134,14 +150,23 @@ export function PRTable({
           <PRTableRow
             key={row.id}
             row={row}
+            allRows={rows}
             variant={variant}
             stack={stackMeta?.get(row.id)}
+            parentStatus={
+              row.mergeQueue?.stackParentNumber != null
+                ? queueStatusByNumber.get(
+                    `${row.repositoryId}|${row.mergeQueue.stackParentNumber}`
+                  )
+                : undefined
+            }
             viewerLogin={viewerLogin}
             isSelected={row.id === selectedId}
             onSelect={() => onSelect(row.id)}
             onOpenTask={onOpenTask}
             onMerge={onMerge}
             onSetMergeQueue={onSetMergeQueue}
+            onSetMergeQueueStack={onSetMergeQueueStack}
             onCreatePostHogTask={onCreatePostHogTask}
             onOpenSkillPicker={onRunSkill ? () => setSkillPickerRowId(row.id) : undefined}
             taskAsk={taskAsk}
@@ -170,14 +195,17 @@ export function PRTable({
 
 function PRTableRow({
   row,
+  allRows,
   variant,
   stack,
+  parentStatus,
   viewerLogin,
   isSelected,
   onSelect,
   onOpenTask,
   onMerge,
   onSetMergeQueue,
+  onSetMergeQueueStack,
   onCreatePostHogTask,
   onOpenSkillPicker,
   taskAsk,
@@ -187,7 +215,11 @@ function PRTableRow({
   taskProvider,
 }: {
   row: PRRow;
+  /** Every row on the page — the set this row's stack is derived from. */
+  allRows: PRRow[];
   variant: PRTableVariant;
+  /** Queue status of the PR below this one in its stack, when it has one. */
+  parentStatus?: NonNullable<PRRow['mergeQueue']>['status'];
   /** Stacked-PR placement for this row, when it belongs to a stack. */
   stack?: StackMeta;
   viewerLogin: string | null;
@@ -196,6 +228,9 @@ function PRTableRow({
   onOpenTask: (taskId: string) => void;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
+  /** Queue/dequeue a whole stack of dependent PRs. Enabling takes everything
+   *  `row` is based on; disabling takes `row` and everything stacked on it. */
+  onSetMergeQueueStack?: (row: PRRow, enabled: boolean) => Promise<void>;
   onCreatePostHogTask: (row: PRRow, providerType?: string) => Promise<boolean>;
   /** Open the table-level skill picker for this row (absent → no skill button). */
   onOpenSkillPicker?: () => void;
@@ -210,7 +245,10 @@ function PRTableRow({
   const summary = row.summary;
   const updatedTooltip = new Date(summary.updatedAt || row.lastPolledAt).toLocaleString();
   const [confirmMerge, setConfirmMerge] = useState(false);
-  const [busy, setBusy] = useState<null | 'merge' | 'posthog' | 'queue'>(null);
+  const [busy, setBusy] = useState<null | 'merge' | 'posthog' | 'queue' | 'stack'>(null);
+  // Queuing several PRs at once is worth a second click, and it may publish
+  // drafts on the way — same two-step shape as the merge confirm.
+  const [confirmStack, setConfirmStack] = useState(false);
   const [rowError, setRowError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Brief confirmation flash after a cloud run is kicked off — we stay on the
@@ -227,6 +265,32 @@ function PRTableRow({
     billingStatus.plan === 'free' &&
     billingStatus.activeTaskLimit != null &&
     billingStatus.activeTasks >= billingStatus.activeTaskLimit;
+  // The PRs this one is based on, root-first, including itself. >1 means the
+  // row opens a stack worth offering "merge the whole thing" on. Derived from
+  // the rows on screen; the server re-resolves the chain on the actual call, so
+  // this only decides whether to show a button, never what gets queued.
+  const stackBelow = useMemo(
+    () =>
+      onSetMergeQueueStack && variant !== 'review' && row.state === 'open'
+        ? stackAncestors(allRows, row.id)
+        : [],
+    [onSetMergeQueueStack, variant, row.state, allRows, row.id]
+  );
+  const stackable = stackBelow.length > 1;
+  const draftsInStack = stackBelow.filter((r) => r.summary.draft === true).length;
+  const unqueuedInStack = stackBelow.filter((r) => !r.mergeQueued).length;
+  // A dequeue has to cascade whenever anything is parked on this PR.
+  const stackDequeue =
+    !!onSetMergeQueueStack && stackWithDescendants(allRows, row.id).length > 1;
+  const stackAbove = stackDequeue ? stackWithDescendants(allRows, row.id).length - 1 : 0;
+  // Free-plan annotation only, same as atTaskLimit: the button stays enabled and
+  // the server stays the authority, but the tooltip can name the exact shortfall
+  // because BillingStatus already carries both numbers.
+  const stackWontFit =
+    billingStatus?.billingEnabled === true &&
+    billingStatus.plan === 'free' &&
+    billingStatus.mergeQueueLimit != null &&
+    billingStatus.queuedPrs + unqueuedInStack > billingStatus.mergeQueueLimit;
   // Mergeable covers the clean case AND "mergeable, but only non-required
   // checks are failing" — GitHub lets you merge both. `blocked` normally means
   // don't offer it, with ONE exception: a branch behind an external merge queue
@@ -301,12 +365,31 @@ function PRTableRow({
     }
   }
 
+  async function runStackQueue(e: React.MouseEvent) {
+    e.stopPropagation();
+    setConfirmStack(false);
+    setBusy('stack');
+    setRowError(null);
+    try {
+      await onSetMergeQueueStack!(row, true);
+    } catch (err) {
+      setRowError(err instanceof Error ? err.message : 'Could not queue the stack');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function runToggleQueue(e: React.MouseEvent) {
     e.stopPropagation();
     setBusy('queue');
     setRowError(null);
     try {
-      await onSetMergeQueue(row, !row.mergeQueued);
+      // Dequeuing one member of a live stack would strand every PR above it in
+      // `awaiting_stack` forever, so route that through the stack endpoint,
+      // which takes this PR and its dependents together. Queuing stays
+      // single-PR: "add just this one" is a real thing to want.
+      if (row.mergeQueued && stackDequeue) await onSetMergeQueueStack!(row, false);
+      else await onSetMergeQueue(row, !row.mergeQueued);
     } catch (err) {
       setRowError(err instanceof Error ? err.message : 'Could not update merge queue');
     } finally {
@@ -556,7 +639,7 @@ function PRTableRow({
         </td>
       ) : variant === 'queue' ? (
         <>
-          <QueueCell row={row} />
+          <QueueCell row={row} parentStatus={parentStatus} />
           <td className="px-2 py-2">
             <PRStatusPill
               blockingReason={summary.blockingReason}
@@ -610,6 +693,44 @@ function PRTableRow({
               Merge, merge-queue, and "get mergeable" are owner actions, so
               they're hidden on the Reviews page (you're reviewing someone
               else's PR there). */}
+          {stackable &&
+            (confirmStack ? (
+              <button
+                type="button"
+                data-attr="pr-row-merge-stack-confirm"
+                onClick={runStackQueue}
+                disabled={busy !== null}
+                className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase text-indigo-700 hover:bg-indigo-500/10 dark:text-indigo-400"
+                title={`Queue all ${stackBelow.length} PRs in this stack`}
+              >
+                {busy === 'stack' ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  `Queue ${stackBelow.length}`
+                )}
+              </button>
+            ) : (
+              <button
+                type="button"
+                data-attr="pr-row-merge-stack-toggle"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmStack(true);
+                }}
+                disabled={busy !== null}
+                className="rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-indigo-500/10 hover:text-indigo-600 focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-indigo-400"
+                title={
+                  stackWontFit
+                    ? `This stack needs ${unqueuedInStack} merge-queue slots; your free plan allows ${billingStatus?.mergeQueueLimit} and ${billingStatus?.queuedPrs} are in use`
+                    : `Merge the whole stack — queues all ${stackBelow.length} PRs and merges them into ${summary.baseBranch || 'the base'} one at a time, retargeting each as its parent lands` +
+                      (draftsInStack > 0
+                        ? `. Marks ${draftsInStack} draft ${draftsInStack === 1 ? 'PR' : 'PRs'} ready for review.`
+                        : '')
+                }
+              >
+                <Layers className="h-3.5 w-3.5" />
+              </button>
+            ))}
           {variant !== 'review' && row.state === 'open' && (
             <button
               type="button"
@@ -624,7 +745,9 @@ function PRTableRow({
               )}
               title={
                 row.mergeQueued
-                  ? 'Remove from the merge queue'
+                  ? stackAbove > 0
+                    ? `Remove this PR and the ${stackAbove} stacked on it from the merge queue`
+                    : 'Remove from the merge queue'
                   : 'Add to the merge queue — merges automatically when clean, auto-fixing conflicts'
               }
             >
@@ -804,7 +927,13 @@ function PRTableRow({
  * per-head budgets) and falls back to the legacy 4-status shape for rows the
  * v2 echo hasn't reached yet.
  */
-function QueueCell({ row }: { row: PRRow }) {
+function QueueCell({
+  row,
+  parentStatus,
+}: {
+  row: PRRow;
+  parentStatus?: NonNullable<PRRow['mergeQueue']>['status'];
+}) {
   const v2 = row.mergeQueue;
   const legacy = row.mergeQueueState;
   const pos = v2?.position ?? legacy?.position ?? 0;
@@ -883,6 +1012,35 @@ function QueueCell({ row }: { row: PRRow }) {
               Waiting for review
             </span>
           );
+        case 'awaiting_stack': {
+          // Parked behind the PR this one is stacked on. Ordinarily a quiet
+          // wait that needs nothing from anyone — but if the PR below it is
+          // stuck, this one is stuck too, and rendering that as a passive
+          // "waiting" is how a whole stack sits dead looking healthy.
+          const below = v2.stackParentNumber;
+          const stuck = parentStatus === 'blocked' || parentStatus === 'blocked_manual';
+          return (
+            <span
+              className={
+                stuck
+                  ? 'inline-flex items-center gap-1 text-amber-700 dark:text-amber-400'
+                  : 'inline-flex items-center gap-1 text-muted-foreground'
+              }
+              title={
+                stuck
+                  ? `The PR below this one in the stack${below ? ` (#${below})` : ''} is blocked, so this one can't proceed either — clear that one first`
+                  : `Stacked on${below ? ` #${below}` : ' another PR'} — merges once that lands, and Talyn retargets this PR onto the real base for you`
+              }
+            >
+              <Layers className="h-3 w-3" />
+              {stuck
+                ? `Blocked below${below ? ` #${below}` : ''}`
+                : below
+                  ? `Waiting for #${below}`
+                  : 'Waiting for its stack'}
+            </span>
+          );
+        }
         case 'fixing': {
           // Budgets count attempts SPENT (a run only burns budget when it
           // ends without fixing the PR), so show the in-progress attempt as
