@@ -55,6 +55,8 @@ export const ENTRY_COLUMNS = {
   fixTaskId: mergeQueueEntries.fixTaskId,
   fixTaskAccounted: mergeQueueEntries.fixTaskAccounted,
   fixKind: mergeQueueEntries.fixKind,
+  stackParentNumber: mergeQueueEntries.stackParentNumber,
+  retargetAttempts: mergeQueueEntries.retargetAttempts,
   signingCheckedSha: mergeQueueEntries.signingCheckedSha,
   unsignedCount: mergeQueueEntries.unsignedCount,
   automergeArmedAt: mergeQueueEntries.automergeArmedAt,

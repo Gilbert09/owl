@@ -649,6 +649,19 @@ export const mergeQueueEntries = pgTable(
     fixTaskId: text('fix_task_id').references(() => tasks.id, { onDelete: 'set null' }),
     fixTaskAccounted: boolean('fix_task_accounted').notNull().default(true),
     fixKind: text('fix_kind'), // 'blockers' | 'resign'
+    /**
+     * Merge stack: the PR this entry is parked behind (`awaiting_stack`).
+     * Display only — it feeds the badge's "Waiting for #123". The parent EDGE
+     * is derived per evaluation from the summary jsonb, never persisted; a
+     * stored edge would rot exactly the way base_branch did.
+     */
+    stackParentNumber: integer('stack_parent_number'),
+    /**
+     * Retargets attempted after a stack parent merged. Counts ACTIONS, not
+     * successes, so a PATCH that keeps erroring is bounded too. Deliberately
+     * NOT reset by a new head — a push that reset the loop guard defeats it.
+     */
+    retargetAttempts: integer('retarget_attempts').notNull().default(0),
     /** Signature-probe memo — valid only while it matches the current head. */
     signingCheckedSha: text('signing_checked_sha'),
     unsignedCount: integer('unsigned_count'),

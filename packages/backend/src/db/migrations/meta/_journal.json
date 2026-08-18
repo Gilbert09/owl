@@ -288,6 +288,13 @@
 			"when": 1784160000024,
 			"tag": "0040_posthog_oauth_states",
 			"breakpoints": true
+		},
+		{
+			"idx": 41,
+			"version": "7",
+			"when": 1784160000025,
+			"tag": "0041_merge_stack",
+			"breakpoints": true
 		}
 	]
 }

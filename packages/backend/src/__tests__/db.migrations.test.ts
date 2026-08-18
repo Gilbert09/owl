@@ -87,6 +87,34 @@ describe('Drizzle migration', () => {
     expect(uq?.indexdef).toMatch(/number/);
   });
 
+  it('gives merge_queue_entries the stack columns + indexes the branch lookups', async () => {
+    const testDb = await createTestDb();
+    cleanup = testDb.cleanup;
+
+    const colsRes = await testDb.pglite.query<{ column_name: string }>(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'merge_queue_entries'
+    `);
+    const cols = colsRes.rows.map((r) => r.column_name);
+    expect(cols).toContain('stack_parent_number');
+    expect(cols).toContain('retarget_attempts');
+
+    // Resolving a stack parent asks "which open PR's HEAD is this branch?" —
+    // the reverse of every other base-branch lookup, and branch names live
+    // only inside the last_summary jsonb. Without these expression indexes
+    // every group walk sequential-scans pull_requests.
+    const idxRes = await testDb.pglite.query<{ indexname: string; indexdef: string }>(`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'pull_requests'
+    `);
+    const names = idxRes.rows.map((r) => r.indexname);
+    expect(names).toContain('idx_pr_repo_head_branch');
+    expect(names).toContain('idx_pr_repo_base_branch');
+    const head = idxRes.rows.find((r) => r.indexname === 'idx_pr_repo_head_branch');
+    expect(head?.indexdef).toMatch(/headBranch/);
+    expect(head?.indexdef).toMatch(/repository_id/);
+  });
+
   it('workspaces and environments have owner_id columns', async () => {
     const testDb = await createTestDb();
     cleanup = testDb.cleanup;
