@@ -1,4 +1,4 @@
-import { and, eq, inArray, ne, sql } from 'drizzle-orm';
+import { and, eq, inArray, ne, notInArray, sql } from 'drizzle-orm';
 import {
   FREE_PLAN_ACTIVE_TASK_LIMIT,
   FREE_PLAN_MERGE_QUEUE_LIMIT,
@@ -63,11 +63,17 @@ export class MergeQueueLimitError extends Error {
   readonly code = MERGE_QUEUE_LIMIT_ERROR_CODE;
   constructor(
     readonly limit: number,
-    readonly queued: number
+    readonly queued: number,
+    /** How many PRs the refused call was trying to add. >1 for a stack. */
+    readonly adding = 1
   ) {
     super(
-      `Free plan is limited to ${limit} PRs in the merge queue (${queued} queued). ` +
-        `Upgrade for an unlimited queue, or wait for a queued PR to land.`
+      adding > 1
+        ? `This stack needs ${adding} merge-queue slots. Free plan is limited to ` +
+          `${limit} PRs in the merge queue (${queued} queued). Upgrade for an ` +
+          `unlimited queue, or wait for a queued PR to land.`
+        : `Free plan is limited to ${limit} PRs in the merge queue (${queued} queued). ` +
+          `Upgrade for an unlimited queue, or wait for a queued PR to land.`
     );
     this.name = 'MergeQueueLimitError';
   }
@@ -193,13 +199,16 @@ export async function countActiveTasks(
  * `state = 'open'` guard is belt-and-braces: merge/close clears mergeQueued,
  * but a stale row must never eat a free slot.
  */
-export function countQueuedPrsQuery(ownerId: string, excludePrId?: string) {
+export function countQueuedPrsQuery(ownerId: string, excludePrIds?: string | string[]) {
+  const exclude =
+    excludePrIds === undefined ? [] : Array.isArray(excludePrIds) ? excludePrIds : [excludePrIds];
   const conditions = [
     eq(workspacesTable.ownerId, ownerId),
     eq(pullRequestsTable.mergeQueued, true),
     eq(pullRequestsTable.state, 'open'),
   ];
-  if (excludePrId) conditions.push(ne(pullRequestsTable.id, excludePrId));
+  if (exclude.length === 1) conditions.push(ne(pullRequestsTable.id, exclude[0]!));
+  else if (exclude.length > 1) conditions.push(notInArray(pullRequestsTable.id, exclude));
   return getDbClient()
     .select({ count: sql<number>`cast(count(*) as int)` })
     .from(pullRequestsTable)
@@ -210,9 +219,9 @@ export function countQueuedPrsQuery(ownerId: string, excludePrId?: string) {
 /** How many PRs the owner has in the merge queue, across all their workspaces. */
 export async function countQueuedPrs(
   ownerId: string,
-  excludePrId?: string
+  excludePrIds?: string | string[]
 ): Promise<number> {
-  const rows = await countQueuedPrsQuery(ownerId, excludePrId);
+  const rows = await countQueuedPrsQuery(ownerId, excludePrIds);
   return rows[0]?.count ?? 0;
 }
 
@@ -271,16 +280,30 @@ export async function withTaskLimitGate<T>(
  */
 export async function withMergeQueueLimitGate<T>(
   ownerId: string,
-  options: { excludePrId?: string },
+  options: {
+    /**
+     * PRs excluded from the count — the ones this call is (re-)queuing, so an
+     * idempotent re-arm of an already-queued PR can never self-block. A stack
+     * passes every member.
+     */
+    excludePrId?: string | string[];
+    /**
+     * How many PRs this call adds. A stack is ALL-OR-NOTHING: enqueuing only
+     * the bottom of it produces a stack that silently stops halfway, because
+     * the retarget of rung 4 only happens if rung 4 is in the queue.
+     */
+    adding?: number;
+  },
   fn: () => Promise<T>
 ): Promise<T> {
+  const adding = options.adding ?? 1;
   return withFreePlanGate(
     ownerId,
     `mergeQueueLimit:${ownerId}`,
     async () => {
       const queued = await countQueuedPrs(ownerId, options.excludePrId);
-      if (queued >= FREE_MERGE_QUEUE_LIMIT) {
-        throw new MergeQueueLimitError(FREE_MERGE_QUEUE_LIMIT, queued);
+      if (queued + adding > FREE_MERGE_QUEUE_LIMIT) {
+        throw new MergeQueueLimitError(FREE_MERGE_QUEUE_LIMIT, queued, adding);
       }
     },
     fn

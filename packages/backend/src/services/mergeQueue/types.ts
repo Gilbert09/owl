@@ -220,7 +220,7 @@ export interface EntrySnapshot {
   automergeArmedBy: 'talyn' | 'user' | null;
   mergeMethod: MergeMethod;
   baseBranch: string;
-  /** Merge stack: the PR this entry is parked behind. Display only. */
+  /** Merge stack: the PR this entry is, or was, stacked on. Never decides. */
   stackParentNumber: number | null;
   /** Merge stack: retarget actions spent. See MAX_RETARGETS. */
   retargetAttempts: number;

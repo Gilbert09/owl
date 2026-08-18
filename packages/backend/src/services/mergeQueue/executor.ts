@@ -977,7 +977,12 @@ async function retargetBase(
     status: 'queued',
     blockedCode: null,
     blockedReason: null,
-    stackParentNumber: null,
+    // Recorded HERE, not merely kept: a child whose parent merges before the
+    // child is ever evaluated never parks, so it would otherwise have no
+    // record of what it was stacked on. From here it reads "the PR this one
+    // was stacked on" — which is what tells a later fix run that this branch
+    // may still carry that PR's original commits after a squash-merge.
+    stackParentNumber: action.parentNumber,
     retargetAttempts: entry.retargetAttempts + 1,
     // The PR faces a genuinely different base with genuinely different
     // problems; attempts spent fighting the old one shouldn't count. Same
@@ -1037,7 +1042,7 @@ async function retargetBase(
       status: 'queued',
       blockedCode: null,
       blockedReason: null,
-      stackParentNumber: null,
+      stackParentNumber: action.parentNumber,
       retargetAttempts: entry.retargetAttempts + 1,
     },
   };
@@ -1245,6 +1250,18 @@ async function fireFixRun(
         // Starts the run at the provider's failure output rather than the PR's
         // own (green) checks — see queueFailureRule.
         queueFailure,
+        // The squash escape hatch. This entry was retargeted after the PR it
+        // was stacked on merged, so its branch may still carry that PR's
+        // original commits — a plain base merge conflicts or re-shows them.
+        // Only an agent with a checkout can rebase them away.
+        ...(ctx.entry.retargetAttempts > 0 && ctx.entry.stackParentNumber !== null
+          ? {
+              retargetedOnto: {
+                base: summary.baseBranch,
+                parentNumber: ctx.entry.stackParentNumber,
+              },
+            }
+          : {}),
         template: await workspacePromptTemplate(ctx.pr.workspaceId, 'mergeable'),
       }),
       repositoryId: ctx.pr.repositoryId,

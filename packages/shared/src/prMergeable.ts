@@ -235,6 +235,18 @@ export interface MergeablePromptInput {
    * `evidence` is the provider's own status sentence, verbatim.
    */
   queueFailure?: { provider: string; evidence: string };
+  /**
+   * The PR was just retargeted onto its real base by the merge stack, because
+   * the PR it was stacked on merged.
+   *
+   * This matters because the default merge method is SQUASH: when the parent
+   * squash-lands, the base gets one new commit and the parent's original
+   * commits are NOT in it — but this PR's branch still contains them. A plain
+   * "merge the base in" therefore conflicts, or worse succeeds and re-shows the
+   * parent's changes in this PR's diff. The correct move is a rebase that drops
+   * what the base already has, and only an agent with a checkout can do it.
+   */
+  retargetedOnto?: { base: string; parentNumber: number };
 }
 
 /**
@@ -365,6 +377,12 @@ export function mergeablePromptVariables(
     buildIssuesSummary(s) +
     (input.resignCommits
       ? '\n- Some commits on the branch are UNSIGNED and the base requires signed commits — re-sign the whole branch (see the COMMIT SIGNING section above).'
+      : '') +
+    (input.retargetedOnto
+      ? `\n- This PR was part of a stack. #${input.retargetedOnto.parentNumber} (the PR it was based on) has merged, and this PR has just been retargeted onto \`${input.retargetedOnto.base}\`. ` +
+        `That parent was very likely SQUASH-merged, so \`${input.retargetedOnto.base}\` contains its changes as ONE new commit while this branch still carries the parent's original commits. ` +
+        `Prefer rebasing this branch onto \`${input.retargetedOnto.base}\` and dropping every commit whose changes are already there, rather than merging the base in — a merge here either conflicts or leaves the parent's changes showing in this PR's diff. ` +
+        `When you are done, this PR's diff must contain ONLY its own changes.`
       : '');
   return {
     'pr.url': s.url,

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { and, desc, eq, isNotNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import { getDbClient, runWithoutScope } from '../db/client.js';
 import {
   pullRequests as pullRequestsTable,
@@ -51,6 +51,12 @@ import {
   broadcastMergeQueuePositions,
   QUEUE_RESET_COLUMNS,
 } from '../services/mergeQueueBroadcast.js';
+import {
+  ancestorsOf,
+  descendantsOf,
+  StackCycleError,
+  type StackNode,
+} from '@talyn/shared';
 import type { ApiResponse } from '@talyn/shared';
 
 /**
@@ -98,6 +104,9 @@ const PR_FLAG_COLUMNS = {
   mergeMethod: pullRequestsTable.mergeMethod,
   mergeQueuedAt: pullRequestsTable.mergeQueuedAt,
 } as const;
+
+/** A row read through {@link PR_FLAG_COLUMNS}. The `Pick` is the egress guard. */
+type PRFlagRow = Pick<typeof pullRequestsTable.$inferSelect, keyof typeof PR_FLAG_COLUMNS>;
 
 /**
  * Exactly the columns the list endpoint serializes (`rowToPublicShape`) plus
@@ -528,58 +537,36 @@ export function pullRequestRoutes(): Router {
   // per (repo, base branch). On conflict / behind / blocked it fires the same
   // cloud "fix every blocker" run the watcher uses, then merges. The PR drops
   // off the queue once merged.
-  router.post('/:id/merge-queue', async (req, res) => {
+  /**
+   * Apply queue membership to ONE PR: the pull_requests bookkeeping plus the
+   * merge_queue_entries dual-write. Extracted so the single-PR toggle and the
+   * stack batch can't drift — the batch is exactly N of these, and a member
+   * that skipped the disarm or the entry write would be a silent hole.
+   *
+   * Deliberately does NOT gate on billing, publish drafts, broadcast, or kick
+   * the pipeline: those are per-CALL, not per-PR, and doing them here would
+   * mean N advisory locks and N broadcasts for one user action.
+   */
+  async function applyQueueMembership(
+    row: PRFlagRow,
+    opts: { enabled: boolean; method: string; trigger: string }
+  ): Promise<void> {
     const db = getDbClient();
-    const rows = await db
-      .select(PR_FLAG_COLUMNS)
-      .from(pullRequestsTable)
-      .where(eq(pullRequestsTable.id, req.params.id))
-      .limit(1);
-    const row = rows[0];
-    if (!row) {
-      return res.status(404).json({ success: false, error: 'Pull request not found' });
-    }
-    try {
-      await requireWorkspaceAccess(req, row.workspaceId);
-    } catch (err) {
-      return handleAccessError(err, res);
-    }
-
-    const body = req.body as { enabled?: boolean; method?: string } | undefined;
-    const enabled = body?.enabled === true;
-    const method =
-      body?.method === 'merge' || body?.method === 'rebase' || body?.method === 'squash'
-        ? body.method
-        : row.mergeMethod; // keep the existing method when omitted
+    const { enabled, method } = opts;
     // Enabling: arm a fresh guard so the next processor tick acts immediately,
     // and preserve the queue place on a fast off/on toggle. Disabling: clear
     // all queue bookkeeping.
     const nextState = enabled ? { status: 'waiting' as const, attempts: 0, accounted: true } : null;
-    const armQueue = () =>
-      db
-        .update(pullRequestsTable)
-        .set({
-          mergeQueued: enabled,
-          mergeQueuedAt: enabled ? (row.mergeQueuedAt ?? new Date()) : null,
-          mergeMethod: method,
-          mergeQueueState: nextState,
-          updatedAt: new Date(),
-        })
-        .where(eq(pullRequestsTable.id, row.id));
-
-    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
-      // Free-plan queue cap — MergeQueueLimitError → 402 via the error
-      // middleware. The PR itself is excluded from the count so re-arming an
-      // already-queued PR never self-blocks. Pre-paywall builds skip the gate
-      // (they can't render the upgrade flow) — see billing/clientGate.ts.
-      await withMergeQueueLimitGate(
-        assertUser(req).id,
-        { excludePrId: row.id },
-        armQueue
-      );
-    } else {
-      await armQueue();
-    }
+    await db
+      .update(pullRequestsTable)
+      .set({
+        mergeQueued: enabled,
+        mergeQueuedAt: enabled ? (row.mergeQueuedAt ?? new Date()) : null,
+        mergeMethod: method,
+        mergeQueueState: nextState,
+        updatedAt: new Date(),
+      })
+      .where(eq(pullRequestsTable.id, row.id));
 
     // Dual-write membership into merge_queue_entries (the v2 queue). While
     // the v1 engine drives, this only tracks membership — v1's own
@@ -596,11 +583,11 @@ export function pullRequestRoutes(): Router {
           baseBranch: summary?.baseBranch ?? '',
           mergeMethod: method as MergeMethod,
           headSha: summary?.headSha ?? '',
-          trigger: 'user:enqueue',
+          trigger: opts.trigger,
         });
       } else {
         const closed = await closeActiveEntry(row.id, 'removed', {
-          trigger: 'user:dequeue',
+          trigger: opts.trigger,
           message: 'Removed from the merge queue by the user.',
         });
         // A dequeued PR must NOT keep a Talyn-armed auto-merge on GitHub —
@@ -632,57 +619,105 @@ export function pullRequestRoutes(): Router {
         err instanceof Error ? err.message : err
       );
     }
+  }
 
-    // Queuing a draft PR: GitHub 405s a draft merge, so a queued draft would
-    // just sit blocked waiting on the author. Since queuing IS the intent to
-    // merge, mark it ready for review now. Best-effort — on success we refresh
-    // the cached summary so the kick below merges without waiting for the
-    // ready_for_review webhook; on failure decide()'s draft block still surfaces
-    // the manual action.
-    if (enabled) {
-      const summary = row.lastSummary as
-        | { draft?: boolean; nodeId?: string; mergeStateStatus?: string }
-        | null;
-      const isDraftPr = summary?.draft === true || summary?.mergeStateStatus === 'DRAFT';
-      if (isDraftPr && summary?.nodeId) {
-        const ready = await markReadyForReview({
-          workspaceId: row.workspaceId,
-          owner: row.owner,
-          repo: row.repo,
-          nodeId: summary.nodeId,
-        });
-        if (ready) {
-          await prMonitorService
-            .refreshPr(row.workspaceId, row.owner, row.repo, row.number, {
-              resolveMergeable: true,
-              repositoryId: row.repositoryId,
-            })
-            .catch((err) => {
-              console.warn(
-                `[pullRequests] post-ready refresh failed for ${row.owner}/${row.repo}#${row.number}:`,
-                err instanceof Error ? err.message : err
-              );
-            });
-        }
-      }
-    }
-
-    // When disabling, the row is no longer in the queue so the group rebroadcast
-    // below won't touch it — emit its cleared badge explicitly here.
-    if (!enabled) {
-      emitPullRequestUpdated(row.workspaceId, {
-        id: row.id,
-        taskId: row.taskId,
+  /**
+   * Queuing a draft PR: GitHub 405s a draft merge, so a queued draft would just
+   * sit blocked waiting on the author. Since queuing IS the intent to merge,
+   * mark it ready for review now. Best-effort — on success we refresh the
+   * cached summary so the kick merges without waiting for the ready_for_review
+   * webhook; on failure decide()'s draft block still surfaces the manual action.
+   */
+  async function publishDraftForQueue(row: PRFlagRow): Promise<void> {
+    const summary = row.lastSummary as
+      | { draft?: boolean; nodeId?: string; mergeStateStatus?: string }
+      | null;
+    const isDraftPr = summary?.draft === true || summary?.mergeStateStatus === 'DRAFT';
+    if (!isDraftPr || !summary?.nodeId) return;
+    const ready = await markReadyForReview({
+      workspaceId: row.workspaceId,
+      owner: row.owner,
+      repo: row.repo,
+      nodeId: summary.nodeId,
+    });
+    if (!ready) return;
+    await prMonitorService
+      .refreshPr(row.workspaceId, row.owner, row.repo, row.number, {
+        resolveMergeable: true,
         repositoryId: row.repositoryId,
-        owner: row.owner,
-        repo: row.repo,
-        number: row.number,
-        state: row.state,
-        lastSummary: row.lastSummary as Record<string, unknown>,
-        mergeQueued: false,
-        mergeQueueState: null,
+      })
+      .catch((err) => {
+        console.warn(
+          `[pullRequests] post-ready refresh failed for ${row.owner}/${row.repo}#${row.number}:`,
+          err instanceof Error ? err.message : err
+        );
       });
+  }
+
+  /** The cleared-badge broadcast a dequeued row needs (it is out of the group). */
+  function emitDequeued(row: PRFlagRow): void {
+    emitPullRequestUpdated(row.workspaceId, {
+      id: row.id,
+      taskId: row.taskId,
+      repositoryId: row.repositoryId,
+      owner: row.owner,
+      repo: row.repo,
+      number: row.number,
+      state: row.state,
+      lastSummary: row.lastSummary as Record<string, unknown>,
+      mergeQueued: false,
+      mergeQueueState: null,
+    });
+  }
+
+  function resolveMergeMethod(body: unknown, fallback: string): string {
+    const m = (body as { method?: string } | undefined)?.method;
+    return m === 'merge' || m === 'rebase' || m === 'squash' ? m : fallback;
+  }
+
+  router.post('/:id/merge-queue', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select(PR_FLAG_COLUMNS)
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, req.params.id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Pull request not found' });
     }
+    try {
+      await requireWorkspaceAccess(req, row.workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+
+    const body = req.body as { enabled?: boolean } | undefined;
+    const enabled = body?.enabled === true;
+    // keep the existing method when omitted
+    const method = resolveMergeMethod(req.body, row.mergeMethod);
+    const apply = () =>
+      applyQueueMembership(row, {
+        enabled,
+        method,
+        trigger: enabled ? 'user:enqueue' : 'user:dequeue',
+      });
+
+    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
+      // Free-plan queue cap — MergeQueueLimitError → 402 via the error
+      // middleware. The PR itself is excluded from the count so re-arming an
+      // already-queued PR never self-blocks. Pre-paywall builds skip the gate
+      // (they can't render the upgrade flow) — see billing/clientGate.ts.
+      await withMergeQueueLimitGate(assertUser(req).id, { excludePrId: row.id }, apply);
+    } else {
+      await apply();
+    }
+
+    if (enabled) await publishDraftForQueue(row);
+    // When disabling, the row is no longer in the queue so the group rebroadcast
+    // below will not touch it — emit its cleared badge explicitly here.
+    else emitDequeued(row);
+
     // Recompute "#N" for the whole queue so the toggled PR gets its real
     // position and every sibling shifts to match — not just after a refresh.
     await broadcastMergeQueuePositions(row.workspaceId);
@@ -690,7 +725,7 @@ export function pullRequestRoutes(): Router {
     // Kick a tick so an already-clean PR merges without waiting for the poll.
     // Both engines: the v1 runOnce no-ops when the flag reads 'v2', and the
     // v2 trigger no-ops while v1 drives. Scope-escaped — fire-and-forget work
-    // must never inherit this request's transaction handle (it's dead by the
+    // must never inherit this request's transaction handle (it is dead by the
     // time the kick runs; see runWithoutScope).
     if (enabled) {
       runWithoutScope(() => {
@@ -700,6 +735,175 @@ export function pullRequestRoutes(): Router {
     }
 
     res.json({ success: true, data: null } as ApiResponse<null>);
+  });
+
+  /**
+   * Every open PR in one repo, as the structural nodes @talyn/shared links on.
+   * Projected: `number` and the two branch names off the summary jsonb, never
+   * the blob itself — a repo with hundreds of open PRs would otherwise ship
+   * hundreds of multi-KB summaries to resolve one chain.
+   */
+  async function stackCandidates(
+    workspaceId: string,
+    repositoryId: string
+  ): Promise<Array<StackNode & { number: number }>> {
+    const rows = await getDbClient()
+      .select({
+        id: pullRequestsTable.id,
+        number: pullRequestsTable.number,
+        state: pullRequestsTable.state,
+        headBranch: sql<string | null>`${pullRequestsTable.lastSummary} ->> 'headBranch'`,
+        baseBranch: sql<string | null>`${pullRequestsTable.lastSummary} ->> 'baseBranch'`,
+      })
+      .from(pullRequestsTable)
+      .where(
+        and(
+          eq(pullRequestsTable.workspaceId, workspaceId),
+          eq(pullRequestsTable.repositoryId, repositoryId),
+          eq(pullRequestsTable.state, 'open')
+        )
+      );
+    return rows.map((r) => ({
+      id: r.id,
+      repositoryId,
+      state: 'open' as const,
+      headBranch: r.headBranch ?? '',
+      baseBranch: r.baseBranch ?? '',
+      number: r.number,
+    }));
+  }
+
+  /**
+   * Enqueue (or dequeue) a whole stack of dependent PRs in one call.
+   *
+   * `:id` may be ANY member — the server resolves the chain itself rather than
+   * trusting a client list, so a stale UI can never enqueue an unrelated PR.
+   * Enabling always takes the ANCESTORS of `:id` (root-first): you cannot land
+   * `:id` without everything it is based on. `includeDescendants` adds the PRs
+   * stacked on top of it.
+   *
+   * Disabling is the mirror and always CASCADES UPWARD: every descendant is
+   * parked on this PR and would wait forever if we dropped only this one. That
+   * asymmetry is deliberate — see the tooltip copy in the desktop table.
+   *
+   * The free-plan gate is ALL-OR-NOTHING and wraps every write, so a 402
+   * leaves nothing enqueued. Enqueuing only the bottom of a stack is not a
+   * degraded success: the retarget of rung 4 only happens because rung 4 is in
+   * the queue, so a partial stack silently stops halfway with nothing to say why.
+   */
+  router.post('/:id/merge-queue/stack', async (req, res) => {
+    const db = getDbClient();
+    const rows = await db
+      .select(PR_FLAG_COLUMNS)
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, req.params.id))
+      .limit(1);
+    const anchor = rows[0];
+    if (!anchor) {
+      return res.status(404).json({ success: false, error: 'Pull request not found' });
+    }
+    try {
+      await requireWorkspaceAccess(req, anchor.workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+
+    const body = req.body as { enabled?: boolean; includeDescendants?: boolean } | undefined;
+    const enabled = body?.enabled === true;
+    const method = resolveMergeMethod(req.body, anchor.mergeMethod);
+
+    const candidates = await stackCandidates(anchor.workspaceId, anchor.repositoryId);
+    let chainIds: string[];
+    try {
+      const up = enabled ? ancestorsOf(candidates, anchor.id) : [anchor];
+      const down =
+        enabled && body?.includeDescendants !== true
+          ? []
+          : descendantsOf(candidates, anchor.id);
+      chainIds = [...up.map((n) => n.id), ...down.map((n) => n.id)];
+    } catch (err) {
+      if (err instanceof StackCycleError) {
+        return res.status(409).json({
+          success: false,
+          error:
+            'These PRs form a base/head cycle, so none of them can merge first. ' +
+            'Retarget one of them to break the loop.',
+          code: 'stack_cycle',
+        });
+      }
+      throw err;
+    }
+    // De-duplicate while keeping order: with includeDescendants the anchor is
+    // in both halves, and a diamond can surface a PR twice.
+    const orderedIds = [...new Set(chainIds)];
+    if (orderedIds.length === 0) {
+      return res.status(404).json({ success: false, error: 'Pull request not found' });
+    }
+
+    // Re-read the full flag rows for the chain, then restore the resolved
+    // order — root-first enqueue gives sensible enqueuedAt FIFO within any
+    // group the members happen to share.
+    const memberRows = await db
+      .select(PR_FLAG_COLUMNS)
+      .from(pullRequestsTable)
+      .where(inArray(pullRequestsTable.id, orderedIds));
+    const byId = new Map(memberRows.map((r) => [r.id, r]));
+    const members = orderedIds.map((id) => byId.get(id)).filter((r): r is PRFlagRow => !!r);
+
+    const applyAll = async () => {
+      for (const member of members) {
+        await applyQueueMembership(member, {
+          enabled,
+          method,
+          trigger: enabled ? 'user:enqueue-stack' : 'user:dequeue-stack',
+        });
+      }
+    };
+
+    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
+      // One advisory lock spanning the count AND every insert, so a stack that
+      // does not fit is refused whole. Every member is excluded from the count
+      // — an already-queued member must not make its own stack unaffordable.
+      await withMergeQueueLimitGate(
+        assertUser(req).id,
+        { excludePrId: orderedIds, adding: members.length },
+        applyAll
+      );
+    } else {
+      await applyAll();
+    }
+
+    // Per-call work, once for the batch rather than once per member.
+    for (const member of members) {
+      if (enabled) await publishDraftForQueue(member);
+      else emitDequeued(member);
+    }
+    await broadcastMergeQueuePositions(anchor.workspaceId);
+    if (enabled) {
+      runWithoutScope(() => {
+        void mergeQueueProcessor.runOnce();
+        // The evaluator coalesces these into one walk per group.
+        for (const member of members) {
+          void onQueueMembershipChanged(member.id, 'user:enqueue-stack');
+        }
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        pullRequestIds: members.map((m) => m.id),
+        // A resolved member whose row vanished between the two reads. Surfaced
+        // rather than silently dropped: the client's own derivation may show a
+        // different size, and it must not be the authority on what happened.
+        skipped: orderedIds
+          .filter((id) => !byId.has(id))
+          .map((id) => ({ pullRequestId: id, reason: 'No longer tracked' })),
+      },
+    } as ApiResponse<{
+      pullRequestIds: string[];
+      skipped: Array<{ pullRequestId: string; reason: string }>;
+    }>);
   });
 
   // Merge-queue timeline: the entry's audit log (transitions, remediations,

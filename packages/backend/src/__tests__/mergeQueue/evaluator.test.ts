@@ -990,7 +990,9 @@ describe('mergeQueue v2 pipeline', () => {
         baseBranch: 'main',
         status: 'queued',
         retargetAttempts: 1,
-        stackParentNumber: null,
+        // Kept, not cleared: it is how a later fix run learns this branch may
+        // still carry #1's original commits after a squash-merge.
+        stackParentNumber: 1,
       });
       // The context was built against feat-a, an unprotected feature branch —
       // merging in the same walk would use signing/gate probes from the wrong
