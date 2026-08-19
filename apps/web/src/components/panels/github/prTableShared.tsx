@@ -405,127 +405,137 @@ function PRTableRow({
               {summary.title || '(no title)'}
             </span>
           </span>
-          <span className="truncate text-xs text-muted-foreground">
-            {row.owner}/{row.repo}#{row.number} · @{summary.author || 'unknown'}
-            {(summary.createdAt || row.createdAt) && (
-              <span title={`Opened ${new Date(summary.createdAt || row.createdAt).toLocaleString()}`}>
-                {' · opened '}
-                {formatRelative(summary.createdAt || row.createdAt)}
-              </span>
-            )}
-            {summary.draft && (
-              <span className="ml-2 rounded bg-zinc-200 px-1 py-0.5 text-[10px] uppercase text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
-                Draft
-              </span>
-            )}
-            {row.reviewRequested && (
-              <span
-                className="ml-2 rounded bg-purple-200 px-1 py-0.5 text-[10px] uppercase text-purple-800 dark:bg-purple-900 dark:text-purple-200"
-                title="You're a requested reviewer on this PR"
-              >
-                Review
-              </span>
-            )}
-            {/* Linked-task indicator — "Working" (spinner) while running,
-                "Failed" if it errored/was cancelled. Hidden once the task
-                completes cleanly. Deep-links to the run. */}
-            {row.taskId && (taskRunning || taskFailed) && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpenTask(row.taskId!);
-                }}
-                className={cn(
-                  'ml-2 inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] uppercase',
-                  taskFailed
-                    ? 'bg-red-200 text-red-800 hover:bg-red-300 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800'
-                    : 'bg-blue-200 text-blue-800 hover:bg-blue-300 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800'
-                )}
-                title={
-                  taskRunning
-                    ? 'A task is working this PR — click to open it'
-                    : 'The linked task failed — click to open it'
-                }
-              >
-                <ProviderIcon provider={taskProvider} className="h-2.5 w-2.5" />
-                {taskRunning ? (
-                  <>
-                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                    Working
-                  </>
+          {/* Width priority, highest first: badges and #number never shrink,
+              owner/repo truncates next, author/opened collapses first. */}
+          <span className="grid grid-cols-[auto_minmax(0,max-content)_auto_minmax(0,1fr)] items-center overflow-hidden text-xs text-muted-foreground">
+            <span className="mr-2 flex items-center gap-2 whitespace-nowrap empty:mr-0">
+              {summary.draft && (
+                <span className="rounded bg-zinc-200 px-1 py-0.5 text-[10px] uppercase text-zinc-700 dark:bg-zinc-700 dark:text-zinc-300">
+                  Draft
+                </span>
+              )}
+              {row.reviewRequested && (
+                <span
+                  className="rounded bg-purple-200 px-1 py-0.5 text-[10px] uppercase text-purple-800 dark:bg-purple-900 dark:text-purple-200"
+                  title="You're a requested reviewer on this PR"
+                >
+                  Review
+                </span>
+              )}
+              {/* Linked-task indicator — "Working" (spinner) while running,
+                  "Failed" if it errored/was cancelled. Hidden once the task
+                  completes cleanly. Deep-links to the run. */}
+              {row.taskId && (taskRunning || taskFailed) && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenTask(row.taskId!);
+                  }}
+                  className={cn(
+                    'inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] uppercase',
+                    taskFailed
+                      ? 'bg-red-200 text-red-800 hover:bg-red-300 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800'
+                      : 'bg-blue-200 text-blue-800 hover:bg-blue-300 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800'
+                  )}
+                  title={
+                    taskRunning
+                      ? 'A task is working this PR — click to open it'
+                      : 'The linked task failed — click to open it'
+                  }
+                >
+                  <ProviderIcon provider={taskProvider} className="h-2.5 w-2.5" />
+                  {taskRunning ? (
+                    <>
+                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                      Working
+                    </>
+                  ) : (
+                    'Failed'
+                  )}
+                </button>
+              )}
+              {/* Auto-keep-mergeable watcher indicator. "Watching" while armed,
+                  "Paused" once it's given up after 3 attempts. */}
+              {row.autoKeepMergeable &&
+                (row.autoMergeState?.paused ? (
+                  <span
+                    className="inline-flex items-center gap-1 rounded bg-amber-200 px-1 py-0.5 text-[10px] uppercase text-amber-800 dark:bg-amber-900 dark:text-amber-200"
+                    title="Auto-keep-mergeable paused after 3 attempts — needs attention"
+                  >
+                    <AlertTriangle className="h-2.5 w-2.5" />
+                    Paused
+                  </span>
                 ) : (
-                  'Failed'
-                )}
-              </button>
-            )}
-            {/* Auto-keep-mergeable watcher indicator. "Watching" while armed,
-                "Paused" once it's given up after 3 attempts. */}
-            {row.autoKeepMergeable &&
-              (row.autoMergeState?.paused ? (
-                <span
-                  className="ml-2 inline-flex items-center gap-1 rounded bg-amber-200 px-1 py-0.5 text-[10px] uppercase text-amber-800 dark:bg-amber-900 dark:text-amber-200"
-                  title="Auto-keep-mergeable paused after 3 attempts — needs attention"
-                >
-                  <AlertTriangle className="h-2.5 w-2.5" />
-                  Paused
-                </span>
-              ) : (
-                <span
-                  className="ml-2 inline-flex items-center gap-1 rounded bg-emerald-200 px-1 py-0.5 text-[10px] uppercase text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200"
-                  title="Auto-keep-mergeable is on — keeping this PR in a mergeable state"
-                >
-                  <Eye className="h-2.5 w-2.5" />
-                  Watching
-                </span>
-              ))}
-            {/* Merge-queue indicator. The membership badge ("Queued #N") stays
-                visible the whole time the PR is in the queue; an activity badge
-                (Merging / Blocked) sits alongside it. We deliberately DON'T show
-                a "Fixing" badge — when a cloud run is clearing blockers the
-                linked-task "Working" badge above already says so, so a separate
-                Fixing chip would be redundant. On the Merge Queue page the
-                Queue column carries this, so we skip the title badge there. */}
-            {variant !== 'queue' &&
-              row.mergeQueued &&
-              (() => {
-                const qs = row.mergeQueueState?.status ?? 'waiting';
-                const pos = row.mergeQueueState?.position ?? 0;
-                const reason = row.mergeQueueState?.reason;
-                return (
-                  <>
-                    <span
-                      className="ml-2 inline-flex items-center gap-1 rounded bg-indigo-200 px-1 py-0.5 text-[10px] uppercase text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200"
-                      title="In the merge queue — merges automatically when it's its turn and clean"
-                    >
-                      <GitMerge className="h-2.5 w-2.5" />
-                      {pos > 0 ? `Queued #${pos}` : 'Queued'}
+                  <span
+                    className="inline-flex items-center gap-1 rounded bg-emerald-200 px-1 py-0.5 text-[10px] uppercase text-emerald-800 dark:bg-emerald-900 dark:text-emerald-200"
+                    title="Auto-keep-mergeable is on — keeping this PR in a mergeable state"
+                  >
+                    <Eye className="h-2.5 w-2.5" />
+                    Watching
+                  </span>
+                ))}
+              {/* Merge-queue indicator. The membership badge ("Queued #N") stays
+                  visible the whole time the PR is in the queue; an activity badge
+                  (Merging / Blocked) sits alongside it. We deliberately DON'T show
+                  a "Fixing" badge — when a cloud run is clearing blockers the
+                  linked-task "Working" badge above already says so, so a separate
+                  Fixing chip would be redundant. On the Merge Queue page the
+                  Queue column carries this, so we skip the title badge there. */}
+              {variant !== 'queue' &&
+                row.mergeQueued &&
+                (() => {
+                  const qs = row.mergeQueueState?.status ?? 'waiting';
+                  const pos = row.mergeQueueState?.position ?? 0;
+                  const reason = row.mergeQueueState?.reason;
+                  return (
+                    <span className="inline-flex items-center gap-1">
+                      <span
+                        className="inline-flex items-center gap-1 rounded bg-indigo-200 px-1 py-0.5 text-[10px] uppercase text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200"
+                        title="In the merge queue — merges automatically when it's its turn and clean"
+                      >
+                        <GitMerge className="h-2.5 w-2.5" />
+                        {pos > 0 ? `Queued #${pos}` : 'Queued'}
+                      </span>
+                      {qs === 'merging' && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded bg-blue-200 px-1 py-0.5 text-[10px] uppercase text-blue-800 dark:bg-blue-900 dark:text-blue-200"
+                          title="Merging this PR now"
+                        >
+                          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                          Merging
+                        </span>
+                      )}
+                      {qs === 'blocked' && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded bg-amber-200 px-1 py-0.5 text-[10px] uppercase text-amber-800 dark:bg-amber-900 dark:text-amber-200"
+                          title={
+                            reason
+                              ? `Merge queue gave up after 3 attempts — ${reason}. Needs manual intervention.`
+                              : 'Merge queue gave up after 3 attempts — needs manual intervention'
+                          }
+                        >
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          Blocked
+                        </span>
+                      )}
                     </span>
-                    {qs === 'merging' && (
-                      <span
-                        className="ml-1 inline-flex items-center gap-1 rounded bg-blue-200 px-1 py-0.5 text-[10px] uppercase text-blue-800 dark:bg-blue-900 dark:text-blue-200"
-                        title="Merging this PR now"
-                      >
-                        <Loader2 className="h-2.5 w-2.5 animate-spin" />
-                        Merging
-                      </span>
-                    )}
-                    {qs === 'blocked' && (
-                      <span
-                        className="ml-1 inline-flex items-center gap-1 rounded bg-amber-200 px-1 py-0.5 text-[10px] uppercase text-amber-800 dark:bg-amber-900 dark:text-amber-200"
-                        title={
-                          reason
-                            ? `Merge queue gave up after 3 attempts — ${reason}. Needs manual intervention.`
-                            : 'Merge queue gave up after 3 attempts — needs manual intervention'
-                        }
-                      >
-                        <AlertTriangle className="h-2.5 w-2.5" />
-                        Blocked
-                      </span>
-                    )}
-                  </>
-                );
-              })()}
+                  );
+                })()}
+            </span>
+            <span className="truncate">
+              {row.owner}/{row.repo}
+            </span>
+            <span>#{row.number}</span>
+            <span className="truncate pl-1">
+              · @{summary.author || 'unknown'}
+              {(summary.createdAt || row.createdAt) && (
+                <span title={`Opened ${new Date(summary.createdAt || row.createdAt).toLocaleString()}`}>
+                  {' · opened '}
+                  {formatRelative(summary.createdAt || row.createdAt)}
+                </span>
+              )}
+            </span>
           </span>
         </div>
       </td>
