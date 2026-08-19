@@ -48,8 +48,11 @@ describe('normalizeCheckState', () => {
     expect(normalizeCheckState({ status: 'COMPLETED', conclusion: 'ACTION_REQUIRED' })).toBe('failure');
   });
 
-  it('maps CANCELLED conclusion to cancelled (its own state)', () => {
-    expect(normalizeCheckState({ status: 'COMPLETED', conclusion: 'CANCELLED' })).toBe('cancelled');
+  it('maps CANCELLED conclusion to failure (GitHub blocks the merge on one)', () => {
+    // It had its own `cancelled` state, which no count bucket read — so a
+    // cancelled REQUIRED check left `checks.failed = 0` and the PR read green
+    // (PostHog/posthog#84477).
+    expect(normalizeCheckState({ status: 'COMPLETED', conclusion: 'CANCELLED' })).toBe('failure');
   });
 
   it('maps STALE conclusion to skipped (superseded — not a failure)', () => {
@@ -650,7 +653,7 @@ describe('dedupeLatestCheckByName', () => {
 describe('summarizeCheckContexts', () => {
   const ctx = (over: {
     name: string;
-    state: 'success' | 'failure' | 'pending' | 'in_progress' | 'skipped' | 'cancelled';
+    state: 'success' | 'failure' | 'pending' | 'in_progress' | 'skipped';
     ts: number;
     url?: string | null;
     required?: boolean | null;
@@ -674,17 +677,17 @@ describe('summarizeCheckContexts', () => {
   });
 
   it('restores a live (un-superseded) failure when GitHub\'s rollup is FAILURE', () => {
-    // PostHog/posthog#64614: a gate failed and its same-name re-run was CANCELLED
-    // (not a passing run), so latest-per-name shows the cancelled run and hides
-    // the failure — yet GitHub still counts it (rollup FAILURE). With no later
-    // same-name SUCCESS to supersede it, the failure is live and must be restored
-    // so the PR does NOT read as Ready.
+    // PostHog/posthog#64614: a gate failed and its same-name re-run was SKIPPED,
+    // so latest-per-name shows the skipped run and hides the failure — yet
+    // GitHub still counts it (rollup FAILURE). With no later same-name SUCCESS
+    // to supersede it, the failure is live and must be restored so the PR does
+    // NOT read as Ready.
     const { normalized, checks } = summarizeCheckContexts(
       [
         ctx({ name: 'Frontend Tests Pass', state: 'failure', ts: 100, url: 'http://fail/fe', required: true }),
-        ctx({ name: 'Frontend Tests Pass', state: 'cancelled', ts: 200, required: true }),
+        ctx({ name: 'Frontend Tests Pass', state: 'skipped', ts: 200, required: true }),
         ctx({ name: 'Django Tests Pass', state: 'failure', ts: 100, url: 'http://fail/be', required: true }),
-        ctx({ name: 'Django Tests Pass', state: 'cancelled', ts: 300, required: true }),
+        ctx({ name: 'Django Tests Pass', state: 'skipped', ts: 300, required: true }),
         ctx({ name: 'lint', state: 'success', ts: 50 }),
       ],
       'FAILURE'
@@ -695,6 +698,26 @@ describe('summarizeCheckContexts', () => {
     // The restored failures keep their failing detailsUrl (not the re-run's).
     expect(normalized.find((c) => c.name === 'Frontend Tests Pass')?.url).toBe('http://fail/fe');
     expect(normalized.find((c) => c.name === 'Django Tests Pass')?.url).toBe('http://fail/be');
+  });
+
+  it('counts a cancelled check as failing — it needs no rollup restore', () => {
+    // The #64614 shape as it actually arrives now that CANCELLED normalizes to
+    // `failure`: the cancelled re-run IS the latest run of its name, so the
+    // de-noised view already holds a failure and the restore branch never runs.
+    // What matters is the count, and the PR reading as blocked either way.
+    const { normalized, checks } = summarizeCheckContexts(
+      [
+        ctx({ name: 'Frontend Tests Pass', state: 'failure', ts: 100, url: 'http://fail/fe', required: true }),
+        // The CANCELLED re-run — normalized to `failure` before it gets here.
+        ctx({ name: 'Frontend Tests Pass', state: 'failure', ts: 200, url: 'http://rerun/fe', required: true }),
+        ctx({ name: 'lint', state: 'success', ts: 50 }),
+      ],
+      'FAILURE'
+    );
+    expect(checks.total).toBe(2);
+    expect(checks.failed).toBe(1);
+    // Latest-per-name wins: the link points at the run that is blocking now.
+    expect(normalized.find((c) => c.name === 'Frontend Tests Pass')?.url).toBe('http://rerun/fe');
   });
 
   it('does NOT restore a superseded failure when a later same-name run passed', () => {
@@ -846,9 +869,9 @@ describe('rawToSummary check de-duplication (via decodeBatchResponse)', () => {
 
   it('does NOT read as Ready when GitHub\'s rollup is FAILURE (posthog#64614)', () => {
     // The gate ran twice on the head commit: an early FAILURE and a later
-    // CANCELLED re-run (no passing run). Latest-per-name shows the cancelled run
-    // and would report 0 failing → "Ready", but GitHub's rollup is FAILURE and
-    // no SUCCESS superseded the failure, so we must surface it.
+    // CANCELLED re-run (no passing run). Neither run passed, so the PR must not
+    // read as Ready — GitHub's rollup says FAILURE and no SUCCESS superseded
+    // anything.
     const base = prWithContexts([
       checkRun({
         name: 'Django Tests Pass',
@@ -878,6 +901,46 @@ describe('rawToSummary check de-duplication (via decodeBatchResponse)', () => {
     expect(pr!.checks.failed).toBe(1); // the un-superseded gate failure, restored
     expect(pr!.checks.passed).toBe(1); // lint
     expect(pr!.checks.total).toBe(2); // de-duped distinct names
+    expect(pr!.blockingReason).toBe('checks_failed');
+  });
+
+  it('blocks on a CANCELLED required check with no FAILURE anywhere (posthog#84477)', () => {
+    // The shape that read as all-green for days. `shellcheck` was cancelled
+    // ("Workflow did not pass") and is REQUIRED; a second cancelled run is not.
+    // No context on the commit has a FAILURE conclusion, so while CANCELLED had
+    // a state of its own — one no count bucket read — `checks.failed` was 0,
+    // `blockingReason` never became `checks_failed`, and the merge queue held
+    // the PR as passing while GitHub refused to merge it.
+    const base = prWithContexts([
+      checkRun({
+        name: 'shellcheck',
+        status: 'COMPLETED',
+        conclusion: 'CANCELLED',
+        startedAt: '2026-08-19T09:22:12Z',
+        completedAt: '2026-08-19T09:27:22Z',
+        isRequired: true,
+      }),
+      checkRun({
+        name: 'semgrep-package-managers',
+        status: 'COMPLETED',
+        conclusion: 'CANCELLED',
+        startedAt: '2026-08-19T09:22:10Z',
+        completedAt: '2026-08-19T09:37:12Z',
+        isRequired: false,
+      }),
+      checkRun({ name: 'lint', status: 'COMPLETED', conclusion: 'SUCCESS', isRequired: true }),
+    ]) as { commits: { nodes: Array<{ commit: { statusCheckRollup: { state: string } } }> } };
+    // GitHub rolls CANCELLED up as FAILURE — the signal Talyn contradicted.
+    base.commits.nodes[0].commit.statusCheckRollup.state = 'FAILURE';
+    const data = { repository: { [aliasForBranch(0)]: { nodes: [base] } } };
+    const [{ pr }] = decodeBatchResponse(['feature/x'], data, 'acme', 'widgets');
+    expect(pr).not.toBeNull();
+    expect(pr!.checks.failed).toBe(2);
+    expect(pr!.checks.passed).toBe(1);
+    // Every check lands in a bucket — the tiles must add up to the total, or a
+    // blocking check is on screen in the count and nowhere in the list.
+    const { total, passed, failed, inProgress, skipped } = pr!.checks;
+    expect(passed + failed + inProgress + skipped).toBe(total);
     expect(pr!.blockingReason).toBe('checks_failed');
   });
 

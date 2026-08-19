@@ -2,6 +2,19 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 89 — A cancelled check is a failure (2026-08-19)
+
+PostHog/posthog#84477 read as green in the panel and to the merge queue, while GitHub showed "4 failing checks" and refused the merge. The counts were not stale — a refresh re-fetched the same data and re-derived the same wrong verdict. The classification was wrong.
+
+- **`CANCELLED` had a `CheckState` of its own, and no bucket counted it.** The pill breakdown is `{total, passed, failed, inProgress, skipped}`, so a cancelled check landed in `total` and nowhere else. On #84477 no context on the head commit had a `FAILURE` conclusion at all: the two blockers were both cancelled, and one of them (`shellcheck`) is REQUIRED. So `checks.failed` was 0, `blockingReason` never became `checks_failed`, `prNeedsFollowup` was false, and the queue held the PR as passing. GitHub rolls `CANCELLED` up as `statusCheckRollup.state = FAILURE` and lists it under "N failing checks"; branch protection is never satisfied by one. `normalizeCheckState` now returns `failure`, and `CheckState` drops both `cancelled` and `neutral` (the latter was never produced) — the type is now identical to the wire type `PRCheckState` in `@talyn/client`, which never had those members. The backend can no longer emit a state the front ends cannot count.
+- **The rollup reconciliation was blind to it too.** `summarizeCheckContexts` restores a live failure when GitHub's rollup says FAILURE but latest-per-name shows none. It searches the raw contexts for `state === 'failure'`, and on #84477 there were none to find — the restore ran and restored nothing. With the cancelled runs reading as failures, the de-noised view already holds them and the branch is not needed.
+- **Migration `0043` moves the rows written under the old mapping.** `pr_check_states` feeds the incremental (webhook) counts and is only rewritten when a new `check_run` event arrives for that `(repo, sha, name)` — which a cancelled run will not send. Left alone, every affected PR kept miscounting until its head moved, and the 5-min sweep's correct counts were overwritten by the stale rows on the next unrelated check event for the same sha. `pull_requests.last_summary` needs no rewrite: the sweep replaces that blob wholesale.
+- **The tiles and the list came from different fetches.** The detail sheet read its counts off the cached row and its rows off the live detail fetch, so the two could disagree — "1 Failed" over a list with no failing check in it, which is what the bug report showed. Both now come from the live detail when it has landed, with the cached counts as the fallback.
+
+Verified against the live PR: before, `{total: 257, passed: 148, failed: 0, inProgress: 1, skipped: 106}` — the buckets summed to 255, not 257. After: `failed: 2`, the buckets sum to the total, `shellcheck` is named as the required failure, and the verdict is `checks_failed`.
+
+Tests: the #84477 shape end-to-end in `githubGraphql.test.ts` (a cancelled required check, no `FAILURE` conclusion anywhere → `checks_failed`), the same through the webhook parser in `checkCounts.test.ts`, and a buckets-sum-to-total assertion in both — that invariant is what the old behaviour broke. The test that pinned the old behaviour ("counts only cancelled checks toward total, not the sub-buckets") is gone.
+
 ## Session 88 — Back off a merge queue that is broken across PRs (2026-08-19)
 
 Every guard in the pipeline was per PR. `MAX_INFRA_SUBMITS_PER_HEAD` bounds one commit's resubmits and the recurrence signature bounds one head's ejections, but nothing could see that the QUEUE was the broken thing. So a backlog of queued PRs each rediscovered a dead runner independently and spent its own budget doing it.

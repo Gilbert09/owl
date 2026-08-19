@@ -26,14 +26,18 @@ import { githubService } from './github.js';
 
 export type PRState = 'open' | 'closed' | 'merged';
 
+// Deliberately identical to the wire type `PRCheckState` in `@talyn/client`:
+// every state here is rendered, counted, and filtered by both front ends. It
+// used to carry two extra members — `neutral` (never produced) and `cancelled`
+// (produced, but counted by nothing) — and a state no bucket counts is a check
+// GitHub blocks the merge on that Talyn reads as green. See
+// `normalizeCheckState` on why CANCELLED is a failure.
 export type CheckState =
   | 'pending'
   | 'in_progress'
   | 'success'
   | 'failure'
-  | 'skipped'
-  | 'neutral'
-  | 'cancelled';
+  | 'skipped';
 
 export type ReviewDecision = 'APPROVED' | 'CHANGES_REQUESTED' | 'REVIEW_REQUIRED' | null;
 
@@ -538,10 +542,15 @@ function extractByNumberPRs(
  * `GithubPullRequestStatusCheck.normalize`.
  *
  *   - `status != COMPLETED` → in_progress / pending
- *   - else `conclusion` wins (NEUTRAL/SKIPPED → success-ish; FAILURE →
- *     failure; etc.)
+ *   - else `conclusion` wins (NEUTRAL/SKIPPED → success-ish; FAILURE and
+ *     CANCELLED → failure; etc.)
  *   - falls back to legacy `state` for `StatusContext` nodes that don't
  *     have a conclusion.
+ *
+ * Every branch lands on one of the five {@link CheckState} members the front
+ * ends count and filter. Adding a sixth is how a blocking check becomes
+ * invisible — a state outside the {passed, failed, inProgress, skipped}
+ * buckets is in `checks.total` and nothing else.
  */
 export function normalizeCheckState(input: {
   status?: string | null;
@@ -575,7 +584,17 @@ export function normalizeCheckState(input: {
       case 'ACTION_REQUIRED':
         return 'failure';
       case 'CANCELLED':
-        return 'cancelled';
+        // A cancelled run is a FAILURE, not a state of its own. GitHub rolls
+        // CANCELLED into `statusCheckRollup.state = FAILURE` and lists it under
+        // "N failing checks", and branch protection is never satisfied by one —
+        // a cancelled REQUIRED check blocks the merge exactly like a red one
+        // (PostHog/posthog#84477: `shellcheck` cancelled + required, GitHub
+        // rollup FAILURE, zero contexts we called `failure`, so the PR read as
+        // green and sat in the merge queue). Cancellation is common on a repo
+        // with concurrency groups; the ones cancelled by a NEW push land on a
+        // new head sha and never reach this rollup, so counting these as
+        // failures doesn't manufacture noise.
+        return 'failure';
       default:
         // Unknown conclusion — be conservative.
         return 'failure';

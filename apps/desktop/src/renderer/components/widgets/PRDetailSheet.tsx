@@ -991,7 +991,12 @@ function ChecksTab({
   data: { row: PRRow; fresh: (PRSummaryShape & PRFreshDetail) | null };
   detailPending: boolean;
 }) {
-  const checks = data.row.summary.checks;
+  // Counts come from the SAME fetch as the rows below whenever the live detail
+  // has landed. Reading them off the cached row instead let the two disagree —
+  // a tile saying "1 Failed" over a list with no failing check in it, because
+  // the cached summary and the fresh contexts were fetched minutes apart. The
+  // cached counts stay the fallback for when the detail fetch returns nothing.
+  const checks = data.fresh?.checks ?? data.row.summary.checks;
   // Clicking a tile filters the list to that state (toggle off by
   // clicking again).
   const [filter, setFilter] = useState<CheckFilter | null>(null);
@@ -1010,7 +1015,8 @@ function ChecksTab({
   const allFailuresNonRequired =
     failingContexts.length > 0 && failingContexts.every((c) => c.required === false);
   const failuresOptional =
-    data.row.summary.blockingReason === 'checks_failed_optional' || allFailuresNonRequired;
+    (data.fresh ?? data.row.summary).blockingReason === 'checks_failed_optional' ||
+    allFailuresNonRequired;
   const sorted = contexts
     .slice()
     .sort((a, b) => (CHECK_STATE_ORDER[a.state] ?? 99) - (CHECK_STATE_ORDER[b.state] ?? 99));

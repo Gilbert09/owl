@@ -208,11 +208,26 @@ describe('checkCounts', () => {
       expect(await db.select().from(prCheckStates)).toHaveLength(0);
     });
 
-    it('counts only cancelled checks toward total, not the sub-buckets', async () => {
+    it('counts a CANCELLED check as failing, not as an uncounted extra (posthog#84477)', async () => {
+      // CANCELLED used to normalize to a state of its own that no bucket read,
+      // so a cancelled REQUIRED check left `failed: 0` and the PR read green.
+      // Driven through the payload parser so the whole chain is covered.
       await seedPr(7, 'sha-A');
       await ingestCheckRun(ev({ name: 'a', state: 'success' }), targets, [7], tracked([7]));
-      await ingestCheckRun(ev({ name: 'b', state: 'cancelled' }), targets, [7], tracked([7]));
-      expect(await checksOf(7)).toEqual({ total: 2, passed: 1, failed: 0, inProgress: 0, skipped: 0 });
+      const cancelled = parseCheckRunPayload(
+        {
+          check_run: { id: 9, name: 'shellcheck', status: 'completed', conclusion: 'cancelled', head_sha: 'sha-A' },
+          repository: { owner: { login: 'acme' }, name: 'widget' },
+        },
+        'acme/widget',
+      );
+      expect(cancelled?.state).toBe('failure');
+      await ingestCheckRun(cancelled!, targets, [7], tracked([7]));
+      const counts = await checksOf(7);
+      expect(counts).toEqual({ total: 2, passed: 1, failed: 1, inProgress: 0, skipped: 0 });
+      // Every check lands in exactly one bucket — the invariant whose absence
+      // is what made the blocking check invisible.
+      expect(counts.passed + counts.failed + counts.inProgress + counts.skipped).toBe(counts.total);
     });
   });
 

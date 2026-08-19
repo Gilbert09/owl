@@ -302,6 +302,13 @@
 			"when": 1784160000026,
 			"tag": "0042_merge_queue_progress",
 			"breakpoints": true
+		},
+		{
+			"idx": 43,
+			"version": "7",
+			"when": 1784160000027,
+			"tag": "0043_cancelled_checks_are_failures",
+			"breakpoints": true
 		}
 	]
 }

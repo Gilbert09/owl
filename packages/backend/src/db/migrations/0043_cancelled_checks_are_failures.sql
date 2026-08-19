@@ -1,0 +1,23 @@
+-- `cancelled` is no longer a check state — it is a failure.
+--
+-- `normalizeCheckState` used to map a CANCELLED conclusion to its own
+-- `CheckState`, but nothing ever counted that state: the pill's breakdown is
+-- {passed, failed, inProgress, skipped} plus a `total`, so a cancelled check
+-- landed in `total` and no bucket. A REQUIRED check that GitHub cancelled
+-- therefore left `checks.failed = 0`, `blockingReason` never became
+-- `checks_failed`, and the PR read as green in the panel and to the merge queue
+-- while GitHub's own rollup said FAILURE and refused the merge
+-- (PostHog/posthog#84477 — `shellcheck` cancelled + required).
+--
+-- The rows already written under the old mapping have to move with the code.
+-- `pr_check_states` is the incremental (webhook) source of the counts, and it is
+-- only rewritten when a NEW `check_run` event arrives for that (repo, sha, name)
+-- — which a cancelled run, by definition, is not going to send. Left alone,
+-- every affected PR would keep miscounting until its head moved, and worse, the
+-- 5-min sweep's correct counts would be overwritten by the stale rows on the
+-- next unrelated check event for the same sha.
+--
+-- Nothing else stored the state: `pull_requests.last_summary` holds check
+-- contexts too, but that blob is overwritten wholesale by the next sweep (~5
+-- min), so it self-heals without a rewrite here.
+UPDATE "pr_check_states" SET "state" = 'failure' WHERE "state" = 'cancelled';
