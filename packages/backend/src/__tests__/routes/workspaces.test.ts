@@ -249,6 +249,55 @@ describe('routes/workspaces', () => {
       expect(body.data.description).toBe('old');
     });
 
+    // autoApprove switches on an irreversible outward-facing action (the queue
+    // finalizes visual-review runs, rewriting the committed baseline), so it is
+    // validated strictly rather than coerced.
+    describe('settings.visualReview', () => {
+      async function patchVr(visualReview: unknown) {
+        return fetch(`${serverUrl}/workspaces/a`, {
+          method: 'PATCH',
+          headers: authHeaders,
+          body: JSON.stringify({ settings: { visualReview } }),
+        });
+      }
+
+      beforeEach(async () => {
+        await db.insert(workspacesTable).values({
+          id: 'a',
+          ownerId: TEST_USER_ID,
+          name: 'Alpha',
+          settings: {},
+        });
+      });
+
+      it('stores a valid opt-in', async () => {
+        const res = await patchVr({ autoApprove: true, projectId: '2' });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { data: { settings: Record<string, unknown> } };
+        expect(body.data.settings.visualReview).toEqual({ autoApprove: true, projectId: '2' });
+      });
+
+      // "false" is truthy in JS — coercing it would silently arm the thing.
+      it.each([['"false"', 'false'], ['1', 1], ['null', null]])(
+        'rejects autoApprove: %s rather than coercing it',
+        async (_label, autoApprove) => {
+          expect((await patchVr({ autoApprove })).status).toBe(400);
+        }
+      );
+
+      it('rejects a non-numeric project id', async () => {
+        expect((await patchVr({ projectId: 'two' })).status).toBe(400);
+      });
+
+      it('rejects an unknown key rather than storing it silently', async () => {
+        expect((await patchVr({ autoApprove: true, approveAll: true })).status).toBe(400);
+      });
+
+      it('rejects a non-object', async () => {
+        expect((await patchVr(true)).status).toBe(400);
+      });
+    });
+
     describe('settings.prompts', () => {
       const validTemplate = 'Fix {{pr.url}}\n{{gitRules}}';
       const hash = defaultPromptTemplateHash('mergeable');

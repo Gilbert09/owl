@@ -45,6 +45,8 @@ import { PRStatusPill } from './PRStatusPill';
 import { PRReviewPill } from './PRReviewPill';
 import { toast } from '../../stores/toast';
 import { trackEvent } from '../../lib/analytics';
+import { usePullRequestStore } from '../../stores/pullRequests';
+import { stackAncestors } from '../panels/github/stacks';
 
 /**
  * Slide-in detail panel for a PR. Phase 4 ships the skeleton —
@@ -101,6 +103,15 @@ export function PRDetailSheet({
   const [posthogConnected, setPosthogConnected] = useState(false);
   const [togglingAutoKeep, setTogglingAutoKeep] = useState(false);
   const [togglingQueue, setTogglingQueue] = useState(false);
+  // The PRs this one is stacked on, root-first. Derived from the open rows in
+  // the store (the sheet gets no stackMeta), by the same rule the backend uses.
+  // Only decides whether to offer "Merge stack" — the server re-resolves the
+  // chain on the call itself.
+  const openRows = usePullRequestStore((s) => s.rows);
+  const stackBelow = useMemo(
+    () => (pullRequestId ? stackAncestors(openRows, pullRequestId) : []),
+    [openRows, pullRequestId]
+  );
 
   useEffect(() => {
     if (!pullRequestId) {
@@ -260,6 +271,25 @@ export function PRDetailSheet({
       );
     } finally {
       setTogglingAutoKeep(false);
+    }
+  }
+
+  /**
+   * Queue this PR together with everything it is stacked on. The sheet has no
+   * `stackMeta`, so membership is derived here from the open rows in the store
+   * — the same rule the backend uses. The server re-resolves the chain on the
+   * call itself; this only decides whether to offer the button and what to say
+   * on it.
+   */
+  async function handleQueueStack() {
+    if (!pullRequestId) return;
+    setTogglingQueue(true);
+    try {
+      await api.pullRequests.setMergeQueueStack(pullRequestId, true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not queue the stack');
+    } finally {
+      setTogglingQueue(false);
     }
   }
 
@@ -538,6 +568,20 @@ export function PRDetailSheet({
                   : 'Add to merge queue'}
               </Button>
             )}
+            {view.row.state === 'open' && stackBelow.length > 1 && (
+              <Button
+                variant="outline"
+                className="h-7 px-2 text-xs"
+                onClick={() => void handleQueueStack()}
+                disabled={togglingQueue}
+                title={`Queue all ${stackBelow.length} PRs in this stack and merge them into ${
+                  stackBelow[0]?.summary.baseBranch || 'the base'
+                } one at a time, retargeting each as its parent lands`}
+              >
+                <Layers className="mr-1 h-3.5 w-3.5" />
+                Merge stack ({stackBelow.length})
+              </Button>
+            )}
             {canMerge &&
               (confirmMerge ? (
                 <>
@@ -757,15 +801,25 @@ function OverviewTab({
 }
 
 /** Human labels for the merge-queue v2 status vocabulary. */
-const QUEUE_STATUS_LABEL: Record<string, string> = {
+/**
+ * Keyed by the status union rather than `string`, so adding a status to the
+ * engine is a compile error here instead of a raw enum name rendering in the
+ * sheet. That is not hypothetical: `awaiting_external`, `merged` and `removed`
+ * were all missing under the looser type and showed as-is.
+ */
+const QUEUE_STATUS_LABEL: Record<NonNullable<PRRow['mergeQueue']>['status'], string> = {
   queued: 'Waiting in line',
   awaiting_ci: 'Waiting for CI',
   awaiting_review: 'Waiting for a required review',
   automerge_armed: 'Auto-merge armed — GitHub merges when checks pass',
+  awaiting_external: 'Handed to the repo’s merge queue, which owns the merge now',
+  awaiting_stack: 'Waiting for the PR below it in the stack to merge',
   fixing: 'A cloud fix run is working this PR',
   merging: 'Merging',
   blocked: 'Blocked — retries on the next push, or re-queue now',
   blocked_manual: 'Blocked — needs you (merge manually or re-queue)',
+  merged: 'Merged',
+  removed: 'Removed from the queue',
 };
 
 /**
@@ -796,9 +850,20 @@ function MergeQueueSection({ row }: { row: PRRow }) {
 
   if (!queued) return null;
 
+  // `awaiting_stack` is deliberately NOT blocked: it self-heals the moment the
+  // PR below it lands, so offering Requeue would suggest an action that does
+  // nothing. Don't "helpfully" add it here.
   const blocked = v2?.status === 'blocked' || v2?.status === 'blocked_manual';
   const statusLabel = v2
-    ? (QUEUE_STATUS_LABEL[v2.status] ?? v2.status)
+    ? v2.status === 'awaiting_stack' && v2.stackParentNumber != null
+      ? `Waiting for #${v2.stackParentNumber} to merge — this PR is stacked on it`
+      : // Retargeted off a stack and now waiting on review: bringing the new
+        // base in pushes a merge commit, and a repo that dismisses stale
+        // approvals drops the one this PR already had. Say so, or it reads as
+        // though it was never approved.
+        v2.status === 'awaiting_review' && v2.stackParentNumber != null
+        ? `Waiting for a required review — this PR was retargeted after #${v2.stackParentNumber} merged, which may have dismissed an earlier approval`
+        : QUEUE_STATUS_LABEL[v2.status]
     : (row.mergeQueueState?.status ?? 'waiting');
   const budgets = v2?.budgets;
   const shown = events ? (showAll ? events : events.slice(0, 8)) : null;

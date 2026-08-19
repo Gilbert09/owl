@@ -678,6 +678,12 @@ export interface MergeQueuePublic {
     /** Submitted to an external merge queue (trunk.io / GitHub native), which
      *  owns the merge from here; its progress shows up in the PR's labels. */
     | 'awaiting_external'
+    /** Part of a merge stack, parked because the PR its base branch belongs to
+     *  hasn't merged yet. Merging now would land it in that PR's branch rather
+     *  than the real base. Self-heals when the parent lands — the backend
+     *  retargets this PR onto the parent's base and returns it to the queue.
+     *  Never needs a user action, so it is a wait, not a block. */
+    | 'awaiting_stack'
     | 'fixing'
     | 'merging'
     | 'blocked'
@@ -698,6 +704,17 @@ export interface MergeQueuePublic {
     resigns: [number, number];
   };
   autoMerge?: { armed: boolean; armedBy?: 'talyn' | 'user' };
+  /**
+   * Merge stack: the PR this one is — or was — stacked on.
+   *
+   * The server's answer, resolved when the entry was evaluated. The client can
+   * derive stack membership itself from the open rows (`linkStack` in
+   * `@talyn/shared`, the same rule the backend uses), and should for anything
+   * structural like ordering or grouping. This field is what that derivation
+   * CANNOT give: the parent of a PR that has already been retargeted, whose
+   * branch link is gone. Present while parked, and after a retarget.
+   */
+  stackParentNumber?: number | null;
   /** External merge queue: which door the PR was handed over through, the
    *  resubmit budget for the current head, and where the provider itself says
    *  the PR is (read off its own PR comment — the authoritative channel; the
@@ -707,6 +724,18 @@ export interface MergeQueuePublic {
     submits?: [number, number];
     state?: ExternalQueueState;
   };
+}
+
+/** Result of POST /pull-requests/:id/merge-queue/stack. */
+export interface MergeStackResult {
+  /** Members the server actually touched, root-first (= merge order). */
+  pullRequestIds: string[];
+  /**
+   * Members the server resolved but could not act on. Surfaced rather than
+   * dropped: the client's own derivation may show a different stack size, and
+   * it must not be the authority on what happened.
+   */
+  skipped: Array<{ pullRequestId: string; reason: string }>;
 }
 
 /** One row of GET /pull-requests/:id/merge-queue/timeline. */
@@ -847,11 +876,42 @@ export const pullRequests = {
   // Add/remove a PR from the Talyn merge queue. When enabled, the backend
   // merges it (per `method`, default squash) as soon as it's clean, serialized
   // per repo+base, auto-firing a cloud run to fix conflicts/behind branches.
+  /**
+   * Add/remove ONE PR. For a PR that is part of a live stack — anything with
+   * `mergeQueue.stackParentNumber`, or a base branch that is another open PR's
+   * head — route the DEQUEUE through {@link setMergeQueueStack} instead:
+   * dropping one member here leaves every PR stacked above it parked forever.
+   */
   setMergeQueue: (
     id: string,
     enabled: boolean,
     method?: 'merge' | 'squash' | 'rebase'
   ) => request<null>('POST', `/pull-requests/${id}/merge-queue`, { enabled, method }),
+  /**
+   * Enqueue (or dequeue) a whole stack of dependent PRs in one call.
+   *
+   * `id` may be ANY member — the server resolves the chain itself, so a stale
+   * client list can never enqueue an unrelated PR. Enabling always takes the
+   * PRs `id` is based on (you cannot land it without them); pass
+   * `includeDescendants` to also take the PRs stacked on top of it. Disabling
+   * always cascades UPWARD: every descendant is parked on this PR and would
+   * wait forever otherwise, so a stack member's dequeue must route here rather
+   * than through {@link setMergeQueue}.
+   *
+   * Gated ONCE against the free-plan merge-queue cap for the whole set: a stack
+   * that doesn't fit is refused whole (402, `merge_queue_limit_reached`) with
+   * nothing enqueued, because a stack that stops halfway has nothing to say why.
+   */
+  setMergeQueueStack: (
+    id: string,
+    enabled: boolean,
+    opts?: { method?: 'merge' | 'squash' | 'rebase'; includeDescendants?: boolean }
+  ) =>
+    request<MergeStackResult>('POST', `/pull-requests/${id}/merge-queue/stack`, {
+      enabled,
+      method: opts?.method,
+      includeDescendants: opts?.includeDescendants,
+    }),
   // The merge-queue entry's audit timeline (transitions + remediations with
   // reasons), newest first — powers the detail sheet's "Merge queue" section.
   mergeQueueTimeline: (id: string) =>

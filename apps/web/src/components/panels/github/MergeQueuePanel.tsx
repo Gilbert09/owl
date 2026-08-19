@@ -1,23 +1,17 @@
 import { useMemo, useState } from 'react';
-import { GitMerge, ListOrdered, Zap } from 'lucide-react';
+import { GitMerge, Layers, ListOrdered, Zap } from 'lucide-react';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
 import type { TaskStatus, AnyCloudProviderType, MergeQueueMode, Workspace } from '@talyn/shared';
 import { taskCloudProvider } from '../../../lib/providerMeta';
-import { api, type PRRow } from '../../../lib/api';
+import { api } from '../../../lib/api';
 import { cn } from '../../../lib/utils';
 import { GitHubPageShell } from './GitHubPageShell';
 import { PRTable } from './prTableShared';
 import { prMatchesText } from './filters';
 import { useGitHubActions } from './useGitHubActions';
+import { buildQueueGroups } from './queueGroups';
 
-interface QueueGroup {
-  key: string;
-  owner: string;
-  repo: string;
-  base: string;
-  rows: PRRow[];
-}
 
 const MODE_OPTIONS: Array<{
   mode: MergeQueueMode;
@@ -137,31 +131,11 @@ export function MergeQueuePanel() {
     return out;
   }, [rows, search]);
 
-  // Grouped by repo + base, each group ordered by queue position. Mirrors the
-  // backend's (repo, base) serialization so the "#N" matches merge order.
-  const groups = useMemo<QueueGroup[]>(() => {
-    const byKey = new Map<string, QueueGroup>();
-    for (const r of queued) {
-      const base = r.summary.baseBranch ?? '';
-      const key = `${r.repositoryId}|${base}`;
-      let g = byKey.get(key);
-      if (!g) {
-        g = { key, owner: r.owner, repo: r.repo, base, rows: [] };
-        byKey.set(key, g);
-      }
-      g.rows.push(r);
-    }
-    const list = [...byKey.values()];
-    for (const g of list) {
-      g.rows.sort(
-        (a, b) => (a.mergeQueueState?.position ?? 0) - (b.mergeQueueState?.position ?? 0)
-      );
-    }
-    list.sort((a, b) =>
-      `${a.owner}/${a.repo}/${a.base}`.localeCompare(`${b.owner}/${b.repo}/${b.base}`)
-    );
-    return list;
-  }, [queued]);
+  // Grouped by where each PR actually lands: one group per (repo, base), and
+  // ONE group per stack (whose members each target a different base by
+  // definition, so grouping them naively yields N single-row headers all
+  // labelled #1). Pure + tested in ./queueGroups.
+  const groups = useMemo(() => buildQueueGroups(queued), [queued]);
 
   const hasSearch = search.trim().length > 0;
 
@@ -188,10 +162,29 @@ export function MergeQueuePanel() {
           {groups.map((g) => (
             <div key={g.key}>
               <div className="sticky top-0 z-[1] flex items-center gap-1.5 border-b bg-muted/60 px-4 py-1.5 text-xs font-medium text-muted-foreground">
-                <GitMerge className="h-3.5 w-3.5" />
+                {g.kind === 'stack' ? (
+                  <Layers className="h-3.5 w-3.5" />
+                ) : (
+                  <GitMerge className="h-3.5 w-3.5" />
+                )}
                 {g.owner}/{g.repo}
                 <span className="opacity-60">→</span>
                 {g.base || 'default'}
+                {g.kind === 'stack' && (
+                  <>
+                    <span className="opacity-60">·</span>
+                    <span
+                      title={`These ${g.size} PRs are stacked on each other, so they merge one at a time from the bottom — each waits for a full CI cycle after the one below it lands`}
+                    >
+                      stack of {g.size}
+                    </span>
+                    {g.stalledAt && (
+                      <span className="ml-auto text-amber-700 dark:text-amber-400">
+                        Stalled at #{g.stalledAt.number}
+                      </span>
+                    )}
+                  </>
+                )}
               </div>
               <PRTable
                 rows={g.rows}
@@ -202,6 +195,7 @@ export function MergeQueuePanel() {
                 onOpenTask={actions.openTask}
                 onMerge={actions.mergeRow}
                 onSetMergeQueue={actions.setMergeQueue}
+                onSetMergeQueueStack={actions.setMergeQueueStack}
                 onCreatePostHogTask={actions.createPostHogTask}
                 onRunSkill={actions.runSkillTask}
                 taskAsk={actions.taskAsk}

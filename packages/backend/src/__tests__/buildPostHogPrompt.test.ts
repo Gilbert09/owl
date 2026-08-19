@@ -207,6 +207,51 @@ describe('buildMergeablePrompt — re-sign section (signed-commits repos)', () =
   });
 });
 
+/**
+ * The merge stack's squash escape hatch. When a stack's parent SQUASH-merges,
+ * the base gets one new commit but the child's branch still carries the
+ * parent's originals — so "merge the base in" either conflicts or leaves the
+ * parent's changes showing in the child's diff. Talyn has no checkout and
+ * cannot rebase; the run it dispatches can, but only if the prompt says so.
+ */
+describe('buildMergeablePrompt — retargeted stack member', () => {
+  it('is absent by default', () => {
+    for (const provider of ['posthog_code', 'claude_code'] as CloudProviderType[]) {
+      const prompt = buildMergeablePrompt({
+        owner: 'acme', repo: 'widgets', number: 7, summary, provider,
+      });
+      expect(prompt).not.toMatch(/part of a stack/i);
+    }
+  });
+
+  it('names the parent, the new base, and prefers a rebase over a base merge', () => {
+    for (const provider of ['posthog_code', 'claude_code'] as CloudProviderType[]) {
+      const prompt = buildMergeablePrompt({
+        owner: 'acme', repo: 'widgets', number: 7, provider,
+        summary: { ...summary, baseBranch: 'develop' } as PRMergeableSummary,
+        retargetedOnto: { base: 'develop', parentNumber: 41 },
+      });
+      expect(prompt).toMatch(/part of a stack/i);
+      expect(prompt).toContain('#41');
+      expect(prompt).toContain('develop');
+      expect(prompt).toMatch(/squash/i);
+      expect(prompt).toMatch(/rebas/i);
+      // The outcome that actually matters to the reviewer of the child PR.
+      expect(prompt).toMatch(/ONLY its own changes/);
+    }
+  });
+
+  it('composes with the re-sign section rather than replacing it', () => {
+    const prompt = buildMergeablePrompt({
+      owner: 'acme', repo: 'widgets', number: 7, provider: 'posthog_code', summary,
+      resignCommits: true,
+      retargetedOnto: { base: 'main', parentNumber: 41 },
+    });
+    expect(prompt.toLowerCase()).toContain('unsigned');
+    expect(prompt).toMatch(/part of a stack/i);
+  });
+});
+
 describe('prHasFixableIssues vs prNeedsFollowup (manual button vs auto-fire)', () => {
   const base: PRMergeableSummary = {
     url: 'https://github.com/acme/app/pull/1',

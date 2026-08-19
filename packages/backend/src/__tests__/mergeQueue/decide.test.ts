@@ -16,6 +16,7 @@ import {
   queueSignature,
   unsignedCommitsBlockReason,
 } from '../../services/mergeQueue/decide.js';
+import { MAX_INFRA_SUBMITS_PER_HEAD } from '../../services/mergeQueue/types.js';
 import type {
   Action,
   Decision,
@@ -1349,6 +1350,33 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(lastTransition(d)!.set?.submitAttempts).toBeUndefined();
     });
 
+    // PostHog/posthog#84433: trunk had the PR ("✨ Submitted to Merge by
+    // talyn-app[bot]"), but it had also REWRITTEN its instruction comment to say
+    // so — which closed the command door, and with no submit label and no
+    // auto-merge on a gated branch, every door was shut. The PR was reported as
+    // needing manual intervention while sitting healthily in the queue.
+    it('tracks the queue instead of blocking when the provider already has the PR', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({
+          externalGate: 'confirmed',
+          submitOutcome: {
+            kind: 'already_submitted',
+            state: 'queued',
+            evidence: '✨ Submitted to Merge by talyn-app[bot]',
+          },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_external');
+      expect(t.set?.externalState).toBe('queued');
+      expect(t.event.code).toBe('external_already_submitted');
+      expect(t.blockedCode).toBeNull();
+      expect(kinds(d)).not.toContain('notify_blocked');
+      expect(d.verdict).toBe('advance');
+    });
+
     it('blocks manually only when nothing can submit the PR', () => {
       const d = decide(
         entry(),
@@ -1719,6 +1747,91 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).toContain('submit_external');
     });
 
+    // PostHog/posthog#85338 + #85284: trunk's queue run died in "Apply postgres
+    // and clickhouse migrations and setup dev" with "failed to bind host port
+    // for 0.0.0.0:50052 … address already in use". The tests never ran, both
+    // PRs were green on their own branches, and nothing a cloud agent could
+    // write would have changed the outcome.
+    describe('a queue run that died on CI infrastructure', () => {
+      const infra = {
+        kind: 'infrastructure' as const,
+        detail: 'the "Apply postgres and clickhouse migrations and setup dev" step failed',
+      };
+
+      it('resubmits instead of spending a fix run', () => {
+        const d = decide(
+          commented(longAgo, { submitAttempts: 1 }),
+          cleanPr(),
+          ctx({
+            externalGate: 'confirmed',
+            externalQueue: observed('failed'),
+            externalFailure: infra,
+          })
+        );
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('queued');
+        expect(t.event.code).toBe('external_queue_infra_failure');
+        expect(kinds(d)).toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+        expect(kinds(d)).not.toContain('notify_blocked');
+        // The signature must NOT be recorded: an infrastructure death is not a
+        // reason this PR can defeat, and recording it would make a LATER real
+        // failure look like a repeat.
+        expect(t.set?.seenSignatures).toBeUndefined();
+      });
+
+      it('keeps resubmitting when the same infrastructure failure repeats', () => {
+        const failed = observed('failed');
+        const d = decide(
+          commented(longAgo, { submitAttempts: 2, seenSignatures: [queueSignature(failed)] }),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: failed, externalFailure: infra })
+        );
+        expect(lastTransition(d)!.event.code).toBe('external_queue_infra_failure');
+        expect(kinds(d)).toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+      });
+
+      it('stops once this head has spent its infrastructure budget', () => {
+        const d = decide(
+          commented(longAgo, { submitAttempts: MAX_INFRA_SUBMITS_PER_HEAD }),
+          cleanPr(),
+          ctx({
+            externalGate: 'confirmed',
+            externalQueue: observed('failed'),
+            externalFailure: infra,
+          })
+        );
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('blocked');
+        expect(t.blockedCode).toBe('external_queue_rejected');
+        // The reason must not read like the PR broke something.
+        expect(t.blockedReason).toContain('infrastructure');
+        expect(t.blockedReason).toContain('nothing here to fix');
+        expect(kinds(d)).toContain('notify_blocked');
+        expect(kinds(d)).not.toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+      });
+
+      it.each([['unknown'], [null]] as const)(
+        'leaves an ordinary queue failure alone when the verdict is %s',
+        (kind) => {
+          const failed = observed('failed');
+          const d = decide(
+            commented(longAgo, { seenSignatures: [queueSignature(failed)] }),
+            cleanPr(),
+            ctx({
+              externalGate: 'confirmed',
+              externalQueue: failed,
+              externalFailure: kind === null ? null : { kind, detail: '' },
+            })
+          );
+          // Unchanged behaviour: a repeat of a real failure escalates.
+          expect(lastTransition(d)!.event.code).not.toBe('external_queue_infra_failure');
+        }
+      );
+    });
+
     it('blocks an `ejected` PR only once the SAME ejection repeats', () => {
       const ejected = observed('ejected');
       const d = decide(
@@ -1989,6 +2102,142 @@ describe('decide — invariants', () => {
     for (const [, e, p, c] of scenarios) {
       expect(decide(e, p, c)).toEqual(decide(e, p, c));
     }
+  });
+});
+
+// R8b — the visual-review gate. Visual Review holds the check red until a
+// PERSON approves each changed snapshot, so a fix run can never green it. Left
+// to the ordinary rules the queue deadlocks: the run pushes a commit, CI
+// re-runs, the fresh run carries the same unapproved diffs
+// (PostHog/posthog#83850 went round 11 times in two days).
+describe('decide — visual review gate', () => {
+  const vr = (o: Partial<NonNullable<DecisionContext['visualReview']>> = {}) => ({
+    runId: 'run-1',
+    url: 'https://us.posthog.com/project/2/visual_review/runs/run-1',
+    changed: 4,
+    autoApprove: false,
+    ...o,
+  });
+  /** Red required check — what a VR-gated PR actually looks like to us. */
+  const gatedPr = () =>
+    pr(
+      { mergeStateStatus: 'BLOCKED' },
+      { blockingReason: 'checks_failed', checks: { total: 280, failed: 2, inProgress: 0 } }
+    );
+
+  it('parks instead of firing a doomed fix run when auto-approve is off', () => {
+    const d = decide(entry(), gatedPr(), ctx({ visualReview: vr() }));
+    const t = lastTransition(d)!;
+    expect(t.to).toBe('blocked');
+    expect(t.blockedCode).toBe('awaiting_human_check');
+    expect(t.blockedReason).toContain('4 snapshot(s) changed');
+    expect(t.blockedReason).toContain('visual_review/runs/run-1');
+    expect(kinds(d)).toContain('notify_blocked');
+    expect(kinds(d)).not.toContain('fire_fix_run');
+  });
+
+  it('does not re-notify or churn while already parked', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check' }),
+      gatedPr(),
+      ctx({ visualReview: vr() })
+    );
+    expect(d.actions).toEqual([]);
+  });
+
+  it('releases the park when nothing is gating any more', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check', blockedReason: 'x' }),
+      gatedPr(),
+      ctx({ visualReview: null })
+    );
+    const t = transitions(d).find((x) => x.event.code === 'human_check_cleared')!;
+    expect(t.to).toBe('queued');
+    expect(t.blockedCode).toBeNull();
+  });
+
+  // A LOOKUP FAILURE must not read as "nothing is gating" — that would un-park
+  // every gated PR on a PostHog blip and start the loop again.
+  it('leaves a parked entry alone when the gate was not resolved at all', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check' }),
+      gatedPr(),
+      ctx({ visualReview: undefined })
+    );
+    expect(transitions(d).map((t) => t.event.code)).not.toContain('human_check_cleared');
+  });
+
+  describe('auto-approve opted in', () => {
+    it('finalizes the run rather than parking or firing a fix run', () => {
+      const d = decide(entry(), gatedPr(), ctx({ visualReview: vr({ autoApprove: true }) }));
+      expect(d.actions).toEqual([
+        { kind: 'resolve_visual_review', runId: 'run-1', url: vr().url, changed: 4 },
+      ]);
+      expect(d.verdict).toBe('hold');
+    });
+
+    it('waits for CI once the baseline is committed', () => {
+      const d = decide(
+        entry(),
+        gatedPr(),
+        ctx({
+          visualReview: vr({ autoApprove: true }),
+          visualReviewOutcome: { kind: 'finalized' },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_ci');
+      expect(t.event.code).toBe('visual_review_finalized');
+      expect(kinds(d)).toContain('refresh_snapshot');
+    });
+
+    it.each([['superseded'], ['retry']] as const)(
+      'burns nothing on a %s outcome — the next evaluation retries',
+      (kind) => {
+        const d = decide(
+          entry({ status: 'queued' }),
+          gatedPr(),
+          ctx({
+            visualReview: vr({ autoApprove: true }),
+            visualReviewOutcome:
+              kind === 'retry' ? { kind, message: 'rate limited' } : { kind },
+          })
+        );
+        expect(kinds(d)).not.toContain('fire_fix_run');
+        expect(lastTransition(d)?.to).not.toBe('blocked');
+      }
+    );
+
+    it('parks with the reason when finalizing is refused outright', () => {
+      const d = decide(
+        entry(),
+        gatedPr(),
+        ctx({
+          visualReview: vr({ autoApprove: true }),
+          visualReviewOutcome: { kind: 'error', message: 'needs visual_review:write' },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('awaiting_human_check');
+      expect(t.blockedReason).toContain('needs visual_review:write');
+      expect(kinds(d)).toContain('notify_blocked');
+    });
+  });
+
+  // The gate must be reachable from a PR the progress rule already gave up on,
+  // or a PR that looped before this shipped can never be un-stuck.
+  it('is reached even when the entry is already blocked on no_progress', () => {
+    const d = decide(
+      entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        seenSignatures: [blockerSignature(gatedPr())],
+      }),
+      gatedPr(),
+      ctx({ visualReview: vr({ autoApprove: true }) })
+    );
+    expect(kinds(d)).toContain('resolve_visual_review');
   });
 });
 

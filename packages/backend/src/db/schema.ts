@@ -663,10 +663,13 @@ export const mergeQueueEntries = pgTable(
     fixTaskAccounted: boolean('fix_task_accounted').notNull().default(true),
     fixKind: text('fix_kind'), // 'blockers' | 'resign'
     /**
-     * Merge stack: the PR this entry is parked behind (`awaiting_stack`).
-     * Display only — it feeds the badge's "Waiting for #123". The parent EDGE
-     * is derived per evaluation from the summary jsonb, never persisted; a
-     * stored edge would rot exactly the way base_branch did.
+     * Merge stack: the PR this entry is — or was — stacked on. Set when the
+     * entry parks in `awaiting_stack` (it feeds the badge's "Waiting for
+     * #123") and KEPT through the retarget, where it becomes the record of
+     * which PR's commits this branch may still redundantly carry after a
+     * squash-merge. Never read to make a decision. The parent EDGE is derived
+     * per evaluation from the summary jsonb, never persisted; a stored edge
+     * would rot exactly the way base_branch did.
      */
     stackParentNumber: integer('stack_parent_number'),
     /**

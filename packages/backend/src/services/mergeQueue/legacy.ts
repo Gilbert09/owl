@@ -21,7 +21,8 @@ export function toLegacyStatus(status: EntryStatus): LegacyQueueStatus {
       return 'blocked';
     default:
       // queued / awaiting_ci / awaiting_review / automerge_armed /
-      // awaiting_external — all "waiting" to a v1-era desktop.
+      // awaiting_external / awaiting_stack — all "waiting" to a v1-era
+      // desktop, which is correct for every one of them.
       return 'waiting';
   }
 }
@@ -76,6 +77,10 @@ export function toPublicMergeQueue(
     autoMerge: entry.automergeArmedBy
       ? { armed: true, armedBy: entry.automergeArmedBy }
       : { armed: false },
+    /** Merge stack: the PR this one is, or was, stacked on. The client derives
+     *  stack membership itself from the open rows' branches; this is the piece
+     *  it can't — the parent of a PR already retargeted off that branch. */
+    stackParentNumber: entry.stackParentNumber ?? undefined,
     /** External merge queue (trunk.io / GitHub native): how the PR was handed
      *  over, how many submissions this head has spent, and where the provider
      *  itself says the PR is. `state` is the authoritative channel — read off

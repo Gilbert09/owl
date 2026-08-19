@@ -13,13 +13,19 @@
 // is ground truth that must never be lost to a version race).
 
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { buildMergeablePrompt, type PRMergeableSummary } from '@talyn/shared';
+import {
+  buildMergeablePrompt,
+  prNeedsFollowup,
+  type PRMergeableSummary,
+  type VisualReviewSettings,
+} from '@talyn/shared';
 import { getDbClient } from '../../db/client.js';
 import {
   mergeQueueEntries,
   mergeQueueEvents,
   pullRequests as pullRequestsTable,
   tasks as tasksTable,
+  workspaces as workspacesTable,
 } from '../../db/schema.js';
 import { githubService, MergeNotPermittedForAppError } from '../github.js';
 import { fetchUnsignedCommitCount } from '../githubGraphql.js';
@@ -33,6 +39,11 @@ import {
 } from '../repoMergeGate.js';
 import { submitToExternalQueue } from '../externalQueueSubmit.js';
 import { readExternalQueueState } from '../externalQueueState.js';
+import { classifyExternalQueueFailure } from '../externalQueueFailure.js';
+import {
+  finalizeRun as finalizeVisualReviewRun,
+  gatingRunForPr as gatingVisualReviewRun,
+} from '../visualReview.js';
 import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
@@ -68,6 +79,7 @@ import {
   type PrSnapshot,
   type RerunOutcome,
   type SubmitOutcome,
+  type VisualReviewContext,
 } from './types.js';
 
 // Only the pull_requests columns an evaluation touches (egress rules — never
@@ -133,11 +145,62 @@ export function buildPrSnapshot(pr: PrEvalRow): PrSnapshot {
       blockingReason: summary.blockingReason ?? 'unknown',
       checks: summary.checks ?? { total: 0, failed: 0, inProgress: 0 },
       unresolvedReviewThreads: summary.unresolvedReviewThreads ?? 0,
+      // Identity of the failing-check SET — what lets `blockerSignature` tell
+      // "fixed one, uncovered another" from "changed nothing". Left undefined
+      // (never '') on summaries cached before it shipped: '' would claim
+      // "nothing failing" and make two different failures look identical.
+      failingChecksDigest: summary.failingChecksDigest,
       draft: summary.draft,
       // Load-bearing for external merge queues: trunk.io reports a submitted
       // PR's state ONLY as labels, so decide can't see the queue without them.
       labels: summary.labels ?? [],
     },
+  };
+}
+
+/**
+ * The workspace's visual-review settings. Absent reads as OFF: finalizing
+ * rewrites a committed baseline, so the queue must never do it because a
+ * settings row happened to be missing.
+ */
+async function visualReviewSettings(workspaceId: string): Promise<VisualReviewSettings> {
+  const rows = await getDbClient()
+    .select({ settings: workspacesTable.settings })
+    .from(workspacesTable)
+    .where(eq(workspacesTable.id, workspaceId))
+    .limit(1);
+  const settings = (rows[0]?.settings ?? {}) as { visualReview?: VisualReviewSettings };
+  return settings.visualReview ?? {};
+}
+
+/**
+ * Resolve the visual-review gate for a PR, or undefined when the question does
+ * not apply (no PostHog credentials, lookup refused). `null` is a real answer —
+ * "asked, nothing is gating" — and is what releases a parked entry.
+ */
+async function resolveVisualReviewContext(
+  pr: PrEvalRow
+): Promise<VisualReviewContext | null | undefined> {
+  const settings = await visualReviewSettings(pr.workspaceId);
+  // No `visualReview` settings at all = never ask. Without this the queue would
+  // round-trip to PostHog for every blocked PR in every workspace that has
+  // PostHog credentials — including the great majority of repos that have no
+  // visual review and never will. Configuring the setting (even just
+  // `{ autoApprove: false }`) is what turns the lookup on.
+  if (Object.keys(settings).length === 0) return undefined;
+  const summary = (pr.lastSummary ?? {}) as { headSha?: string };
+  const run = await gatingVisualReviewRun(
+    pr.workspaceId,
+    pr.number,
+    summary.headSha ?? '',
+    settings.projectId
+  );
+  if (run === null) return null;
+  return {
+    runId: run.id,
+    url: run.url,
+    changed: run.changed + run.newCount,
+    autoApprove: settings.autoApprove === true,
   };
 }
 
@@ -222,7 +285,36 @@ async function buildBaseContext(
           pr.number,
           externalMaxAge
         ).catch(() => null);
+  // WHY did the queue's run fail? Only asked when it actually failed and the
+  // provider linked the run, and memoised per job — so this is one REST call per
+  // ejection, not one per evaluation. `null` (not asked / GitHub wouldn't say)
+  // reads exactly like `unknown`: the failure is treated as real.
+  const externalFailure =
+    externalQueue?.state === 'failed'
+      ? await classifyExternalQueueFailure(
+          pr.workspaceId,
+          pr.owner,
+          pr.repo,
+          externalQueue.failureUrl
+        ).catch(() => null)
+      : undefined;
+  // Is a visual-review gate holding this PR? Asked ONLY when the PR has a
+  // settled blocker (a green PR is not gated by anything) and the workspace has
+  // PostHog credentials — otherwise this would be a PostHog round-trip on every
+  // evaluation of every PR in every repo.
+  const visualReview = prNeedsFollowup(pr.lastSummary as PRMergeableSummary)
+    ? await resolveVisualReviewContext(pr).catch((err) => {
+        console.warn(
+          `[mergeQueueV2] visual-review lookup failed for ${pr.owner}/${pr.repo}#${pr.number}:`,
+          err instanceof Error ? err.message : err
+        );
+        // Undefined = "not asked", so decide leaves the gate alone rather than
+        // reading a lookup failure as "nothing is gating" and un-parking a PR.
+        return undefined;
+      })
+    : undefined;
   return {
+    visualReview,
     nowIso: new Date().toISOString(),
     isHead: input.isHead,
     groupMergeInFlight: input.groupMergeInFlight,
@@ -233,6 +325,7 @@ async function buildBaseContext(
     autoMergeCapability,
     externalGate,
     ...(externalQueue !== undefined ? { externalQueue } : {}),
+    ...(externalFailure !== undefined ? { externalFailure } : {}),
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),
@@ -373,6 +466,8 @@ async function performAction(action: Action, ctx: ActionContext): Promise<Action
       ctx.extras.rerunOutcome = await rerequestFailedChecks(ctx.pr);
       return { redecide: true };
     }
+    case 'resolve_visual_review':
+      return resolveVisualReview(action, ctx);
     case 'update_branch': {
       ctx.extras.updateBranchOutcome = await githubService.updatePullRequestBranch(
         ctx.pr.workspaceId,
@@ -495,6 +590,19 @@ async function submitExternal(ctx: ActionContext): Promise<ActionOutcome> {
         detail: attempt.command ?? attempt.label,
       });
     }
+    case 'already_submitted':
+      debugBus.recordEvent({
+        service: 'merge_queue',
+        action: 'external-queue:already-submitted',
+        summary: `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} is already ${attempt.state} in the queue`,
+        workspaceId: ctx.pr.workspaceId,
+        meta: { entryId: ctx.entry.id, state: attempt.state },
+      });
+      return settle({
+        kind: 'already_submitted',
+        state: attempt.state,
+        evidence: attempt.evidence,
+      });
     case 'clean_status':
       return settle({ kind: 'try_direct_merge' });
     case 'no_mechanism':
@@ -897,7 +1005,12 @@ async function retargetBase(
     status: 'queued',
     blockedCode: null,
     blockedReason: null,
-    stackParentNumber: null,
+    // Recorded HERE, not merely kept: a child whose parent merges before the
+    // child is ever evaluated never parks, so it would otherwise have no
+    // record of what it was stacked on. From here it reads "the PR this one
+    // was stacked on" — which is what tells a later fix run that this branch
+    // may still carry that PR's original commits after a squash-merge.
+    stackParentNumber: action.parentNumber,
     retargetAttempts: entry.retargetAttempts + 1,
     // The PR faces a genuinely different base with genuinely different
     // problems; attempts spent fighting the old one shouldn't count. Same
@@ -957,7 +1070,7 @@ async function retargetBase(
       status: 'queued',
       blockedCode: null,
       blockedReason: null,
-      stackParentNumber: null,
+      stackParentNumber: action.parentNumber,
       retargetAttempts: entry.retargetAttempts + 1,
     },
   };
@@ -1030,6 +1143,40 @@ async function verifyLiveThenMerge(ctx: ActionContext): Promise<ActionOutcome> {
   // The merging transition consumed one CAS version; the merge itself writes
   // no entry state (the aftermath rules do, next round).
   return { entry, versionDelta: 1, redecide: true };
+}
+
+/**
+ * Clear a visual-review gate by finalizing its run.
+ *
+ * The one action in the queue that ships a change to someone's branch without a
+ * cloud run behind it: finalize approves every pending diff and commits a new
+ * baseline. Reached only when the workspace set `visualReview.autoApprove`.
+ *
+ * Every outcome is folded back into `extras` and redecided rather than written
+ * here — the aftermath (wait for CI / retry / block) is a decision, and
+ * decisions live in `decide`.
+ */
+async function resolveVisualReview(
+  action: Extract<Action, { kind: 'resolve_visual_review' }>,
+  ctx: ActionContext
+): Promise<ActionOutcome> {
+  const projectId = (await visualReviewSettings(ctx.pr.workspaceId)).projectId;
+  const outcome = await finalizeVisualReviewRun(ctx.pr.workspaceId, action.runId, projectId);
+  ctx.extras.visualReviewOutcome =
+    outcome.kind === 'finalized'
+      ? { kind: 'finalized' }
+      : outcome.kind === 'stale' || outcome.kind === 'sha_mismatch'
+        ? { kind: 'superseded' }
+        : outcome.kind === 'retry'
+          ? { kind: 'retry', message: outcome.message }
+          : { kind: 'error', message: outcome.message };
+  if (outcome.kind === 'finalized') {
+    console.log(
+      `[mergeQueueV2] finalized visual review ${action.runId} for ` +
+        `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} (${action.changed} snapshot(s))`
+    );
+  }
+  return { redecide: true };
 }
 
 async function rerequestFailedChecks(pr: PrEvalRow): Promise<RerunOutcome> {
@@ -1131,6 +1278,18 @@ async function fireFixRun(
         // Starts the run at the provider's failure output rather than the PR's
         // own (green) checks — see queueFailureRule.
         queueFailure,
+        // The squash escape hatch. This entry was retargeted after the PR it
+        // was stacked on merged, so its branch may still carry that PR's
+        // original commits — a plain base merge conflicts or re-shows them.
+        // Only an agent with a checkout can rebase them away.
+        ...(ctx.entry.retargetAttempts > 0 && ctx.entry.stackParentNumber !== null
+          ? {
+              retargetedOnto: {
+                base: summary.baseBranch,
+                parentNumber: ctx.entry.stackParentNumber,
+              },
+            }
+          : {}),
         template: await workspacePromptTemplate(ctx.pr.workspaceId, 'mergeable'),
       }),
       repositoryId: ctx.pr.repositoryId,

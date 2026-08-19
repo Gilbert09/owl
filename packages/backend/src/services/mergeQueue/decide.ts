@@ -24,7 +24,7 @@ import {
   type ExternalQueueStatus,
   type PRMergeableSummary,
 } from '@talyn/shared';
-import { MAX_RETARGETS } from './types.js';
+import { MAX_INFRA_SUBMITS_PER_HEAD, MAX_RETARGETS } from './types.js';
 import type {
   Action,
   BlockedCode,
@@ -34,6 +34,7 @@ import type {
   EntryStatus,
   EventDraft,
   PrSnapshot,
+  VisualReviewContext,
 } from './types.js';
 import type { StackParent } from './stack.js';
 
@@ -46,6 +47,25 @@ export const EXTERNAL_GATE_BLOCK_REASON =
   'and there is no way to submit the PR to it automatically: the repo refuses ' +
   'GitHub auto-merge and defines no submit label. Merge it through that system, ' +
   'or remove it from the queue.';
+
+/**
+ * The queue's runner kept dying on this head. Says so plainly: the PR is not
+ * the problem, and the next move belongs to whoever owns the CI, not to the
+ * author staring at a green branch.
+ */
+export function externalQueueInfraReason(
+  status: ExternalQueueStatus,
+  detail: string,
+  attempts: number
+): string {
+  const provider = externalQueueProviderLabel(status.provider);
+  return (
+    `${provider}'s merge queue failed this PR ${attempts} time(s) on its own CI ` +
+    `infrastructure, not on anything in this PR (${detail}). Its checks are green ` +
+    `on the branch, so there is nothing here to fix — re-queue it once the CI ` +
+    `runners are healthy.`
+  );
+}
 
 export function externalQueueRejectedReason(status: ExternalQueueStatus): string {
   const provider = externalQueueProviderLabel(status.provider);
@@ -863,6 +883,34 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     if (justBlocked) d.act({ kind: 'notify_blocked' });
   }
 
+  // R8b — a check only a PERSON can clear. PostHog Visual Review diffs
+  // screenshots against committed baselines and holds the gate red until
+  // someone approves each change, so no code a fix run can write will ever
+  // green it. Left to the ordinary rules it deadlocks: the run pushes a commit,
+  // the commit triggers fresh CI, the fresh run carries the SAME unapproved
+  // diffs (PostHog/posthog#83850 went round 11 times in two days).
+  //
+  // Placed AFTER R8 so a finished run is still accounted, and BEFORE R9 so an
+  // entry already parked on `no_progress` or `awaiting_human_check` can still
+  // be released by this — otherwise the blocked gate returns first and the PR
+  // can never be un-stuck without a human.
+  if (ctx.visualReview !== undefined && ctx.visualReview !== null) {
+    const verdict = decideVisualReview(d, ctx.visualReview, ctx);
+    if (verdict) return verdict;
+  } else if (ctx.visualReview === null && d.entry.blockedCode === 'awaiting_human_check') {
+    // Nothing is gating any more — approved by hand, superseded, or the check
+    // went green. Same shape as the stack self-heal: the verdict was derived
+    // from a live reading, so it dies with the reading.
+    d.transition('queued', {
+      blockedCode: null,
+      blockedReason: null,
+      event: {
+        code: 'human_check_cleared',
+        message: 'The visual review gate is no longer holding this PR — back in line.',
+      },
+    });
+  }
+
   // R9 — blocked gates.
   if (d.entry.status === 'blocked_manual') {
     // Truly manual: GitHub refused the App with no failing check to blame.
@@ -1169,6 +1217,61 @@ function decideExternalEjection(
   // PR's problems, and keeps its resubmits.
   const signature = queueSignature(ext);
   const recurred = signatureSeen(d.entry, signature);
+
+  // The queue's own run died on INFRASTRUCTURE — it never reached a test, so
+  // the failure is not about this PR at all (its checks are green on its
+  // branch). Neither of the two responses below fits: the recurrence rule reads
+  // a repeat as evidence the PR is at fault, and a fix run would spend a cloud
+  // agent on a runner it cannot touch. The remedy for a broken runner is to go
+  // round again, so that is what this does — bounded per head, because a runner
+  // that is broken for good must eventually reach a human.
+  if (ext.state === 'failed' && ctx.externalFailure?.kind === 'infrastructure') {
+    const detail = ctx.externalFailure.detail;
+    if (d.entry.submitAttempts < MAX_INFRA_SUBMITS_PER_HEAD) {
+      // The signature is deliberately NOT recorded: it is not a reason this PR
+      // can defeat, and recording it would make the NEXT failure — possibly a
+      // real one — look like a repeat.
+      d.transition('queued', {
+        set: {
+          externalSubmitVia: null,
+          externalSubmittedAt: null,
+          externalState: ext.state,
+        },
+        event: {
+          code: 'external_queue_infra_failure',
+          message:
+            `${provider}'s queue run failed on CI infrastructure, not on this PR ` +
+            `(${detail}) — resubmitting.`,
+          detail: {
+            evidence: ext.evidence,
+            source: ext.source,
+            attempts: d.entry.submitAttempts,
+            failure: detail,
+          },
+        },
+      });
+      return null;
+    }
+    d.transition('blocked', {
+      blockedCode: 'external_queue_rejected',
+      blockedReason: externalQueueInfraReason(ext, detail, d.entry.submitAttempts),
+      set: {
+        externalSubmitVia: null,
+        externalSubmittedAt: null,
+        externalState: ext.state,
+      },
+      event: {
+        code: 'external_queue_infra_exhausted',
+        message:
+          `${provider}'s queue kept dying on CI infrastructure (${detail}) across ` +
+          `${d.entry.submitAttempts} submissions of this commit — stopping until the runners are fixed.`,
+        detail: { evidence: ext.evidence, source: ext.source, failure: detail },
+      },
+    });
+    d.act({ kind: 'notify_blocked' });
+    return d.done('advance');
+  }
+
   if (ext.state === 'cancelled' || recurred) {
     // A queue FAILURE on a locally-clean PR is fixable — it just needs a
     // different starting point.
@@ -1263,6 +1366,93 @@ function decideExternalEjection(
   return null;
 }
 
+/**
+ * R8b's body — the visual-review gate.
+ *
+ * Returns a Decision when the gate owns this evaluation, or null to fall
+ * through (the gate is handled and other blockers still deserve the ordinary
+ * rules).
+ */
+function decideVisualReview(
+  d: DecisionBuilder,
+  vr: VisualReviewContext,
+  ctx: DecisionContext
+): Decision | null {
+  const outcome = ctx.visualReviewOutcome;
+  if (outcome) {
+    if (outcome.kind === 'finalized') {
+      // The baseline is committed and the gate is green. CI re-runs off the
+      // new commit, so wait for it rather than racing a merge against a
+      // check that has not reported yet.
+      d.transition('awaiting_ci', {
+        blockedCode: null,
+        blockedReason: null,
+        event: {
+          code: 'visual_review_finalized',
+          message: `Approved ${vr.changed} visual-review snapshot(s) and committed the baseline — waiting for checks.`,
+          detail: { runId: vr.runId, url: vr.url },
+        },
+      });
+      d.act({ kind: 'refresh_snapshot' });
+      return d.done('advance');
+    }
+    if (outcome.kind === 'superseded') {
+      // A newer run, or newer commits. Ordinary on an active branch — the next
+      // evaluation resolves the current run and tries again. Burn nothing.
+      d.ensure('queued');
+      return d.done('advance');
+    }
+    if (outcome.kind === 'retry') {
+      d.ensure('queued');
+      return d.done('advance');
+    }
+    // Terminal for this head — a missing scope or a refused commit. Say
+    // exactly what it was; this one is almost always a configuration answer.
+    if (d.entry.blockedCode !== 'awaiting_human_check') {
+      d.transition('blocked', {
+        blockedCode: 'awaiting_human_check',
+        blockedReason: `${visualReviewReason(vr)} Talyn tried to approve it and could not: ${outcome.message}`,
+        event: {
+          code: 'visual_review_failed',
+          message: `Finalizing the visual review failed: ${outcome.message}`,
+          detail: { runId: vr.runId, url: vr.url },
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+    }
+    return d.done('advance');
+  }
+
+  if (vr.autoApprove) {
+    d.act({ kind: 'resolve_visual_review', runId: vr.runId, url: vr.url, changed: vr.changed });
+    return d.done('hold');
+  }
+
+  // Not opted in: park and name the run. Fire-once, so re-evaluating a parked
+  // PR is silent. `blocked` rather than `blocked_manual` — the check going
+  // green self-heals it, no requeue needed.
+  if (d.entry.blockedCode !== 'awaiting_human_check') {
+    d.transition('blocked', {
+      blockedCode: 'awaiting_human_check',
+      blockedReason: visualReviewReason(vr),
+      event: {
+        code: 'awaiting_visual_review',
+        message: `Waiting on a human to review ${vr.changed} visual-review snapshot(s).`,
+        detail: { runId: vr.runId, url: vr.url },
+      },
+    });
+    d.act({ kind: 'notify_blocked' });
+  }
+  return d.done('advance');
+}
+
+function visualReviewReason(vr: VisualReviewContext): string {
+  return (
+    `PostHog Visual Review is holding this PR: ${vr.changed} snapshot(s) changed and need a ` +
+    `person to approve them — no fix run can green that check. Review them at ${vr.url}.`
+  );
+}
+
 /** Aftermath of this evaluation's own external-queue submit (ctx.submitOutcome). */
 function decideSubmitAftermath(
   d: DecisionBuilder,
@@ -1300,6 +1490,22 @@ function decideSubmitAftermath(
           ...(outcome.detail ? { command: outcome.detail } : {}),
           ...(ext ? { providerState: ext.state } : {}),
         },
+      },
+    });
+    return d.done('advance');
+  }
+
+  if (outcome.kind === 'already_submitted') {
+    // Nothing was posted — the provider already had the PR. Track it there,
+    // with what it just said recorded, exactly as a fresh submission would.
+    d.transition('awaiting_external', {
+      blockedCode: null,
+      blockedReason: null,
+      set: { externalState: outcome.state, externalSubmittedAt: ctx.nowIso },
+      event: {
+        code: 'external_already_submitted',
+        message: `The external merge queue already has this PR (${outcome.evidence}) — tracking it there.`,
+        detail: { state: outcome.state, evidence: outcome.evidence },
       },
     });
     return d.done('advance');
