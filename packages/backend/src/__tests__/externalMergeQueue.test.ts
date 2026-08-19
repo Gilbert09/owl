@@ -16,6 +16,7 @@ import {
   externalQueueStatusFromLabels,
   isExternalQueueEjected,
   isExternalQueueHolding,
+  externalQueuePushWouldEject,
   isExternalQueueSubmitLabel,
   TRUNK_SUBMIT_LABELS,
 } from '@talyn/shared';
@@ -116,6 +117,29 @@ describe('externalQueueStatusFromLabels', () => {
   ] as const)('isExternalQueueHolding(%s) === %s', (state, holding) => {
     expect(isExternalQueueHolding(state)).toBe(holding);
   });
+
+  // Narrower than "holding" by exactly one state, and that state is the whole
+  // point: in `not_ready` trunk has the submission but has NOT queued the PR,
+  // so there is no cycle for a push to destroy — and the branch protection it
+  // is waiting on is what a fix run produces. Treating it as untouchable
+  // deadlocked PostHog/posthog#84450 for 9½ hours.
+  it.each([
+    ['queued', true],
+    ['testing', true],
+    ['passed', true],
+    ['not_ready', false],
+    ['failed', false],
+    ['ejected', false],
+    ['cancelled', false],
+    ['merged', false],
+    ['not_submitted', false],
+    ['rejected', false],
+  ] as const)('externalQueuePushWouldEject(%s) === %s', (state, wouldEject) => {
+    expect(externalQueuePushWouldEject(state)).toBe(wouldEject);
+    // Anything a push would eject must also be a state the provider holds —
+    // otherwise the two predicates disagree about who owns the PR.
+    if (wouldEject) expect(isExternalQueueHolding(state)).toBe(true);
+  });
 });
 
 // ── The comment channel ──
@@ -146,7 +170,10 @@ describe('externalQueueStatusFromComment — trunk states, as trunk writes them'
       `\u{23F3} Waiting to start tests on this pull request - [details]${LINK}.`],
     ['waiting after a restart', 'queued',
       `\u{23F3} Waiting to start tests on this pull request because its tests were restarted by Tom\u00E1s (a GitHub user) - [details]${LINK}.`],
-    ['submitted', 'queued',
+    // `not_ready`, not `queued`: trunk holds the submission and says outright
+    // that the PR is NOT in the queue yet. That distinction is what decides
+    // whether Talyn may push a fix (see externalQueuePushWouldEject).
+    ['submitted', 'not_ready',
       `\u{2728} Submitted to Merge by @tatoalo. It will be added to the merge queue once all branch protection rules pass and there are no merge conflicts with the target branch. See more details [here]${LINK}.`],
     ['tests passed', 'passed',
       `\u{1F44D} Pull request will be merged soon because tests have passed on [#74640](https://www.github.com/PostHog/posthog/pull/74640) - [details]${LINK}.`],
@@ -579,7 +606,7 @@ describe('submitToExternalQueue', () => {
       listComments.mockResolvedValue([{ body: TRUNK_OWNS_IT }]);
       expect(await submitToExternalQueue(base)).toMatchObject({
         kind: 'already_submitted',
-        state: 'queued',
+        state: 'not_ready',
       });
       expect(comment).not.toHaveBeenCalled();
       expect(addLabels).not.toHaveBeenCalled();

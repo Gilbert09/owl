@@ -2,6 +2,18 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 90 — Trunk waiting on Talyn, Talyn waiting on trunk (2026-08-19)
+
+PostHog/posthog#84450 sat in the merge queue for 9½ hours with three required checks red and nothing happening. No fix run fired, no notification, and the badge said "Queued" — the same thing it says for a PR waiting its turn.
+
+- **The deadlock.** Trunk's comment read "✨ Submitted to Merge … It will be added to the merge queue **once all branch protection rules pass**". The parser mapped that to `queued`, `isExternalQueueHolding('queued')` is true, and R5b stands down on every holding state (Session 87 — a fix run's push ejects a PR trunk is testing, destroying ~40 minutes of CI). So trunk waited for the PR's branch protection to pass, and Talyn refused to fire the run that would make it pass. Neither side could move.
+- **Trunk was saying the opposite of what Talyn read.** "It *will be added* to the merge queue once…" means it holds the SUBMISSION and the PR is not in the queue. That is `not_ready`, and the parser now says so. Nothing is running, no batch exists to eject the PR from, and the branch protection trunk is waiting on is exactly what a fix run produces.
+- **"Has the PR" is not "is working the PR".** `isExternalQueueHolding` answers the first — it decides whether the entry belongs in `awaiting_external`, and `not_ready` still belongs there. The question R5b actually needs is the second, and it is now its own predicate: `externalQueuePushWouldEject` = `queued | testing | passed`. Those are the states where a commit costs the provider real work. `not_ready` falls through to the settled-blocker test instead: remediated when it has a blocker, left waiting when it doesn't.
+- **Session 87's reasoning is intact for the states it was about.** It swept `not_ready` in as part of "every holding state" and its own argument — that a push destroys a test cycle — never applied there. The test that pinned it (`does NOT push at a trunk-not-ready PR`) is now its opposite, with the deadlock spelled out.
+- **No migration.** `merge_queue_entries.external_state` is re-derived from the provider's comment on every evaluation, so the stuck entries re-read as `not_ready` on the next 60s reconciler tick. The desktop already renders that state better than the one it replaces: an amber clock and "trunk's merge queue is holding this PR until it meets the merge requirements", rather than a plain "Queued".
+
+Tests: the parser body (verbatim from #84450), `externalQueuePushWouldEject` across every state with the invariant that anything it flags is also `holding`, the two new decide cases (`not_ready` + blocker → `fire_fix_run`; `not_ready` + clean → wait), and the evaluator end-to-end.
+
 ## Session 89 — A cancelled check is a failure (2026-08-19)
 
 PostHog/posthog#84477 read as green in the panel and to the merge queue, while GitHub showed "4 failing checks" and refused the merge. The counts were not stale — a refresh re-fetched the same data and re-derived the same wrong verdict. The classification was wrong.

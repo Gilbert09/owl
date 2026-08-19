@@ -1436,7 +1436,6 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     // was in — and it fired on the ordinary shape of a reviewed PR, since an
     // unresolved review thread counts as a settled blocker.
     it.each([
-      ['trunk-not-ready'],
       ['trunk-queued'],
       ['trunk-testing'],
       ['trunk-tests-passed'],
@@ -1452,6 +1451,35 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).not.toContain('fire_fix_run');
       expect(kinds(d)).not.toContain('update_branch');
       expect(kinds(d)).not.toContain('submit_external');
+      expect(d.verdict).toBe('advance');
+    });
+
+    // ...but `not_ready` is the one holding state where standing down is a
+    // deadlock, not patience. Trunk has the submission and has NOT added the
+    // PR — "it will be added to the merge queue once all branch protection
+    // rules pass". Nothing is running, so a push ejects nothing, and the branch
+    // protection it is waiting on is exactly what the fix run produces. Read as
+    // a cycle to protect, each side waits for the other: PostHog/posthog#84450
+    // sat here 9½ hours with three required checks red.
+    it('DOES remediate a not_ready PR — trunk is waiting on the blocker', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-not-ready', { mergeStateStatus: 'BLOCKED' }, {
+          blockingReason: 'checks_failed',
+          checks: { total: 10, passed: 7, failed: 3, inProgress: 0, skipped: 0 },
+        }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+    });
+
+    it('leaves a not_ready PR alone when it has no blocker to remediate', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-not-ready'),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(workActions(d)).toEqual([]);
       expect(d.verdict).toBe('advance');
     });
 

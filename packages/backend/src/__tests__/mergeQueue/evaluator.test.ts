@@ -729,7 +729,9 @@ describe('mergeQueue v2 pipeline', () => {
 
       const entry = await entryOf(db, prId);
       expect(entry?.status).toBe('awaiting_external');
-      expect(entry?.externalState).toBe('queued');
+      // `not_ready`, not `queued` — trunk holds the submission and says the PR
+      // is not in the queue yet ("once all branch protection rules pass").
+      expect(entry?.externalState).toBe('not_ready');
       expect(entry?.blockedCode).toBeNull();
       expect(comment).not.toHaveBeenCalled(); // no duplicate `/trunk merge`
       const codes = (await eventsOf(db, entryId)).map((e) => e.code);

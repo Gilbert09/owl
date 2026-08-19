@@ -209,8 +209,18 @@ const TRUNK_STATUS_PATTERNS: Array<{ re: RegExp; state: ExternalQueueState }> = 
   // "⏳ Waiting to start tests on this pull request[ because …]"
   { re: /waiting to start tests/i, state: 'queued' },
   // "✨ Submitted to Merge by @x. It will be added to the merge queue once all
-  //  branch protection rules pass…"
-  { re: /submitted to merge/i, state: 'queued' },
+  //  branch protection rules pass, there are no merge conflicts with the target
+  //  branch, and impacted targets … have been uploaded."
+  //
+  // `not_ready`, not `queued`, and the difference decides whether Talyn may
+  // touch the PR. Trunk is saying it holds the SUBMISSION and the PR is NOT in
+  // the queue — it will add it once the PR's own branch protection passes. So
+  // nothing is being tested, no batch exists to eject the PR from, and the one
+  // thing trunk is waiting for is exactly what a fix run produces. Read as
+  // `queued` it looked like "trunk is working on it", and Talyn stood down on a
+  // PR whose required checks were red — trunk waiting on Talyn, Talyn waiting
+  // on trunk (PostHog/posthog#84450, stuck 9½ hours).
+  { re: /submitted to merge/i, state: 'not_ready' },
   // "GitHub considers this PR to be a part of a stack — … our merge queue will
   //  be unable to merge this PR." Appended to the instruction body, so it must
   //  be read before the checkbox: the box is ticked and nothing will happen.
@@ -488,12 +498,36 @@ export function isExternalQueueEjected(state: ExternalQueueState): boolean {
 }
 
 /**
- * The provider has the PR and is working it — the states where Talyn's only
- * job is to wait. Positive evidence: seeing one is enough to reopen an entry
- * Talyn had given up on (its submit DID land after all).
+ * The provider has the PR — the states that say a submission landed. Positive
+ * evidence: seeing one is enough to reopen an entry Talyn had given up on (its
+ * submit DID land after all), and to keep the entry in `awaiting_external`.
+ *
+ * "Has the PR" is NOT the same as "is working the PR" — see
+ * {@link externalQueuePushWouldEject}.
  */
 export function isExternalQueueHolding(state: ExternalQueueState): boolean {
   return state === 'not_ready' || state === 'queued' || state === 'testing' || state === 'passed';
+}
+
+/**
+ * A commit pushed to the PR right now costs the provider real work.
+ *
+ * This is the question "may Talyn remediate?" actually turns on, and it is
+ * narrower than {@link isExternalQueueHolding}. Trunk ejects on a push
+ * ("removed from the merge queue because it was pushed to by @x"), so from
+ * `queued` (accepted, waiting its turn in the batch line) through `testing` and
+ * `passed`, a fix run destroys a cycle — ~40 minutes of CI at PostHog — to
+ * repair something the provider was already handling.
+ *
+ * `not_ready` is the opposite case, and collapsing the two deadlocked the
+ * queue: trunk holds the submission but has NOT added the PR, and says why —
+ * "it will be added to the merge queue once all branch protection rules pass".
+ * There is no batch to eject from, and the branch protection it is waiting on
+ * is precisely what a fix run exists to satisfy. Standing down there means each
+ * side waits for the other forever (PostHog/posthog#84450).
+ */
+export function externalQueuePushWouldEject(state: ExternalQueueState): boolean {
+  return state === 'queued' || state === 'testing' || state === 'passed';
 }
 
 /**

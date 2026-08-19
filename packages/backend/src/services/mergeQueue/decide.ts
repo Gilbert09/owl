@@ -22,6 +22,7 @@ import {
   isExternalQueueSubmitLabel,
   isExternalQueueEjected,
   isExternalQueueHolding,
+  externalQueuePushWouldEject,
   type ExternalQueueStatus,
   type PRMergeableSummary,
 } from '@talyn/shared';
@@ -732,7 +733,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       // null → requeued for a resubmit; fall through to the normal rules so a
       // PR that came back broken gets remediated before it goes round again.
     } else if (staleEjection || stillSubmitted(d.entry, pr, ctx)) {
-      // In the queue's hands. While the provider is OBSERVED holding the PR,
+      // In the queue's hands. While the provider is OBSERVED WORKING the PR,
       // hands off entirely — including a settled blocker.
       //
       // Remediating one meant firing a cloud run at a PR trunk was testing, and
@@ -748,7 +749,18 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       // it's ready"), and THAT is when remediation is both safe and useful.
       // The old comment's premise — that the provider holds a broken PR
       // forever — is not how trunk behaves.
-      if (staleEjection || (ext && isExternalQueueHolding(ext.state))) return d.done('advance');
+      //
+      // The test is `externalQueuePushWouldEject`, NOT "is holding". Holding
+      // also covers `not_ready`, where trunk has the submission but has not
+      // added the PR and says it is waiting for the PR's own branch protection
+      // to pass. Nothing is running, a push ejects nothing, and the thing trunk
+      // waits for is what the fix run produces — so standing down there is a
+      // real deadlock, and was one for 9½ hours (PostHog/posthog#84450). Such a
+      // PR falls through to the settled-blocker test below: remediated when it
+      // has a blocker to remediate, left waiting when it doesn't.
+      if (staleEjection || (ext && externalQueuePushWouldEject(ext.state))) {
+        return d.done('advance');
+      }
       // No positive observation, only our own record of having submitted (an
       // armed auto-merge, a label, a command inside its grace window). Nothing
       // says a queue is testing this PR right now, so a settled blocker still
