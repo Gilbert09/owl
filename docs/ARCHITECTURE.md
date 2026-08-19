@@ -59,7 +59,7 @@ Primary unit of work, always delegated to a cloud provider. Types: `code_writing
 Lifecycle: `queued` → `in_progress` → `completed` / `failed` / `cancelled`. The cloud poller drives status and ingests the transcript; review happens on the provider's PR (no local approval gate).
 
 ### GitHub / PR core
-The heart of the app: webhook-first PR monitoring (with polling reconciliation as the safety net), a per-workspace PR cache, the prioritized GitHub panel (Needs attention / Mine / Review, stacked PRs), the merge queue (auto-fix runs for conflicts/failed checks, bounded check re-runs and branch updates where GitHub allows), and the auto-keep-mergeable watcher.
+The heart of the app: webhook-first PR monitoring (with polling reconciliation as the safety net), a per-workspace PR cache, the prioritized GitHub panel (Needs attention / Mine / Review, stacked PRs), the merge queue (auto-fix runs for conflicts/failed checks, bounded check re-runs and branch updates where GitHub allows, and stacked PRs drained bottom-up — each child parked in `awaiting_stack` until the PR its base belongs to lands, then retargeted onto the real base), and the auto-keep-mergeable watcher.
 
 ## Key Decisions
 
