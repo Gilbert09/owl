@@ -19,13 +19,26 @@
 // for (see externalMergeQueue.ts).
 
 import {
+  externalQueueInstructionFromComments,
   externalQueueStatusFromComment,
   externalQueueStatusFromComments,
   type ExternalQueueComment,
   type ExternalQueueStatus,
 } from '@talyn/shared';
 import { githubService } from './github.js';
+import { noteExternalQueueSubmitRoute } from './externalQueueSubmitRoute.js';
 import { debugBus } from './debugBus.js';
+
+/**
+ * Every comment that passes through here is also a chance to learn the repo's
+ * submit command, which trunk offers only while a PR is unsubmitted. Recording
+ * it repo-wide is what lets a LATER evaluation resubmit a PR whose own comment
+ * has since been rewritten into a status line — see externalQueueSubmitRoute.ts.
+ */
+function learnSubmitRoute(owner: string, repo: string, comments: ExternalQueueComment[]): void {
+  const instruction = externalQueueInstructionFromComments(comments);
+  if (instruction) noteExternalQueueSubmitRoute(owner, repo, instruction);
+}
 
 interface Observation {
   status: ExternalQueueStatus | null;
@@ -69,6 +82,7 @@ export function noteIssueComment(
   number: number,
   comment: ExternalQueueComment
 ): void {
+  learnSubmitRoute(owner, repo, [comment]);
   const status = externalQueueStatusFromComment(comment);
   if (!status) return;
   const now = Date.now();
@@ -88,6 +102,7 @@ export function noteIssueComments(
   number: number,
   comments: ExternalQueueComment[]
 ): void {
+  learnSubmitRoute(owner, repo, comments);
   const status = externalQueueStatusFromComments(comments);
   if (!status) return;
   observations.set(keyOf(owner, repo, number), { status, at: Date.now() });
@@ -126,6 +141,7 @@ export async function readExternalQueueState(
     // "trunk is testing this" beats no reading at all while GitHub is unhappy.
     return cached?.status ?? null;
   }
+  learnSubmitRoute(owner, repo, comments);
   const status = externalQueueStatusFromComments(comments);
   observations.set(key, { status, at: Date.now() });
   prune(now);

@@ -36,6 +36,22 @@ export const MAX_DECIDE_ROUNDS = 8;
  */
 export const MAX_RETARGETS = 8;
 
+/**
+ * Submissions allowed on ONE head while the external queue keeps dying on
+ * infrastructure. The ordinary "same reason twice" rule can't bound this path:
+ * an infrastructure death says nothing about the PR, so it is not a reason that
+ * REPEATING is evidence against — resubmitting really is the remedy, and the
+ * failure genuinely may not recur.
+ *
+ * The bound is a cost, not a guess: one resubmit costs a full provider test
+ * cycle (~40 minutes on posthog/posthog) plus a complete CI run of that repo.
+ * Four submissions — the first plus three retries — is about two hours of queue
+ * time before Talyn stops and says a human should look at the runner, which is
+ * the point at which "the CI infrastructure is broken" has stopped being a blip.
+ * Reset by a new head, like every other per-head budget.
+ */
+export const MAX_INFRA_SUBMITS_PER_HEAD = 4;
+
 export type MergeMethod = 'merge' | 'squash' | 'rebase';
 
 /**
@@ -286,10 +302,34 @@ export type SubmitOutcome =
    * still worth one attempt (it settles whether the gate is real).
    */
   | { kind: 'try_direct_merge' }
+  /**
+   * The provider already had the PR when we went to submit it (its comment says
+   * queued/testing/passed). Nothing was posted, and the entry simply goes back
+   * to tracking the queue.
+   */
+  | { kind: 'already_submitted'; state: ExternalQueueState; evidence: string }
   /** Gate is real and nothing can submit: no auto-merge, no submit label. */
   | { kind: 'unavailable'; message: string }
   /** Transient (head moved, API error) — retry on a later evaluation. */
   | { kind: 'retry'; message: string };
+
+/**
+ * What killed the external queue's own test run.
+ *
+ * `infrastructure` — the job died in setup/teardown: the runner failed to start
+ *                    a container, bind a port, run migrations, install deps. The
+ *                    tests never ran, so the PR's code is not implicated and no
+ *                    fix run can help. Observed on posthog/posthog when trunk's
+ *                    run hit "failed to bind host port for 0.0.0.0:50052 …
+ *                    address already in use" (2026-08-19).
+ * `unknown`        — anything else, including "we couldn't tell". The safe
+ *                    reading: it is treated exactly as before, as a real failure.
+ */
+export interface ExternalQueueFailure {
+  kind: 'infrastructure' | 'unknown';
+  /** The step (or shape) the verdict was read off, for the timeline. */
+  detail: string;
+}
 
 export type RerunOutcome =
   | {
@@ -342,6 +382,17 @@ export interface DecisionContext {
    * configurations and leaves stale in others.
    */
   externalQueue?: ExternalQueueStatus | null;
+  /**
+   * Why the external queue's own run failed, when `externalQueue.state` is
+   * `failed` and the provider linked the run. `undefined` = not asked (no
+   * failure, or no link to ask about); `null` = asked and GitHub wouldn't say.
+   *
+   * The queue tests the PR MERGED WITH the base, so a failure there is normally
+   * exactly what a fix run is for. An INFRASTRUCTURE death is the exception: the
+   * job never reached the tests, no code change can affect it, and the only
+   * remedy is to go round again — see decideExternalEjection.
+   */
+  externalFailure?: ExternalQueueFailure | null;
   /** Whether githubService.updateBranch exists/is enabled (Push E). */
   updateBranchAvailable: boolean;
   /**
