@@ -1840,7 +1840,7 @@ function PostHogCodeCard() {
           <WorkspaceModelSelector
             providerType="posthog_code"
             title="Model"
-            description="Which model PostHog Code runs use. Opus 4.8 is the most capable of the Claude 4 line; Fable 5 is the newest."
+            description="Which model PostHog Code runs use. Opus 5 is the most capable model; Fable 5 is the newest."
             models={POSTHOG_CODE_MODELS}
             defaultId={DEFAULT_POSTHOG_CODE_MODEL_ID}
             settingKey="posthogCodeModel"
