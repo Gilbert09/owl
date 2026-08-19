@@ -14,6 +14,8 @@ PostHog/posthog#84450 sat in the merge queue for 9½ hours with three required c
 
 Tests: the parser body (verbatim from #84450), `externalQueuePushWouldEject` across every state with the invariant that anything it flags is also `holding`, the two new decide cases (`not_ready` + blocker → `fire_fix_run`; `not_ready` + clean → wait), and the evaluator end-to-end.
 
+**Follow-up in the same session — R5d and R11 fought over the entries that stayed blocked.** Removing R5b's brake let a `not_ready` entry reach R11, and on a PR whose fix budget was already spent the recurrence guard blocked it — which R9 had been doing correctly all along. R5d then parked it back into `awaiting_external`, out of the status R9 keys on, and the pair rewrote the entry twice per evaluation: #84471 logged 100 events inside one minute, alternating `blocked ⇄ awaiting_external`. R5d now leaves a `blocked` entry alone when parking it would not HOLD it — `!externalQueuePushWouldEject`. On `testing`/`passed`/`queued` it still parks, because R5b holds it there and the badge is the better information; on `not_ready` the entry keeps its block and the reason a human needs, and nothing below R5d runs, so it still cannot push or merge under the provider.
+
 ## Session 89 — A cancelled check is a failure (2026-08-19)
 
 PostHog/posthog#84477 read as green in the panel and to the merge queue, while GitHub showed "4 failing checks" and refused the merge. The counts were not stale — a refresh re-fetched the same data and re-derived the same wrong verdict. The classification was wrong.

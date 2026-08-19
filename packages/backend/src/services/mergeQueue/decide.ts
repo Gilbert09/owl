@@ -909,11 +909,34 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   // Parking on one of those would wedge every entry in a repo where trunk was
   // switched off, with nothing left to un-wedge it.
   const providerHolding = ctx.externalGate ? externalQueueOf(pr, ctx) : null;
+  const holdingNow = providerHolding !== null && isExternalQueueHolding(providerHolding.state);
+
+  // Parking a `blocked` entry only means anything if `awaiting_external` will
+  // HOLD it, and R5b holds exactly the states where a push would eject. On the
+  // one holding state it doesn't (`not_ready`), the parked entry falls straight
+  // through to R11, whose recurrence guard blocks it again — and blocking is
+  // what R9 was already doing, correctly, before R5d moved the entry out of the
+  // status R9 keys on. So the two rules rewrite the entry twice per evaluation,
+  // forever: PostHog/posthog#84471 logged 100 events inside one minute,
+  // alternating blocked ⇄ awaiting_external.
+  //
+  // Leaving it blocked keeps both protections. The entry keeps the reason a
+  // human needs ("a fix run already failed to move this"), and nothing below
+  // this line runs, so it still cannot push or merge under the provider. A new
+  // head clears it via R2, exactly as it clears every other block.
+  if (
+    d.entry.status === 'blocked' &&
+    holdingNow &&
+    !externalQueuePushWouldEject(providerHolding!.state)
+  ) {
+    return d.done('advance');
+  }
+
   if (
     d.entry.status !== 'awaiting_external' &&
     d.entry.status !== 'blocked_manual' &&
-    providerHolding &&
-    isExternalQueueHolding(providerHolding.state)
+    holdingNow &&
+    providerHolding
   ) {
     if (ctx.fixTaskState === 'active') {
       // A run dispatched before the provider took the PR is still going, and

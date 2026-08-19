@@ -2018,6 +2018,32 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       }
     );
 
+    // PostHog/posthog#84471: R5d parked the entry ("trunk has this PR"), R11's
+    // recurrence guard blocked it straight back ("a fix run already failed to
+    // move this"), and the two rewrote the entry twice per evaluation — 100
+    // events inside one minute. The block is about the PR, not the queue, so
+    // the provider holding it is not evidence against it.
+    it('does not fight the recurrence guard over a blocked entry', () => {
+      const redPr = trunkPr('trunk-not-ready', { mergeStateStatus: 'BLOCKED' }, {
+        blockingReason: 'checks_failed',
+        checks: { total: 10, passed: 7, failed: 3, inProgress: 0, skipped: 0 },
+      });
+      const blockedEntry = entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        blockedReason: 'a fix run already failed to move this',
+        seenSignatures: [blockerSignature(redPr)],
+      });
+      const d = decide(
+        blockedEntry,
+        redPr,
+        ctx({ externalGate: 'confirmed', externalQueue: observed('not_ready') })
+      );
+      expect(transitions(d)).toEqual([]);
+      expect(workActions(d)).toEqual([]);
+      expect(d.verdict).toBe('advance');
+    });
+
     it('leaves an external block alone while the provider is NOT holding the PR', () => {
       for (const state of ['not_submitted', 'failed', 'cancelled', 'rejected'] as const) {
         const d = decide(
