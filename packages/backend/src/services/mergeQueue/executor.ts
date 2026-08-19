@@ -218,6 +218,12 @@ async function resolveVisualReviewContext(
  *   so a 10-minute backstop costs nothing and catches a dropped delivery.
  * - Already blocked on the external queue: only a self-heal can come of it
  *   (R5c), which is not urgent — the same 10-minute backstop.
+ * - Any OTHER entry on a gated base: the provider may hold a PR this entry
+ *   knows nothing about (the author submitted it themselves), and R5d has to
+ *   see that before it fires a run whose push ejects the PR. Same 10-minute
+ *   backstop, and normally free — the caller only reaches this function when a
+ *   gate exists, and on a gated repo trunk comments on every PR, so the
+ *   webhook feed has almost always answered already.
  */
 export function externalStateMaxAge(entry: EntrySnapshot): number | null {
   const AWAITING_ANSWER_MS = 60_000;
@@ -228,13 +234,7 @@ export function externalStateMaxAge(entry: EntrySnapshot): number | null {
       : BACKSTOP_MS;
   }
   if (entry.externalSubmitVia !== null) return AWAITING_ANSWER_MS;
-  if (
-    (entry.status === 'blocked' || entry.status === 'blocked_manual') &&
-    (entry.blockedCode === 'external_gate' || entry.blockedCode === 'external_queue_rejected')
-  ) {
-    return BACKSTOP_MS;
-  }
-  return null;
+  return BACKSTOP_MS;
 }
 
 async function buildBaseContext(
@@ -1207,7 +1207,7 @@ async function rerequestFailedChecks(pr: PrEvalRow): Promise<RerunOutcome> {
 async function fireFixRun(
   resign: boolean,
   ctx: ActionContext,
-  queueFailure?: { provider: string; evidence: string }
+  queueFailure?: { provider: string; evidence: string; failedChecks?: string[] }
 ): Promise<ActionOutcome> {
   const resolved = await resolveCloudEnv(ctx.pr.workspaceId);
   if (!resolved) {

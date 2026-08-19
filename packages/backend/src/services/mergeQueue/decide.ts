@@ -16,6 +16,7 @@ import {
   prNeedsFollowup,
   mergeBlockerReason,
   externalQueueProviderLabel,
+  externalQueueReason,
   externalQueueStateLabel,
   externalQueueStatusFromLabels,
   isExternalQueueSubmitLabel,
@@ -87,6 +88,23 @@ export function externalQueueRejectedReason(status: ExternalQueueStatus): string
     `commit (${status.evidence}) — its tests fail when the PR is merged with the base, ` +
     `and nothing here changed that. Push a fix (the queue resubmits automatically on a ` +
     `new commit), or re-queue to retry now.`
+  );
+}
+
+/**
+ * The per-head submit budget is spent: the provider has taken this commit and
+ * handed it back more times than the queue is willing to re-offer it.
+ */
+export function externalQueueBudgetSpentReason(
+  status: ExternalQueueStatus,
+  attempts: number
+): string {
+  const provider = externalQueueProviderLabel(status.provider);
+  return (
+    `${provider}'s merge queue has taken this commit and sent it back ${attempts} times ` +
+    `(latest: ${status.evidence}). The queue stopped resubmitting it rather than keep ` +
+    `spending queue cycles on an unchanged commit. Push a fix (that resets the budget ` +
+    `automatically), or re-queue to retry now.`
   );
 }
 
@@ -325,9 +343,14 @@ export function blockerSignature(pr: PrSnapshot): string {
  * nothing about the PR's local state — trunk fails a PR on the merge WITH the
  * base, which is green on the branch. Its evidence sentence names the checks
  * that failed, so it discriminates a repeat failure from a different one.
+ *
+ * Over `externalQueueReason`, not the raw sentence: trunk interpolates the
+ * pusher and the batch PR into exactly the two reasons that repeat, so the raw
+ * form made every ejection look novel and this bound unreachable.
  */
 export function queueSignature(status: ExternalQueueStatus): string {
-  return ['queue', status.provider, status.state, status.evidence].join('|');
+  const checks = (status.failedChecks ?? []).map((c) => c.toLowerCase()).sort().join(',');
+  return ['queue', status.provider, status.state, externalQueueReason(status), checks].join('|');
 }
 
 /**
@@ -694,9 +717,28 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       // null → requeued for a resubmit; fall through to the normal rules so a
       // PR that came back broken gets remediated before it goes round again.
     } else if (staleEjection || stillSubmitted(d.entry, pr, ctx)) {
-      // In the queue's hands. A settled blocker still deserves remediation —
-      // the provider will hold a conflicting PR at "not ready" forever — so
-      // only an unobstructed PR short-circuits here.
+      // In the queue's hands. While the provider is OBSERVED holding the PR,
+      // hands off entirely — including a settled blocker.
+      //
+      // Remediating one meant firing a cloud run at a PR trunk was testing, and
+      // that run's push is itself an ejection: "🚫 removed from the merge queue
+      // because it was pushed to by @x. Please re-submit it in order to merge."
+      // So the remediation destroyed the very queue cycle it was meant to
+      // help — ~40 minutes of CI at PostHog — and it fired on the ordinary
+      // shape of a reviewed PR, since `prNeedsFollowup` counts an unresolved
+      // review thread, and bot reviewers leave those on nearly every PR.
+      //
+      // Waiting is not a deadlock: trunk ejects a PR it cannot merge on its
+      // own ("waiting to become mergeable for too long … Submit it again once
+      // it's ready"), and THAT is when remediation is both safe and useful.
+      // The old comment's premise — that the provider holds a broken PR
+      // forever — is not how trunk behaves.
+      if (staleEjection || (ext && isExternalQueueHolding(ext.state))) return d.done('advance');
+      // No positive observation, only our own record of having submitted (an
+      // armed auto-merge, a label, a command inside its grace window). Nothing
+      // says a queue is testing this PR right now, so a settled blocker still
+      // deserves remediation — otherwise a PR whose provider never comments
+      // parks forever.
       if (!hasSettledBlockerFor(pr, ctx)) return d.done('advance');
     } else if (d.entry.externalSubmitVia === 'comment') {
       // We posted the provider's own submit command and it never acknowledged
@@ -791,6 +833,68 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       });
       return d.done('advance');
     }
+  }
+
+  // R5d — the provider is holding a PR whose entry does not know it.
+  //
+  // R5b only protects an entry already parked in `awaiting_external`, so it
+  // covers exactly one route into the queue: Talyn's own submit. Every other
+  // route leaves the entry in `queued`/`awaiting_ci`/`blocked` while trunk has
+  // the PR — the author commented `/trunk merge` themselves, the PR was queued
+  // in Talyn after it was already submitted, or a submission was made from the
+  // desktop merge button. Those entries walked straight into the remediation
+  // and merge rules and did to a testing PR what R5b now refuses to: fire a
+  // fix run that pushes (ejecting it), or re-post the submit command at a
+  // queue that already has it.
+  //
+  // So the rule is stated on the PROVIDER's state rather than on ours: if it
+  // is holding the PR, the entry belongs in `awaiting_external`, whatever it
+  // currently says. Positive evidence only — `isExternalQueueHolding` excludes
+  // every ejected and terminal state, so this can never park a PR the queue
+  // has handed back.
+  //
+  // `blocked_manual` is exempt, and doesn't need the protection: it emits no
+  // actions at all, so it cannot push or resubmit, and only a dequeue/requeue
+  // is meant to clear it. Its external-queue codes still self-heal one rule up
+  // (R5c), which is the case where the provider's state IS the evidence the
+  // block was wrong.
+  //
+  // Gated bases only. Without a gate no external system owns this branch, and
+  // `externalQueueOf` still answers off the PR's LABELS — which trunk leaves
+  // behind: PostHog carries stale `trunk-testing` on PRs that merged hours ago.
+  // Parking on one of those would wedge every entry in a repo where trunk was
+  // switched off, with nothing left to un-wedge it.
+  const providerHolding = ctx.externalGate ? externalQueueOf(pr, ctx) : null;
+  if (
+    d.entry.status !== 'awaiting_external' &&
+    d.entry.status !== 'blocked_manual' &&
+    providerHolding &&
+    isExternalQueueHolding(providerHolding.state)
+  ) {
+    if (ctx.fixTaskState === 'active') {
+      // A run dispatched before the provider took the PR is still going, and
+      // its push will eject it — nothing here can un-push that. Parking now
+      // would also strand the run's accounting, which lives in R8 below this
+      // rule. Hold; the ejection path picks the PR up when it comes back.
+      d.ensure('fixing');
+      return d.done('hold');
+    }
+    d.transition('awaiting_external', {
+      set: { externalState: providerHolding.state },
+      event: {
+        code: 'external_queue_holding',
+        message:
+          `${externalQueueProviderLabel(providerHolding.provider)}'s merge queue has this PR ` +
+          `(${externalQueueStateLabel(providerHolding.state).toLowerCase()}) — tracking it there ` +
+          'rather than acting on the PR underneath it.',
+        detail: {
+          evidence: providerHolding.evidence,
+          source: providerHolding.source,
+          from: d.entry.status,
+        },
+      },
+    });
+    return d.done('advance');
   }
 
   // R6 — active-run guard. Never fire a NEW run while one is already working
@@ -1211,10 +1315,9 @@ function decideExternalEjection(
   ctx: DecisionContext
 ): Decision | null {
   const provider = externalQueueProviderLabel(ext.provider);
-  // Has the queue already sent this head back for this exact reason, AFTER we
-  // resubmitted it? Then resubmitting again is repeating a move that did not
-  // work. A DIFFERENT reason each time is the queue making progress through the
-  // PR's problems, and keeps its resubmits.
+  // Has the queue already sent this head back for this exact reason? Then
+  // whatever we did last time did not work. A DIFFERENT reason is the queue
+  // making progress through the PR's problems, and earns another go.
   const signature = queueSignature(ext);
   const recurred = signatureSeen(d.entry, signature);
 
@@ -1272,82 +1375,131 @@ function decideExternalEjection(
     return d.done('advance');
   }
 
-  if (ext.state === 'cancelled' || recurred) {
-    // A queue FAILURE on a locally-clean PR is fixable — it just needs a
-    // different starting point.
-    //
-    // The ordinary fix run works from the PR's own blockers, and this PR has
-    // none: its checks are green on its branch. What broke is the PR MERGED
-    // WITH TRUNK, a state that exists only inside the queue, so the run is
-    // started from the provider's failure output instead (fixKind
-    // 'queue_failure'). Without this the entry parked on "Failed in queue ·
-    // BLOCKED" and waited for a human to push, with a remedy available and
-    // idle.
-    //
-    // Dispatched DIRECTLY, never by falling through to the ordinary rules. The
-    // recurrence test above is the ONLY guard on resubmission, and a
-    // fall-through would bypass the one thing standing between a rejected PR
-    // and an eject → resubmit → eject loop.
-    //
-    // Bounded by the same progress rule, one lane over: the local blocker
-    // signature this run will be judged on is recorded when it completes, so a
-    // PR that keeps failing the same way stops on the repeat rather than after
-    // a fixed number of tries. `cancelled` is excluded: somebody may have
-    // pulled the PR out deliberately and spending money to override that is not
-    // a repair. Auto-merge is disarmed on the way, exactly as the blocking path
-    // does — a half-fixed PR must not merge itself behind the queue's back.
-    // Escalate to a fix run seeded with the queue's failure output — unless a
-    // fix run has already been left with this same local blocker on this head,
-    // in which case it is the same dead end one lane over.
-    const fixable =
-      ext.state === 'failed' &&
-      !signatureSeen(d.entry, blockerSignature(pr)) &&
-      ctx.cloudEnvAvailable;
-    if (fixable) {
-      d.transition('queued', {
-        set: {
-          externalSubmitVia: null,
-          externalSubmittedAt: null,
-          externalState: ext.state,
-          seenSignatures: withSignature(d.entry, signature),
-        },
-        event: {
-          code: 'external_queue_failed_fixing',
-          message:
-            `${provider} failed this PR in its merge queue for the same reason as before — ` +
-            "resubmitting won't change it, so dispatching a run from the queue's failure output.",
-          detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
-        },
-      });
-      d.act({ kind: 'disarm_automerge' });
-      d.act({
-        kind: 'fire_fix_run',
-        resign: false,
-        queueFailure: { provider, evidence: ext.evidence },
-      });
-      return d.done('hold');
-    }
-    d.transition('blocked', {
-      blockedCode: 'external_queue_rejected',
-      blockedReason: externalQueueRejectedReason(ext),
+  // Everything below here is a failure the queue attributes to THIS PR: the
+  // infrastructure case was taken above, so a `failed` reaching this point
+  // means the queue ran the tests and this commit lost.
+  // A queue FAILURE is acted on the FIRST time, never resubmitted as-is.
+  //
+  // `failed` means the provider RAN the tests and this commit lost. Handing it
+  // back unchanged asks the same question of the same code, and the answer
+  // costs far more than one PR's CI: trunk batches, so a resubmit re-tests the
+  // batch, bisects it to find the PR at fault again, and ejects again — with
+  // every PR batched alongside it waiting through all of that. Requiring the
+  // ejection to REPEAT before remediating bought one of those rounds for
+  // nothing.
+  //
+  // A flake is the case this trades against, and it is the cheaper side: a
+  // wasted cloud run is minutes, and `queueFailureRule` tells the run to report
+  // that it found nothing rather than push a speculative change. The other
+  // ejected states are untouched — nothing was learned about the code in a
+  // "pushed to by @x" or a "waiting to become mergeable for too long", so those
+  // still resubmit.
+  //
+  // The ordinary fix run works from the PR's own blockers, and such a PR has
+  // none: its checks are green on its branch. What broke is the PR MERGED WITH
+  // THE BASE, a state that exists only inside the queue, so the run is started
+  // from the provider's failure output instead (fixKind 'queue_failure').
+  //
+  // Dispatched DIRECTLY, never by falling through to the ordinary rules, which
+  // would resubmit it behind our back.
+  //
+  // Bounded by the same progress rule as everything else: the local blocker
+  // signature this run will be judged on is recorded when it completes, so a PR
+  // that keeps failing the same way stops rather than looping.
+  if (
+    ext.state === 'failed' &&
+    !signatureSeen(d.entry, blockerSignature(pr)) &&
+    ctx.cloudEnvAvailable
+  ) {
+    d.transition('queued', {
       set: {
         externalSubmitVia: null,
         externalSubmittedAt: null,
         externalState: ext.state,
-        ...(recurred ? {} : { seenSignatures: withSignature(d.entry, signature) }),
+        seenSignatures: withSignature(d.entry, signature),
       },
       event: {
-        code: 'external_queue_rejected',
+        code: 'external_queue_failed_fixing',
         message:
-          ext.state === 'cancelled'
-            ? `${provider} cancelled this PR in its merge queue.`
-            : `${provider} sent this PR back for the same reason twice and nothing here can move it — giving up until a new push.`,
-        detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
+          `${provider}'s merge queue tested this commit and failed it` +
+          (ext.failedChecks?.length ? ` (${ext.failedChecks.join(', ')})` : '') +
+          " — dispatching a run from the queue's failure output rather than resubmitting it.",
+        detail: {
+          evidence: ext.evidence,
+          source: ext.source,
+          state: ext.state,
+          ...(ext.failedChecks?.length ? { failedChecks: ext.failedChecks } : {}),
+        },
+      },
+    });
+    d.act({ kind: 'disarm_automerge' });
+    d.act({
+      kind: 'fire_fix_run',
+      resign: false,
+      queueFailure: { provider, evidence: ext.evidence, failedChecks: ext.failedChecks },
+    });
+    return d.done('hold');
+  }
+  if (ext.state === 'cancelled' || recurred) {
+  // Nothing left to dispatch: a deliberate cancellation, or a repeat the fix
+  // run above has already been defeated by. Both are a human's call now.
+  //
+  // `cancelled` is excluded from remediation on purpose: somebody may have
+  // pulled the PR out deliberately, and spending money to override that is
+  // not a repair. Auto-merge is disarmed by the transition itself — a
+  // half-fixed PR must not merge itself behind the queue's back.
+  d.transition('blocked', {
+    blockedCode: 'external_queue_rejected',
+    blockedReason: externalQueueRejectedReason(ext),
+    set: {
+      externalSubmitVia: null,
+      externalSubmittedAt: null,
+      externalState: ext.state,
+      ...(recurred ? {} : { seenSignatures: withSignature(d.entry, signature) }),
+    },
+    event: {
+      code: 'external_queue_rejected',
+      message:
+        ext.state === 'cancelled'
+          ? `${provider} cancelled this PR in its merge queue.`
+          : `${provider} sent this PR back for the same reason twice and nothing here can move it — giving up until a new push.`,
+      detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
+    },
+  });
+  d.act({ kind: 'notify_blocked' });
+  return d.done('advance');
+}
+
+  // The per-head submit budget, which `submitAttempts` had counted since it
+  // shipped without anything ever reading it — the `external_queue_rejected`
+  // doc ("more times than the per-head budget allows") and the desktop's
+  // "submits: n/3" both describe a cap that did not exist. The recurrence
+  // guard above is reason-shaped and cannot bound a queue that ejects for a
+  // DIFFERENT reason each round; this bounds the rounds themselves. Like every
+  // other per-head budget it self-heals on a real push (R2), so a fresh commit
+  // earns fresh submits.
+  if (d.entry.submitAttempts >= ctx.maxAttempts) {
+    d.transition('blocked', {
+      blockedCode: 'external_queue_rejected',
+      blockedReason: externalQueueBudgetSpentReason(ext, d.entry.submitAttempts),
+      set: {
+        externalSubmitVia: null,
+        externalSubmittedAt: null,
+        externalState: ext.state,
+        seenSignatures: withSignature(d.entry, signature),
+      },
+      event: {
+        code: 'external_queue_budget_spent',
+        message:
+          `${provider} sent this PR back ${d.entry.submitAttempts} times on this commit — ` +
+          'not resubmitting it again until something changes.',
+        detail: { evidence: ext.evidence, state: ext.state, attempts: d.entry.submitAttempts },
       },
     });
     d.act({ kind: 'notify_blocked' });
     return d.done('advance');
   }
+
   d.transition('queued', {
     set: {
       externalSubmitVia: null,

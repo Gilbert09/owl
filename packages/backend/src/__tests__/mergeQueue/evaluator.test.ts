@@ -723,7 +723,15 @@ describe('mergeQueue v2 pipeline', () => {
       expect(entry?.blockedCode).toBeNull();
       expect(comment).not.toHaveBeenCalled(); // no duplicate `/trunk merge`
       const codes = (await eventsOf(db, entryId)).map((e) => e.code);
-      expect(codes).toContain('external_already_submitted');
+      // Either tracking path is a pass. R5d parks the entry the moment the
+      // provider is seen holding the PR, so it usually gets here first and no
+      // submit is attempted at all; the ladder's `already_submitted` is the
+      // fallback for when decide had no state to read. Both end with the PR
+      // tracked and nothing posted twice, which is what the assertions above
+      // pin. The ladder itself is covered in externalMergeQueue.test.ts.
+      expect(
+        codes.some((c) => c === 'external_already_submitted' || c === 'external_queue_holding')
+      ).toBe(true);
       expect(codes).not.toContain('external_gate');
     });
 
@@ -839,7 +847,11 @@ describe('mergeQueue v2 pipeline', () => {
       expect(blockedSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('takes an ejected PR back and resubmits it', async () => {
+    // Trunk batches, so handing back a commit it has already TESTED costs a
+    // batch re-test, a bisection to find this PR at fault again, and every PR
+    // batched alongside it waiting through both. Its verdict is acted on the
+    // first time rather than bought twice.
+    it('dispatches a queue-failure run on the FIRST ejection, without resubmitting', async () => {
       gated();
       mockCapability.mockResolvedValue('available');
       const { prId, entryId } = await insertQueuedPr(db, {
@@ -851,13 +863,19 @@ describe('mergeQueue v2 pipeline', () => {
         .set({ externalSubmitVia: 'auto_merge', submitAttempts: 1 } as never)
         .where(eq(mergeQueueEntries.id, entryId));
 
+      const spy = vi
+        .spyOn(taskCreateModule, 'createCloudTask')
+        .mockResolvedValue({ id: 'task-first-ejection' } as never);
+
       await evaluateGroupNow('repo1', 'main', 'test');
 
       const entry = await entryOf(db, prId);
-      expect(entry?.status).toBe('awaiting_external');
-      expect(entry?.submitAttempts).toBe(2);
+      expect(entry?.fixKind).toBe('queue_failure');
+      expect(entry?.submitAttempts).toBe(1);
       const codes = (await eventsOf(db, entryId)).map((e) => e.code);
-      expect(codes).toContain('external_queue_ejected');
+      expect(codes).toContain('external_queue_failed_fixing');
+      expect(codes).not.toContain('external_submitted');
+      spy.mockRestore();
     });
 
     /**

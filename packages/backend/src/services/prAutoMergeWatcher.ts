@@ -2,6 +2,8 @@ import { and, eq } from 'drizzle-orm';
 import {
   prNeedsFollowup,
   buildMergeablePrompt,
+  externalQueueProviderLabel,
+  isExternalQueueHolding,
   normalizeLabelNames,
   type PRMergeableSummary,
 } from '@talyn/shared';
@@ -11,6 +13,8 @@ import { pullRequests as pullRequestsTable } from '../db/schema.js';
 import { readWorkspaceSettings } from './workspaceSettings.js';
 import { createCloudTask } from './taskCreate.js';
 import { TaskLimitError } from './billing/entitlements.js';
+import { getExternalMergeGate } from './repoMergeGate.js';
+import { readExternalQueueState } from './externalQueueState.js';
 import { githubService } from './github.js';
 import { graphqlBudget } from './graphqlBudget.js';
 import { prMonitorService } from './prMonitor.js';
@@ -26,6 +30,13 @@ const FRESHNESS_MS = 90_000;
 /** Pause auto-firing after this many consecutive un-mergeable auto-runs. */
 const MAX_ATTEMPTS = 3;
 const LABEL_FAILURE_BACKOFF_MS = 15 * 60_000;
+/**
+ * How stale an external-queue reading may be before firing a run. Matches the
+ * merge queue's own backstop (`externalStateMaxAge`): a provider's next move is
+ * a whole test cycle away, and every move edits its comment, so the webhook
+ * feed normally answers this for free.
+ */
+const EXTERNAL_STATE_MAX_AGE_MS = 10 * 60_000;
 
 interface AutoMergeState {
   attempts: number;
@@ -78,6 +89,55 @@ export function normalizeWatchLabels(value: unknown): string[] {
 /** Compact watcher state for the desktop (toggle + badge). */
 function publicState(s: AutoMergeState): { attempts: number; paused: boolean } {
   return { attempts: s.attempts, paused: !!s.pausedAt };
+}
+
+/**
+ * Is an external merge queue (trunk.io) holding this PR right now?
+ *
+ * The watcher's remedy is a cloud run, and a cloud run's fix arrives as a
+ * PUSH — which is how trunk answers it: "🚫 removed from the merge queue
+ * because it was pushed to by @x. Please re-submit it in order to merge." So
+ * firing at a PR the queue is testing does not fix the PR, it destroys a test
+ * cycle (~40 minutes at PostHog) and pays for a cloud run to do it. And the
+ * trigger is the ordinary shape of a reviewed PR: `prNeedsFollowup` counts an
+ * unresolved review thread, which bot reviewers leave on nearly every PR.
+ *
+ * Standing down on `mergeQueued` alone was not enough — that is TALYN's queue.
+ * A PR the author submitted to trunk themselves is not in it, so the watcher
+ * kept ticking every 60s with no idea another system had the PR.
+ *
+ * Two reads, both cached: the gate probe answers "does this repo even have a
+ * queue" (and short-circuits every ordinary repo before the second call), and
+ * the state read is normally served by the `issue_comment` webhook feed. Only
+ * the HOLDING states stand down — an ejected PR is exactly what the watcher is
+ * for, and a failure to read anything answers "no", so a queue we cannot see
+ * can never wedge the watcher.
+ */
+async function externalQueueHolds(row: PRRow, summary: PRMergeableSummary): Promise<boolean> {
+  const ref = `${row.owner}/${row.repo}#${row.number}`;
+  try {
+    const gate = await getExternalMergeGate(row.workspaceId, row.owner, row.repo, summary.baseBranch);
+    if (!gate) return false;
+    const ext = await readExternalQueueState(
+      row.workspaceId,
+      row.owner,
+      row.repo,
+      row.number,
+      EXTERNAL_STATE_MAX_AGE_MS
+    );
+    if (!ext || !isExternalQueueHolding(ext.state)) return false;
+    console.log(
+      `[autoKeep] ${ref}: standing down — ${externalQueueProviderLabel(ext.provider)}'s merge ` +
+        `queue has the PR (${ext.state}).`
+    );
+    return true;
+  } catch (err) {
+    console.warn(
+      `[autoKeep] ${ref}: couldn't read external queue state:`,
+      err instanceof Error ? err.message : err
+    );
+    return false;
+  }
 }
 
 /**
@@ -283,6 +343,7 @@ class PRAutoMergeWatcher {
 
     // 5. Fire — blocker present, nothing running, not paused.
     if (state.pausedAt || state.attempts >= MAX_ATTEMPTS) return;
+    if (await externalQueueHolds(row, summary)) return;
 
     const resolved = await resolveCloudEnv(row.workspaceId);
     if (!resolved) return; // No connected cloud provider — can't dispatch.

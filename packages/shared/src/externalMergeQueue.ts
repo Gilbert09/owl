@@ -71,6 +71,19 @@ export interface ExternalQueueStatus {
    *  sentence. Shown verbatim in tooltips. */
   evidence: string;
   /**
+   * The required checks the provider named as failing, when it named any.
+   *
+   * Trunk publishes them in two shapes and Talyn used to keep neither, because
+   * `evidence` is one SENTENCE and the checks sit either in a markdown table on
+   * the following lines or inside a link on the same one. So a run dispatched
+   * from a queue failure was told "it failed tests" and had to rediscover which
+   * check broke, with the answer already parsed and thrown away.
+   *
+   * Also what makes a repeat failure distinguishable from a new one: the same
+   * check failing twice is a dead end, a different check is progress.
+   */
+  failedChecks?: string[];
+  /**
    * The Actions run/job the provider linked when it reported a FAILURE, when it
    * named one. Deliberately not part of `evidence` (prose for tooltips) or of
    * the queue signature: it is the handle on WHY the queue's run failed, which
@@ -204,6 +217,58 @@ const TRUNK_STATUS_PATTERNS: Array<{ re: RegExp; state: ExternalQueueState }> = 
   { re: /unable to merge this pr/i, state: 'rejected' },
 ];
 
+/**
+ * Header of the failure table trunk appends when its queue run goes red:
+ *
+ *     |Failed Required Status|Conclusion|
+ *     |-|-|
+ *     |Semgrep Checks Pass|[Failure](https://github.com/…/runs/1)|
+ */
+const TRUNK_FAILURE_TABLE_HEADER = /^\|\s*failed required status\s*\|/i;
+/** A markdown table separator row (`|-|-|`) — never a check. */
+const TRUNK_TABLE_SEPARATOR = /^\|[\s|:-]*$/;
+/** The single-check shape: "The required check `X` (Failure) has failed." */
+const TRUNK_INLINE_CHECK = /required check\s+\[?`([^`]+)`/i;
+
+/** Markdown link text, so `[Failure](https://…)` reads as `Failure`. */
+function flattenLinks(line: string): string {
+  return line.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+}
+
+/**
+ * Every required check the comment names as failing, deduped and in the order
+ * trunk listed them. Empty when it named none — a push ejection has no checks,
+ * and neither does a plain "waiting to become mergeable for too long".
+ */
+function failedChecksFrom(body: string): string[] {
+  const checks: string[] = [];
+  const inline = TRUNK_INLINE_CHECK.exec(body);
+  if (inline) checks.push(inline[1]!.trim());
+
+  const lines = body.split('\n').map((l) => flattenLinks(l).trim());
+  let inTable = false;
+  for (const line of lines) {
+    if (TRUNK_FAILURE_TABLE_HEADER.test(line)) {
+      inTable = true;
+      continue;
+    }
+    if (!inTable) continue;
+    // The table runs until the first line that is not a row of it.
+    if (!line.startsWith('|')) break;
+    if (TRUNK_TABLE_SEPARATOR.test(line)) continue;
+    const name = line.split('|')[1]?.trim();
+    if (name) checks.push(name);
+  }
+
+  const seen = new Set<string>();
+  return checks.filter((c) => {
+    const key = c.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 /** One PR comment, as both the REST list and the webhook payload expose it. */
 export interface ExternalQueueComment {
   body?: string | null;
@@ -291,12 +356,14 @@ export function externalQueueStatusFromComment(
   const body = comment.body!;
   for (const { re, state } of TRUNK_STATUS_PATTERNS) {
     if (re.test(body)) {
+      const failedChecks = failedChecksFrom(body);
       const url = state === 'failed' ? failureRunUrl(body, re) : undefined;
       return {
         provider: 'trunk',
         state,
         source: 'comment',
         evidence: statusEvidence(body, re),
+        ...(failedChecks.length > 0 ? { failedChecks } : {}),
         ...(url ? { failureUrl: url } : {}),
       };
     }
@@ -427,6 +494,27 @@ export function isExternalQueueEjected(state: ExternalQueueState): boolean {
  */
 export function isExternalQueueHolding(state: ExternalQueueState): boolean {
   return state === 'not_ready' || state === 'queued' || state === 'testing' || state === 'passed';
+}
+
+/**
+ * The ejection REASON, stripped of the parts trunk interpolates per attempt —
+ * for asking "has it already sent this head back for exactly this?".
+ *
+ * Trunk names the actor and the batch in its own sentences: "…because it was
+ * pushed to by @dmarchuk", "…it failed tests. PR #74331 was used for testing."
+ * Both change every round, so comparing raw sentences answered "a different
+ * reason each time" to a queue repeating itself verbatim, and the recurrence
+ * guard meant to stop an eject → resubmit → eject loop never once fired. The
+ * check NAME in "The required check `X` has failed" is deliberately kept: a
+ * different failing check IS a different problem, and deserves its resubmit.
+ */
+export function externalQueueReason(status: ExternalQueueStatus): string {
+  return status.evidence
+    .replace(/@[A-Za-z0-9-]+/g, '@actor')
+    .replace(/#\d+/g, '#n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
 }
 
 /** Short human label for a badge. */

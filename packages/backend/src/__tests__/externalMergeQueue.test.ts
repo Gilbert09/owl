@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   externalQueueCommentPresent,
   externalQueueInstructionFromComments,
+  externalQueueReason,
   externalQueueStatusFromComment,
   externalQueueStatusFromComments,
   externalQueueStatusFromLabels,
@@ -177,6 +178,70 @@ describe('externalQueueStatusFromComment — trunk states, as trunk writes them'
       provider: 'trunk',
       state,
       source: 'comment',
+    });
+  });
+
+  // Trunk names the pusher and the batch PR in exactly the two reasons that
+  // repeat, so the raw sentence made every ejection look like a new one and
+  // the recurrence guard that bounds eject → resubmit → eject never fired.
+  // Pinned to the verbatim bodies above, so a change in trunk's wording that
+  // reintroduces an interpolation shows up here.
+  describe('the ejection reason, minus what trunk interpolates per attempt', () => {
+    const reasonOf = (body: string) => externalQueueReason(externalQueueStatusFromComment(trunk(body))!);
+
+    it('reads two push-ejections by different people as the same reason', () => {
+      const pushedBy = (who: string) =>
+        reasonOf(
+          `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by @${who}. Please re-submit it in order to merge. See more details [here]${LINK}.`
+        );
+      expect(pushedBy('dmarchuk')).toBe(pushedBy('tatoalo'));
+    });
+
+    it('reads two test-failure ejections tested on different PRs as the same reason', () => {
+      const failedOn = (n: number) =>
+        reasonOf(
+          `\u{274C} This pull request was removed from the merge queue because it failed tests. PR [#${n}](https://www.github.com/PostHog/posthog/pull/${n}) was used for testing. See more details [here]${LINK}.`
+        );
+      expect(failedOn(84396)).toBe(failedOn(84400));
+    });
+
+    it('still tells two DIFFERENT failing checks apart — that is a new problem', () => {
+      const checkFailed = (name: string) =>
+        reasonOf(
+          `\u{26A0}\u{FE0F} The required check [\`${name}\`](https://github.com/PostHog/posthog/actions/runs/1) (Failure) has failed. See more details [here]${LINK}.`
+        );
+      expect(checkFailed('Semgrep Checks Pass')).not.toBe(checkFailed('Backend Tests Pass'));
+    });
+  });
+
+  // The queue-failure fix run is dispatched from this. Before it was captured,
+  // the run was told "it failed tests" and had to rediscover which check broke,
+  // with the answer already parsed and thrown away.
+  describe('the required checks the provider named as failing', () => {
+    const checksOf = (body: string) => externalQueueStatusFromComment(trunk(body))?.failedChecks;
+
+    it('reads them out of the failure table, which sits below the status sentence', () => {
+      expect(
+        checksOf(
+          `\u{274C} This pull request was removed from the merge queue because it failed tests. PR [#84396](https://www.github.com/PostHog/posthog/pull/84396) was used for testing. See more details [here]${LINK}.\n|Failed Required Status|Conclusion|\n|-|-|\n|Semgrep Checks Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/1)|\n|Backend Tests Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/2)|\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`
+        )
+      ).toEqual(['Semgrep Checks Pass', 'Backend Tests Pass']);
+    });
+
+    it('reads the single-check shape, where the name sits inside a link', () => {
+      expect(
+        checksOf(
+          `\u{26A0}\u{FE0F} The required check [\`LLM Services Tests Pass\`](https://github.com/PostHog/posthog/actions/runs/1) (Failure) has failed. Pull request failed tests and is waiting for other pull requests to finish testing. See more details [here]${LINK}.`
+        )
+      ).toEqual(['LLM Services Tests Pass']);
+    });
+
+    it('names none when the queue never tested the PR', () => {
+      expect(
+        checksOf(
+          `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by @dmarchuk. Please re-submit it in order to merge. See more details [here]${LINK}.`
+        )
+      ).toBeUndefined();
     });
   });
 
