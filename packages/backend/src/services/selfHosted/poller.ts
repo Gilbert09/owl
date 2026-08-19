@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import type { AgentEvent, CloudTaskMetadata, TaskResult, TaskStatus } from '@talyn/shared';
-import { readCloudTaskMeta } from '@talyn/shared';
+import { readCloudTaskMeta, readCloudTaskProvider } from '@talyn/shared';
 import { getDbClient } from '../../db/client.js';
 import { tasks as tasksTable, repositories as repositoriesTable } from '../../db/schema.js';
 import { captureWorkspaceEvent } from '../analytics.js';
@@ -19,6 +19,15 @@ import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 // byte-identical copy of the predicate and the two constants behind it; a
 // second definition of one rule is how they drift.
 export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
+
+/**
+ * How long a task may be `in_progress` with no fleet run before it is failed.
+ *
+ * Five minutes: long enough that no dispatch in flight could still be inside it
+ * (the executor's own request timeout is twenty seconds), short enough that a
+ * task nobody will ever finish stops claiming to be running within one coffee.
+ */
+export const DISPATCH_GRACE_MS = 5 * 60_000;
 
 /** A fleet run is terminal exactly when the fleet says so — it owns the
  *  lifecycle and reports one of three end states. */
@@ -104,8 +113,16 @@ class SelfHostedPoller {
 
   /** Entry point the generic cloud poller calls via the provider seam. */
   async reconcileTask(row: CloudTaskRow): Promise<void> {
+    // Read the provider from the metadata rather than from the cloud envelope,
+    // because a task with NO remote run has no envelope to read it off — and
+    // that task is exactly the one this method used to walk away from.
+    if (readCloudTaskProvider({ metadata: row.metadata }) !== 'selfhosted') return;
+
     const cloud = readCloudTaskMeta({ metadata: row.metadata });
-    if (!cloud || cloud.provider !== 'selfhosted' || !cloud.remoteTaskId) return;
+    if (!cloud?.remoteTaskId) {
+      await this.failUndispatched(row);
+      return;
+    }
     const runId = cloud.remoteTaskId;
 
     const client = await getSelfHostedClient(row.workspaceId);
@@ -376,6 +393,78 @@ class SelfHostedPoller {
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  /**
+   * Fail a task that is in progress and has no remote run at all.
+   *
+   * # Why nothing was reconciling these
+   *
+   * Every branch of this reconcile needs a run id, so the entry point returned
+   * early when there was none. That early return is correct for a task that is
+   * not ours; for a task that IS ours and says `in_progress`, it is the poller
+   * declining to look at the only tasks it could still help. Two of them sat in
+   * that state indefinitely — "Get PostHog/posthog#70991 mergeable" and "#74692"
+   * — with no run on any host, no log line, and nothing that would ever move
+   * them. A task nobody will finish must not present as a task in progress.
+   *
+   * # Why a grace period, when the write order already looks safe
+   *
+   * The executor writes `cloudTask.remoteTaskId` BEFORE it flips the task to
+   * `in_progress` (executor.ts), so in principle a task cannot be seen as
+   * running before its run id exists. The grace period does not assume that
+   * holds: the two writes are separate statements, `patchTaskMetadata`
+   * serialises through its own mutex, and a poll tick that landed between them
+   * would fail a task whose agent was starting perfectly well. Costing a stuck
+   * task five extra minutes is nothing; killing a healthy run is not.
+   *
+   * Failed rather than requeued, deliberately. Requeueing would dispatch work
+   * the user asked for once and has not looked at since — possibly hours ago,
+   * possibly against a branch that has moved — and it would do so from a code
+   * path that does not know WHY the dispatch was lost. Failing states the
+   * position honestly and leaves the retry to the person who wanted it.
+   */
+  private async failUndispatched(row: CloudTaskRow): Promise<void> {
+    // Only in-flight tasks. The generic poller also loads completed revival
+    // candidates and completed tasks awaiting a transcript backfill, and
+    // neither has any business being failed by this branch — one of them is a
+    // finished task whose transcript is merely late.
+    if (row.status !== 'in_progress') return;
+
+    const startedAt = row.updatedAt?.getTime();
+    if (startedAt !== undefined && Date.now() - startedAt < DISPATCH_GRACE_MS) return;
+
+    this.stopStreaming(row.id);
+    clearWatched(row.id);
+    this.cursor.delete(row.id);
+
+    const summary =
+      'This task never reached the fleet: it is marked in progress but carries no run, ' +
+      'so no host is working on it and nothing can report back. Retry it to dispatch a fresh run.';
+    const result: TaskResult = {
+      success: false,
+      summary,
+      error: 'task is in_progress with no cloudTask.remoteTaskId; the dispatch did not complete',
+    };
+
+    await getDbClient()
+      .update(tasksTable)
+      .set({ status: 'failed', result, completedAt: null, updatedAt: new Date() })
+      .where(eq(tasksTable.id, row.id));
+
+    // The cloud status too, for the same reason failVanishedRun stamps it: the
+    // operator console falls back to this metadata when there is no live run,
+    // and a row left saying `running` keeps offering a Cancel button that can
+    // only ever error.
+    await patchTaskMetadata(row.id, (existing) => {
+      const prev = (existing.cloudTask as CloudTaskMetadata | undefined) ?? undefined;
+      return { ...existing, cloudTask: { ...(prev ?? {}), status: 'failed' } };
+    });
+
+    emitTaskStatus(row.workspaceId, row.id, 'failed', result);
+    console.warn(
+      `[selfhosted] task ${row.id.slice(0, 8)}: in_progress with no fleet run — failing it`,
+    );
   }
 
   /**

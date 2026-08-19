@@ -136,6 +136,7 @@ class CloudTaskPoller {
             metadata: tasksTable.metadata,
             status: tasksTable.status,
             completedAt: tasksTable.completedAt,
+            updatedAt: tasksTable.updatedAt,
             transcriptEmpty: sql<boolean>`CASE WHEN jsonb_typeof(${tasksTable.transcript}) = 'array' THEN jsonb_array_length(${tasksTable.transcript}) = 0 ELSE true END`,
           })
           .from(tasksTable)
@@ -210,6 +211,7 @@ class CloudTaskPoller {
             watched: isWatched(row.id),
             status: row.status as CloudTaskRow['status'],
             completedAt: row.completedAt,
+            updatedAt: row.updatedAt,
           };
 
           try {

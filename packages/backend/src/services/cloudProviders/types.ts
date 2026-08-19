@@ -108,4 +108,11 @@ export interface CloudTaskRow {
    * Null unless the task is completed.
    */
   completedAt: Date | null;
+  /**
+   * When the task row last changed — which, for an `in_progress` task, is when
+   * it started. It is how a provider tells a task that is mid-dispatch from one
+   * that never dispatched at all: both look identical in a single tick, and only
+   * the elapsed time separates them.
+   */
+  updatedAt: Date | null;
 }
