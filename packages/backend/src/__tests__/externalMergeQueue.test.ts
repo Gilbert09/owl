@@ -212,6 +212,37 @@ describe('externalQueueStatusFromComment — trunk states, as trunk writes them'
     });
   });
 
+  // The queue-failure fix run is dispatched from this. Before it was captured,
+  // the run was told "it failed tests" and had to rediscover which check broke,
+  // with the answer already parsed and thrown away.
+  describe('the required checks the provider named as failing', () => {
+    const checksOf = (body: string) => externalQueueStatusFromComment(trunk(body))?.failedChecks;
+
+    it('reads them out of the failure table, which sits below the status sentence', () => {
+      expect(
+        checksOf(
+          `\u{274C} This pull request was removed from the merge queue because it failed tests. PR [#84396](https://www.github.com/PostHog/posthog/pull/84396) was used for testing. See more details [here]${LINK}.\n|Failed Required Status|Conclusion|\n|-|-|\n|Semgrep Checks Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/1)|\n|Backend Tests Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/2)|\n<!-- Start PR Submit Checkbox -->\n- [ ] <!-- End PR Submit Checkbox -->To merge this pull request, check the box to the left or comment \`/trunk merge\` below.`
+        )
+      ).toEqual(['Semgrep Checks Pass', 'Backend Tests Pass']);
+    });
+
+    it('reads the single-check shape, where the name sits inside a link', () => {
+      expect(
+        checksOf(
+          `\u{26A0}\u{FE0F} The required check [\`LLM Services Tests Pass\`](https://github.com/PostHog/posthog/actions/runs/1) (Failure) has failed. Pull request failed tests and is waiting for other pull requests to finish testing. See more details [here]${LINK}.`
+        )
+      ).toEqual(['LLM Services Tests Pass']);
+    });
+
+    it('names none when the queue never tested the PR', () => {
+      expect(
+        checksOf(
+          `\u{1F6AB} This pull request was removed from the merge queue because it was pushed to by @dmarchuk. Please re-submit it in order to merge. See more details [here]${LINK}.`
+        )
+      ).toBeUndefined();
+    });
+  });
+
   it('quotes the provider sentence that carried the state, without the link URL', () => {
     const status = externalQueueStatusFromComment(
       trunk(`\u{1F60E} Merged successfully - [details]${LINK}.`)

@@ -1572,12 +1572,21 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     });
 
     // `submitAttempts` was counted from the day it shipped and never read; the
-    // entry type and the desktop both describe a cap that did not exist.
+    // `external_queue_rejected` doc and the desktop's `submits: n/3` both
+    // promised a cap that did not exist. It bounds the untested ejections,
+    // which are the only ones that still go round again.
+    const pushedBack = {
+      provider: 'trunk',
+      state: 'ejected',
+      source: 'comment',
+      evidence: 'it was pushed to by @someone',
+    } as const;
+
     it('stops resubmitting once the per-head submit budget is spent', () => {
       const d = decide(
         submitted({ submitAttempts: 3 }),
-        trunkPr('trunk-failed'),
-        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', maxAttempts: 3, externalQueue: pushedBack })
       );
       const t = lastTransition(d)!;
       expect(t.to).toBe('blocked');
@@ -1588,17 +1597,18 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     it('still resubmits inside the budget', () => {
       const d = decide(
         submitted({ submitAttempts: 1 }),
-        trunkPr('trunk-failed'),
-        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', maxAttempts: 3, externalQueue: pushedBack })
       );
       expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
+      expect(kinds(d)).toContain('submit_external');
     });
 
     it('earns a fresh budget on a genuine new head', () => {
       const d = decide(
         submitted({ submitAttempts: 3, headSha: 'old' }),
         pr({ headSha: 'new' }),
-        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+        ctx({ externalGate: 'confirmed', maxAttempts: 3, externalQueue: pushedBack })
       );
       expect(kinds(d)).toContain('reset_budgets');
       expect(kinds(d)).toContain('submit_external');
@@ -1837,14 +1847,14 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(lastTransition(d)!.blockedCode).toBe('external_queue_rejected');
     });
 
-    it('ejects on a failure the provider reports in its comment, not in a label', () => {
+    it('acts on a failure the provider reports in its comment, not in a label', () => {
       const d = decide(
         commented(longAgo),
         cleanPr(),
         ctx({ externalGate: 'confirmed', externalQueue: observed('failed') })
       );
-      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
-      expect(kinds(d)).toContain('submit_external');
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_failed_fixing');
+      expect(kinds(d)).toContain('fire_fix_run');
     });
 
     it.each([['blocked_manual'], ['blocked']] as const)(
@@ -1965,17 +1975,24 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
   });
 
   describe('ejection', () => {
-    it('requeues and resubmits when the provider fails the PR within budget', () => {
+    // Resubmitting a commit the queue has already TESTED asks the same question
+    // of the same code, and trunk batches: the answer costs a batch re-test, a
+    // bisection to find this PR again, and every PR batched alongside it
+    // waiting through both.
+    it('dispatches a queue-failure run on the FIRST failure, without resubmitting', () => {
       const d = decide(submitted(), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
-      const eject = transitions(d).find((t) => t.event.code === 'external_queue_ejected')!;
-      expect(eject.to).toBe('queued');
-      expect(eject.set?.externalSubmitVia).toBeNull();
-      expect(kinds(d)).toContain('submit_external');
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('queued');
+      expect(t.set?.externalSubmitVia).toBeNull();
+      expect(t.event.code).toBe('external_queue_failed_fixing');
     });
 
-    it('treats a pending-failure label as an ejection too', () => {
+    it('treats a pending-failure label as a tested failure too', () => {
       const d = decide(submitted(), trunkPr('trunk-pending-failure'), ctx({ externalGate: 'confirmed' }));
-      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
+      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('submit_external');
     });
 
     it('fixes the PR first when it comes back genuinely broken', () => {
@@ -1999,8 +2016,6 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
      * An ordinary fix run would re-read the green checks and conclude there was
      * nothing to do.
      */
-    // The queue's reason is the budget. A FIRST failure resubmits (it may have
-    // been a flake); the SAME failure again means resubmitting won't change it.
     const failedBefore = queueSignature({
       provider: 'trunk',
       state: 'failed',
@@ -2008,20 +2023,15 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       evidence: 'trunk-failed',
     });
 
-    it('resubmits the FIRST time the queue fails a PR — it may have been a flake', () => {
-      const d = decide(
-        submitted({ submitAttempts: 1 }),
-        trunkPr('trunk-failed'),
-        ctx({ externalGate: 'confirmed' })
-      );
-      expect(kinds(d)).toContain('submit_external');
-      expect(kinds(d)).not.toContain('fire_fix_run');
-      // …and records the reason, so the next identical one is recognised.
-      const eject = transitions(d).find((t) => t.event.code === 'external_queue_ejected')!;
-      expect(eject.set?.seenSignatures).toContain(failedBefore);
+    // A flake is what this trades against, and it is the cheaper side: the run
+    // costs minutes, and `queueFailureRule` tells it to report that it found
+    // nothing rather than push a guess.
+    it('records the reason it dispatched on, so a repeat is recognised', () => {
+      const d = decide(submitted(), trunkPr('trunk-failed'), ctx({ externalGate: 'confirmed' }));
+      expect(lastTransition(d)!.set?.seenSignatures).toContain(failedBefore);
     });
 
-    it('dispatches a queue-failure run when the queue fails it the SAME way twice', () => {
+    it('still dispatches when the queue fails it the SAME way twice', () => {
       const d = decide(
         submitted({ seenSignatures: [failedBefore] }),
         trunkPr('trunk-failed'),
@@ -2039,11 +2049,22 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(lastTransition(d)!.event.code).toBe('external_queue_failed_fixing');
     });
 
-    it('keeps resubmitting while the queue fails it for a DIFFERENT reason each time', () => {
+    // An `ejected` state means the queue never tested the PR: a push landed on
+    // it, or it waited too long to become mergeable. Nothing was learned about
+    // the code, so those still go round again rather than paying for a run.
+    it('resubmits an ejection the queue never tested, rather than dispatching', () => {
       const d = decide(
-        submitted({ seenSignatures: [failedBefore] }),
-        trunkPr('trunk-pending-failure'),
-        ctx({ externalGate: 'confirmed' })
+        submitted(),
+        cleanPr(),
+        ctx({
+          externalGate: 'confirmed',
+          externalQueue: {
+            provider: 'trunk',
+            state: 'ejected',
+            source: 'comment',
+            evidence: 'it was pushed to by @someone',
+          },
+        })
       );
       expect(kinds(d)).toContain('submit_external');
       expect(kinds(d)).not.toContain('fire_fix_run');

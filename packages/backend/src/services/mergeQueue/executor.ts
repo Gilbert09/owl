@@ -1179,7 +1179,7 @@ async function rerequestFailedChecks(pr: PrEvalRow): Promise<RerunOutcome> {
 async function fireFixRun(
   resign: boolean,
   ctx: ActionContext,
-  queueFailure?: { provider: string; evidence: string }
+  queueFailure?: { provider: string; evidence: string; failedChecks?: string[] }
 ): Promise<ActionOutcome> {
   const resolved = await resolveCloudEnv(ctx.pr.workspaceId);
   if (!resolved) {

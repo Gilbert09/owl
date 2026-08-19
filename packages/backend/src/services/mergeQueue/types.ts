@@ -488,10 +488,11 @@ export type Action =
       resign: boolean;
       /**
        * Set when the PR is clean on its own branch but the external queue
-       * failed it merged with trunk. The run has no local blocker to work
-       * from, so it is started from the provider's failure output instead.
+       * failed it merged with the base. The run has no local blocker to work
+       * from, so it is started from the provider's failure output instead —
+       * including the required checks the provider named, when it named any.
        */
-      queueFailure?: { provider: string; evidence: string };
+      queueFailure?: { provider: string; evidence: string; failedChecks?: string[] };
     }
   /** Enable GitHub auto-merge on the head (expectedHeadOid-guarded; Push E). */
   | { kind: 'arm_automerge' }

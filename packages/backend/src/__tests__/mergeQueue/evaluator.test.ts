@@ -738,7 +738,11 @@ describe('mergeQueue v2 pipeline', () => {
       expect(blockedSpy).toHaveBeenCalledTimes(1);
     });
 
-    it('takes an ejected PR back and resubmits it', async () => {
+    // Trunk batches, so handing back a commit it has already TESTED costs a
+    // batch re-test, a bisection to find this PR at fault again, and every PR
+    // batched alongside it waiting through both. Its verdict is acted on the
+    // first time rather than bought twice.
+    it('dispatches a queue-failure run on the FIRST ejection, without resubmitting', async () => {
       gated();
       mockCapability.mockResolvedValue('available');
       const { prId, entryId } = await insertQueuedPr(db, {
@@ -750,13 +754,19 @@ describe('mergeQueue v2 pipeline', () => {
         .set({ externalSubmitVia: 'auto_merge', submitAttempts: 1 } as never)
         .where(eq(mergeQueueEntries.id, entryId));
 
+      const spy = vi
+        .spyOn(taskCreateModule, 'createCloudTask')
+        .mockResolvedValue({ id: 'task-first-ejection' } as never);
+
       await evaluateGroupNow('repo1', 'main', 'test');
 
       const entry = await entryOf(db, prId);
-      expect(entry?.status).toBe('awaiting_external');
-      expect(entry?.submitAttempts).toBe(2);
+      expect(entry?.fixKind).toBe('queue_failure');
+      expect(entry?.submitAttempts).toBe(1);
       const codes = (await eventsOf(db, entryId)).map((e) => e.code);
-      expect(codes).toContain('external_queue_ejected');
+      expect(codes).toContain('external_queue_failed_fixing');
+      expect(codes).not.toContain('external_submitted');
+      spy.mockRestore();
     });
 
     /**

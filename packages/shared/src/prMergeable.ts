@@ -234,7 +234,7 @@ export interface MergeablePromptInput {
    *
    * `evidence` is the provider's own status sentence, verbatim.
    */
-  queueFailure?: { provider: string; evidence: string };
+  queueFailure?: { provider: string; evidence: string; failedChecks?: string[] };
   /**
    * The PR was just retargeted onto its real base by the merge stack, because
    * the PR it was stacked on merged.
@@ -258,10 +258,18 @@ export interface MergeablePromptInput {
  * unmergeable. The queue tested a merge commit that does not exist on the
  * branch, so reproducing it means merging trunk in locally.
  */
-export function queueFailureRule(input: { provider: string; evidence: string; baseBranch: string }): string {
+export function queueFailureRule(input: {
+  provider: string;
+  evidence: string;
+  baseBranch: string;
+  failedChecks?: string[];
+}): string {
+  const named = input.failedChecks?.length
+    ? `\n  - The checks ${input.provider} named as failing: ${input.failedChecks.map((c) => `\`${c}\``).join(', ')}. Start with those specific ones.`
+    : '';
   return `WHY THIS RUN EXISTS — THE MERGE QUEUE FAILED THIS PR, NOT ITS BRANCH:
   - ${input.provider} took this PR into its merge queue, tested it MERGED WITH ${input.baseBranch}, and that merged result failed. The PR's own checks are green — do not take that as "nothing to fix", because the failure is not on the branch as it stands.
-  - What ${input.provider} reported: "${input.evidence}"
+  - What ${input.provider} reported: "${input.evidence}"${named}
   - START THERE, not with the PR's check list. Find the queue's failure output — the provider's comments on the PR, its check runs, and any linked CI job it names — and read what actually broke.
   - REPRODUCE IT the way the queue did: merge the latest ${input.baseBranch} into this branch (or rebase onto it) and run the failing tests against that combination. A failure that only appears merged is usually a semantic conflict — two changes that are each fine alone and contradict together.
   - If you genuinely cannot find any failure after merging ${input.baseBranch} and running the relevant tests, say so plainly in your summary rather than pushing a speculative change. A no-op run that explains itself is worth more than a guess.`;

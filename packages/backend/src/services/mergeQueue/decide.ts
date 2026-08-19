@@ -330,7 +330,8 @@ export function blockerSignature(pr: PrSnapshot): string {
  * form made every ejection look novel and this bound unreachable.
  */
 export function queueSignature(status: ExternalQueueStatus): string {
-  return ['queue', status.provider, status.state, externalQueueReason(status)].join('|');
+  const checks = (status.failedChecks ?? []).map((c) => c.toLowerCase()).sort().join(',');
+  return ['queue', status.provider, status.state, externalQueueReason(status), checks].join('|');
 }
 
 /**
@@ -1295,67 +1296,83 @@ function decideExternalEjection(
   ctx: DecisionContext
 ): Decision | null {
   const provider = externalQueueProviderLabel(ext.provider);
-  // Has the queue already sent this head back for this exact reason, AFTER we
-  // resubmitted it? Then resubmitting again is repeating a move that did not
-  // work. A DIFFERENT reason each time is the queue making progress through the
-  // PR's problems, and keeps its resubmits.
+  // Has the queue already sent this head back for this exact reason? Then
+  // whatever we did last time did not work. A DIFFERENT reason is the queue
+  // making progress through the PR's problems, and earns another go.
   const signature = queueSignature(ext);
   const recurred = signatureSeen(d.entry, signature);
+
+  // A queue FAILURE is acted on the FIRST time, never resubmitted as-is.
+  //
+  // `failed` means the provider RAN the tests and this commit lost. Handing it
+  // back unchanged asks the same question of the same code, and the answer
+  // costs far more than one PR's CI: trunk batches, so a resubmit re-tests the
+  // batch, bisects it to find the PR at fault again, and ejects again — with
+  // every PR batched alongside it waiting through all of that. Requiring the
+  // ejection to REPEAT before remediating bought one of those rounds for
+  // nothing.
+  //
+  // A flake is the case this trades against, and it is the cheaper side: a
+  // wasted cloud run is minutes, and `queueFailureRule` tells the run to report
+  // that it found nothing rather than push a speculative change. The other
+  // ejected states are untouched — nothing was learned about the code in a
+  // "pushed to by @x" or a "waiting to become mergeable for too long", so those
+  // still resubmit.
+  //
+  // The ordinary fix run works from the PR's own blockers, and such a PR has
+  // none: its checks are green on its branch. What broke is the PR MERGED WITH
+  // THE BASE, a state that exists only inside the queue, so the run is started
+  // from the provider's failure output instead (fixKind 'queue_failure').
+  //
+  // Dispatched DIRECTLY, never by falling through to the ordinary rules, which
+  // would resubmit it behind our back.
+  //
+  // Bounded by the same progress rule as everything else: the local blocker
+  // signature this run will be judged on is recorded when it completes, so a PR
+  // that keeps failing the same way stops rather than looping.
+  if (
+    ext.state === 'failed' &&
+    !signatureSeen(d.entry, blockerSignature(pr)) &&
+    ctx.cloudEnvAvailable
+  ) {
+    d.transition('queued', {
+      set: {
+        externalSubmitVia: null,
+        externalSubmittedAt: null,
+        externalState: ext.state,
+        seenSignatures: withSignature(d.entry, signature),
+      },
+      event: {
+        code: 'external_queue_failed_fixing',
+        message:
+          `${provider}'s merge queue tested this commit and failed it` +
+          (ext.failedChecks?.length ? ` (${ext.failedChecks.join(', ')})` : '') +
+          " — dispatching a run from the queue's failure output rather than resubmitting it.",
+        detail: {
+          evidence: ext.evidence,
+          source: ext.source,
+          state: ext.state,
+          ...(ext.failedChecks?.length ? { failedChecks: ext.failedChecks } : {}),
+        },
+      },
+    });
+    d.act({ kind: 'disarm_automerge' });
+    d.act({
+      kind: 'fire_fix_run',
+      resign: false,
+      queueFailure: { provider, evidence: ext.evidence, failedChecks: ext.failedChecks },
+    });
+    return d.done('hold');
+  }
+
   if (ext.state === 'cancelled' || recurred) {
-    // A queue FAILURE on a locally-clean PR is fixable — it just needs a
-    // different starting point.
+    // Nothing left to dispatch: a deliberate cancellation, or a repeat the fix
+    // run above has already been defeated by. Both are a human's call now.
     //
-    // The ordinary fix run works from the PR's own blockers, and this PR has
-    // none: its checks are green on its branch. What broke is the PR MERGED
-    // WITH TRUNK, a state that exists only inside the queue, so the run is
-    // started from the provider's failure output instead (fixKind
-    // 'queue_failure'). Without this the entry parked on "Failed in queue ·
-    // BLOCKED" and waited for a human to push, with a remedy available and
-    // idle.
-    //
-    // Dispatched DIRECTLY, never by falling through to the ordinary rules. The
-    // recurrence test above is the ONLY guard on resubmission, and a
-    // fall-through would bypass the one thing standing between a rejected PR
-    // and an eject → resubmit → eject loop.
-    //
-    // Bounded by the same progress rule, one lane over: the local blocker
-    // signature this run will be judged on is recorded when it completes, so a
-    // PR that keeps failing the same way stops on the repeat rather than after
-    // a fixed number of tries. `cancelled` is excluded: somebody may have
-    // pulled the PR out deliberately and spending money to override that is not
-    // a repair. Auto-merge is disarmed on the way, exactly as the blocking path
-    // does — a half-fixed PR must not merge itself behind the queue's back.
-    // Escalate to a fix run seeded with the queue's failure output — unless a
-    // fix run has already been left with this same local blocker on this head,
-    // in which case it is the same dead end one lane over.
-    const fixable =
-      ext.state === 'failed' &&
-      !signatureSeen(d.entry, blockerSignature(pr)) &&
-      ctx.cloudEnvAvailable;
-    if (fixable) {
-      d.transition('queued', {
-        set: {
-          externalSubmitVia: null,
-          externalSubmittedAt: null,
-          externalState: ext.state,
-          seenSignatures: withSignature(d.entry, signature),
-        },
-        event: {
-          code: 'external_queue_failed_fixing',
-          message:
-            `${provider} failed this PR in its merge queue for the same reason as before — ` +
-            "resubmitting won't change it, so dispatching a run from the queue's failure output.",
-          detail: { evidence: ext.evidence, source: ext.source, state: ext.state },
-        },
-      });
-      d.act({ kind: 'disarm_automerge' });
-      d.act({
-        kind: 'fire_fix_run',
-        resign: false,
-        queueFailure: { provider, evidence: ext.evidence },
-      });
-      return d.done('hold');
-    }
+    // `cancelled` is excluded from remediation on purpose: somebody may have
+    // pulled the PR out deliberately, and spending money to override that is
+    // not a repair. Auto-merge is disarmed by the transition itself — a
+    // half-fixed PR must not merge itself behind the queue's back.
     d.transition('blocked', {
       blockedCode: 'external_queue_rejected',
       blockedReason: externalQueueRejectedReason(ext),
@@ -1377,6 +1394,7 @@ function decideExternalEjection(
     d.act({ kind: 'notify_blocked' });
     return d.done('advance');
   }
+
   // The per-head submit budget, which `submitAttempts` had counted since it
   // shipped without anything ever reading it — the `external_queue_rejected`
   // doc ("more times than the per-head budget allows") and the desktop's
