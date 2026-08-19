@@ -100,6 +100,14 @@ export type BlockedCode =
    * signature list, or on a requeue. See `blockerSignature` in decide.ts.
    */
   | 'no_progress'
+  /**
+   * A check that only a PERSON can clear is holding the PR — today that means
+   * PostHog Visual Review, whose gate stays red until someone approves the
+   * changed snapshots. No fix run can help, so none is dispatched. Self-heals
+   * the moment the check goes green (or the workspace turns on
+   * `visualReview.autoApprove` and the queue resolves it itself).
+   */
+  | 'awaiting_human_check'
   /** Re-sign budget spent on a signed-commits-required base. Self-heals on a new head. */
   | 'unsigned_commits'
   /**
@@ -223,6 +231,27 @@ export interface EntrySnapshot {
  * is fresh by construction on webhook-triggered evaluations (the trigger IS
  * the snapshot write); the reconciler refreshes stale ones before deciding.
  */
+/** The VR run holding this PR, as the decision core sees it. */
+export interface VisualReviewContext {
+  runId: string;
+  url: string;
+  /** Snapshots awaiting a decision — changed plus new. */
+  changed: number;
+  /** Whether the workspace opted into the queue finalizing the run itself. */
+  autoApprove: boolean;
+}
+
+/** What `resolve_visual_review` did, folded back in on the redecide. */
+export type VisualReviewActionOutcome =
+  /** The gate is greened; CI will re-report. */
+  | { kind: 'finalized' }
+  /** The PR moved under us (a newer run, or newer commits). Not an error. */
+  | { kind: 'superseded' }
+  /** Transient — try again on a later evaluation. */
+  | { kind: 'retry'; message: string }
+  /** Terminal for this head (missing scope, no GitHub App, unresolvable). */
+  | { kind: 'error'; message: string };
+
 export interface PrSnapshot {
   state: 'open' | 'closed' | 'merged';
   /** Current head commit. '' when the summary predates headSha capture. */
@@ -315,6 +344,14 @@ export interface DecisionContext {
   externalQueue?: ExternalQueueStatus | null;
   /** Whether githubService.updateBranch exists/is enabled (Push E). */
   updateBranchAvailable: boolean;
+  /**
+   * A PostHog Visual Review run gating this PR, resolved only when the PR has
+   * a settled blocker and the repo is VR-tracked (see the executor). `null` =
+   * asked and nothing is gating; `undefined` = not asked.
+   */
+  visualReview?: VisualReviewContext | null;
+  /** Result of `resolve_visual_review`, folded back in on the redecide. */
+  visualReviewOutcome?: VisualReviewActionOutcome;
   /** A cloud provider is connected for this workspace. */
   cloudEnvAvailable: boolean;
   /** githubRateGate.isBlocked(account, 'rest') — merge-critical calls would sleep. */
@@ -426,6 +463,13 @@ export type Action =
   | { kind: 'rerequest_failed_checks' }
   /** PUT update-branch — merge the base into the head server-side (Push E). */
   | { kind: 'update_branch' }
+  /**
+   * Clear a PostHog Visual Review gate by finalizing its run — approve every
+   * pending diff and commit the baseline. IRREVERSIBLE and outward-facing: it
+   * rewrites the baseline on the PR branch. Only emitted when the workspace
+   * has opted in via `settings.visualReview.autoApprove`.
+   */
+  | { kind: 'resolve_visual_review'; runId: string; url: string; changed: number }
   /**
    * Merge stack: point the PR at `toBase` (REST PATCH), then move the entry
    * into that group. Fired only once the stack parent that owned the current

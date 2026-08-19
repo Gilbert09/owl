@@ -461,6 +461,21 @@ describe('mergeQueue v2 pipeline', () => {
   // it was left with and re-fires; the SECOND, left with the identical problem,
   // blocks. Driven through the real lifecycle rather than a seeded counter, so
   // it also proves the signature actually round-trips through the column.
+  // The visual-review lookup is a PostHog round-trip. Without this gate it
+  // would fire for every blocked PR in every workspace holding PostHog
+  // credentials — including the great majority of repos that have no visual
+  // review at all.
+  it('never asks PostHog about visual review when the workspace has not configured it', async () => {
+    const vr = await import('../../services/visualReview.js');
+    const spy = vi.spyOn(vr, 'gatingRunForPr');
+    await insertQueuedPr(db, { summary: conflictSummary() });
+
+    await evaluateGroupNow('repo1', 'main', 'test');
+
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it('re-fires after one failed run, then blocks when the same problem recurs', async () => {
     await insertTask(db, 'task-1', 'completed');
     const { prId } = await insertQueuedPr(db, {

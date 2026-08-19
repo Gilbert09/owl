@@ -272,6 +272,49 @@ export interface WorkspaceSettings {
    * prompt kind (Settings → Instructions). Absent kind = the shipped default.
    */
   prompts?: PromptTemplateSettings;
+  /**
+   * PostHog Visual Review — the screenshot-regression gate on posthog/posthog.
+   * Absent = off, and off is the only safe default: finalizing REWRITES the
+   * committed baseline and greens the gate, so turning it on delegates a
+   * human review decision to the queue. See {@link VisualReviewSettings}.
+   */
+  visualReview?: VisualReviewSettings;
+}
+
+/**
+ * Visual Review is a HUMAN-DECISION gate: CI diffs screenshots against
+ * committed baselines and stays red until a person approves each change. No
+ * code an agent can write will ever green it, which is why the queue used to
+ * loop — 11 runs on PostHog/posthog#83850 over two days, every one carrying
+ * the same 4 unapproved diffs, each fix run pushing a commit that triggered
+ * the next run (2026-08-19).
+ *
+ * With `autoApprove` on, the queue finalizes the run itself (approve-all +
+ * commit baseline) rather than dispatching a run that cannot help.
+ *
+ * Understand what that trades away. Approving is the review — an UNINTENDED
+ * regression is baselined and shipped exactly as readily as an intended
+ * change, because nothing here can tell them apart. Leave it off and the queue
+ * still stops looping; it parks the PR and names the run for a human instead.
+ */
+export interface VisualReviewSettings {
+  /**
+   * Finalize the PR's visual review run instead of parking it for a human.
+   * Absent/false = park and surface (the safe default).
+   *
+   * Note the object's PRESENCE is itself the switch for looking at all: with no
+   * `visualReview` settings the queue never asks PostHog about a PR, so a
+   * workspace whose repos have no visual review pays nothing. Set
+   * `{ autoApprove: false }` to get the recognise-and-park behaviour without
+   * the queue approving anything.
+   */
+  autoApprove?: boolean;
+  /**
+   * PostHog project id owning the visual reviews. Unset = the project on the
+   * workspace's PostHog Code integration, which is the same project in every
+   * setup seen so far.
+   */
+  projectId?: string;
 }
 
 export type MergeQueueMode = 'ordered' | 'eager';

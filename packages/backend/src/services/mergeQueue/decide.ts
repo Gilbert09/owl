@@ -34,6 +34,7 @@ import type {
   EntryStatus,
   EventDraft,
   PrSnapshot,
+  VisualReviewContext,
 } from './types.js';
 import type { StackParent } from './stack.js';
 
@@ -863,6 +864,34 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     if (justBlocked) d.act({ kind: 'notify_blocked' });
   }
 
+  // R8b — a check only a PERSON can clear. PostHog Visual Review diffs
+  // screenshots against committed baselines and holds the gate red until
+  // someone approves each change, so no code a fix run can write will ever
+  // green it. Left to the ordinary rules it deadlocks: the run pushes a commit,
+  // the commit triggers fresh CI, the fresh run carries the SAME unapproved
+  // diffs (PostHog/posthog#83850 went round 11 times in two days).
+  //
+  // Placed AFTER R8 so a finished run is still accounted, and BEFORE R9 so an
+  // entry already parked on `no_progress` or `awaiting_human_check` can still
+  // be released by this — otherwise the blocked gate returns first and the PR
+  // can never be un-stuck without a human.
+  if (ctx.visualReview !== undefined && ctx.visualReview !== null) {
+    const verdict = decideVisualReview(d, ctx.visualReview, ctx);
+    if (verdict) return verdict;
+  } else if (ctx.visualReview === null && d.entry.blockedCode === 'awaiting_human_check') {
+    // Nothing is gating any more — approved by hand, superseded, or the check
+    // went green. Same shape as the stack self-heal: the verdict was derived
+    // from a live reading, so it dies with the reading.
+    d.transition('queued', {
+      blockedCode: null,
+      blockedReason: null,
+      event: {
+        code: 'human_check_cleared',
+        message: 'The visual review gate is no longer holding this PR — back in line.',
+      },
+    });
+  }
+
   // R9 — blocked gates.
   if (d.entry.status === 'blocked_manual') {
     // Truly manual: GitHub refused the App with no failing check to blame.
@@ -1261,6 +1290,93 @@ function decideExternalEjection(
     },
   });
   return null;
+}
+
+/**
+ * R8b's body — the visual-review gate.
+ *
+ * Returns a Decision when the gate owns this evaluation, or null to fall
+ * through (the gate is handled and other blockers still deserve the ordinary
+ * rules).
+ */
+function decideVisualReview(
+  d: DecisionBuilder,
+  vr: VisualReviewContext,
+  ctx: DecisionContext
+): Decision | null {
+  const outcome = ctx.visualReviewOutcome;
+  if (outcome) {
+    if (outcome.kind === 'finalized') {
+      // The baseline is committed and the gate is green. CI re-runs off the
+      // new commit, so wait for it rather than racing a merge against a
+      // check that has not reported yet.
+      d.transition('awaiting_ci', {
+        blockedCode: null,
+        blockedReason: null,
+        event: {
+          code: 'visual_review_finalized',
+          message: `Approved ${vr.changed} visual-review snapshot(s) and committed the baseline — waiting for checks.`,
+          detail: { runId: vr.runId, url: vr.url },
+        },
+      });
+      d.act({ kind: 'refresh_snapshot' });
+      return d.done('advance');
+    }
+    if (outcome.kind === 'superseded') {
+      // A newer run, or newer commits. Ordinary on an active branch — the next
+      // evaluation resolves the current run and tries again. Burn nothing.
+      d.ensure('queued');
+      return d.done('advance');
+    }
+    if (outcome.kind === 'retry') {
+      d.ensure('queued');
+      return d.done('advance');
+    }
+    // Terminal for this head — a missing scope or a refused commit. Say
+    // exactly what it was; this one is almost always a configuration answer.
+    if (d.entry.blockedCode !== 'awaiting_human_check') {
+      d.transition('blocked', {
+        blockedCode: 'awaiting_human_check',
+        blockedReason: `${visualReviewReason(vr)} Talyn tried to approve it and could not: ${outcome.message}`,
+        event: {
+          code: 'visual_review_failed',
+          message: `Finalizing the visual review failed: ${outcome.message}`,
+          detail: { runId: vr.runId, url: vr.url },
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+    }
+    return d.done('advance');
+  }
+
+  if (vr.autoApprove) {
+    d.act({ kind: 'resolve_visual_review', runId: vr.runId, url: vr.url, changed: vr.changed });
+    return d.done('hold');
+  }
+
+  // Not opted in: park and name the run. Fire-once, so re-evaluating a parked
+  // PR is silent. `blocked` rather than `blocked_manual` — the check going
+  // green self-heals it, no requeue needed.
+  if (d.entry.blockedCode !== 'awaiting_human_check') {
+    d.transition('blocked', {
+      blockedCode: 'awaiting_human_check',
+      blockedReason: visualReviewReason(vr),
+      event: {
+        code: 'awaiting_visual_review',
+        message: `Waiting on a human to review ${vr.changed} visual-review snapshot(s).`,
+        detail: { runId: vr.runId, url: vr.url },
+      },
+    });
+    d.act({ kind: 'notify_blocked' });
+  }
+  return d.done('advance');
+}
+
+function visualReviewReason(vr: VisualReviewContext): string {
+  return (
+    `PostHog Visual Review is holding this PR: ${vr.changed} snapshot(s) changed and need a ` +
+    `person to approve them — no fix run can green that check. Review them at ${vr.url}.`
+  );
 }
 
 /** Aftermath of this evaluation's own external-queue submit (ctx.submitOutcome). */

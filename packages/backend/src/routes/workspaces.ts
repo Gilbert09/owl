@@ -60,6 +60,30 @@ function generatedLogo(): WorkspaceLogo {
   return { kind: 'identicon', seed: uuid() };
 }
 
+/**
+ * `autoApprove` switches on an IRREVERSIBLE outward-facing action: the queue
+ * finalizes visual-review runs, which rewrites the baseline committed to the
+ * PR branch. So it is type-checked strictly rather than coerced — a stray
+ * `"false"` string is truthy in JS, and enabling this by accident is not a
+ * mistake anyone can take back.
+ */
+function validateVisualReview(value: unknown): void {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('settings.visualReview must be an object');
+  }
+  const { autoApprove, projectId, ...rest } = value as Record<string, unknown>;
+  const unknown = Object.keys(rest);
+  if (unknown.length > 0) {
+    throw new Error(`Unknown settings.visualReview key "${unknown[0]}"`);
+  }
+  if (autoApprove !== undefined && typeof autoApprove !== 'boolean') {
+    throw new Error('settings.visualReview.autoApprove must be a boolean');
+  }
+  if (projectId !== undefined && (typeof projectId !== 'string' || !/^\d+$/.test(projectId))) {
+    throw new Error('settings.visualReview.projectId must be a numeric string');
+  }
+}
+
 // Validated per-kind patch, nulls kept: the merge itself happens in SQL so
 // two concurrent PATCHes cannot clobber each other's kinds.
 function promptSettingsPatch(patch: unknown): PromptTemplateSettings {
@@ -223,6 +247,14 @@ export function workspaceRoutes(): Router {
           prompts = promptSettingsPatch(body.settings.prompts);
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'invalid prompts';
+          return res.status(400).json({ success: false, error: msg });
+        }
+      }
+      if (body.settings.visualReview !== undefined) {
+        try {
+          validateVisualReview(body.settings.visualReview);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'invalid visualReview';
           return res.status(400).json({ success: false, error: msg });
         }
       }

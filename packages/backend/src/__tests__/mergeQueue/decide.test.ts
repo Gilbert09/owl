@@ -1992,6 +1992,142 @@ describe('decide — invariants', () => {
   });
 });
 
+// R8b — the visual-review gate. Visual Review holds the check red until a
+// PERSON approves each changed snapshot, so a fix run can never green it. Left
+// to the ordinary rules the queue deadlocks: the run pushes a commit, CI
+// re-runs, the fresh run carries the same unapproved diffs
+// (PostHog/posthog#83850 went round 11 times in two days).
+describe('decide — visual review gate', () => {
+  const vr = (o: Partial<NonNullable<DecisionContext['visualReview']>> = {}) => ({
+    runId: 'run-1',
+    url: 'https://us.posthog.com/project/2/visual_review/runs/run-1',
+    changed: 4,
+    autoApprove: false,
+    ...o,
+  });
+  /** Red required check — what a VR-gated PR actually looks like to us. */
+  const gatedPr = () =>
+    pr(
+      { mergeStateStatus: 'BLOCKED' },
+      { blockingReason: 'checks_failed', checks: { total: 280, failed: 2, inProgress: 0 } }
+    );
+
+  it('parks instead of firing a doomed fix run when auto-approve is off', () => {
+    const d = decide(entry(), gatedPr(), ctx({ visualReview: vr() }));
+    const t = lastTransition(d)!;
+    expect(t.to).toBe('blocked');
+    expect(t.blockedCode).toBe('awaiting_human_check');
+    expect(t.blockedReason).toContain('4 snapshot(s) changed');
+    expect(t.blockedReason).toContain('visual_review/runs/run-1');
+    expect(kinds(d)).toContain('notify_blocked');
+    expect(kinds(d)).not.toContain('fire_fix_run');
+  });
+
+  it('does not re-notify or churn while already parked', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check' }),
+      gatedPr(),
+      ctx({ visualReview: vr() })
+    );
+    expect(d.actions).toEqual([]);
+  });
+
+  it('releases the park when nothing is gating any more', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check', blockedReason: 'x' }),
+      gatedPr(),
+      ctx({ visualReview: null })
+    );
+    const t = transitions(d).find((x) => x.event.code === 'human_check_cleared')!;
+    expect(t.to).toBe('queued');
+    expect(t.blockedCode).toBeNull();
+  });
+
+  // A LOOKUP FAILURE must not read as "nothing is gating" — that would un-park
+  // every gated PR on a PostHog blip and start the loop again.
+  it('leaves a parked entry alone when the gate was not resolved at all', () => {
+    const d = decide(
+      entry({ status: 'blocked', blockedCode: 'awaiting_human_check' }),
+      gatedPr(),
+      ctx({ visualReview: undefined })
+    );
+    expect(transitions(d).map((t) => t.event.code)).not.toContain('human_check_cleared');
+  });
+
+  describe('auto-approve opted in', () => {
+    it('finalizes the run rather than parking or firing a fix run', () => {
+      const d = decide(entry(), gatedPr(), ctx({ visualReview: vr({ autoApprove: true }) }));
+      expect(d.actions).toEqual([
+        { kind: 'resolve_visual_review', runId: 'run-1', url: vr().url, changed: 4 },
+      ]);
+      expect(d.verdict).toBe('hold');
+    });
+
+    it('waits for CI once the baseline is committed', () => {
+      const d = decide(
+        entry(),
+        gatedPr(),
+        ctx({
+          visualReview: vr({ autoApprove: true }),
+          visualReviewOutcome: { kind: 'finalized' },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_ci');
+      expect(t.event.code).toBe('visual_review_finalized');
+      expect(kinds(d)).toContain('refresh_snapshot');
+    });
+
+    it.each([['superseded'], ['retry']] as const)(
+      'burns nothing on a %s outcome — the next evaluation retries',
+      (kind) => {
+        const d = decide(
+          entry({ status: 'queued' }),
+          gatedPr(),
+          ctx({
+            visualReview: vr({ autoApprove: true }),
+            visualReviewOutcome:
+              kind === 'retry' ? { kind, message: 'rate limited' } : { kind },
+          })
+        );
+        expect(kinds(d)).not.toContain('fire_fix_run');
+        expect(lastTransition(d)?.to).not.toBe('blocked');
+      }
+    );
+
+    it('parks with the reason when finalizing is refused outright', () => {
+      const d = decide(
+        entry(),
+        gatedPr(),
+        ctx({
+          visualReview: vr({ autoApprove: true }),
+          visualReviewOutcome: { kind: 'error', message: 'needs visual_review:write' },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('awaiting_human_check');
+      expect(t.blockedReason).toContain('needs visual_review:write');
+      expect(kinds(d)).toContain('notify_blocked');
+    });
+  });
+
+  // The gate must be reachable from a PR the progress rule already gave up on,
+  // or a PR that looped before this shipped can never be un-stuck.
+  it('is reached even when the entry is already blocked on no_progress', () => {
+    const d = decide(
+      entry({
+        status: 'blocked',
+        blockedCode: 'no_progress',
+        seenSignatures: [blockerSignature(gatedPr())],
+      }),
+      gatedPr(),
+      ctx({ visualReview: vr({ autoApprove: true }) })
+    );
+    expect(kinds(d)).toContain('resolve_visual_review');
+  });
+});
+
 // R4b — the merge stack gate. The group walk gives no protection here: parent
 // and child live in different (repo, base) groups, are walked by two
 // independent evaluations, and decideCleanPath never reads ctx.isHead. So this
