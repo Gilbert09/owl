@@ -45,23 +45,34 @@ jobs:
       # rather than a second workflow. The env vars are the same publishable
       # repo variables the desktop build uses; vite.config.ts refuses to build
       # a production bundle without them, which is the point.
+      #
+      # PLACEHOLDER FALLBACKS, and they are load-bearing for outside
+      # contributions: GitHub withholds repo VARIABLES from a pull_request run
+      # raised off a fork, exactly as it withholds secrets, so `vars.*` arrives
+      # empty and `assertUsableBuildEnv` refuses the build. That guard exists to
+      # stop a real DEPLOY shipping a white screen (apps/web/buildEnv.ts); here
+      # the bundle is thrown away the moment it is built, so a placeholder keeps
+      # the compile + bundle coverage instead of failing every fork PR on env it
+      # was never going to be given. A push to main still builds with the real
+      # values, and the actual deploys read Vercel's own env, never this.
       - name: Build web app
         env:
           VITE_TALYN_API_URL: https://prod.talyn.dev
-          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL }}
-          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY }}
+          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL || 'https://fork-pr.placeholder.invalid' }}
+          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY || 'fork-pr-placeholder-anon-key' }}
           VITE_TALYN_POSTHOG_KEY: ${{ vars.TALYN_POSTHOG_KEY }}
           VITE_TALYN_BUILD_SHA: ${{ github.sha }}
         run: npm run build -w @talyn/web
 
       # Same reasoning as the web build above, and the same publishable repo
-      # variables. The console points at the same backend and the same
-      # Supabase project — what differs is who the backend lets in.
+      # variables (including the fork-PR placeholders). The console points at
+      # the same backend and the same Supabase project — what differs is who
+      # the backend lets in.
       - name: Build admin console
         env:
           VITE_TALYN_API_URL: https://prod.talyn.dev
-          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL }}
-          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY }}
+          VITE_TALYN_SUPABASE_URL: ${{ vars.TALYN_SUPABASE_URL || 'https://fork-pr.placeholder.invalid' }}
+          VITE_TALYN_SUPABASE_ANON_KEY: ${{ vars.TALYN_SUPABASE_ANON_KEY || 'fork-pr-placeholder-anon-key' }}
           VITE_TALYN_POSTHOG_KEY: ${{ vars.TALYN_POSTHOG_KEY }}
           VITE_TALYN_BUILD_SHA: ${{ github.sha }}
         run: npm run build -w @talyn/admin
