@@ -1643,6 +1643,90 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     });
   });
 
+  // Per-PR budgets cannot see that the QUEUE is the broken thing, so with a
+  // backlog each entry rediscovers a dead runner alone. Trunk batches, so those
+  // submissions lengthen the outage for the PRs already in the queue.
+  describe('backing off a queue that looks broken across PRs', () => {
+    const degraded = { state: 'degraded', prs: [11, 22, 33] } as const;
+
+    it.each([['suspected'], ['confirmed']] as const)(
+      'does not submit a clean PR into a degraded queue (%s gate)',
+      (gate) => {
+        const d = decide(entry(), cleanPr(), ctx({ externalGate: gate, queueHealth: degraded }));
+        expect(kinds(d)).not.toContain('submit_external');
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('blocked');
+        expect(t.blockedCode).toBe('external_queue_unhealthy');
+      }
+    );
+
+    it('does not submit one whose only obstacle is in-flight CI either', () => {
+      const d = decide(
+        entry(),
+        ciRunningPr(),
+        ctx({ externalGate: 'confirmed', queueHealth: degraded })
+      );
+      expect(kinds(d)).not.toContain('submit_external');
+      expect(lastTransition(d)!.blockedCode).toBe('external_queue_unhealthy');
+    });
+
+    // The point of the feature is that it fires across many entries at once,
+    // so one notification per PR would be the noise it exists to remove.
+    it('never notifies — the reason carries it in the UI instead', () => {
+      const d = decide(entry(), cleanPr(), ctx({ externalGate: 'confirmed', queueHealth: degraded }));
+      expect(kinds(d)).not.toContain('notify_blocked');
+      expect(lastTransition(d)!.blockedReason).toContain('unhealthy');
+    });
+
+    it('settles rather than re-blocking an entry it already blocked', () => {
+      const d = decide(
+        entry({ status: 'blocked', blockedCode: 'external_queue_unhealthy' }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', queueHealth: degraded })
+      );
+      expect(d.actions).toEqual([]);
+      expect(d.verdict).toBe('advance');
+    });
+
+    // This gates SUBMISSION only. Fixing a PR is useful whenever the queue
+    // recovers, and holding it back would waste the outage.
+    it('still remediates a PR with a real blocker while the queue is sick', () => {
+      const d = decide(
+        entry(),
+        conflictingPr(),
+        ctx({ externalGate: 'confirmed', queueHealth: degraded })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+    });
+
+    // Nothing about the entry caused this block and nothing about it can clear
+    // it, so it must never wait for a push.
+    it('releases the block and submits once the queue looks healthy again', () => {
+      const d = decide(
+        entry({ status: 'blocked', blockedCode: 'external_queue_unhealthy' }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', queueHealth: null })
+      );
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_recovered');
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('leaves a PR the queue is already testing alone — it is past submitting', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-testing'),
+        ctx({ externalGate: 'confirmed', queueHealth: degraded })
+      );
+      expect(lastTransition(d)?.blockedCode).not.toBe('external_queue_unhealthy');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('is inert on a repo whose queue looks fine', () => {
+      const d = decide(entry(), cleanPr(), ctx({ externalGate: 'confirmed', queueHealth: null }));
+      expect(kinds(d)).toContain('submit_external');
+    });
+  });
+
   describe('GitHub refuses the App merge (how a gated branch actually answers)', () => {
     // posthog/posthog doesn't 405 "protected ref" — it 403s every App token,
     // because its ruleset exempts only trunk's App. Before this, that refusal

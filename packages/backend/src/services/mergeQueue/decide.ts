@@ -68,6 +68,21 @@ export function externalQueueInfraReason(
   );
 }
 
+/**
+ * The queue itself is the problem, and the PR is a bystander. Says so, and says
+ * that waiting is the plan — a reader told only "blocked" goes looking for
+ * something to fix in a PR that has nothing wrong with it.
+ */
+export function externalQueueUnhealthyReason(prs: number[]): string {
+  return (
+    `The merge queue on this branch looks unhealthy: ${prs.length} pull requests failed ` +
+    `in it on CI infrastructure rather than on their own code, and nothing merged in ` +
+    `between. Submitting now would join a batch that fails and gets bisected, which ` +
+    `slows down the PRs already queued, so the queue is waiting. It submits again on ` +
+    `its own once anything merges or the runners recover.`
+  );
+}
+
 export function externalQueueRejectedReason(status: ExternalQueueStatus): string {
   const provider = externalQueueProviderLabel(status.provider);
   if (status.state === 'cancelled') {
@@ -835,6 +850,23 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     }
   }
 
+  // R5c2 — the queue-health block, released the moment the queue stops looking
+  // sick. Nothing about this entry caused the block and nothing about it can
+  // clear it, so it must never wait for a push: `repoQueueHealth` ages its
+  // observations out on its own, and any merge clears them outright.
+  if (d.entry.status === 'blocked' && d.entry.blockedCode === 'external_queue_unhealthy') {
+    if (ctx.queueHealth?.state === 'degraded') return d.done('advance');
+    d.transition('queued', {
+      blockedCode: null,
+      blockedReason: null,
+      event: {
+        code: 'external_queue_recovered',
+        message: 'The merge queue on this branch looks healthy again — back in line.',
+      },
+    });
+    // Fall through: this entry is ordinary again and may submit on this pass.
+  }
+
   // R5d — the provider is holding a PR whose entry does not know it.
   //
   // R5b only protects an entry already parked in `awaiting_external`, so it
@@ -1268,6 +1300,8 @@ function decideCleanButWaitingOnCi(
   if (ctx.externalGate) {
     const signing = signingGateFor(d, pr, ctx, runActive);
     if (signing === 'clear') {
+      const backoff = queueBackoff(d, ctx);
+      if (backoff) return backoff;
       d.act({ kind: 'submit_external' });
       return d.done('advance');
     }
@@ -1879,6 +1913,39 @@ function dispatchResign(d: DecisionBuilder, ctx: DecisionContext, runActive: boo
   return d.done('advance');
 }
 
+/**
+ * Refuse to feed a queue that looks broken across PRs. Returns a Decision when
+ * it takes over, or null to submit as usual.
+ *
+ * Called at every site that would emit `submit_external`, rather than as a rule
+ * of its own, because this gates SUBMISSION and nothing else. A PR with a real
+ * local blocker still gets its fix run while the queue is sick: that work is
+ * useful whenever the queue recovers, and holding it would waste the outage.
+ *
+ * No `notify_blocked`. The whole point is that this fires across many entries
+ * at once, and one notification per PR would be the noise the feature exists to
+ * remove — the blocked reason carries it in the UI instead.
+ */
+function queueBackoff(d: DecisionBuilder, ctx: DecisionContext): Decision | null {
+  if (!ctx.queueHealth || ctx.queueHealth.state !== 'degraded') return null;
+  if (d.entry.status === 'blocked' && d.entry.blockedCode === 'external_queue_unhealthy') {
+    return d.done('advance');
+  }
+  d.transition('blocked', {
+    blockedCode: 'external_queue_unhealthy',
+    blockedReason: externalQueueUnhealthyReason(ctx.queueHealth.prs),
+    event: {
+      code: 'external_queue_unhealthy',
+      message:
+        `The merge queue on this branch failed ${ctx.queueHealth.prs.length} PRs on CI ` +
+        'infrastructure without merging anything — holding this one back rather than ' +
+        'adding to the pile.',
+      detail: { prs: ctx.queueHealth.prs },
+    },
+  });
+  return d.done('advance');
+}
+
 /** Clean path — mergeable AND up-to-date. Merge it (or defer safely). */
 function decideCleanPath(
   d: DecisionBuilder,
@@ -1911,6 +1978,8 @@ function decideCleanPath(
   // submit action falls back to the direct merge when the gate is only
   // suspected and GitHub says the PR could merge right now.
   if (ctx.externalGate) {
+    const backoff = queueBackoff(d, ctx);
+    if (backoff) return backoff;
     d.act({ kind: 'submit_external' });
     return d.done('hold');
   }
@@ -1958,6 +2027,8 @@ function decideMergeAftermath(d: DecisionBuilder, pr: PrSnapshot, ctx: DecisionC
           'GitHub refused the App merge on a branch governed by an external merge queue — submitting the PR to it instead.',
       },
     });
+    const backoff = queueBackoff(d, ctx);
+    if (backoff) return backoff;
     d.act({ kind: 'submit_external' });
     return d.done('hold');
   }
@@ -1984,6 +2055,8 @@ function decideMergeAftermath(d: DecisionBuilder, pr: PrSnapshot, ctx: DecisionC
           'This branch is governed by an external merge queue — submitting the PR to it instead of merging.',
       },
     });
+    const backoff = queueBackoff(d, ctx);
+    if (backoff) return backoff;
     d.act({ kind: 'submit_external' });
     return d.done('hold');
   }

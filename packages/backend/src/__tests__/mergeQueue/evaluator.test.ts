@@ -36,6 +36,12 @@ import {
 } from '../../services/externalQueueSubmitRoute.js';
 import { _resetExternalQueueState } from '../../services/externalQueueState.js';
 import { _resetExternalQueueFailures } from '../../services/externalQueueFailure.js';
+import {
+  DEGRADED_AFTER_DISTINCT_PRS,
+  noteInfraFailure,
+  noteMerge,
+  _resetQueueHealth,
+} from '../../services/repoQueueHealth.js';
 import { TaskLimitError } from '../../services/billing/entitlements.js';
 import { ensureActiveEntry, getActiveEntryForPr } from '../../services/mergeQueue/store.js';
 import {
@@ -302,6 +308,10 @@ describe('mergeQueue v2 pipeline', () => {
     // PR with the same number.
     _resetExternalQueueState();
     _resetExternalQueueFailures();
+    // Repo/base-scoped like the two above, and these tests all share
+    // `repo1`/`main` — an infra failure recorded by one would otherwise have
+    // the queue looking sick for every test after it.
+    _resetQueueHealth();
     _resetSubmitRoutes();
     await seedBase(db);
     await setEngine(db, 'v2');
@@ -789,6 +799,59 @@ describe('mergeQueue v2 pipeline', () => {
       const entry = await entryOf(db, prId);
       expect(entry?.status).toBe('awaiting_external');
       expect(entry?.submitAttempts).toBe(2);
+    });
+
+    // The cross-PR half: the tally is fed by the very transitions the pipeline
+    // writes, so a queue that has killed several PRs stops taking new ones.
+    it('stops submitting new PRs once several others died on queue infrastructure', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      mockSubmitLabel.mockResolvedValue('trunk-merge-queue-submit');
+      const addLabels = vi
+        .spyOn(githubService, 'addPullRequestLabels')
+        .mockResolvedValue(undefined);
+      for (let n = 900; n < 900 + DEGRADED_AFTER_DISTINCT_PRS; n++) {
+        noteInfraFailure('a', 'b', 'main', n);
+      }
+
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      expect(addLabels).not.toHaveBeenCalled();
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('blocked');
+      expect(entry?.blockedCode).toBe('external_queue_unhealthy');
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      expect(codes).toContain('external_queue_unhealthy');
+    });
+
+    it('submits again on its own once the queue recovers', async () => {
+      gated();
+      mockCapability.mockResolvedValue('available');
+      mockSubmitLabel.mockResolvedValue('trunk-merge-queue-submit');
+      const addLabels = vi
+        .spyOn(githubService, 'addPullRequestLabels')
+        .mockResolvedValue(undefined);
+      for (let n = 900; n < 900 + DEGRADED_AFTER_DISTINCT_PRS; n++) {
+        noteInfraFailure('a', 'b', 'main', n);
+      }
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+      await evaluateGroupNow('repo1', 'main', 'test');
+      expect((await entryOf(db, prId))?.blockedCode).toBe('external_queue_unhealthy');
+
+      // Something merged, which is the only direct proof the queue works.
+      noteMerge('a', 'b', 'main');
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      expect(codes).toContain('external_queue_recovered');
+      expect(addLabels).toHaveBeenCalled();
+      expect((await entryOf(db, prId))?.blockedCode).toBeNull();
     });
 
     it("applies the repo's submit label when there is no instruction comment", async () => {
