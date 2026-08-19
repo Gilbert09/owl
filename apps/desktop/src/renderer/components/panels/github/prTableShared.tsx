@@ -277,6 +277,15 @@ function PRTableRow({
     [onSetMergeQueueStack, variant, row.state, allRows, row.id]
   );
   const stackable = stackBelow.length > 1;
+  // Every member of this row's stack, in merge order. From any member, walking
+  // down then up covers the whole chain — a root has no ancestors, so the chip
+  // below cannot be derived from `stackBelow` alone.
+  const stackAll = useMemo(() => {
+    if (variant === 'review' || row.state !== 'open') return [];
+    const below = stackAncestors(allRows, row.id);
+    const above = stackWithDescendants(allRows, row.id).slice(1);
+    return [...below, ...above];
+  }, [variant, row.state, allRows, row.id]);
   const draftsInStack = stackBelow.filter((r) => r.summary.draft === true).length;
   const unqueuedInStack = stackBelow.filter((r) => !r.mergeQueued).length;
   // A dequeue has to cascade whenever anything is parked on this PR.
@@ -307,8 +316,12 @@ function PRTableRow({
   const requested = variant === 'review' ? reviewRequestLabel(summary, viewerLogin) : null;
 
   // Stacked-PR visual: left indentation by depth so dependents nest under
-  // their base PR (no accent bar — indentation alone conveys the grouping).
+  // their base PR. Indentation alone conveys the grouping while a stack is just
+  // sitting there — a permanent accent bar on every stack would be noise.
   const stackIndent = (stack?.depth ?? 0) * STACK_INDENT_PX;
+  // The exception: once EVERY member is queued, the stack is one unit that is
+  // actively draining, and that is worth seeing at a glance.
+  const stackDraining = stackAll.length > 1 && stackAll.every((r) => r.mergeQueued);
 
   // A linked task is "active" while it's queued or running — i.e. not yet
   // fully done. Drives the spinner/label and suppresses the start-task
@@ -482,7 +495,13 @@ function PRTableRow({
           table refuses to shrink below the full text width and `truncate`
           never engages. */}
       <td className="w-full max-w-0 px-4 py-2">
-        <div className="flex min-w-0 flex-col gap-0.5" style={stackIndent ? { paddingLeft: stackIndent } : undefined}>
+        <div
+          className={cn(
+            'flex min-w-0 flex-col gap-0.5',
+            stackDraining && 'border-l-2 border-indigo-500/60 pl-2'
+          )}
+          style={stackIndent ? { marginLeft: stackIndent } : undefined}
+        >
           <span className="flex items-center gap-1.5 truncate font-medium">
             <span className="truncate" title={summary.title || undefined}>
               {summary.title || '(no title)'}
@@ -569,6 +588,15 @@ function PRTableRow({
                 linked-task "Working" badge above already says so, so a separate
                 Fixing chip would be redundant. On the Merge Queue page the
                 Queue column carries this, so we skip the title badge there. */}
+            {variant !== 'queue' && stack?.depth === 0 && stackAll.length > 1 && (
+              <span
+                className="ml-2 inline-flex items-center gap-1 rounded bg-indigo-200 px-1 py-0.5 text-[10px] uppercase text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200"
+                title={`This PR is the bottom of a stack of ${stackAll.length}. They merge one at a time from here up, each waiting a full CI cycle after the one below it lands.`}
+              >
+                <Layers className="h-2.5 w-2.5" />
+                Stack of {stackAll.length}
+              </span>
+            )}
             {variant !== 'queue' &&
               row.mergeQueued &&
               (() => {
@@ -1002,16 +1030,28 @@ function QueueCell({
               Waiting for CI
             </span>
           );
-        case 'awaiting_review':
+        case 'awaiting_review': {
+          // A PR that was RETARGETED off a stack and is now waiting on review is
+          // very often waiting because of the retarget: bringing the new base in
+          // pushes a merge commit, and a repo with "dismiss stale approvals on
+          // new commits" drops the approval it already had. Nothing can fix that
+          // but a human, and without saying so this reads as though the PR was
+          // never approved at all.
+          const restacked = v2.stackParentNumber != null;
           return (
             <span
               className="inline-flex items-center gap-1 text-muted-foreground"
-              title="A required review is the only thing missing — merges once approved"
+              title={
+                restacked
+                  ? `A required review is the only thing missing — merges once approved. This PR was retargeted after #${v2.stackParentNumber} merged, so if the repo dismisses approvals on new commits, an earlier approval was dropped and needs re-requesting.`
+                  : 'A required review is the only thing missing — merges once approved'
+              }
             >
               <Eye className="h-3 w-3" />
-              Waiting for review
+              {restacked ? 'Waiting for review (re-approve)' : 'Waiting for review'}
             </span>
           );
+        }
         case 'awaiting_stack': {
           // Parked behind the PR this one is stacked on. Ordinarily a quiet
           // wait that needs nothing from anyone — but if the PR below it is
