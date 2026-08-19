@@ -504,6 +504,7 @@ export function taskRoutes(): Router {
           // rowToTask serialises dates to ISO strings; CloudTaskRow wants the
           // Date the poller passes it, so convert rather than cast.
           completedAt: task.completedAt ? new Date(task.completedAt) : null,
+          updatedAt: task.updatedAt ? new Date(task.updatedAt) : null,
         });
       } catch (err) {
         return res.status(502).json({
