@@ -30,6 +30,12 @@ import {
 import { registerCloudProvider } from '../../services/cloudProviders/registry.js';
 import { postHogCodeProvider } from '../../services/cloudProviders/posthog/provider.js';
 import * as taskCreateModule from '../../services/taskCreate.js';
+import {
+  noteExternalQueueSubmitRoute,
+  _resetSubmitRoutes,
+} from '../../services/externalQueueSubmitRoute.js';
+import { _resetExternalQueueState } from '../../services/externalQueueState.js';
+import { _resetExternalQueueFailures } from '../../services/externalQueueFailure.js';
 import { TaskLimitError } from '../../services/billing/entitlements.js';
 import { ensureActiveEntry, getActiveEntryForPr } from '../../services/mergeQueue/store.js';
 import {
@@ -291,6 +297,12 @@ describe('mergeQueue v2 pipeline', () => {
     db = testDb.db;
     cleanup = testDb.cleanup;
     prCounter = 0;
+    // Repo/PR-scoped caches that outlive a test. PR numbers restart at 1 here,
+    // so an observation left by an earlier test would answer for a DIFFERENT
+    // PR with the same number.
+    _resetExternalQueueState();
+    _resetExternalQueueFailures();
+    _resetSubmitRoutes();
     await seedBase(db);
     await setEngine(db, 'v2');
     mergeSpy = vi
@@ -680,6 +692,103 @@ describe('mergeQueue v2 pipeline', () => {
       expect(entry?.status).toBe('awaiting_external');
       expect(entry?.externalSubmitVia).toBe('comment');
       expect(entry?.externalSubmittedAt).not.toBeNull();
+    });
+
+    // PostHog/posthog#84433 (2026-08-19): trunk HAD the PR and had rewritten its
+    // comment to say so, which removed the command from the body. With no submit
+    // label and no auto-merge on a gated branch, every door was shut and the
+    // queue told the user a healthy queued PR needed manual intervention.
+    it('tracks a PR the provider already holds instead of blocking it', async () => {
+      gated();
+      mockCapability.mockResolvedValue('unavailable'); // gated branch: no auto-merge
+      mockSubmitLabel.mockResolvedValue(null); // this repo defines no submit label
+      vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([
+        {
+          body:
+            '\u{2728} Submitted to Merge by talyn-app[bot]. It will be added to the merge queue ' +
+            'once all branch protection rules pass. See more details ' +
+            '[here](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/84433).',
+        },
+      ]);
+      const comment = vi.spyOn(githubService, 'createIssueComment').mockResolvedValue(undefined);
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.externalState).toBe('queued');
+      expect(entry?.blockedCode).toBeNull();
+      expect(comment).not.toHaveBeenCalled(); // no duplicate `/trunk merge`
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      // Either tracking path is a pass. R5d parks the entry the moment the
+      // provider is seen holding the PR, so it usually gets here first and no
+      // submit is attempted at all; the ladder's `already_submitted` is the
+      // fallback for when decide had no state to read. Both end with the PR
+      // tracked and nothing posted twice, which is what the assertions above
+      // pin. The ladder itself is covered in externalMergeQueue.test.ts.
+      expect(
+        codes.some((c) => c === 'external_already_submitted' || c === 'external_queue_holding')
+      ).toBe(true);
+      expect(codes).not.toContain('external_gate');
+    });
+
+    // PostHog/posthog#85338 + #85284: trunk's own run died in "Apply postgres
+    // and clickhouse migrations and setup dev" (a Docker port collision). The
+    // PRs were green on their branches; a fix run had nothing to fix.
+    it('resubmits when the queue run died on CI infrastructure', async () => {
+      gated();
+      mockCapability.mockResolvedValue('unavailable');
+      mockSubmitLabel.mockResolvedValue(null);
+      const JOB = 'https://github.com/PostHog/posthog/actions/runs/32250916189/job/96064408804';
+      vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([
+        {
+          body:
+            `\u{26A0}\u{FE0F} The required check [\`Playwright tests pass\`](${JOB}) (Failure) ` +
+            'has failed. Pull request failed tests and is waiting for other pull requests to ' +
+            'finish testing. See more details ' +
+            '[here](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/85338).',
+        },
+      ]);
+      vi.spyOn(githubService, 'getWorkflowJob').mockResolvedValue({
+        id: 96064408804,
+        name: 'Playwright E2E tests',
+        conclusion: 'failure',
+        steps: [
+          { name: 'Set up job', conclusion: 'success' },
+          { name: 'Apply postgres and clickhouse migrations and setup dev', conclusion: 'failure' },
+        ],
+      });
+      const comment = vi.spyOn(githubService, 'createIssueComment').mockResolvedValue(undefined);
+      const fixRun = vi.spyOn(taskCreateModule, 'createCloudTask');
+      // The repo taught us its command on an earlier PR — trunk's failure body
+      // no longer carries one.
+      noteExternalQueueSubmitRoute('a', 'b', { provider: 'trunk', command: '/trunk merge' });
+
+      const { prId, entryId } = await insertQueuedPr(db, {
+        summary: { ...cleanSummary(), nodeId: 'PR_node' },
+      });
+      await db
+        .update(mergeQueueEntries)
+        .set({
+          status: 'awaiting_external',
+          externalSubmitVia: 'comment',
+          externalSubmittedAt: new Date(Date.now() - 60 * 60_000),
+          submitAttempts: 1,
+        })
+        .where(eq(mergeQueueEntries.id, entryId));
+
+      await evaluateGroupNow('repo1', 'main', 'test');
+
+      const codes = (await eventsOf(db, entryId)).map((e) => e.code);
+      expect(codes).toContain('external_queue_infra_failure');
+      expect(fixRun).not.toHaveBeenCalled(); // no cloud agent sent at a runner
+      expect(comment).toHaveBeenCalledWith('ws1', 'a', 'b', expect.any(Number), '/trunk merge');
+      const entry = await entryOf(db, prId);
+      expect(entry?.status).toBe('awaiting_external');
+      expect(entry?.submitAttempts).toBe(2);
     });
 
     it("applies the repo's submit label when there is no instruction comment", async () => {

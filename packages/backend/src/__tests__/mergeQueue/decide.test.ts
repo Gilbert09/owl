@@ -16,6 +16,7 @@ import {
   queueSignature,
   unsignedCommitsBlockReason,
 } from '../../services/mergeQueue/decide.js';
+import { MAX_INFRA_SUBMITS_PER_HEAD } from '../../services/mergeQueue/types.js';
 import type {
   Action,
   Decision,
@@ -1349,6 +1350,33 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(lastTransition(d)!.set?.submitAttempts).toBeUndefined();
     });
 
+    // PostHog/posthog#84433: trunk had the PR ("✨ Submitted to Merge by
+    // talyn-app[bot]"), but it had also REWRITTEN its instruction comment to say
+    // so — which closed the command door, and with no submit label and no
+    // auto-merge on a gated branch, every door was shut. The PR was reported as
+    // needing manual intervention while sitting healthily in the queue.
+    it('tracks the queue instead of blocking when the provider already has the PR', () => {
+      const d = decide(
+        entry(),
+        cleanPr(),
+        ctx({
+          externalGate: 'confirmed',
+          submitOutcome: {
+            kind: 'already_submitted',
+            state: 'queued',
+            evidence: '✨ Submitted to Merge by talyn-app[bot]',
+          },
+        })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('awaiting_external');
+      expect(t.set?.externalState).toBe('queued');
+      expect(t.event.code).toBe('external_already_submitted');
+      expect(t.blockedCode).toBeNull();
+      expect(kinds(d)).not.toContain('notify_blocked');
+      expect(d.verdict).toBe('advance');
+    });
+
     it('blocks manually only when nothing can submit the PR', () => {
       const d = decide(
         entry(),
@@ -1899,6 +1927,91 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       );
       expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
       expect(kinds(d)).toContain('submit_external');
+    });
+
+    // PostHog/posthog#85338 + #85284: trunk's queue run died in "Apply postgres
+    // and clickhouse migrations and setup dev" with "failed to bind host port
+    // for 0.0.0.0:50052 … address already in use". The tests never ran, both
+    // PRs were green on their own branches, and nothing a cloud agent could
+    // write would have changed the outcome.
+    describe('a queue run that died on CI infrastructure', () => {
+      const infra = {
+        kind: 'infrastructure' as const,
+        detail: 'the "Apply postgres and clickhouse migrations and setup dev" step failed',
+      };
+
+      it('resubmits instead of spending a fix run', () => {
+        const d = decide(
+          commented(longAgo, { submitAttempts: 1 }),
+          cleanPr(),
+          ctx({
+            externalGate: 'confirmed',
+            externalQueue: observed('failed'),
+            externalFailure: infra,
+          })
+        );
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('queued');
+        expect(t.event.code).toBe('external_queue_infra_failure');
+        expect(kinds(d)).toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+        expect(kinds(d)).not.toContain('notify_blocked');
+        // The signature must NOT be recorded: an infrastructure death is not a
+        // reason this PR can defeat, and recording it would make a LATER real
+        // failure look like a repeat.
+        expect(t.set?.seenSignatures).toBeUndefined();
+      });
+
+      it('keeps resubmitting when the same infrastructure failure repeats', () => {
+        const failed = observed('failed');
+        const d = decide(
+          commented(longAgo, { submitAttempts: 2, seenSignatures: [queueSignature(failed)] }),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: failed, externalFailure: infra })
+        );
+        expect(lastTransition(d)!.event.code).toBe('external_queue_infra_failure');
+        expect(kinds(d)).toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+      });
+
+      it('stops once this head has spent its infrastructure budget', () => {
+        const d = decide(
+          commented(longAgo, { submitAttempts: MAX_INFRA_SUBMITS_PER_HEAD }),
+          cleanPr(),
+          ctx({
+            externalGate: 'confirmed',
+            externalQueue: observed('failed'),
+            externalFailure: infra,
+          })
+        );
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('blocked');
+        expect(t.blockedCode).toBe('external_queue_rejected');
+        // The reason must not read like the PR broke something.
+        expect(t.blockedReason).toContain('infrastructure');
+        expect(t.blockedReason).toContain('nothing here to fix');
+        expect(kinds(d)).toContain('notify_blocked');
+        expect(kinds(d)).not.toContain('submit_external');
+        expect(kinds(d)).not.toContain('fire_fix_run');
+      });
+
+      it.each([['unknown'], [null]] as const)(
+        'leaves an ordinary queue failure alone when the verdict is %s',
+        (kind) => {
+          const failed = observed('failed');
+          const d = decide(
+            commented(longAgo, { seenSignatures: [queueSignature(failed)] }),
+            cleanPr(),
+            ctx({
+              externalGate: 'confirmed',
+              externalQueue: failed,
+              externalFailure: kind === null ? null : { kind, detail: '' },
+            })
+          );
+          // Unchanged behaviour: a repeat of a real failure escalates.
+          expect(lastTransition(d)!.event.code).not.toBe('external_queue_infra_failure');
+        }
+      );
     });
 
     it('blocks an `ejected` PR only once the SAME ejection repeats', () => {

@@ -1914,6 +1914,45 @@ class GitHubService extends EventEmitter {
     return this.apiRequest(workspaceId, `/repos/${owner}/${repo}/commits/${ref}/check-runs`);
   }
 
+  /**
+   * One Actions job with its per-step results. Read-only (`actions: read`), and
+   * used to tell an infrastructure death apart from a real test failure — the
+   * step names are the only place that distinction is visible.
+   */
+  async getWorkflowJob(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    jobId: number
+  ): Promise<{
+    id: number;
+    name: string;
+    conclusion: string | null;
+    steps?: Array<{ name: string; conclusion: string | null; number?: number }>;
+  }> {
+    return this.apiRequest(workspaceId, `/repos/${owner}/${repo}/actions/jobs/${jobId}`);
+  }
+
+  /** Every job of one Actions run, newest attempt. */
+  async listWorkflowRunJobs(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    runId: number
+  ): Promise<{
+    jobs: Array<{
+      id: number;
+      name: string;
+      conclusion: string | null;
+      steps?: Array<{ name: string; conclusion: string | null; number?: number }>;
+    }>;
+  }> {
+    return this.apiRequest(
+      workspaceId,
+      `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`
+    );
+  }
+
   async createPRComment(
     workspaceId: string,
     owner: string,

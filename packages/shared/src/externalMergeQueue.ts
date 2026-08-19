@@ -83,6 +83,15 @@ export interface ExternalQueueStatus {
    * check failing twice is a dead end, a different check is progress.
    */
   failedChecks?: string[];
+  /**
+   * The Actions run/job the provider linked when it reported a FAILURE, when it
+   * named one. Deliberately not part of `evidence` (prose for tooltips) or of
+   * the queue signature: it is the handle on WHY the queue's run failed, which
+   * is what tells an infrastructure death (a runner that never got to the
+   * tests) apart from this PR breaking something — see
+   * services/externalQueueFailure.ts.
+   */
+  failureUrl?: string;
 }
 
 /**
@@ -313,6 +322,28 @@ function statusEvidence(body: string, re: RegExp): string {
 }
 
 /**
+ * A GitHub Actions run (or one job inside it) the provider linked. Anchored on
+ * `/actions/runs/` so trunk's OWN links (app.trunk.io) and any PR/commit links
+ * in the same comment can't be mistaken for the failing run.
+ */
+const ACTIONS_RUN_URL_RE = /https:\/\/github\.com\/[^\s)]+\/actions\/runs\/\d+(?:\/job\/\d+)?/;
+
+/**
+ * The run the provider blamed, off the status line that carried the state.
+ * Falls back to the first such link anywhere in the comment: the whole comment
+ * is trunk's merge-queue report for THIS PR, so a run it links there is the run
+ * it just failed — the table shape ("|Failed Required Status|…") puts the link
+ * on a different line from the sentence.
+ */
+function failureRunUrl(body: string, re: RegExp): string | undefined {
+  const line = body
+    .split('\n')
+    .find((l) => re.test(l.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')) && ACTIONS_RUN_URL_RE.test(l));
+  const hit = (line ?? body).match(ACTIONS_RUN_URL_RE);
+  return hit ? hit[0] : undefined;
+}
+
+/**
  * Read the external-queue state off ONE provider comment body. Null when the
  * comment isn't the provider's merge-queue comment, or when trunk has rewritten
  * it into a shape this doesn't recognise — the caller then falls back to labels
@@ -326,12 +357,14 @@ export function externalQueueStatusFromComment(
   for (const { re, state } of TRUNK_STATUS_PATTERNS) {
     if (re.test(body)) {
       const failedChecks = failedChecksFrom(body);
+      const url = state === 'failed' ? failureRunUrl(body, re) : undefined;
       return {
         provider: 'trunk',
         state,
         source: 'comment',
         evidence: statusEvidence(body, re),
         ...(failedChecks.length > 0 ? { failedChecks } : {}),
+        ...(url ? { failureUrl: url } : {}),
       };
     }
   }
@@ -407,6 +440,23 @@ export function externalQueueInstructionFromComments(
     return { provider: 'trunk', command: TRUNK_MERGE_COMMAND };
   }
   return null;
+}
+
+/**
+ * Has the provider claimed this PR at all? True when any of its merge-queue
+ * comments is present, whatever the body currently says.
+ *
+ * This is the question `externalQueueInstructionFromComments` can NOT answer
+ * once trunk takes the PR: trunk keeps one comment and rewrites the body, so
+ * the instruction (and with it the command text) disappears the moment the
+ * submission lands, and comes back only on some of the eject shapes. The
+ * comment itself never goes away — so "trunk manages this PR" stays provable
+ * even when "trunk offered a command" no longer is.
+ */
+export function externalQueueCommentPresent(
+  comments: ExternalQueueComment[]
+): ExternalQueueProvider | null {
+  return comments.some((c) => isTrunkQueueComment(c)) ? 'trunk' : null;
 }
 
 /** Is `name` a label Talyn may apply to submit a PR to an external queue? */

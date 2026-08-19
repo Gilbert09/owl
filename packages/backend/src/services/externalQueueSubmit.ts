@@ -5,6 +5,12 @@
 // order — a PR submitted from the UI is indistinguishable from one the queue
 // submitted, which is what makes the queue's tracking work either way.
 //
+// Before any of them: if the provider's comment says it ALREADY has the PR
+// (queued/testing/passed), that is the answer — no door is opened at all.
+// Trunk rewrites its one comment in place, so a PR it is actively working shows
+// neither the instruction nor the checkbox, and a ladder that walked past that
+// reported "nothing can submit this PR" about a PR sitting happily in the queue.
+//
 // Three doors, most authoritative first:
 //
 //  1. **The provider's own submit command.** trunk.io posts an instruction
@@ -13,6 +19,9 @@
 //     IS the contract — it names the door and proves the queue owns the branch.
 //     The checkbox lives inside trunk's own comment (only its author should edit
 //     it), so Talyn posts the command instead. Needs `issues: write`.
+//     The instruction survives only until trunk takes the PR, so the command is
+//     also remembered per repo (externalQueueSubmitRoute.ts) and reused on any PR whose
+//     comment proves trunk owns it — that is what makes a RESUBMIT possible.
 //  2. **The repo's submit label**, for configurations that use one.
 //  3. **GitHub native auto-merge** — the door for GitHub's OWN merge queue
 //     ("merge when ready"), and the only one needing no extra permission. It is
@@ -21,10 +30,19 @@
 //     #74354 — trunk ignored it and the PR sat untouched).
 
 import { enableAutoMerge, getAutoMergeCapability } from './githubAutoMerge.js';
-import { externalQueueInstructionFromComments } from '@talyn/shared';
+import {
+  externalQueueCommentPresent,
+  externalQueueInstructionFromComments,
+  externalQueueStatusFromComments,
+  isExternalQueueHolding,
+  type ExternalQueueComment,
+  type ExternalQueueInstruction,
+  type ExternalQueueState,
+} from '@talyn/shared';
 import { noteIssueComments } from './externalQueueState.js';
 import { githubService } from './github.js';
 import { getExternalQueueSubmitLabel } from './repoMergeGate.js';
+import { rememberedExternalQueueSubmitRoute } from './externalQueueSubmitRoute.js';
 import type { ExternalSubmitVia, MergeMethod } from './mergeQueue/types.js';
 
 export type ExternalSubmitAttempt =
@@ -44,6 +62,13 @@ export type ExternalSubmitAttempt =
   | { kind: 'clean_status' }
   /** Nothing can submit this PR: no auto-merge, no submit label (or no permission). */
   | { kind: 'no_mechanism'; message: string }
+  /**
+   * The provider ALREADY has this PR — its own comment says it is queued,
+   * testing, waiting or passed. Not a submission we made, and not a failure:
+   * submitting again would post a duplicate command (or, once every door is
+   * closed, report a healthy PR as unmergeable).
+   */
+  | { kind: 'already_submitted'; state: ExternalQueueState; evidence: string }
   /** Transient — head moved, API error, PR node id not cached yet. */
   | { kind: 'retry'; message: string };
 
@@ -76,8 +101,20 @@ export async function submitToExternalQueue(
 ): Promise<ExternalSubmitAttempt> {
   const { workspaceId, owner, repo, number } = input;
 
-  // Door 1 — the provider told us, on this PR, how to submit it.
-  const instruction = await readSubmitInstruction(workspaceId, owner, repo, number);
+  const comments = await readProviderComments(workspaceId, owner, repo, number);
+
+  // Does the provider already HAVE the PR? Its comment is the authoritative
+  // answer, and every door below is pointless while it holds it: door 1 would
+  // post a second `/trunk merge`, and doors 2-3 would be reached only because
+  // trunk has REPLACED its instruction body with a status line — which is how a
+  // queued PR ended up blocked as "no way to submit" (2026-08-19).
+  const observed = externalQueueStatusFromComments(comments);
+  if (observed && isExternalQueueHolding(observed.state)) {
+    return { kind: 'already_submitted', state: observed.state, evidence: observed.evidence };
+  }
+
+  // Door 1 — the provider's own submit command.
+  const instruction = resolveSubmitInstruction(owner, repo, comments);
   if (instruction) {
     try {
       await githubService.createIssueComment(
@@ -181,27 +218,51 @@ export async function submitToExternalQueue(
 }
 
 /**
- * The provider's submit instruction for THIS PR, or null. One REST call, made
- * only at submit time. A failure reads as "no instruction" — the remaining doors
- * still apply, and the caller's block reason stays honest either way.
+ * The PR's comments, or an empty list. One REST call, made only at submit time.
+ * A failure reads as "no comments" — the remaining doors still apply, and the
+ * caller's block reason stays honest either way.
  */
-async function readSubmitInstruction(
+async function readProviderComments(
   workspaceId: string,
   owner: string,
   repo: string,
   number: number
-): Promise<{ provider: string; command: string } | null> {
+): Promise<ExternalQueueComment[]> {
   try {
     const comments = await githubService.listIssueComments(workspaceId, owner, repo, number);
-    // The same fetch answers "where is this PR in the queue?" — seed the state
-    // cache so the post-submit evaluation doesn't pay for the list twice.
+    // The same fetch answers "where is this PR in the queue?" and "how does this
+    // repo submit?" — seed both caches so the post-submit evaluation doesn't pay
+    // for the list twice.
     noteIssueComments(owner, repo, number, comments);
-    return externalQueueInstructionFromComments(comments);
+    return comments;
   } catch (err) {
     console.warn(
-      `[externalQueueSubmit] couldn't read submit instructions for ${owner}/${repo}#${number}:`,
+      `[externalQueueSubmit] couldn't read comments for ${owner}/${repo}#${number}:`,
       err instanceof Error ? err.message : err
     );
-    return null;
+    return [];
   }
+}
+
+/**
+ * The command that submits THIS PR, from the provider's instruction when the
+ * comment still carries it, and otherwise from what this repo taught us on an
+ * earlier PR.
+ *
+ * The memo is only consulted when the provider has claimed this PR (its comment
+ * is present), so a repo that uses no queue can never acquire a command, and a
+ * PR no queue manages can never be sent one. That pairing is what makes the
+ * fallback safe: the evidence for "trunk owns this PR" and the evidence for
+ * "trunk takes this command here" are both real, they just live on different
+ * PRs once trunk has rewritten this one's comment.
+ */
+function resolveSubmitInstruction(
+  owner: string,
+  repo: string,
+  comments: ExternalQueueComment[]
+): ExternalQueueInstruction | null {
+  const instruction = externalQueueInstructionFromComments(comments);
+  if (instruction) return instruction;
+  if (!externalQueueCommentPresent(comments)) return null;
+  return rememberedExternalQueueSubmitRoute(owner, repo);
 }

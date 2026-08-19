@@ -39,6 +39,7 @@ import {
 } from '../repoMergeGate.js';
 import { submitToExternalQueue } from '../externalQueueSubmit.js';
 import { readExternalQueueState } from '../externalQueueState.js';
+import { classifyExternalQueueFailure } from '../externalQueueFailure.js';
 import {
   finalizeRun as finalizeVisualReviewRun,
   gatingRunForPr as gatingVisualReviewRun,
@@ -284,6 +285,19 @@ async function buildBaseContext(
           pr.number,
           externalMaxAge
         ).catch(() => null);
+  // WHY did the queue's run fail? Only asked when it actually failed and the
+  // provider linked the run, and memoised per job — so this is one REST call per
+  // ejection, not one per evaluation. `null` (not asked / GitHub wouldn't say)
+  // reads exactly like `unknown`: the failure is treated as real.
+  const externalFailure =
+    externalQueue?.state === 'failed'
+      ? await classifyExternalQueueFailure(
+          pr.workspaceId,
+          pr.owner,
+          pr.repo,
+          externalQueue.failureUrl
+        ).catch(() => null)
+      : undefined;
   // Is a visual-review gate holding this PR? Asked ONLY when the PR has a
   // settled blocker (a green PR is not gated by anything) and the workspace has
   // PostHog credentials — otherwise this would be a PostHog round-trip on every
@@ -311,6 +325,7 @@ async function buildBaseContext(
     autoMergeCapability,
     externalGate,
     ...(externalQueue !== undefined ? { externalQueue } : {}),
+    ...(externalFailure !== undefined ? { externalFailure } : {}),
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),
@@ -575,6 +590,19 @@ async function submitExternal(ctx: ActionContext): Promise<ActionOutcome> {
         detail: attempt.command ?? attempt.label,
       });
     }
+    case 'already_submitted':
+      debugBus.recordEvent({
+        service: 'merge_queue',
+        action: 'external-queue:already-submitted',
+        summary: `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number} is already ${attempt.state} in the queue`,
+        workspaceId: ctx.pr.workspaceId,
+        meta: { entryId: ctx.entry.id, state: attempt.state },
+      });
+      return settle({
+        kind: 'already_submitted',
+        state: attempt.state,
+        evidence: attempt.evidence,
+      });
     case 'clean_status':
       return settle({ kind: 'try_direct_merge' });
     case 'no_mechanism':

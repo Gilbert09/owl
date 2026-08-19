@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  externalQueueCommentPresent,
   externalQueueInstructionFromComments,
   externalQueueReason,
   externalQueueStatusFromComment,
@@ -30,6 +31,7 @@ import {
   PROBE_TTL_MS,
 } from '../services/repoMergeGate.js';
 import { submitToExternalQueue } from '../services/externalQueueSubmit.js';
+import { _resetSubmitRoutes } from '../services/externalQueueSubmitRoute.js';
 import * as autoMerge from '../services/githubAutoMerge.js';
 
 describe('externalQueueStatusFromLabels', () => {
@@ -304,6 +306,60 @@ describe('externalQueueStatusFromComment — trunk states, as trunk writes them'
   });
 });
 
+describe('the run trunk blamed for a failure', () => {
+  // Verbatim off PostHog/posthog#85338 (2026-08-19). The job behind this link
+  // died in "Apply postgres and clickhouse migrations and setup dev" with a
+  // Docker port collision — the PR itself was green. Keeping the link is what
+  // lets the queue ask WHY before it spends a fix run.
+  const JOB = 'https://github.com/PostHog/posthog/actions/runs/32250916189/job/96064408804';
+
+  it('keeps the failing run link off the status line', () => {
+    const body =
+      `\u{26A0}\u{FE0F} The required check [\`Playwright tests pass\`](${JOB}) (Failure) has ` +
+      `failed. Pull request failed tests and is waiting for other pull requests to finish ` +
+      `testing. See more details [here]${LINK}.`;
+    const status = externalQueueStatusFromComment(trunk(body));
+    expect(status?.state).toBe('failed');
+    expect(status?.failureUrl).toBe(JOB);
+    // …and never trunk's own link, which is on the same line.
+    expect(status?.evidence).not.toContain('app.trunk.io');
+  });
+
+  it('finds it in the failure TABLE when the sentence itself carries no run link', () => {
+    const body =
+      `\u{274C} This pull request was removed from the merge queue because it failed tests. ` +
+      `See more details [here]${LINK}.\n|Failed Required Status|Conclusion|\n|-|-|\n` +
+      `|Semgrep Checks Pass|[Failure](https://github.com/PostHog/posthog/actions/runs/42)|`;
+    expect(externalQueueStatusFromComment(trunk(body))?.failureUrl).toBe(
+      'https://github.com/PostHog/posthog/actions/runs/42'
+    );
+  });
+
+  it('is absent when the state is not a failure, or the failure names no run', () => {
+    const testing = `\u{1F9EA} Running tests on this pull request - [details]${LINK}.`;
+    expect(externalQueueStatusFromComment(trunk(testing))?.failureUrl).toBeUndefined();
+    const noRun = `\u{274C} This pull request could not start testing because there was a merge conflict.`;
+    expect(externalQueueStatusFromComment(trunk(noRun))?.failureUrl).toBeUndefined();
+  });
+});
+
+describe('externalQueueCommentPresent', () => {
+  it('sees the provider on a PR it has taken over, command or no command', () => {
+    // The state line trunk leaves once it OWNS the PR: no marker, no checkbox,
+    // no command — only its merge-queue link. This is the shape that made the
+    // submit ladder think no queue was involved (#84433).
+    const owned = `\u{2728} Submitted to Merge by talyn-app[bot]. See more details [here]${LINK}.`;
+    expect(externalQueueCommentPresent([trunk(owned)])).toBe('trunk');
+    expect(externalQueueCommentPresent([trunk(TRUNK_UNSUBMITTED)])).toBe('trunk');
+  });
+
+  it('is null for a PR no queue manages', () => {
+    expect(externalQueueCommentPresent([{ body: 'lgtm' }])).toBeNull();
+    expect(externalQueueCommentPresent([trunk('<!-- Trunk Test Analytics -->\n| Failed |')])).toBeNull();
+    expect(externalQueueCommentPresent([])).toBeNull();
+  });
+});
+
 describe('externalQueueInstructionFromComments', () => {
   it('finds the command door in the instruction body', () => {
     expect(externalQueueInstructionFromComments([trunk(TRUNK_UNSUBMITTED)])).toEqual({
@@ -494,6 +550,10 @@ describe('submitToExternalQueue', () => {
 
   beforeEach(() => {
     _resetSubmitLabelCache();
+    // The submit command is remembered PER REPO once trunk offers it anywhere,
+    // so a test that means "this repo offers no command" must start from a
+    // repo that has never taught us one.
+    _resetSubmitRoutes();
     capability = vi.spyOn(autoMerge, 'getAutoMergeCapability').mockResolvedValue('available');
     enable = vi.spyOn(autoMerge, 'enableAutoMerge').mockResolvedValue({ armed: true });
     // Defaults: no provider instruction, no submit label — i.e. the plain repo.
@@ -503,6 +563,89 @@ describe('submitToExternalQueue', () => {
     addLabels = vi.spyOn(githubService, 'addPullRequestLabels').mockResolvedValue(undefined);
   });
   afterEach(() => vi.restoreAllMocks());
+
+  /** What trunk's ONE comment says once it has taken the PR — no marker, no
+   *  checkbox, no command, just its status line and its merge-queue link. */
+  const TRUNK_OWNS_IT =
+    '\u{2728} Submitted to Merge by talyn-app[bot]. It will be added to the merge queue once ' +
+    'all branch protection rules pass. See more details ' +
+    '[here](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/84433).';
+
+  // PostHog/posthog#84433 (2026-08-19): Talyn submitted the PR, trunk accepted
+  // it and rewrote its comment — and the next evaluation walked a ladder whose
+  // every door was now shut and reported a queued PR as unmergeable.
+  describe('the provider already has the PR', () => {
+    it('opens no door at all and says where the PR is', async () => {
+      listComments.mockResolvedValue([{ body: TRUNK_OWNS_IT }]);
+      expect(await submitToExternalQueue(base)).toMatchObject({
+        kind: 'already_submitted',
+        state: 'queued',
+      });
+      expect(comment).not.toHaveBeenCalled();
+      expect(addLabels).not.toHaveBeenCalled();
+      expect(enable).not.toHaveBeenCalled();
+    });
+
+    it.each([['testing'], ['not_ready'], ['passed']] as const)(
+      'does the same while the queue reports %s',
+      async (state) => {
+        const bodies: Record<string, string> = {
+          testing:
+            '\u{1F9EA} Running tests on this pull request (testing on PR #85404) - [details]' +
+            '(https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/84433).',
+          not_ready:
+            '\u{23F3} Waiting to start tests on this pull request - [details]' +
+            '(https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/84433).',
+          passed:
+            '\u{1F44D} Pull request will be merged soon because tests have passed on #85404 - ' +
+            '[details](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/84433).',
+        };
+        listComments.mockResolvedValue([{ body: bodies[state] }]);
+        expect((await submitToExternalQueue(base)).kind).toBe('already_submitted');
+        expect(comment).not.toHaveBeenCalled();
+      }
+    );
+
+    it('still submits a PR the queue says it does NOT have', async () => {
+      listComments.mockResolvedValue([{ body: TRUNK_INSTRUCTION }]); // box untouched
+      expect((await submitToExternalQueue(base)).kind).toBe('submitted');
+      expect(comment).toHaveBeenCalled();
+    });
+  });
+
+  // The other half of #84433: a RESUBMIT after an ejection needs the command
+  // too, and trunk's failure bodies mostly don't carry it either.
+  describe('the command this repo accepts, remembered from an earlier PR', () => {
+    /** trunk's body after it failed the PR in its own run (#85338). */
+    const TRUNK_FAILED =
+      '\u{26A0}\u{FE0F} The required check [`Playwright tests pass`]' +
+      '(https://github.com/PostHog/posthog/actions/runs/32250916189/job/96064408804) (Failure) ' +
+      'has failed. See more details ' +
+      '[here](https://app.trunk.io/posthog-inc/merge-queue/3921a8a3/85338).';
+
+    it('resubmits off a body that no longer offers the command', async () => {
+      // Learned on an earlier PR of the same repo…
+      listComments.mockResolvedValue([{ body: TRUNK_INSTRUCTION }]);
+      await submitToExternalQueue({ ...base, number: 1 });
+      comment.mockClear();
+      // …and spent on this one, whose comment is now just a failure line.
+      listComments.mockResolvedValue([{ body: TRUNK_FAILED }]);
+      expect(await submitToExternalQueue(base)).toMatchObject({ kind: 'submitted', via: 'comment' });
+      expect(comment).toHaveBeenCalledWith('ws', 'PostHog', 'posthog', 74353, '/trunk merge');
+      expect(enable).not.toHaveBeenCalled();
+    });
+
+    it('never spends a remembered command on a PR no queue has claimed', async () => {
+      listComments.mockResolvedValue([{ body: TRUNK_INSTRUCTION }]);
+      await submitToExternalQueue({ ...base, number: 1 });
+      comment.mockClear();
+      // A PR in the same repo with no provider comment at all: the memo says
+      // what the command IS, not that this PR needs one.
+      listComments.mockResolvedValue([{ body: 'lgtm', user: { login: 'Gilbert09' } }]);
+      expect((await submitToExternalQueue(base)).via).toBe('auto_merge');
+      expect(comment).not.toHaveBeenCalled();
+    });
+  });
 
   describe('door 1 — the provider says how, on the PR itself', () => {
     it("posts trunk's own submit command and uses no other door", async () => {
