@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 88 — Back off a merge queue that is broken across PRs (2026-08-19)
+
+Every guard in the pipeline was per PR. `MAX_INFRA_SUBMITS_PER_HEAD` bounds one commit's resubmits and the recurrence signature bounds one head's ejections, but nothing could see that the QUEUE was the broken thing. So a backlog of queued PRs each rediscovered a dead runner independently and spent its own budget doing it.
+
+That is worse than wasted spend, because trunk batches. Every submission into a sick queue joins a batch that will fail and then be bisected, so the PRs still feeding it were lengthening the outage for the PRs already in it. The useful move is the one no single entry can decide alone: stop submitting, and wait.
+
+- **`services/repoQueueHealth.ts`** is the third instance of the shape `repoMergeGate.ts` and `repoSigning.ts` already use: a small tally that decays and re-earns itself, with no restart in any recovery path. It is scoped to `(repo, base)` — the merge queue's own group key — and deliberately NOT to a workspace, following `externalQueueState`'s argument that the provider's state is a property of the repo rather than of who is looking at it. Two workspaces watching posthog/posthog are watching one queue.
+- **Counted by PR, never by failure.** One PR resubmitting through its own infra budget is one PR having a bad day; three DISTINCT PRs failing the same way inside the window is the queue. Counting failures instead would have let a single unlucky PR condemn a healthy queue.
+- **One-sided, like the classifier that feeds it.** Only a positively identified `infrastructure` failure counts against the queue. Anything Talyn could not classify stays the PR's own problem, so the worst this can do on unfamiliar output is nothing at all.
+- **It gates SUBMISSION and nothing else.** A PR with a real local blocker still gets its fix run while the queue is sick — that work is useful the moment the queue recovers, and holding it back would waste the outage. A PR already in the queue is left alone; it is past the point this rule speaks to.
+- **No notification.** This fires across many entries at once by construction, and one notification per PR is exactly the noise the feature exists to remove. The blocked reason carries it in the UI instead, and it names the queue rather than the PR, so nobody goes looking for something to fix in a PR that has nothing wrong with it.
+- **Recovery needs no human.** The window ages observations out, and any merge clears them outright — a merge being the only direct proof the queue works. The block is `blocked`, not `blocked_manual`, and is released by its own rule rather than waiting for a push, because nothing about the entry caused it and nothing about the entry can clear it.
+- **Fed by the transitions the pipeline already writes**, rather than a second observation path that could disagree with the timeline. `applyTransition` notes the two infrastructure event codes against the queue and clears the record on any merge, however that merge was reached.
+
+**Worth knowing.** The thresholds (3 distinct PRs, a 30 minute window) are a first guess, not a measurement — nothing has run this against a real outage yet. They are exported so a future session can tune them against what `merge_queue_events` actually recorded, and the one-sided classifier underneath means the failure mode of a bad threshold is a queue that keeps submitting, not one that stops when it should not.
+
 ## Session 87 — Stop ejecting PRs from trunk's merge queue (2026-08-19)
 
 Talyn could read every state trunk publishes and still walk into the one thing trunk punishes: a push. A PR sitting in the queue would get a cloud fix run dispatched at it, the run's fix would land as a commit, and trunk would answer `🚫 This pull request was removed from the merge queue because it was pushed to by @x`. Talyn parsed that sentence perfectly — it just had no rule against causing it. The cost is a whole test cycle (~40 minutes at PostHog) plus the paid run that bought the ejection.

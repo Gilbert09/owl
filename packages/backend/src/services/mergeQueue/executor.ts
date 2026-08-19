@@ -39,6 +39,7 @@ import {
 } from '../repoMergeGate.js';
 import { submitToExternalQueue } from '../externalQueueSubmit.js';
 import { readExternalQueueState } from '../externalQueueState.js';
+import { noteInfraFailure, noteMerge, queueHealth } from '../repoQueueHealth.js';
 import { classifyExternalQueueFailure } from '../externalQueueFailure.js';
 import {
   finalizeRun as finalizeVisualReviewRun,
@@ -313,6 +314,10 @@ async function buildBaseContext(
         return undefined;
       })
     : undefined;
+  // Is the queue itself broken across PRs? Read from an in-process tally fed by
+  // the ejections this pipeline already observes, so it costs nothing and only
+  // means anything on a gated base.
+  const health = externalGate ? queueHealth(pr.owner, pr.repo, entry.baseBranch) : undefined;
   return {
     visualReview,
     nowIso: new Date().toISOString(),
@@ -326,6 +331,7 @@ async function buildBaseContext(
     externalGate,
     ...(externalQueue !== undefined ? { externalQueue } : {}),
     ...(externalFailure !== undefined ? { externalFailure } : {}),
+    ...(health !== undefined ? { queueHealth: health } : {}),
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),
@@ -767,10 +773,37 @@ async function disarmAutoMerge(ctx: ActionContext): Promise<ActionOutcome> {
   };
 }
 
+/**
+ * Feed the cross-PR queue-health tally off the transitions the pipeline already
+ * writes, rather than from a second observation path that could disagree with
+ * the timeline. Only the two INFRASTRUCTURE codes count against the queue —
+ * a failure Talyn could not classify stays the PR's own problem — and any
+ * merge, however it was reached, clears the record.
+ */
+function noteQueueHealth(
+  action: Extract<Action, { kind: 'transition' }>,
+  ctx: ActionContext
+): void {
+  const { owner, repo, number } = ctx.pr;
+  const base = ctx.entry.baseBranch;
+  if (!base) return;
+  if (action.to === 'merged') {
+    noteMerge(owner, repo, base);
+    return;
+  }
+  if (
+    action.event.code === 'external_queue_infra_failure' ||
+    action.event.code === 'external_queue_infra_exhausted'
+  ) {
+    noteInfraFailure(owner, repo, base, number);
+  }
+}
+
 async function applyTransition(
   action: Extract<Action, { kind: 'transition' }>,
   ctx: ActionContext
 ): Promise<ActionOutcome> {
+  noteQueueHealth(action, ctx);
   // `set` carries plain column writes straight through to the snapshot. Copy
   // every defined key rather than listing them: this used to be a hand-written
   // spread per field, and adding a column meant remembering four separate

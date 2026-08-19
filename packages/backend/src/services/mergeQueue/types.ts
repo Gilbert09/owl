@@ -156,6 +156,16 @@ export type BlockedCode =
    */
   | 'external_queue_rejected'
   /**
+   * The external queue itself looks broken: several DISTINCT PRs failed in it
+   * on CI infrastructure inside one window, with nothing merging. Submitting
+   * into it would join a batch that fails and gets bisected, which lengthens
+   * the outage for the PRs already queued, so Talyn waits instead. Not the PR's
+   * fault and nothing here can fix it — `blocked` rather than `blocked_manual`
+   * because it self-heals the moment the window ages out or anything merges.
+   * See services/repoQueueHealth.ts.
+   */
+  | 'external_queue_unhealthy'
+  /**
    * The PR this one is stacked on was CLOSED without merging. Retargeting onto
    * the abandoned parent's base would smuggle the parent's commits into the
    * base branch — the child's head still contains them — so the queue refuses
@@ -382,6 +392,13 @@ export interface DecisionContext {
    * configurations and leaves stale in others.
    */
   externalQueue?: ExternalQueueStatus | null;
+  /**
+   * Whether the external queue on this base looks broken across PRs, from
+   * services/repoQueueHealth.ts. `undefined` when the executor didn't ask (no
+   * gate on this base). Cross-PR by nature, so no single entry could work it
+   * out from its own state.
+   */
+  queueHealth?: { state: 'degraded'; prs: number[] } | null;
   /**
    * Why the external queue's own run failed, when `externalQueue.state` is
    * `failed` and the provider linked the run. `undefined` = not asked (no
