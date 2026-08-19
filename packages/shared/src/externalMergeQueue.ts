@@ -374,6 +374,27 @@ export function isExternalQueueHolding(state: ExternalQueueState): boolean {
   return state === 'not_ready' || state === 'queued' || state === 'testing' || state === 'passed';
 }
 
+/**
+ * The ejection REASON, stripped of the parts trunk interpolates per attempt —
+ * for asking "has it already sent this head back for exactly this?".
+ *
+ * Trunk names the actor and the batch in its own sentences: "…because it was
+ * pushed to by @dmarchuk", "…it failed tests. PR #74331 was used for testing."
+ * Both change every round, so comparing raw sentences answered "a different
+ * reason each time" to a queue repeating itself verbatim, and the recurrence
+ * guard meant to stop an eject → resubmit → eject loop never once fired. The
+ * check NAME in "The required check `X` has failed" is deliberately kept: a
+ * different failing check IS a different problem, and deserves its resubmit.
+ */
+export function externalQueueReason(status: ExternalQueueStatus): string {
+  return status.evidence
+    .replace(/@[A-Za-z0-9-]+/g, '@actor')
+    .replace(/#\d+/g, '#n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 /** Short human label for a badge. */
 export function externalQueueStateLabel(state: ExternalQueueState): string {
   switch (state) {

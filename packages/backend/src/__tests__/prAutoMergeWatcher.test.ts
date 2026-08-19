@@ -6,6 +6,8 @@ import { prAutoMergeWatcher } from '../services/prAutoMergeWatcher.js';
 import { prMonitorService } from '../services/prMonitor.js';
 import { graphqlBudget } from '../services/graphqlBudget.js';
 import { githubService } from '../services/github.js';
+import { _resetMergeGateCache } from '../services/repoMergeGate.js';
+import { _resetExternalQueueState } from '../services/externalQueueState.js';
 import { createTestDb, seedUser } from './helpers/testDb.js';
 import type { Database } from '../db/client.js';
 import {
@@ -183,6 +185,8 @@ describe('prAutoMergeWatcher', () => {
     await cleanup();
     vi.restoreAllMocks();
     prAutoMergeWatcher._resetLabelRetries();
+    _resetMergeGateCache();
+    _resetExternalQueueState();
   });
 
   describe('watch labels', () => {
@@ -572,6 +576,76 @@ describe('prAutoMergeWatcher', () => {
     await prAutoMergeWatcher.runOnce();
 
     expect(await countTasks(db)).toBe(1);
+  });
+
+  // A cloud run's fix arrives as a PUSH, and trunk answers a push by ejecting
+  // the PR: "🚫 removed from the merge queue because it was pushed to by @x."
+  // So firing at a PR trunk is testing does not fix it, it destroys the test
+  // cycle it was in and pays for a cloud run to do it. `mergeQueued` never
+  // caught this — that flag is TALYN's queue, and a PR the author submitted to
+  // trunk themselves is not in it.
+  describe('an external merge queue is holding the PR', () => {
+    const TRUNK_COMMENT = (status: string) => ({
+      user: { login: 'trunk-io' },
+      body:
+        `${status}\n\nSee more details [here](https://app.trunk.io/acme/merge-queue/1/7).`,
+    });
+
+    function gateThe(repo: 'gated' | 'ungated') {
+      vi.spyOn(githubService, 'getBranchRules').mockResolvedValue(
+        repo === 'gated' ? [{ type: 'update' }] : []
+      );
+    }
+
+    it('stands down while trunk reports it is testing the PR', async () => {
+      gateThe('gated');
+      vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([
+        TRUNK_COMMENT('🧪 Running tests on this pull request (testing on PR #9)'),
+      ]);
+      await insertPr(db);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(await countTasks(db)).toBe(0);
+    });
+
+    it('fires once trunk hands the PR back', async () => {
+      gateThe('gated');
+      vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([
+        TRUNK_COMMENT(
+          '🚫 This pull request was removed from the merge queue because it was pushed ' +
+            'to by @someone. Please re-submit it in order to merge.'
+        ),
+      ]);
+      await insertPr(db);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(await countTasks(db)).toBe(1);
+    });
+
+    // The gate probe is what keeps every ordinary repo off the comment read.
+    it('never asks for queue state on a repo with no gate', async () => {
+      gateThe('ungated');
+      const comments = vi.spyOn(githubService, 'listIssueComments').mockResolvedValue([]);
+      await insertPr(db);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(comments).not.toHaveBeenCalled();
+      expect(await countTasks(db)).toBe(1);
+    });
+
+    // A queue we cannot see must never wedge the watcher.
+    it('fires as usual when the queue state cannot be read', async () => {
+      gateThe('gated');
+      vi.spyOn(githubService, 'listIssueComments').mockRejectedValue(new Error('403'));
+      await insertPr(db);
+
+      await prAutoMergeWatcher.runOnce();
+
+      expect(await countTasks(db)).toBe(1);
+    });
   });
 
   it('does not fire while a run is already in flight (no double-run)', async () => {

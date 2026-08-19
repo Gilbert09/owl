@@ -1402,10 +1402,47 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(d.actions).toEqual([]);
     });
 
-    it('still remediates a settled blocker while submitted — the provider would hold it forever', () => {
+    // A run's fix arrives as a PUSH, and trunk answers a push by ejecting the
+    // PR ("removed from the merge queue because it was pushed to by @x"). So
+    // remediating here does not fix the PR, it destroys the test cycle the PR
+    // was in — and it fired on the ordinary shape of a reviewed PR, since an
+    // unresolved review thread counts as a settled blocker.
+    it.each([
+      ['trunk-not-ready'],
+      ['trunk-queued'],
+      ['trunk-testing'],
+      ['trunk-tests-passed'],
+    ] as const)('does NOT push at a %s PR, even with a settled blocker', (label) => {
       const d = decide(
         submitted(),
-        trunkPr('trunk-not-ready', { mergeStateStatus: 'DIRTY' }, {
+        trunkPr(label, { mergeStateStatus: 'DIRTY' }, {
+          mergeable: 'CONFLICTING',
+          blockingReason: 'merge_conflicts',
+        }),
+        ctx({ externalGate: 'confirmed', updateBranchAvailable: true })
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('update_branch');
+      expect(kinds(d)).not.toContain('submit_external');
+      expect(d.verdict).toBe('advance');
+    });
+
+    it('does NOT push at an unresolved review thread either — the everyday case', () => {
+      const d = decide(
+        submitted(),
+        trunkPr('trunk-testing', {}, { unresolvedReviewThreads: 2 }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(workActions(d)).toEqual([]);
+    });
+
+    // The stand-down is on OBSERVED holding, not on our own submission record:
+    // with no answer from the provider, nothing says a queue is testing the PR,
+    // and parking on that would strand it forever.
+    it('still remediates a settled blocker when the provider has said nothing at all', () => {
+      const d = decide(
+        submitted(),
+        pr({ autoMergeEnabledBy: 'talyn', mergeStateStatus: 'DIRTY' }, {
           mergeable: 'CONFLICTING',
           blockingReason: 'merge_conflicts',
         }),
@@ -1430,6 +1467,141 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     it('closes the entry out when the provider merges it', () => {
       const d = decide(submitted(), pr({ state: 'merged' }, { labels: ['trunk-merged'] }), ctx({ externalGate: 'confirmed' }));
       expect(lastTransition(d)!.to).toBe('merged');
+    });
+  });
+
+  // The entry only reaches `awaiting_external` when TALYN submitted the PR.
+  // Every other route into trunk's queue — the author commenting `/trunk merge`
+  // themselves, a PR queued in Talyn after it was already submitted — left the
+  // entry in `queued`, walking straight into the rules that push and merge.
+  describe('the provider holds a PR the entry does not know about', () => {
+    const holding = (state: ExternalQueueState) =>
+      ({ provider: 'trunk', state, source: 'comment', evidence: 'trunk said so' }) as const;
+
+    it.each([['queued'], ['testing'], ['passed'], ['not_ready']] as const)(
+      'parks a plain queued entry rather than acting on a PR trunk reports as %s',
+      (state) => {
+        const d = decide(
+          entry(),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: holding(state) })
+        );
+        expect(lastTransition(d)!.to).toBe('awaiting_external');
+        expect(kinds(d)).not.toContain('submit_external');
+        expect(kinds(d)).not.toContain('verify_live_then_merge');
+      }
+    );
+
+    it('does not fire a fix run at a blocked entry the provider has picked up', () => {
+      const d = decide(
+        entry({ status: 'blocked', blockedCode: 'no_progress' }),
+        conflictingPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: holding('testing') })
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(lastTransition(d)!.to).toBe('awaiting_external');
+    });
+
+    it('holds without parking while our own run is still in flight — its push is already coming', () => {
+      const d = decide(
+        entry({ status: 'fixing', fixTaskId: 't1', fixTaskAccounted: false }),
+        conflictingPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: holding('testing'), fixTaskState: 'active' })
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
+      expect(d.verdict).toBe('hold');
+    });
+
+    it('leaves an ejected PR to the ordinary rules — that is what the queue is for', () => {
+      const d = decide(
+        entry(),
+        conflictingPr(),
+        ctx({
+          externalGate: 'confirmed',
+          externalQueue: { provider: 'trunk', state: 'failed', source: 'comment', evidence: 'x' },
+        })
+      );
+      expect(kinds(d)).toContain('fire_fix_run');
+    });
+
+    // Trunk leaves its labels behind — PostHog carries stale `trunk-testing`
+    // on PRs that merged hours ago — so an ungated repo must never park on one.
+    it('is inert on a repo with no gate at all, however the PR is labelled', () => {
+      const d = decide(entry(), trunkPr('trunk-testing'), ctx());
+      expect(kinds(d)).toContain('verify_live_then_merge');
+    });
+  });
+
+  describe('resubmission is bounded', () => {
+    /** Trunk names the pusher, so the sentence differs every single time. */
+    const pushedBackBy = (who: string) =>
+      ({
+        provider: 'trunk',
+        state: 'ejected',
+        source: 'comment',
+        evidence:
+          'This pull request was removed from the merge queue because it was pushed to by ' +
+          `@${who}. Please re-submit it in order to merge.`,
+      }) as const;
+
+    it('reads two push-ejections naming different people as the same reason', () => {
+      expect(queueSignature(pushedBackBy('alice'))).toBe(queueSignature(pushedBackBy('bob')));
+    });
+
+    it('keeps telling a different failing check apart from a repeat of the same one', () => {
+      const failed = (check: string) =>
+        ({
+          provider: 'trunk',
+          state: 'failed',
+          source: 'comment',
+          evidence: `The required check \`${check}\` (Failure) has failed.`,
+        }) as const;
+      expect(queueSignature(failed('backend'))).not.toBe(queueSignature(failed('frontend')));
+    });
+
+    it('blocks instead of resubmitting when the queue repeats itself', () => {
+      const d = decide(
+        submitted({ seenSignatures: [queueSignature(pushedBackBy('alice'))] }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalQueue: pushedBackBy('bob') })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('external_queue_rejected');
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    // `submitAttempts` was counted from the day it shipped and never read; the
+    // entry type and the desktop both describe a cap that did not exist.
+    it('stops resubmitting once the per-head submit budget is spent', () => {
+      const d = decide(
+        submitted({ submitAttempts: 3 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('blocked');
+      expect(t.blockedCode).toBe('external_queue_rejected');
+      expect(kinds(d)).toContain('notify_blocked');
+    });
+
+    it('still resubmits inside the budget', () => {
+      const d = decide(
+        submitted({ submitAttempts: 1 }),
+        trunkPr('trunk-failed'),
+        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+      );
+      expect(transitions(d).map((t) => t.event.code)).toContain('external_queue_ejected');
+    });
+
+    it('earns a fresh budget on a genuine new head', () => {
+      const d = decide(
+        submitted({ submitAttempts: 3, headSha: 'old' }),
+        pr({ headSha: 'new' }),
+        ctx({ externalGate: 'confirmed', maxAttempts: 3 })
+      );
+      expect(kinds(d)).toContain('reset_budgets');
+      expect(kinds(d)).toContain('submit_external');
     });
   });
 

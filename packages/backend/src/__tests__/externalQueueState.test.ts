@@ -114,12 +114,16 @@ describe('externalStateMaxAge', () => {
       ...o,
     }) as EntrySnapshot;
 
-  it('asks for nothing when the entry has no stake in the external queue', () => {
-    expect(externalStateMaxAge(entry({ status: 'queued' }))).toBeNull();
-    expect(externalStateMaxAge(entry({ status: 'fixing' }))).toBeNull();
+  it('still asks on an entry with no submission of its own — the provider may have the PR anyway', () => {
+    // The caller only reaches this function when the base IS gated, and on a
+    // gated base an entry that never submitted can still be one the provider
+    // is testing (the author submitted it themselves). R5d needs to see that
+    // before it fires a run whose push would eject the PR.
+    expect(externalStateMaxAge(entry({ status: 'queued' }))).toBe(600_000);
+    expect(externalStateMaxAge(entry({ status: 'fixing' }))).toBe(600_000);
     expect(
       externalStateMaxAge(entry({ status: 'blocked', blockedCode: 'attempts_exhausted' }))
-    ).toBeNull();
+    ).toBe(600_000);
   });
 
   it('re-asks quickly while waiting for the provider to answer at all', () => {
