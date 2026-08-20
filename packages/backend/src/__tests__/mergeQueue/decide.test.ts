@@ -2080,6 +2080,44 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(workActions(d)).toEqual([]);
     });
 
+    // PostHog/posthog#82679: trunk refuses a submission from Talyn's App ("Only
+    // users that are a part of this repo's Trunk organization … can submit"),
+    // and DELETES the submit label as it does. That read as "the submission
+    // vanished" — the one path with no budget on it — so Talyn re-applied the
+    // label immediately: 61 label events and 38 provider comments in an hour,
+    // one cycle every four seconds, on a shared repo.
+    describe('a submission the provider keeps discarding', () => {
+      const lost = (submitAttempts: number) =>
+        decide(
+          entry({
+            status: 'awaiting_external',
+            externalSubmitVia: 'label',
+            externalSubmittedAt: longAgo,
+            submitAttempts,
+          }),
+          cleanPr(),
+          ctx({ externalGate: 'confirmed', externalQueue: null })
+        );
+
+      it('takes the PR back while the budget is unspent', () => {
+        const d = lost(1);
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('queued');
+        expect(t.event.code).toBe('external_submission_lost');
+      });
+
+      it('stops instead of submitting again once the budget is spent', () => {
+        const d = lost(3);
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('blocked_manual');
+        expect(t.event.code).toBe('external_submission_lost_exhausted');
+        expect(kinds(d)).toContain('notify_blocked');
+        expect(kinds(d)).not.toContain('submit_external');
+        // The reason has to name the check a human can actually make.
+        expect(t.blockedReason).toContain("Talyn's GitHub App");
+      });
+    });
+
     it('leaves an external block alone while the provider is NOT holding the PR', () => {
       for (const state of ['not_submitted', 'failed', 'cancelled', 'rejected'] as const) {
         const d = decide(

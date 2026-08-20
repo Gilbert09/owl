@@ -111,6 +111,24 @@ export function externalQueueRejectedReason(status: ExternalQueueStatus): string
  * The per-head submit budget is spent: the provider has taken this commit and
  * handed it back more times than the queue is willing to re-offer it.
  */
+/**
+ * The submission kept disappearing without the provider ever saying it ejected
+ * the PR. The commonest cause is that the provider will not accept a submission
+ * from Talyn's App at all — trunk answers one with "Only users that are a part
+ * of this repo's Trunk organization or have write permissions to the repo can
+ * submit a PR to the queue", then deletes the label — so the reason leads with
+ * the check a human can actually make.
+ */
+export function externalSubmissionLostReason(attempts: number): string {
+  return (
+    `Talyn submitted this PR to the external merge queue ${attempts} times on this commit ` +
+    `and the submission was removed each time, with no ejection reason given. Most often ` +
+    `that means the queue does not accept submissions from Talyn's GitHub App — check ` +
+    `whether it needs to be granted access in that system, or submit the PR there yourself. ` +
+    `Push a fix (which resets the budget) or re-queue to retry.`
+  );
+}
+
 export function externalQueueBudgetSpentReason(
   status: ExternalQueueStatus,
   attempts: number
@@ -778,6 +796,33 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
         event: {
           code: 'external_submit_ignored',
           message: 'The external merge queue never picked up the submit command Talyn posted.',
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+      return d.done('advance');
+    } else if (d.entry.submitAttempts >= ctx.maxAttempts) {
+      // The submission keeps vanishing. Until now this path had NO budget on it
+      // — the per-head one is enforced only where the provider EJECTS (see
+      // decideExternalEjection) — so "take the PR back" fed straight into
+      // another submit, and a provider that answers a submission by removing
+      // the label produced an unbounded loop: PostHog/posthog#82679 logged 61
+      // label events and 38 provider comments in an hour, one cycle every four
+      // seconds, on a shared repo.
+      //
+      // The specific cause there is now read as terminal one rule up, but the
+      // bound belongs here regardless: this is the path any provider behaviour
+      // Talyn does not recognise falls into, and it must not be able to spend
+      // the same door forever. Same budget, same per-head reset (R2) — a new
+      // commit is the one thing that plausibly changes the answer.
+      d.transition('blocked_manual', {
+        blockedCode: 'external_gate',
+        blockedReason: externalSubmissionLostReason(d.entry.submitAttempts),
+        set: { externalSubmitVia: null, externalSubmittedAt: null },
+        event: {
+          code: 'external_submission_lost_exhausted',
+          message:
+            `The external merge queue discarded this submission ${d.entry.submitAttempts} ` +
+            'times on this commit — stopping rather than submitting it again.',
         },
       });
       d.act({ kind: 'notify_blocked' });

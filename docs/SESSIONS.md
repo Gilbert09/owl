@@ -2,6 +2,19 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 93 — An unbounded submit loop on a shared repo (2026-08-20)
+
+Opening the submit-label door (Session 92) exposed the path underneath it. On PostHog/posthog#82679: **61 label events and 38 provider comments in one hour**, one cycle every four seconds, in a channel PostHog engineers watch.
+
+- **Trunk refuses the SUBMITTER, not the PR.** "An error occurred while submitting your PR to the queue: `Only users that are a part of this repo's Trunk organization or have write permissions to the repo can submit a PR to the queue`" — Talyn's App is not authorised with that repo's Trunk org. Trunk answers each attempt by **deleting the submit label**, which is what turned a static permission problem into a loop.
+- **The per-head submit budget only existed on the ejection path.** `decideExternalEjection` enforces it; the label vanishing is not an ejection, so it fell to R5b's `external_submission_lost` → `queued` → submit again, with no budget read anywhere. That branch now blocks at the same `maxAttempts`, with a reason that leads with the check a human can make ("the queue may not accept submissions from Talyn's GitHub App"). Same per-head reset via R2 — a new commit is the one thing that plausibly changes the answer.
+- **The bound is deliberately provider-agnostic, and that is the whole point.** This is the branch ANY provider behaviour Talyn does not recognise falls into, so it must not be able to spend the same door forever. A parser rule for trunk's specific sentence would have fixed this one case and left the shape intact.
+- **A parser rule was written and then reverted, which is the more useful lesson.** Recognising the error comment looked obvious — until `externalQueueStatusFromComments` ("last recognised comment wins") plus trunk posting a NEW comment per error meant the error would permanently outrank trunk's real status comment, which is edited in place at its original position. Every affected PR would have been pinned into `rejected` forever, including after a human fixed the permission. The fix that changes no parsing is the safe one.
+
+Tests: the two sides of the bound in `decide.test.ts` (unspent → back in line; spent → `blocked_manual` + notify + no resubmit, and the reason names the App).
+
+**Still open, and it needs a human**: Talyn's GitHub App has to be granted submit rights in PostHog's Trunk organisation, or Talyn cannot submit posthog PRs by any door. Until then the queue takes a PR to green and stops with an accurate message instead of looping.
+
 ## Session 92 — The submit label was always there, on page 3 (2026-08-20)
 
 A steady stream of "can't merge — there is no way to submit the PR to it automatically: the repo refuses GitHub auto-merge and **defines no submit label**. Needs manual intervention." The message was wrong on its own terms. posthog/posthog defines `trunk-merge-queue-submit`, and `/trunk merge` is sitting on a dozen open PRs right now.
