@@ -2118,6 +2118,46 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       });
     });
 
+    // `retry` means the CALL failed, not that the queue answered. It used to be
+    // `ensure('queued')` and nothing else, so a PERMANENT non-403 condition —
+    // "GitHub not connected for this workspace" — was retried on every
+    // evaluation for as long as the PR sat in the queue.
+    describe('a submit call that fails before reaching the queue', () => {
+      const failed = (submitRetryAttempts: number) =>
+        decide(
+          entry({ status: 'queued', submitRetryAttempts, submitAttempts: 1 }),
+          cleanPr(),
+          ctx({
+            externalGate: 'confirmed',
+            submitOutcome: { kind: 'retry', message: 'GitHub not connected for this workspace' },
+          })
+        );
+
+      it('retries while the budget is unspent, counting the attempt', () => {
+        const t = lastTransition(failed(0))!;
+        expect(t.to).toBe('queued');
+        expect(t.event.code).toBe('external_submit_retry');
+        expect(t.set?.submitRetryAttempts).toBe(1);
+      });
+
+      it('stops once the budget is spent', () => {
+        const d = failed(2);
+        const t = lastTransition(d)!;
+        expect(t.to).toBe('blocked_manual');
+        expect(t.event.code).toBe('external_submit_call_failed');
+        expect(kinds(d)).toContain('notify_blocked');
+        expect(t.blockedReason).toContain('GitHub not connected');
+      });
+
+      // The two budgets answer different questions and must not share a pot:
+      // a blip on our side cannot be allowed to eat the doors the PR still has.
+      it('never spends the provider-facing submit budget', () => {
+        for (const n of [0, 2]) {
+          expect(lastTransition(failed(n))!.set?.submitAttempts).toBeUndefined();
+        }
+      });
+    });
+
     it('leaves an external block alone while the provider is NOT holding the PR', () => {
       for (const state of ['not_submitted', 'failed', 'cancelled', 'rejected'] as const) {
         const d = decide(

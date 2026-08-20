@@ -129,6 +129,20 @@ export function externalSubmissionLostReason(attempts: number): string {
   );
 }
 
+/**
+ * The submit CALL kept failing before it ever reached the queue. Names the
+ * error, because the causes need different people: a GitHub outage fixes
+ * itself, a disconnected account or a missing App permission does not.
+ */
+export function submitCallFailedReason(attempts: number, error: string): string {
+  return (
+    `Talyn tried to submit this PR to the external merge queue ${attempts} times on this ` +
+    `commit and the call itself failed each time, so the queue never saw it (${error}). ` +
+    `If that is a GitHub outage it will clear on its own — re-queue to retry. Otherwise ` +
+    `check that the workspace's GitHub connection and App permissions are intact.`
+  );
+}
+
 export function externalQueueBudgetSpentReason(
   status: ExternalQueueStatus,
   attempts: number
@@ -1810,7 +1824,42 @@ function decideSubmitAftermath(
   }
 
   if (outcome.kind === 'retry') {
-    d.ensure('queued');
+    // `retry` means the CALL failed, not that the queue answered — a 5xx, a
+    // network blip, or a permanent condition that simply isn't a 403 (the
+    // ladder's only recognised permanent shape). This used to be
+    // `ensure('queued')` and nothing else, so a permanent condition was retried
+    // on every evaluation, for as long as the PR sat in the queue.
+    //
+    // Its own budget, NOT `submitAttempts`: that one answers "stop spending
+    // queue cycles on an unchanged commit" and is read to explain what the
+    // PROVIDER did with the PR. A call that never reached the provider is a
+    // different fact, and letting a couple of transient blips eat the real
+    // submit budget would block a healthy PR out of doors that still work.
+    const attempts = d.entry.submitRetryAttempts + 1;
+    if (attempts >= ctx.maxAttempts) {
+      d.transition('blocked_manual', {
+        blockedCode: 'external_gate',
+        blockedReason: submitCallFailedReason(attempts, outcome.message),
+        set: { submitRetryAttempts: attempts, lastError: outcome.message, lastErrorAt: ctx.nowIso },
+        event: {
+          code: 'external_submit_call_failed',
+          message:
+            `Submitting to the external merge queue failed ${attempts} times on this commit ` +
+            `without reaching it — stopping rather than retrying every evaluation.`,
+          detail: { error: outcome.message },
+        },
+      });
+      d.act({ kind: 'notify_blocked' });
+      return d.done('advance');
+    }
+    d.transition('queued', {
+      set: { submitRetryAttempts: attempts, lastError: outcome.message, lastErrorAt: ctx.nowIso },
+      event: {
+        code: 'external_submit_retry',
+        message: `Submitting to the external merge queue failed — retrying (${attempts}/${ctx.maxAttempts}).`,
+        detail: { error: outcome.message },
+      },
+    });
     return d.done('advance');
   }
 
@@ -2410,6 +2459,7 @@ class DecisionBuilder {
     this.entry.rerunAttempts = 0;
     this.entry.resignAttempts = 0;
     this.entry.submitAttempts = 0;
+    this.entry.submitRetryAttempts = 0;
     // New code, new problems: what defeated a run on the old head says nothing
     // about this one. This is what makes 'no_progress' self-heal on a push.
     this.entry.seenSignatures = [];

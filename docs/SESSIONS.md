@@ -2,6 +2,17 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 95 — The other unbounded submit path (2026-08-20)
+
+Follow-up from reviewing #53. Session 93 bounded `external_submission_lost`; the ladder's OTHER non-answer had the same shape and was missed.
+
+- **`retry` means the CALL failed, not that the queue answered** — a 5xx, a network blip, or a permanent condition that simply isn't a 403. `decideSubmitAftermath` handled it with `ensure('queued')` and spent nothing, so a permanent condition was retried on every evaluation for as long as the PR sat in the queue. Quiet rather than loud (the call fails before GitHub, so no label and no comment), which is why it outlived the noisy one.
+- **Its own budget, not `submitAttempts`** (`submit_retry_attempts`, migration 0045, reset by R2 with the rest). The two answer different questions: `submitAttempts` means "stop spending QUEUE cycles on an unchanged commit" and is read to explain what the provider did with the PR. A call that never reached the provider is a different fact, and letting a couple of transient blips eat the real submit budget would block a healthy PR out of doors that still work.
+- **The known instance is now classified at the source.** `apiRequest` throws `GitHub not connected for this workspace` when neither an installation token nor a user token resolves — not a 403, not transient. Both doors read it as `no_mechanism` with "Reconnect GitHub in Settings", so the PR stops with the right answer instead of after three pointless calls. The budget still stands behind it for whatever the next unrecognised permanent failure turns out to be.
+- **Why this matters more after #53.** That PR sends the label door as the connected USER (`preferUser`), which skips the installation token with no fallback — so a missing or dead user token turns a working door into exactly this failure. The bound and the classification are what make that safe to merge.
+
+Tests: both sides of the budget in `decide.test.ts` plus an assertion that the provider-facing `submitAttempts` is never touched by it, and the disconnected classification in the ladder suite (including that it does not quietly try the next door with a dead credential).
+
 ## Session 94 — Apply the submit label as the user, not the App (2026-08-20)
 
 Session 93's follow-up established that Talyn's App IS authorised with trunk: it takes `/trunk merge` from talyn-app[bot] and answers "Submitted to Merge by talyn-app[bot]" (#85100, #84450, #84471, #84422). That is true of the COMMENT channel. It is not true of the LABEL channel.

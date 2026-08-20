@@ -50,6 +50,7 @@ export const ENTRY_COLUMNS = {
   rerunAttempts: mergeQueueEntries.rerunAttempts,
   resignAttempts: mergeQueueEntries.resignAttempts,
   submitAttempts: mergeQueueEntries.submitAttempts,
+  submitRetryAttempts: mergeQueueEntries.submitRetryAttempts,
   seenSignatures: mergeQueueEntries.seenSignatures,
   externalSubmitVia: mergeQueueEntries.externalSubmitVia,
   externalSubmittedAt: mergeQueueEntries.externalSubmittedAt,
@@ -87,6 +88,7 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     rerunAttempts: row.rerunAttempts,
     resignAttempts: row.resignAttempts,
     submitAttempts: row.submitAttempts,
+    submitRetryAttempts: row.submitRetryAttempts,
     // A null column (rows written before the progress rule shipped) reads as
     // "nothing has defeated a run yet", so those entries get a clean start
     // rather than an unexplained instant block.
@@ -207,6 +209,7 @@ export async function ensureActiveEntry(
           rerunAttempts: 0,
           resignAttempts: 0,
           submitAttempts: 0,
+          submitRetryAttempts: 0,
           externalSubmitVia: null,
           externalSubmittedAt: null,
           externalState: null,
@@ -301,6 +304,7 @@ export interface CasPatch {
   rerunAttempts?: number;
   resignAttempts?: number;
   submitAttempts?: number;
+  submitRetryAttempts?: number;
   /** Blocker signatures already defeated on this head — see decide.ts. */
   seenSignatures?: string[];
   externalSubmitVia?: ExternalSubmitVia | null;

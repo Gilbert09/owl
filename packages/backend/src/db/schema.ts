@@ -652,6 +652,9 @@ export const mergeQueueEntries = pgTable(
      * fix runs.
      */
     submitAttempts: integer('submit_attempts').notNull().default(0),
+    /** Submit attempts whose CALL failed (never reached the provider) — see
+     *  migration 0045 for why this is not `submit_attempts`. */
+    submitRetryAttempts: integer('submit_retry_attempts').notNull().default(0),
     /**
      * Every distinct blocker signature this head has been left with by a
      * COMPLETED remediation (`string[]`, lane-prefixed — see

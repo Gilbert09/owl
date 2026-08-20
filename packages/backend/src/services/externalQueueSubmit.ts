@@ -106,6 +106,27 @@ export interface SubmitToExternalQueueInput {
   allowAutoMerge?: boolean;
 }
 
+/**
+ * A submit failure that will not fix itself, so it must not go back as `retry`.
+ *
+ * `apiRequest` throws this string when neither an installation token nor a user
+ * token resolves — the workspace's GitHub connection is gone, or its token
+ * cannot be refreshed. That is not transient, and `retry` used to mean "try
+ * again on the very next evaluation, forever". The budget in `decide` now bounds
+ * that anyway; classifying it here means the PR stops with the right answer
+ * instead of after three pointless calls.
+ */
+function disconnectedFailure(message: string): boolean {
+  return /GitHub not connected/i.test(message);
+}
+
+function disconnectedMessage(owner: string, repo: string, message: string): string {
+  return (
+    `Talyn has no usable GitHub credential for this workspace, so it can't submit ` +
+    `${owner}/${repo} to the external merge queue. Reconnect GitHub in Settings. (${message})`
+  );
+}
+
 export async function submitToExternalQueue(
   input: SubmitToExternalQueueInput
 ): Promise<ExternalSubmitAttempt> {
@@ -137,6 +158,9 @@ export async function submitToExternalQueue(
       return { kind: 'submitted', via: 'comment', command: instruction.command };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Posting the submit command failed';
+      if (disconnectedFailure(message)) {
+        return { kind: 'no_mechanism', message: disconnectedMessage(owner, repo, message) };
+      }
       if (/not accessible by integration|resource not accessible|403/i.test(message)) {
         return {
           kind: 'no_mechanism',
@@ -163,6 +187,9 @@ export async function submitToExternalQueue(
       return { kind: 'submitted', via: 'label', label };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Applying the submit label failed';
+      if (disconnectedFailure(message)) {
+        return { kind: 'no_mechanism', message: disconnectedMessage(owner, repo, message) };
+      }
       if (/not accessible by integration|resource not accessible|403/i.test(message)) {
         return {
           kind: 'no_mechanism',

@@ -714,6 +714,20 @@ describe('submitToExternalQueue', () => {
       expect(result).toMatchObject({ message: expect.stringContaining('Issues: Read & write') });
     });
 
+    // "GitHub not connected for this workspace" is what apiRequest throws when
+    // neither token resolves. It is not a 403 and it is not transient, so it
+    // used to go back as `retry` — which meant "try again on the very next
+    // evaluation", forever.
+    it('does not call a lost GitHub connection transient', async () => {
+      listComments.mockResolvedValue([{ body: TRUNK_INSTRUCTION }]);
+      comment.mockRejectedValue(new Error('GitHub not connected for this workspace'));
+      const result = await submitToExternalQueue(base);
+      expect(result.kind).toBe('no_mechanism');
+      expect(result).toMatchObject({ message: expect.stringContaining('Reconnect GitHub') });
+      // And it must not quietly try the next door with a dead credential.
+      expect(enable).not.toHaveBeenCalled();
+    });
+
     it('retries a transient comment failure without falling through to another door', async () => {
       listComments.mockResolvedValue([{ body: TRUNK_INSTRUCTION }]);
       comment.mockRejectedValue(new Error('502 Bad Gateway'));

@@ -213,6 +213,8 @@ export interface EntrySnapshot {
   resignAttempts: number;
   /** External-queue submissions spent on this head (ejected → resubmit). */
   submitAttempts: number;
+  /** Submit attempts whose CALL failed, never reaching the provider (migration 0045). */
+  submitRetryAttempts: number;
   /**
    * Blocker signatures a COMPLETED remediation has already left this head with.
    * This — not the counters above — is what stops remediation: see the
@@ -498,6 +500,7 @@ export type Action =
           | 'rerunAttempts'
           | 'resignAttempts'
           | 'submitAttempts'
+          | 'submitRetryAttempts'
           | 'seenSignatures'
           | 'externalSubmitVia'
           | 'externalSubmittedAt'

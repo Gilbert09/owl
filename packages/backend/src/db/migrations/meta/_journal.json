@@ -316,6 +316,13 @@
 			"when": 1784160000028,
 			"tag": "0044_external_queue_submit_routes",
 			"breakpoints": true
+		},
+		{
+			"idx": 45,
+			"version": "7",
+			"when": 1784160000029,
+			"tag": "0045_submit_retry_attempts",
+			"breakpoints": true
 		}
 	]
 }

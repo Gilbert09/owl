@@ -904,6 +904,7 @@ async function applyBudgetReset(
     rerunAttempts: 0,
     resignAttempts: 0,
     submitAttempts: 0,
+    submitRetryAttempts: 0,
     // New code, new problems — what defeated a run on the old head says
     // nothing about this one. This is what makes 'no_progress' self-heal.
     seenSignatures: [],
@@ -923,6 +924,7 @@ async function applyBudgetReset(
       rerunAttempts: 0,
       resignAttempts: 0,
       submitAttempts: 0,
+      submitRetryAttempts: 0,
       seenSignatures: [],
       externalSubmitVia: null,
       externalSubmittedAt: null,
@@ -1076,6 +1078,7 @@ async function retargetBase(
     rerunAttempts: 0,
     resignAttempts: 0,
     submitAttempts: 0,
+    submitRetryAttempts: 0,
     fixTaskAccounted: true,
     // Every memo below was probed against the OLD base. Signing requirements
     // and external merge gates live on the real base, so a stale memo here is
