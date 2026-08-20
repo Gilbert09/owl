@@ -2,6 +2,16 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 91 — "Queue: not ready" was shouting about an ordinary wait (2026-08-20)
+
+Seven approved PRs showed an amber `Queue: not ready`, and every one of them was fine: checks still running, zero failures, nothing for a human to do. The badge read like a problem and hid the one number that answered it.
+
+- **`not_ready` is the only queue state that is about the PR, not the queue.** Trunk holds the submission and says it "will be added to the merge queue once all branch protection rules pass" — so on posthog it is the state of every submitted PR for the whole ~40 minute CI run, not an exception. Session 90 renamed it correctly (it had been reading as `queued`) and the pill's amber clock then applied to the normal case.
+- **The queue pill outranks every open-state verdict, which is right for the states the queue owns** (`testing`, `passed`, `failed` — "Ready" would be a lie on a branch only trunk can merge). It is wrong for `not_ready`, where the thing trunk is waiting on is exactly what the ordinary verdict describes, and the ordinary verdict says WHICH part. So `not_ready` now defers when the PR explains itself — checks running, checks failing, a conflict, changes requested — and only claims the pill on a PR with nothing left to report, where the queue genuinely is the remaining answer. Same shape as the existing `not_submitted` fall-through.
+- **A Requeue button already exists** (PR detail → Merge queue), shown on `blocked`/`blocked_manual` only, which is the whole set of states where resetting the budgets does anything. None of the seven had it because none were blocked.
+
+Tests: the four-way matrix in `PRStatusPill.test.tsx` — defer on running, defer on failing, claim the pill when the PR is clean, never defer on `testing`. Note the harness gotcha the first draft walked into: the component short-circuits the queue path unless `state="open"` is passed, so the two "defers" cases passed vacuously without it.
+
 ## Session 90 — Trunk waiting on Talyn, Talyn waiting on trunk (2026-08-19)
 
 PostHog/posthog#84450 sat in the merge queue for 9½ hours with three required checks red and nothing happening. No fix run fired, no notification, and the badge said "Queued" — the same thing it says for a PR waiting its turn.

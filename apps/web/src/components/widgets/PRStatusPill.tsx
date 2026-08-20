@@ -118,7 +118,9 @@ export function PRStatusPill({
 }: PRStatusPillProps) {
   const terminal = terminalVariant(state);
   const external =
-    terminal || state !== 'open' ? null : externalQueueVariant(labels, externalQueueState);
+    terminal || state !== 'open'
+      ? null
+      : externalQueueVariant(labels, externalQueueState, { checks, blockingReason });
   const variant =
     terminal ??
     external?.variant ??
@@ -176,7 +178,9 @@ function terminalVariant(state?: PRState): PillVariant | null {
  */
 function externalQueueVariant(
   labels: string[] | undefined,
-  observed: ExternalQueueState | undefined
+  observed: ExternalQueueState | undefined,
+  /** The PR's own verdict — consulted only for `not_ready`, see that case. */
+  own: { checks: PRChecks; blockingReason: PRBlockingReason }
 ): { variant: PillVariant; title: string } | null {
   const ext = observed
     ? ({ provider: 'trunk', state: observed, source: 'comment', evidence: 'its own comment' } as const)
@@ -209,11 +213,29 @@ function externalQueueVariant(
         variant: { icon: GitMerge, label: 'Merged', tone: 'purple' },
         title: `${provider} merged this PR.`,
       };
-    case 'not_ready':
+    case 'not_ready': {
+      // The one queue state that is ABOUT the PR rather than about the queue:
+      // trunk has the submission and says it "will be added to the merge queue
+      // once all branch protection rules pass". On a repo like posthog that
+      // covers the entire ~40-minute CI run, so it is the ordinary state of
+      // every submitted PR — and overriding "1/201 running" with an amber
+      // "Queue: not ready" turned every ordinary wait into something that read
+      // like it needed a human, on seven PRs at once.
+      //
+      // So when the PR itself explains the wait, let it: those verdicts ARE
+      // the branch protection trunk is waiting on, and they say which part.
+      // Only on a PR with nothing left to report does the queue add anything.
+      const prSaysWhy =
+        own.checks.inProgress > 0 ||
+        own.checks.failed > 0 ||
+        own.blockingReason === 'merge_conflicts' ||
+        own.blockingReason === 'changes_requested';
+      if (prSaysWhy) return null;
       return {
         variant: { ...base, icon: Clock, tone: 'amber' },
         title: `${provider}'s merge queue is holding this PR until it meets the merge requirements (${ext.evidence}).`,
       };
+    }
     case 'passed':
       return {
         variant: { ...base, icon: CheckCircle2, tone: 'green' },

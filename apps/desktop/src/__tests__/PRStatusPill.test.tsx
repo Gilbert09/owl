@@ -105,4 +105,59 @@ describe('PRStatusPill', () => {
     expect(screen.getByText('3/10 running')).toBeInTheDocument();
     expect(screen.getByRole('button').className).toContain('blue-500');
   });
+
+  // Trunk reports `not_ready` for the whole CI run — it is waiting on the PR's
+  // own branch protection — so it must not hide what the PR is actually doing.
+  describe("an external queue that is waiting on the PR's own checks", () => {
+    it('keeps the running pill rather than an amber "Queue: not ready"', () => {
+      render(
+        <PRStatusPill
+          blockingReason="blocked"
+          checks={checks({ total: 201, passed: 168, inProgress: 33 })}
+          state="open"
+          externalQueueState="not_ready"
+        />
+      );
+      expect(screen.getByText('33/201 running')).toBeInTheDocument();
+      expect(screen.queryByText('Queue: not ready')).not.toBeInTheDocument();
+    });
+
+    it('keeps the failing pill — that IS the branch protection trunk waits on', () => {
+      render(
+        <PRStatusPill
+          blockingReason="checks_failed"
+          checks={checks({ total: 201, passed: 195, failed: 6 })}
+          state="open"
+          externalQueueState="not_ready"
+        />
+      );
+      expect(screen.getByText('6/201 failing')).toBeInTheDocument();
+      expect(screen.queryByText('Queue: not ready')).not.toBeInTheDocument();
+    });
+
+    it('still shows the queue when the PR itself has nothing left to report', () => {
+      render(
+        <PRStatusPill
+          blockingReason="mergeable"
+          checks={checks({ total: 201, passed: 201 })}
+          state="open"
+          externalQueueState="not_ready"
+        />
+      );
+      expect(screen.getByText('Queue: not ready')).toBeInTheDocument();
+      expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+    });
+
+    it('never defers for a state the queue owns (testing)', () => {
+      render(
+        <PRStatusPill
+          blockingReason="checks_failed"
+          checks={checks({ total: 201, passed: 195, failed: 6 })}
+          state="open"
+          externalQueueState="testing"
+        />
+      );
+      expect(screen.getByText('Queue: testing')).toBeInTheDocument();
+    });
+  });
 });
