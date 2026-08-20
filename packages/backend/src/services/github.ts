@@ -1728,19 +1728,29 @@ class GitHubService extends EventEmitter {
    * thing: applying an external queue's SUBMIT label — the only way to hand a
    * clean PR to trunk.io, since GitHub refuses to arm auto-merge on a PR that
    * is already immediately mergeable. Additive — GitHub keeps existing labels.
+   *
+   * `auth: 'user'` sends the call as the connected GitHub user, not as the App.
+   * Trunk checks the label channel more strictly than the comment channel and
+   * refuses a label from the App. See externalQueueSubmit.ts.
    */
   async addPullRequestLabels(
     workspaceId: string,
     owner: string,
     repo: string,
     number: number,
-    labels: string[]
+    labels: string[],
+    auth: 'auto' | 'user' = 'auto'
   ): Promise<void> {
-    await this.apiRequest(workspaceId, `/repos/${owner}/${repo}/issues/${number}/labels`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ labels }),
-    });
+    await this.apiRequest(
+      workspaceId,
+      `/repos/${owner}/${repo}/issues/${number}/labels`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labels }),
+      },
+      auth
+    );
   }
 
   /**

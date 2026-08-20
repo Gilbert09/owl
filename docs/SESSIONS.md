@@ -2,6 +2,19 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 94 — Apply the submit label as the user, not the App (2026-08-20)
+
+Session 93's follow-up established that Talyn's App IS authorised with trunk: it takes `/trunk merge` from talyn-app[bot] and answers "Submitted to Merge by talyn-app[bot]" (#85100, #84450, #84471, #84422). That is true of the COMMENT channel. It is not true of the LABEL channel.
+
+- **Trunk checks the two channels differently, for the same App.** The label Talyn applied on #82679 got "Only users that are a part of this repo's Trunk organization or have write permissions to the repo can submit a PR to the queue", and trunk deleted the label. The command from the same App, on other PRs, was accepted. So door 2 is refused where door 1 is not, and no App permission changes that — the check is about who submits.
+- **Door 2 now applies the label as the connected GitHub user**, through the `auth: 'user'` mode `apiRequest` already had. That account has write access to the repo, which is what trunk's message asks for. Door 1 keeps using the App: it works, and it is what trunk records as the submitter.
+- **Unverified, deliberately shipped anyway.** Nobody has applied the label by hand on a gated repo to confirm trunk then accepts it. The downside is bounded: trunk deletes the label either way, Session 93's budget stops the retries, and door 1 is the door that normally answers now that the command memo survives a deploy.
+- **A 403 on that call now has two causes** — the account may lack write access, and the App may lack `Issues: Read & write`, since a user-to-server token is still bounded by the App's permissions. The message names both.
+
+Known gap, not addressed here: `accountKeyFor` keys the REST rate-limit gate on the installation id whatever token a call resolves to, so a block earned by a user-token call throttles installation traffic and vice versa. Pre-existing, and it needs a change in `apiRequest`'s gate keying rather than in this path.
+
+Tests: the label door asserted to go out as `'user'` in the ladder suite and through the pipeline in `evaluator.test.ts`; the 403 message pinned to naming both causes.
+
 ## Session 93 — An unbounded submit loop on a shared repo (2026-08-20)
 
 Opening the submit-label door (Session 92) exposed the path underneath it. On PostHog/posthog#82679: **61 label events and 38 provider comments in one hour**, one cycle every four seconds, in a channel PostHog engineers watch.

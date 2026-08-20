@@ -735,17 +735,25 @@ describe('submitToExternalQueue', () => {
         via: 'label',
         label: 'trunk-merge-queue-submit',
       });
-      expect(addLabels).toHaveBeenCalledWith('ws', 'PostHog', 'posthog', 74353, [
-        'trunk-merge-queue-submit',
-      ]);
+      // As the connected user: trunk refuses a label from the App (#82679).
+      expect(addLabels).toHaveBeenCalledWith(
+        'ws',
+        'PostHog',
+        'posthog',
+        74353,
+        ['trunk-merge-queue-submit'],
+        'user'
+      );
       expect(enable).not.toHaveBeenCalled();
     });
 
-    it('explains the missing App permission when labelling is refused', async () => {
+    it('names both the account and the App permission when labelling is refused', async () => {
       labels.mockResolvedValue(['trunk-merge-queue-submit']);
       addLabels.mockRejectedValue(new Error('Resource not accessible by integration'));
       const result = await submitToExternalQueue(base);
       expect(result.kind).toBe('no_mechanism');
+      // A 403 has two causes now, so the message names both.
+      expect(result).toMatchObject({ message: expect.stringContaining('connected GitHub user') });
       expect(result).toMatchObject({ message: expect.stringContaining('Issues: Read & write') });
     });
   });

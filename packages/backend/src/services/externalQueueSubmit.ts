@@ -22,7 +22,17 @@
 //     The instruction survives only until trunk takes the PR, so the command is
 //     also remembered per repo (externalQueueSubmitRoute.ts) and reused on any PR whose
 //     comment proves trunk owns it — that is what makes a RESUBMIT possible.
-//  2. **The repo's submit label**, for configurations that use one.
+//  2. **The repo's submit label**, for configurations that use one. Applied as
+//     the connected GitHub USER, not as the App. Trunk checks this channel more
+//     strictly than the comment channel above: it takes `/trunk merge` from
+//     talyn-app[bot] (verified on #85100, #84450), but answers the same App's
+//     LABEL with "Only users that are a part of this repo's Trunk organization
+//     or have write permissions to the repo can submit a PR to the queue", and
+//     deletes the label. The connected user has that write access.
+//
+//     Unverified: no human has applied the label on a gated repo to confirm
+//     trunk then accepts it. A refusal costs no more than today — trunk deletes
+//     the label either way, and R5b bounds the retries.
 //  3. **GitHub native auto-merge** — the door for GitHub's OWN merge queue
 //     ("merge when ready"), and the only one needing no extra permission. It is
 //     last because a third-party queue does not necessarily watch it: on
@@ -149,7 +159,7 @@ export async function submitToExternalQueue(
   const label = await getExternalQueueSubmitLabel(workspaceId, owner, repo);
   if (label) {
     try {
-      await githubService.addPullRequestLabels(workspaceId, owner, repo, number, [label]);
+      await githubService.addPullRequestLabels(workspaceId, owner, repo, number, [label], 'user');
       return { kind: 'submitted', via: 'label', label };
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Applying the submit label failed';
@@ -157,8 +167,9 @@ export async function submitToExternalQueue(
         return {
           kind: 'no_mechanism',
           message:
-            `Talyn couldn't apply the "${label}" submit label — the GitHub App needs the ` +
-            `"Issues: Read & write" permission. (${message})`,
+            `Talyn couldn't apply the "${label}" submit label as the connected GitHub user — ` +
+            `that account needs write access to ${owner}/${repo}, and Talyn's GitHub App needs ` +
+            `the "Issues: Read & write" permission. (${message})`,
         };
       }
       return { kind: 'retry', message };
