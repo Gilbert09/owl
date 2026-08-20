@@ -4,6 +4,7 @@ import {
   buildStackedRows,
   buildCopyListPayload,
   stackAncestors,
+  stackSelection,
   stackWithDescendants,
 } from '../components/panels/github/stacks';
 
@@ -287,5 +288,73 @@ describe('stackAncestors / stackWithDescendants', () => {
     ];
     expect(stackAncestors(rows, 'B').map((r) => r.id)).toEqual(['B']);
     expect(stackWithDescendants(rows, 'A').map((r) => r.id)).toEqual(['A']);
+  });
+});
+
+
+/**
+ * What the "Merge stack" button offers on a given row. Both cases below were
+ * live bugs: the button was absent on the stack ROOT (the one row where "merge
+ * the whole stack" is unambiguous), and it named the row's OWN base as the
+ * landing branch — which for every member but the root is its parent's head
+ * branch, so it promised to merge a stack into one of that stack's own feature
+ * branches.
+ */
+describe('stackSelection', () => {
+  // master <- A <- B <- C
+  const chain = () => [
+    makeRow({ id: 'A', head: 'a', base: 'master' }),
+    makeRow({ id: 'B', head: 'b', base: 'a' }),
+    makeRow({ id: 'C', head: 'c', base: 'b' }),
+  ];
+
+  it('offers the WHOLE stack on the root, reaching upward', () => {
+    const sel = stackSelection(chain(), 'A');
+    expect(sel.isRoot).toBe(true);
+    expect(sel.targets.map((r) => r.id)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('names the branch the stack LANDS on, never the row\'s own base', () => {
+    for (const id of ['A', 'B', 'C']) {
+      expect(stackSelection(chain(), id).base).toBe('master');
+    }
+  });
+
+  it('stops at the anchor on a non-root row — merging is not reversible', () => {
+    const sel = stackSelection(chain(), 'B');
+    expect(sel.isRoot).toBe(false);
+    expect(sel.targets.map((r) => r.id)).toEqual(['A', 'B']);
+  });
+
+  it('offers the whole chain from the top, which is the same set', () => {
+    expect(stackSelection(chain(), 'C').targets.map((r) => r.id)).toEqual(['A', 'B', 'C']);
+  });
+
+  it('offers nothing for a PR that is not in a stack', () => {
+    const rows = [makeRow({ id: 'A', head: 'a', base: 'master' })];
+    expect(stackSelection(rows, 'A').targets).toHaveLength(1);
+    expect(stackSelection(rows, 'A').isRoot).toBe(false);
+  });
+
+  it('offers nothing for a row that is not on the page', () => {
+    expect(stackSelection(chain(), 'zzz').targets).toEqual([]);
+  });
+
+  it('reaches every branch of a forked stack from the root', () => {
+    const rows = [...chain(), makeRow({ id: 'D', head: 'd', base: 'a' })];
+    expect(stackSelection(rows, 'A').targets.map((r) => r.id).sort()).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  it('treats a stack whose root has merged as landing on the retargeted base', () => {
+    // Mid-drain: A is gone from the open set and B has been retargeted onto
+    // master. B is now the root, and master is still the answer.
+    const rows = [
+      makeRow({ id: 'B', head: 'b', base: 'master' }),
+      makeRow({ id: 'C', head: 'c', base: 'b' }),
+    ];
+    const sel = stackSelection(rows, 'B');
+    expect(sel.isRoot).toBe(true);
+    expect(sel.base).toBe('master');
+    expect(sel.targets.map((r) => r.id)).toEqual(['B', 'C']);
   });
 });

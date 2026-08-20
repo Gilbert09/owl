@@ -58,6 +58,47 @@ export function stackWithDescendants(rows: PRRow[], id: string): PRRow[] {
   ];
 }
 
+export interface StackSelection {
+  /** The PRs a "Merge stack" on this row queues, root-first (= merge order). */
+  targets: PRRow[];
+  /** This row is the bottom of a stack, so the button reaches upward. */
+  isRoot: boolean;
+  /**
+   * The branch the stack LANDS on — the bottom member's base. Never the row's
+   * own base: for any member but the root that is its parent's head branch,
+   * i.e. a feature branch the stack passes through on the way.
+   */
+  base: string | undefined;
+}
+
+/**
+ * What "Merge stack" on a given row should queue, and where that stack lands.
+ *
+ * The reach depends on where the row sits. On a row with PRs beneath it the
+ * button means "land everything this PR needs" and stops there — the PRs
+ * stacked ABOVE are work the user hasn't asked for, and merging is not
+ * reversible. On the stack ROOT there is nothing beneath it, so that reading
+ * would leave the one row where "merge the whole stack" is unambiguous with no
+ * button at all; there it reaches upward instead.
+ *
+ * `targets.length <= 1` means there is no stack worth offering.
+ *
+ * Shared by the row action and the detail sheet deliberately: they had two
+ * copies of this, and the copies disagreed about which branch to name — which
+ * is exactly how the button came to promise merging a stack into one of its own
+ * feature branches.
+ */
+export function stackSelection(rows: PRRow[], id: string): StackSelection {
+  const below = stackAncestors(rows, id);
+  const above = stackWithDescendants(rows, id).slice(1);
+  const isRoot = below.length === 1 && above.length > 0;
+  return {
+    targets: isRoot ? [...below, ...above] : below,
+    isRoot,
+    base: below[0]?.summary.baseBranch,
+  };
+}
+
 export interface StackMeta {
   /** 0 = stack root, 1 = first dependent, … (used for indentation). */
   depth: number;

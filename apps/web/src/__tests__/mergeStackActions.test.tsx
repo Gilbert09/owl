@@ -130,12 +130,31 @@ describe('setMergeQueueStack — enqueue', () => {
 
   it('sends the anchor, and lets the server resolve the chain', async () => {
     await actions().setMergeQueueStack((state.rows as PRRow[])[2]!, true);
-    expect(setMergeQueueStack).toHaveBeenCalledWith('c', true);
+    expect(setMergeQueueStack).toHaveBeenCalledWith('c', true, { includeDescendants: undefined });
   });
 
   it('does not touch PRs stacked ABOVE the anchor', async () => {
     await actions().setMergeQueueStack((state.rows as PRRow[])[1]!, true);
     expect(patchRow.mock.calls.map((c) => c[0])).toEqual(['a', 'b']);
+  });
+
+  it('takes the WHOLE stack when asked to include descendants', async () => {
+    // What the button on a stack root means. Without it the one row where
+    // "merge the whole stack" is unambiguous could queue only itself.
+    await actions().setMergeQueueStack((state.rows as PRRow[])[0]!, true, { includeDescendants: true });
+
+    expect(patchRow.mock.calls.map((c) => c[0])).toEqual(['a', 'b', 'c']);
+    expect(setMergeQueueStack).toHaveBeenCalledWith('a', true, { includeDescendants: true });
+  });
+
+  it('queues only the root when descendants are NOT requested', async () => {
+    await actions().setMergeQueueStack((state.rows as PRRow[])[0]!, true);
+    expect(patchRow.mock.calls.map((c) => c[0])).toEqual(['a']);
+  });
+
+  it('never double-counts the anchor when including descendants', async () => {
+    await actions().setMergeQueueStack((state.rows as PRRow[])[1]!, true, { includeDescendants: true });
+    expect(patchRow.mock.calls.map((c) => c[0])).toEqual(['a', 'b', 'c']);
   });
 
   it('reports what the server declined to queue', async () => {

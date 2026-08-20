@@ -46,7 +46,7 @@ import { PRReviewPill } from './PRReviewPill';
 import { toast } from '../../stores/toast';
 import { trackEvent } from '../../lib/analytics';
 import { usePullRequestStore } from '../../stores/pullRequests';
-import { stackAncestors } from '../panels/github/stacks';
+import { stackSelection } from '../panels/github/stacks';
 
 /**
  * Slide-in detail panel for a PR. Phase 4 ships the skeleton —
@@ -108,8 +108,11 @@ export function PRDetailSheet({
   // Only decides whether to offer "Merge stack" — the server re-resolves the
   // chain on the call itself.
   const openRows = usePullRequestStore((s) => s.rows);
-  const stackBelow = useMemo(
-    () => (pullRequestId ? stackAncestors(openRows, pullRequestId) : []),
+  const { targets: stackTargets, isRoot: isStackRoot, base: stackBase } = useMemo(
+    () =>
+      pullRequestId
+        ? stackSelection(openRows, pullRequestId)
+        : { targets: [] as PRRow[], isRoot: false, base: undefined },
     [openRows, pullRequestId]
   );
 
@@ -285,7 +288,9 @@ export function PRDetailSheet({
     if (!pullRequestId) return;
     setTogglingQueue(true);
     try {
-      await api.pullRequests.setMergeQueueStack(pullRequestId, true);
+      await api.pullRequests.setMergeQueueStack(pullRequestId, true, {
+        includeDescendants: isStackRoot,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not queue the stack');
     } finally {
@@ -568,18 +573,20 @@ export function PRDetailSheet({
                   : 'Add to merge queue'}
               </Button>
             )}
-            {view.row.state === 'open' && stackBelow.length > 1 && (
+            {view.row.state === 'open' && stackTargets.length > 1 && (
               <Button
                 variant="outline"
                 className="h-7 px-2 text-xs"
                 onClick={() => void handleQueueStack()}
                 disabled={togglingQueue}
-                title={`Queue all ${stackBelow.length} PRs in this stack and merge them into ${
-                  stackBelow[0]?.summary.baseBranch || 'the base'
-                } one at a time, retargeting each as its parent lands`}
+                title={
+                  isStackRoot
+                    ? `Queue all ${stackTargets.length} PRs in this stack and merge them into ${stackBase || 'the base branch'} one at a time, retargeting each as its parent lands`
+                    : `Land this PR and the ${stackTargets.length - 1} below it — merges ${stackTargets.length} PRs into ${stackBase || 'the base branch'} one at a time. PRs stacked above this one are left alone.`
+                }
               >
                 <Layers className="mr-1 h-3.5 w-3.5" />
-                Merge stack ({stackBelow.length})
+                Merge stack ({stackTargets.length})
               </Button>
             )}
             {canMerge &&

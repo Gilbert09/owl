@@ -199,15 +199,21 @@ export function useGitHubActions() {
    *
    * The server resolves the chain — the client's own derivation only decides
    * which rows to patch optimistically, and the WS echo corrects it either way.
-   * On DEQUEUE this also takes every PR stacked above `row`, because each of
-   * them is parked on it and would otherwise wait forever.
+   *
+   * Enabling takes everything `row` is based on, plus everything stacked on it
+   * when `includeDescendants` (what the button on a stack ROOT means, where
+   * "the whole stack" is unambiguous). On DEQUEUE it always takes every PR
+   * stacked above `row`, because each is parked on it and would otherwise wait
+   * forever.
    */
   const setMergeQueueStack = useCallback(
-    async (row: PRRow, enabled: boolean) => {
+    async (row: PRRow, enabled: boolean, opts?: { includeDescendants?: boolean }) => {
       const rows = usePullRequestStore.getState().rows;
-      const affected = enabled
-        ? stackAncestors(rows, row.id)
-        : stackWithDescendants(rows, row.id);
+      const affected = !enabled
+        ? stackWithDescendants(rows, row.id)
+        : opts?.includeDescendants
+          ? [...stackAncestors(rows, row.id), ...stackWithDescendants(rows, row.id).slice(1)]
+          : stackAncestors(rows, row.id);
       // Snapshot exactly what we are about to overwrite, so a failure restores
       // every row rather than leaving half the stack looking queued.
       const before = affected.map((r) => ({
@@ -227,7 +233,9 @@ export function useGitHubActions() {
         });
       }
       try {
-        const result = await api.pullRequests.setMergeQueueStack(row.id, enabled);
+        const result = await api.pullRequests.setMergeQueueStack(row.id, enabled, {
+          includeDescendants: opts?.includeDescendants,
+        });
         trackEvent('merge_stack_toggled', {
           enabled,
           size: result.pullRequestIds.length,

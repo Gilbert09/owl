@@ -20,7 +20,12 @@ import {
 } from 'lucide-react';
 import type { PRRow, PRSummaryShape } from '../../../lib/api';
 import { copyRich, prMarkdownLink } from '../../../lib/prClipboard';
-import { stackAncestors, stackWithDescendants, type StackMeta } from './stacks';
+import {
+  stackAncestors,
+  stackSelection,
+  stackWithDescendants,
+  type StackMeta,
+} from './stacks';
 import {
   type TaskStatus,
   type AnyCloudProviderType,
@@ -59,9 +64,14 @@ interface PRTableProps {
   onOpenTask: (taskId: string) => void;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
-  /** Queue/dequeue a whole stack of dependent PRs. Enabling takes everything
-   *  `row` is based on; disabling takes `row` and everything stacked on it. */
-  onSetMergeQueueStack?: (row: PRRow, enabled: boolean) => Promise<void>;
+  /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
+   *  based on, plus everything stacked on it when `includeDescendants`.
+   *  Disabling always takes `row` and everything stacked on it. */
+  onSetMergeQueueStack?: (
+    row: PRRow,
+    enabled: boolean,
+    opts?: { includeDescendants?: boolean }
+  ) => Promise<void>;
   /** Create a cloud task for the row. Resolves true when a task was actually
    *  created (false when nothing's connected / the user dismissed the picker),
    *  so the button only flashes its confirmation on a real start. An explicit
@@ -228,9 +238,14 @@ function PRTableRow({
   onOpenTask: (taskId: string) => void;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
-  /** Queue/dequeue a whole stack of dependent PRs. Enabling takes everything
-   *  `row` is based on; disabling takes `row` and everything stacked on it. */
-  onSetMergeQueueStack?: (row: PRRow, enabled: boolean) => Promise<void>;
+  /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
+   *  based on, plus everything stacked on it when `includeDescendants`.
+   *  Disabling always takes `row` and everything stacked on it. */
+  onSetMergeQueueStack?: (
+    row: PRRow,
+    enabled: boolean,
+    opts?: { includeDescendants?: boolean }
+  ) => Promise<void>;
   onCreatePostHogTask: (row: PRRow, providerType?: string) => Promise<boolean>;
   /** Open the table-level skill picker for this row (absent → no skill button). */
   onOpenSkillPicker?: () => void;
@@ -265,29 +280,25 @@ function PRTableRow({
     billingStatus.plan === 'free' &&
     billingStatus.activeTaskLimit != null &&
     billingStatus.activeTasks >= billingStatus.activeTaskLimit;
-  // The PRs this one is based on, root-first, including itself. >1 means the
-  // row opens a stack worth offering "merge the whole thing" on. Derived from
-  // the rows on screen; the server re-resolves the chain on the actual call, so
-  // this only decides whether to show a button, never what gets queued.
-  const stackBelow = useMemo(
-    () =>
-      onSetMergeQueueStack && variant !== 'review' && row.state === 'open'
-        ? stackAncestors(allRows, row.id)
-        : [],
-    [onSetMergeQueueStack, variant, row.state, allRows, row.id]
-  );
-  const stackable = stackBelow.length > 1;
-  // Every member of this row's stack, in merge order. From any member, walking
-  // down then up covers the whole chain — a root has no ancestors, so the chip
-  // below cannot be derived from `stackBelow` alone.
+  // Every member of this row's stack, in merge order. Walking down then up from
+  // any member covers the whole chain.
   const stackAll = useMemo(() => {
     if (variant === 'review' || row.state !== 'open') return [];
     const below = stackAncestors(allRows, row.id);
     const above = stackWithDescendants(allRows, row.id).slice(1);
     return [...below, ...above];
   }, [variant, row.state, allRows, row.id]);
-  const draftsInStack = stackBelow.filter((r) => r.summary.draft === true).length;
-  const unqueuedInStack = stackBelow.filter((r) => !r.mergeQueued).length;
+  // What this row's button queues, and the branch it lands on. See stackSelection.
+  const { targets: stackTargets, isRoot: isStackRoot, base: stackBase } = useMemo(
+    () =>
+      stackAll.length > 0
+        ? stackSelection(allRows, row.id)
+        : { targets: [] as PRRow[], isRoot: false, base: undefined },
+    [stackAll.length, allRows, row.id]
+  );
+  const stackable = !!onSetMergeQueueStack && stackTargets.length > 1;
+  const draftsInStack = stackTargets.filter((r) => r.summary.draft === true).length;
+  const unqueuedInStack = stackTargets.filter((r) => !r.mergeQueued).length;
   // A dequeue has to cascade whenever anything is parked on this PR.
   const stackDequeue =
     !!onSetMergeQueueStack && stackWithDescendants(allRows, row.id).length > 1;
@@ -384,7 +395,7 @@ function PRTableRow({
     setBusy('stack');
     setRowError(null);
     try {
-      await onSetMergeQueueStack!(row, true);
+      await onSetMergeQueueStack!(row, true, { includeDescendants: isStackRoot });
     } catch (err) {
       setRowError(err instanceof Error ? err.message : 'Could not queue the stack');
     } finally {
@@ -742,12 +753,12 @@ function PRTableRow({
                 onClick={runStackQueue}
                 disabled={busy !== null}
                 className="rounded px-1.5 py-0.5 text-[10px] font-medium uppercase text-indigo-700 hover:bg-indigo-500/10 dark:text-indigo-400"
-                title={`Queue all ${stackBelow.length} PRs in this stack`}
+                title={`Queue all ${stackTargets.length} PRs and merge them into ${stackBase || 'the base branch'}`}
               >
                 {busy === 'stack' ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : (
-                  `Queue ${stackBelow.length}`
+                  `Queue ${stackTargets.length}`
                 )}
               </button>
             ) : (
@@ -763,7 +774,9 @@ function PRTableRow({
                 title={
                   stackWontFit
                     ? `This stack needs ${unqueuedInStack} merge-queue slots; your free plan allows ${billingStatus?.mergeQueueLimit} and ${billingStatus?.queuedPrs} are in use`
-                    : `Merge the whole stack — queues all ${stackBelow.length} PRs and merges them into ${summary.baseBranch || 'the base'} one at a time, retargeting each as its parent lands` +
+                    : (isStackRoot
+                        ? `Merge the whole stack — queues all ${stackTargets.length} PRs and merges them into ${stackBase || 'the base branch'} one at a time, retargeting each as its parent lands`
+                        : `Land this PR and the ${stackTargets.length - 1} below it — merges ${stackTargets.length} PRs into ${stackBase || 'the base branch'} one at a time, retargeting each as its parent lands. PRs stacked above this one are left alone.`) +
                       (draftsInStack > 0
                         ? `. Marks ${draftsInStack} draft ${draftsInStack === 1 ? 'PR' : 'PRs'} ready for review.`
                         : '')
