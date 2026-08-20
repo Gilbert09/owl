@@ -1,13 +1,18 @@
 name: Publish
 
-# Two ways to cut a stable release:
-#   1. Actions → Publish → "Run workflow" — version optional (empty = next
+# Three ways to cut a stable release:
+#   1. The nightly schedule, 03:00 UTC. Skipped when main has not moved since
+#      the latest stable release. This is the normal path: a build ships
+#      every night without anyone dispatching it.
+#   2. Actions → Publish → "Run workflow" — version optional (empty = next
 #      patch above the highest existing release). Fully CI, no local git.
-#   2. Push a vX.Y.Z tag (the original path) — still works identically.
-# Either way electron-builder creates the GitHub Release (tag included, for
-# the dispatch path) as a FULL release, which is what the stable update
-# channel and the website's download button follow.
+#   3. Push a vX.Y.Z tag (the original path) — still works identically.
+# On every path electron-builder creates the GitHub Release (tag included, for
+# the schedule and dispatch paths) as a FULL release, which is what the update
+# feed and the website's download button follow.
 on:
+  schedule:
+    - cron: '0 3 * * *'
   push:
     tags:
       - 'v*'
@@ -18,12 +23,53 @@ on:
         required: false
         type: string
 
+# The version job reads "the highest release so far" at run time, so two runs
+# in flight would stamp the same version and race to create one release.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
+  check:
+    # Only the scheduled run can be pointless. It compares main against the
+    # latest stable release rather than a 24h window so a night the cron
+    # misses is caught up the next night instead of waiting for a new commit.
+    if: github.event_name != 'schedule' || github.repository == 'Gilbert09/talyn'
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+    steps:
+      - name: Decide whether to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LATEST=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)
+          if [ -z "$LATEST" ]; then
+            echo "No stable release yet, building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          AHEAD=$(gh api "repos/$GITHUB_REPOSITORY/compare/$LATEST...$GITHUB_SHA" --jq .ahead_by)
+          if [ "$AHEAD" -gt 0 ]; then
+            echo "main is $AHEAD commit(s) ahead of $LATEST, building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing has landed since $LATEST, skipping."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # Resolved ONCE and fanned out, so every platform bakes the identical
   # version into release/app/package.json. Three legs each computing "the
   # next patch above the latest release" would race — the first to publish
   # would move the ceiling under the others.
   version:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
@@ -66,9 +112,10 @@ jobs:
 
   publish:
     # macOS goes FIRST and alone: it's the leg that creates the GitHub Release
-    # (and, on the dispatch path, the tag). Windows/Linux then upload into the
-    # release it made — see publish-others. Running all three in parallel would
-    # race three electron-builder processes to create the same release.
+    # (and, on the schedule and dispatch paths, the tag). Windows/Linux then
+    # upload into the release it made — see publish-others. Running all three
+    # in parallel would race three electron-builder processes to create the
+    # same release.
     needs: version
     runs-on: macos-latest
     # Needed for GITHUB_TOKEN to create the GitHub Release + upload assets.
@@ -181,8 +228,8 @@ jobs:
     # those runners.
     #
     # `needs: publish` is load-bearing, not just ordering: the macOS leg
-    # creates the GitHub Release (and the tag, on the dispatch path), and
-    # these legs upload into it. It also means a Windows/Linux failure can
+    # creates the GitHub Release (and the tag, on the schedule and dispatch
+    # paths), and these legs upload into it. It also means a Windows/Linux failure can
     # never take down a macOS release that already published cleanly.
     #
     # No notarization and no CSC_* here. macOS signing config lives under
