@@ -869,9 +869,15 @@ describe('mergeQueue v2 pipeline', () => {
 
       await evaluateGroupNow('repo1', 'main', 'test');
 
-      expect(addLabels).toHaveBeenCalledWith('ws1', 'a', 'b', expect.any(Number), [
-        'trunk-merge-queue-submit',
-      ]);
+      // As the connected user: trunk refuses a label from the App (#82679).
+      expect(addLabels).toHaveBeenCalledWith(
+        'ws1',
+        'a',
+        'b',
+        expect.any(Number),
+        ['trunk-merge-queue-submit'],
+        'user'
+      );
       const entry = await entryOf(db, prId);
       expect(entry?.status).toBe('awaiting_external');
       expect(entry?.externalSubmitVia).toBe('label');
