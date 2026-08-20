@@ -35,6 +35,7 @@ import { prAutoMergeWatcher } from './services/prAutoMergeWatcher.js';
 import { mergeQueueProcessor } from './services/mergeQueueProcessor.js';
 import { initMergeQueueTriggers } from './services/mergeQueue/triggers.js';
 import { mergeQueueReconciler } from './services/mergeQueue/reconciler.js';
+import { loadExternalQueueSubmitRoutes } from './services/externalQueueSubmitRoute.js';
 import { dbWatchdog } from './services/dbWatchdog.js';
 
 const PORT = process.env.PORT || 4747;
@@ -117,6 +118,13 @@ async function main() {
   // migration), at which point the v1 processor above stands down per tick.
   initMergeQueueTriggers();
   mergeQueueReconciler.init();
+  // Restore the external merge queue's submit command per repo. This is the
+  // door the queue uses on a PR whose provider comment no longer names it, and
+  // it used to live only in process memory — so every deploy dropped it and the
+  // next submission fell to a worse door (see externalQueueSubmitRoute.ts).
+  await loadExternalQueueSubmitRoutes()
+    .then((n) => n > 0 && console.log(`Loaded ${n} external merge queue submit route(s)`))
+    .catch((err) => console.error('submit-route load failed:', err));
 
   // Webhook pipeline: prime the watch index, start the Redis Stream worker, and
   // arm the low-frequency reconcile sweep. Worker is inert without REDIS_URL.

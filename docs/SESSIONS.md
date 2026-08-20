@@ -13,7 +13,13 @@ Opening the submit-label door (Session 92) exposed the path underneath it. On Po
 
 Tests: the two sides of the bound in `decide.test.ts` (unspent → back in line; spent → `blocked_manual` + notify + no resubmit, and the reason names the App).
 
-**Still open, and it needs a human**: Talyn's GitHub App has to be granted submit rights in PostHog's Trunk organisation, or Talyn cannot submit posthog PRs by any door. Until then the queue takes a PR to green and stops with an accurate message instead of looping.
+**A wrong conclusion, corrected in the same session.** The first reading of trunk's error was "Talyn's App is not authorised with Trunk at all". It is not: `talyn-app[bot]` posts `/trunk merge` and trunk answers "✨ Submitted to Merge by talyn-app[bot]" — verified on #85100, #84450, #84471, #84422. Trunk applies a stricter permission check to the LABEL channel than to the comment channel, same App. Nothing needs granting in the Trunk org; the command door has been working the whole time.
+
+**Which makes the real fault the memo, not the label.** #82679 has no trunk instruction comment (trunk rewrote it), so door 1 could not read the command off the PR — and the per-repo memo Session 86 built for exactly that case was a process-local `Map`, wiped by each of the four deploys that day. So door 1's fallback was empty too and the ladder fell to the label, which is the door trunk refuses. **The memo is now a table** (`external_queue_submit_routes`, migration 0044), loaded at boot, with the Map kept in front as a read cache so the hot path stays synchronous. Session 86's comment reasoned carefully about staleness and never mentioned process lifetime, which is the thing that actually broke it — and a cold memo does not degrade to a slower door here, it degrades to a worse one.
+
+Writing that turned up a second defect: `getPoolDbClient()` throws SYNCHRONOUSLY with no pool, so an unguarded persist propagates up through the comment read that feeds it and takes out the very door it is remembering. The whole call is guarded, not just the promise; six existing submit tests caught it by silently falling through to auto-merge.
+
+Tests: `externalQueueSubmitRoute.test.ts` — the property that was missing (wipe memory, reload from the table, door still there), repo scoping and casing, a changed command keeping one row, and "comment traffic must not become write traffic" (a repeated command writes once).
 
 ## Session 92 — The submit label was always there, on page 3 (2026-08-20)
 

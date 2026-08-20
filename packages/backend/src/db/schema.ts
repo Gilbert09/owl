@@ -542,6 +542,22 @@ export const pullRequests = pgTable(
  * never shipped to the desktop (only the derived counts are), so RLS stays off,
  * like the other infra tables. See docs/INCREMENTAL_CHECK_COUNTS.md.
  */
+/**
+ * The external merge queue's submit COMMAND, per repo. Durable because it is a
+ * DOOR, not a cache: trunk names `/trunk merge` only while a PR is unsubmitted,
+ * so on a PR whose comment has moved on this row is the only way to find it —
+ * and a process-local memo is empty after every deploy. See migration 0044.
+ */
+export const externalQueueSubmitRoutes = pgTable('external_queue_submit_routes', {
+  /** `owner/repo`, lowercased — the GitHub repo, workspace-independent. */
+  repoFullName: text('repo_full_name').primaryKey(),
+  /** ExternalQueueProvider — 'trunk' today. */
+  provider: text('provider').notNull(),
+  /** Verbatim comment body that submits a PR (e.g. `/trunk merge`). */
+  command: text('command').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const prCheckStates = pgTable(
   'pr_check_states',
   {
