@@ -1701,10 +1701,23 @@ class GitHubService extends EventEmitter {
   }
 
   /** Label names defined on a repo (first 100 — enough to spot a submit label). */
+  /**
+   * Every label the repo defines. PAGINATED, and that is the whole point: this
+   * answers "does this repo define an external merge queue's submit label",
+   * and a single page of 100 answered "no" on any repo with more labels than
+   * that. posthog/posthog defines 271, with `trunk-merge-queue-submit` at
+   * position 254 — so the one door the merge queue could always have used was
+   * invisible from the day the probe shipped, and every PR on that repo was
+   * blocked with a confident "the repo defines no submit label".
+   *
+   * A truncated list is worse than a failed call here: the failure is cached
+   * as a definite `null` (see repoMergeGate.getExternalQueueSubmitLabel) and
+   * reported to the user as fact.
+   */
   async listRepoLabelNames(workspaceId: string, owner: string, repo: string): Promise<string[]> {
-    const labels = await this.apiRequest<Array<{ name?: string }>>(
+    const labels = await this.paginate<{ name?: string }>(
       workspaceId,
-      `/repos/${owner}/${repo}/labels?per_page=100`
+      (page) => `/repos/${owner}/${repo}/labels?per_page=100&page=${page}`
     );
     return labels.map((l) => l.name).filter((n): n is string => typeof n === 'string');
   }

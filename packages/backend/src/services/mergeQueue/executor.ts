@@ -35,8 +35,10 @@ import { requiresSignedCommits, markSigningRequired } from '../repoSigning.js';
 import {
   clearExternalMergeGate,
   getExternalMergeGate,
+  getExternalQueueSubmitLabel,
   markExternalMergeGate,
 } from '../repoMergeGate.js';
+import { rememberedExternalQueueSubmitRoute } from '../externalQueueSubmitRoute.js';
 import { submitToExternalQueue } from '../externalQueueSubmit.js';
 import { readExternalQueueState } from '../externalQueueState.js';
 import { noteInfraFailure, noteMerge, queueHealth } from '../repoQueueHealth.js';
@@ -318,6 +320,27 @@ async function buildBaseContext(
   // the ejections this pipeline already observes, so it costs nothing and only
   // means anything on a gated base.
   const health = externalGate ? queueHealth(pr.owner, pr.repo, entry.baseBranch) : undefined;
+  // Does a way to submit to that queue exist NOW? Asked ONLY for an entry the
+  // ladder gave up on, so it costs nothing on any other path. "No mechanism" is
+  // a verdict about the REPO's configuration and what Talyn could SEE of it —
+  // never about the PR — which makes it the one block that can be falsified
+  // without anything about the PR changing. It was false for every repo with
+  // more than 100 labels until the label probe learned to paginate, and a
+  // sticky `blocked_manual` meant a human had to requeue each PR the bug
+  // touched. Both sources are cached (1h label probe, in-process command memo),
+  // so this is a map lookup after the first evaluation per repo.
+  // Both blocked statuses, so this can never drift out of step with the rule in
+  // `decide` that reads it (which keys on the CODE, not the status).
+  const submitDoorSought =
+    externalGate !== null &&
+    (entry.status === 'blocked_manual' || entry.status === 'blocked') &&
+    entry.blockedCode === 'external_gate';
+  const externalSubmitDoor = submitDoorSought
+    ? ((await getExternalQueueSubmitLabel(pr.workspaceId, pr.owner, pr.repo).catch(
+        () => null
+      )) !== null ||
+      rememberedExternalQueueSubmitRoute(pr.owner, pr.repo) !== null)
+    : undefined;
   return {
     visualReview,
     nowIso: new Date().toISOString(),
@@ -332,6 +355,7 @@ async function buildBaseContext(
     ...(externalQueue !== undefined ? { externalQueue } : {}),
     ...(externalFailure !== undefined ? { externalFailure } : {}),
     ...(health !== undefined ? { queueHealth: health } : {}),
+    ...(externalSubmitDoor !== undefined ? { externalSubmitDoor } : {}),
     updateBranchAvailable: true,
     cloudEnvAvailable: cloudEnv !== null,
     restGateBlocked: githubRateGate.isBlocked(accountKey, 'rest'),

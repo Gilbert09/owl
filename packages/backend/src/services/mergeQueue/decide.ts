@@ -806,6 +806,29 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
     (d.entry.status === 'blocked_manual' || d.entry.status === 'blocked') &&
     (d.entry.blockedCode === 'external_gate' || d.entry.blockedCode === 'external_queue_rejected')
   ) {
+    // A door appeared where the ladder found none. Unlike every other block in
+    // this function, "no mechanism can submit this PR" says nothing about the
+    // PR — it is a statement about the repo's configuration AND about what
+    // Talyn could see of it, so it can be falsified with nothing about the PR
+    // changing. It was false on every repo with more than 100 labels for as
+    // long as the submit-label probe read a single page: posthog/posthog
+    // defines `trunk-merge-queue-submit` at position 254 of 271, so the door
+    // was there the whole time and every PR on the repo was told, confidently,
+    // that it did not exist. Retiring the verdict here is what spares a human
+    // requeueing each PR the bug touched, one at a time.
+    if (d.entry.blockedCode === 'external_gate' && ctx.externalSubmitDoor) {
+      d.transition('queued', {
+        blockedCode: null,
+        blockedReason: null,
+        event: {
+          code: 'external_submit_door_found',
+          message:
+            'There is a way to submit this PR to the external merge queue after all — ' +
+            'back in line.',
+        },
+      });
+      return d.done('advance');
+    }
     const ext = externalQueueOf(pr, ctx);
     if (ext && isExternalQueueHolding(ext.state)) {
       const provider = externalQueueProviderLabel(ext.provider);

@@ -2,6 +2,17 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 92 — The submit label was always there, on page 3 (2026-08-20)
+
+A steady stream of "can't merge — there is no way to submit the PR to it automatically: the repo refuses GitHub auto-merge and **defines no submit label**. Needs manual intervention." The message was wrong on its own terms. posthog/posthog defines `trunk-merge-queue-submit`, and `/trunk merge` is sitting on a dozen open PRs right now.
+
+- **`listRepoLabelNames` fetched one page.** `?per_page=100`, no pagination. posthog/posthog defines **271 labels** and `trunk-merge-queue-submit` is at **position 254**, so the merge queue's most reliable door has been invisible on that repo since the probe shipped. Every PR there fell through the whole ladder to `no_mechanism` → `blocked_manual` → notify. It now uses the `paginate` helper the rest of the service already had.
+- **A truncated list is worse than a failed call.** `getExternalQueueSubmitLabel` caches the answer as a definite `null` for an hour, and the block quotes it to the user as fact. A thrown call would at least have been retried and logged.
+- **And the verdict never expired.** `blocked_manual` is sticky by design — only a dequeue/requeue clears it — which is right for a block about the PR. "No mechanism can submit this" is not about the PR: it is about the REPO's configuration and about what Talyn could SEE of it, so it can be falsified with nothing about the PR changing, which is exactly what fixing the probe does. Without a way to retire it, the fix would have left every PR the bug touched needing a manual requeue, one at a time. R5c now retires the verdict when a door is observed to exist (`ctx.externalSubmitDoor` — the cached label probe or the remembered command, asked ONLY for an entry sitting in that block, so it costs nothing anywhere else).
+- **Left alone deliberately**: `listIssueComments` has the same single-page shape, and the same failure is available in theory — trunk's comment posted late on a PR with 100+ comments would be invisible and read as "not submitted". It is not a live problem (the affected PRs carry 5–9 comments) and paginating a hot-path read on every evaluation costs real REST budget, so it stays a known edge rather than a speculative fix.
+
+Tests: `listRepoLabelNames` across three pages with the submit label on the last one and the short-page stop asserted; the heal and its negative in `decide.test.ts`. One unrelated flake in the run (`authMiddleware` timeout test, 10.8s under load) — passes alone.
+
 ## Session 91 — "Queue: not ready" was shouting about an ordinary wait (2026-08-20)
 
 Seven approved PRs showed an amber `Queue: not ready`, and every one of them was fine: checks still running, zero failures, nothing for a human to do. The badge read like a problem and hid the one number that answered it.

@@ -393,6 +393,15 @@ export interface DecisionContext {
    */
   externalQueue?: ExternalQueueStatus | null;
   /**
+   * Whether a way to hand this repo's PRs to the external queue exists NOW — a
+   * submit label the repo defines, or the provider's own command remembered
+   * from one of its PRs. Only ever set for an entry sitting in `blocked_manual`
+   * / `external_gate`, the block that means "there is no such way", so `decide`
+   * can retire a verdict that has stopped being true. Undefined everywhere
+   * else; see the executor for why it costs nothing.
+   */
+  externalSubmitDoor?: boolean;
+  /**
    * Whether the external queue on this base looks broken across PRs, from
    * services/repoQueueHealth.ts. `undefined` when the executor didn't ask (no
    * gate on this base). Cross-PR by nature, so no single entry could work it

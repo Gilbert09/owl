@@ -440,6 +440,30 @@ describe('githubService', () => {
       expect(String(stub.mock.calls[0][0])).toContain('/search/issues?q=');
     });
 
+    // PostHog/posthog defines 271 labels with `trunk-merge-queue-submit` at
+    // position 254. A single page of 100 reported "this repo defines no submit
+    // label" — the merge queue's most reliable door, invisible, and every PR on
+    // the repo blocked with that as the stated reason.
+    it('listRepoLabelNames follows every page', async () => {
+      const page1 = Array.from({ length: 100 }, (_, i) => ({ name: `label-${i}` }));
+      const page2 = Array.from({ length: 100 }, (_, i) => ({ name: `label-${100 + i}` }));
+      const page3 = [{ name: 'trunk-merge-queue-submit' }, { name: 'stamphog' }];
+      const stub = vi.fn(async (input: FetchInput) => {
+        const page = Number(String(input).match(/[?&]page=(\d+)/)?.[1] ?? '1');
+        const body = page === 1 ? page1 : page === 2 ? page2 : page3;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      });
+      vi.stubGlobal('fetch', stub);
+
+      const names = await githubService.listRepoLabelNames('ws1', 'acme', 'widgets');
+      expect(names).toHaveLength(202);
+      expect(names).toContain('trunk-merge-queue-submit');
+      expect(stub).toHaveBeenCalledTimes(3); // stops on the short page
+    });
+
     it('aborts a hung request after the timeout instead of hanging forever', async () => {
       vi.useFakeTimers();
       try {

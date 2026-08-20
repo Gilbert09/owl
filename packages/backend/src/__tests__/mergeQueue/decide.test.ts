@@ -2044,6 +2044,42 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(d.verdict).toBe('advance');
     });
 
+    // The "no way to submit this automatically" block is the one verdict here
+    // that is about the REPO rather than the PR, so it can stop being true with
+    // nothing about the PR changing — as it did the moment the submit-label
+    // probe learned to paginate. Without this it took a manual requeue per PR.
+    it('retires the no-mechanism block once a submit door exists', () => {
+      const d = decide(
+        entry({
+          status: 'blocked_manual',
+          blockedCode: 'external_gate',
+          blockedReason: 'no way to submit the PR automatically',
+          submitAttempts: 1,
+        }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalSubmitDoor: true })
+      );
+      const t = lastTransition(d)!;
+      expect(t.to).toBe('queued');
+      expect(t.blockedCode).toBeNull();
+      expect(t.event.code).toBe('external_submit_door_found');
+    });
+
+    it('keeps the block while no door exists', () => {
+      const d = decide(
+        entry({
+          status: 'blocked_manual',
+          blockedCode: 'external_gate',
+          blockedReason: 'no way to submit the PR automatically',
+          submitAttempts: 1,
+        }),
+        cleanPr(),
+        ctx({ externalGate: 'confirmed', externalSubmitDoor: false })
+      );
+      expect(transitions(d)).toEqual([]);
+      expect(workActions(d)).toEqual([]);
+    });
+
     it('leaves an external block alone while the provider is NOT holding the PR', () => {
       for (const state of ['not_submitted', 'failed', 'cancelled', 'rejected'] as const) {
         const d = decide(
