@@ -11,6 +11,7 @@ import {
   workspaces as workspacesTable,
   repositories as repositoriesTable,
   pullRequests as pullRequestsTable,
+  mergeQueueEntries as mergeQueueEntriesTable,
   tasks as tasksTable,
 } from '../../db/schema.js';
 import * as graphqlModule from '../../services/githubGraphql.js';
@@ -377,6 +378,94 @@ describe('routes/pullRequests', () => {
       expect(persisted.lastCheckDigest).toBe('sha1:Frontend=failure');
     });
 
+    // The desktop sheet paints the seeded list row and then REPLACES it with
+    // this response. The list row carries `mergeQueue` (the v2 entry); a
+    // detail response that drops it reads as "never queued", which took the
+    // Requeue button off a blocked PR the moment the description loaded.
+    it('carries the merge-queue v2 entry, like the list endpoint does', async () => {
+      const id = await insertPR(db, { headBranch: 'feature/x' });
+      await db.insert(mergeQueueEntriesTable).values({
+        id: 'entry-1',
+        pullRequestId: id,
+        workspaceId: 'ws-mine',
+        repositoryId: 'repo-mine',
+        baseBranch: 'main',
+        status: 'blocked',
+        blockedCode: 'checks_failed',
+        blockedReason: 'Required checks failed',
+        headSha: 'abcdef1234567890',
+        fixAttempts: 2,
+      });
+      vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+        { branch: 'feature/x', pr: fakeSummary() },
+      ]);
+
+      const res = await fetch(`${serverUrl}/pull-requests/${id}`, { headers: authMine });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        data: {
+          row: {
+            mergeQueue: {
+              status: string;
+              position: number;
+              reason?: string;
+              headShaShort?: string;
+              budgets: { fixRuns: [number, number] };
+            } | null;
+          };
+        };
+      };
+      expect(body.data.row.mergeQueue?.status).toBe('blocked');
+      expect(body.data.row.mergeQueue?.position).toBe(1);
+      expect(body.data.row.mergeQueue?.reason).toBe('Required checks failed');
+      expect(body.data.row.mergeQueue?.headShaShort).toBe('abcdef1');
+      expect(body.data.row.mergeQueue?.budgets.fixRuns[0]).toBe(2);
+    });
+
+    it('positions the entry within its own (repo, base) group', async () => {
+      const first = await insertPR(db, { headBranch: 'feature/a' });
+      const second = await insertPR(db, { headBranch: 'feature/b' });
+      await db.insert(mergeQueueEntriesTable).values([
+        {
+          id: 'entry-a',
+          pullRequestId: first,
+          workspaceId: 'ws-mine',
+          repositoryId: 'repo-mine',
+          baseBranch: 'main',
+          status: 'queued',
+          enqueuedAt: new Date('2026-08-01T00:00:00Z'),
+        },
+        {
+          id: 'entry-b',
+          pullRequestId: second,
+          workspaceId: 'ws-mine',
+          repositoryId: 'repo-mine',
+          baseBranch: 'main',
+          status: 'queued',
+          enqueuedAt: new Date('2026-08-01T01:00:00Z'),
+        },
+      ]);
+      vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+        { branch: 'feature/b', pr: fakeSummary() },
+      ]);
+
+      const res = await fetch(`${serverUrl}/pull-requests/${second}`, { headers: authMine });
+      const body = (await res.json()) as {
+        data: { row: { mergeQueue: { position: number } | null } };
+      };
+      expect(body.data.row.mergeQueue?.position).toBe(2);
+    });
+
+    it('reports null for a PR that was never queued', async () => {
+      const id = await insertPR(db, { headBranch: 'feature/x' });
+      vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+        { branch: 'feature/x', pr: fakeSummary() },
+      ]);
+      const res = await fetch(`${serverUrl}/pull-requests/${id}`, { headers: authMine });
+      const body = (await res.json()) as { data: { row: { mergeQueue: unknown } } };
+      expect(body.data.row.mergeQueue).toBeNull();
+    });
+
     it('does NOT re-persist on a subsequent open when nothing material changed', async () => {
       const id = await insertPR(db, { headBranch: 'feature/x' });
       vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
@@ -585,6 +674,29 @@ describe('routes/pullRequests', () => {
         .where(eq(pullRequestsTable.id, id))
         .limit(1);
       expect((row[0].lastSummary as { title: string }).title).toBe('Refreshed');
+    });
+
+    it('carries the merge-queue v2 entry too', async () => {
+      const id = await insertPR(db, { headBranch: 'feature/x' });
+      await db.insert(mergeQueueEntriesTable).values({
+        id: 'entry-refresh',
+        pullRequestId: id,
+        workspaceId: 'ws-mine',
+        repositoryId: 'repo-mine',
+        baseBranch: 'main',
+        status: 'blocked_manual',
+        blockedReason: 'Needs a manual merge',
+      });
+      vi.spyOn(graphqlModule, 'batchPullRequests').mockResolvedValue([
+        { branch: 'feature/x', pr: fakeSummary() },
+      ]);
+      const res = await fetch(`${serverUrl}/pull-requests/${id}/refresh`, {
+        method: 'POST',
+        headers: authMine,
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { data: { mergeQueue: { status: string } | null } };
+      expect(body.data.mergeQueue?.status).toBe('blocked_manual');
     });
 
     it('refuses cross-workspace refresh', async () => {

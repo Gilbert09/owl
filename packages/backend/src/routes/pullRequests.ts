@@ -31,7 +31,9 @@ import {
   closeActiveEntry,
   computeEntryPositions,
   ensureActiveEntry,
+  getActiveEntryForPr,
   loadActiveEntriesForWorkspace,
+  loadActiveGroup,
   rowToEntrySnapshot,
 } from '../services/mergeQueue/store.js';
 import { toPublicMergeQueue } from '../services/mergeQueue/legacy.js';
@@ -261,9 +263,13 @@ export function pullRequestRoutes(): Router {
     const summaryHead =
       ((row.lastSummary as { headBranch?: string } | null)?.headBranch) ?? null;
     if (!summaryHead) {
+      const queue = await mergeQueueForPr(row.id, db);
       return res.json({
         success: true,
-        data: { row: rowToPublicShape(row), fresh: null },
+        data: {
+          row: { ...rowToPublicShape(row, queue.position), mergeQueue: queue.payload },
+          fresh: null,
+        },
       });
     }
 
@@ -316,9 +322,13 @@ export function pullRequestRoutes(): Router {
       if (refreshed[0]) outRow = refreshed[0];
     }
 
+    const queue = await mergeQueueForPr(outRow.id, db);
     res.json({
       success: true,
-      data: { row: rowToPublicShape(outRow), fresh },
+      data: {
+        row: { ...rowToPublicShape(outRow, queue.position), mergeQueue: queue.payload },
+        fresh,
+      },
     });
   });
 
@@ -425,7 +435,11 @@ export function pullRequestRoutes(): Router {
       // that's stuck (e.g. a merged PR still showing as closed/open).
       const reconciled = await reconcileTerminalState(row);
       if (reconciled) {
-        return res.json({ success: true, data: rowToPublicShape(reconciled) });
+        const queue = await mergeQueueForPr(reconciled.id, db);
+        return res.json({
+          success: true,
+          data: { ...rowToPublicShape(reconciled, queue.position), mergeQueue: queue.payload },
+        });
       }
       return res
         .status(404)
@@ -440,7 +454,11 @@ export function pullRequestRoutes(): Router {
       .from(pullRequestsTable)
       .where(eq(pullRequestsTable.id, result.rowId))
       .limit(1);
-    res.json({ success: true, data: rowToPublicShape(fresh[0]) });
+    const queue = await mergeQueueForPr(fresh[0].id, db);
+    res.json({
+      success: true,
+      data: { ...rowToPublicShape(fresh[0], queue.position), mergeQueue: queue.payload },
+    });
   });
 
   // Fire the standard "get this PR mergeable" cloud run — the same action as
@@ -1372,6 +1390,39 @@ type PublicShapeRow = Pick<
   | 'createdAt'
   | 'updatedAt'
 >;
+
+/**
+ * The merge-queue v2 payload for ONE pull request, in the shape the list
+ * endpoint decorates every row with (`mergeQueue`), plus its 1-based position
+ * in its (repo, base) group.
+ *
+ * Every response that carries a whole PR row has to include this. The desktop
+ * sheet paints the seeded list row instantly and then REPLACES it with the
+ * detail response, so a response that omits `mergeQueue` reads as "never
+ * queued" — the status line falls back to the v1 blob, the budgets vanish, and
+ * the Requeue button on a blocked entry disappears the moment the detail lands.
+ *
+ * Degrades like the list decoration: a failure logs and returns null rather
+ * than failing the read.
+ */
+async function mergeQueueForPr(
+  prId: string,
+  db: ReturnType<typeof getDbClient>
+): Promise<{ payload: Record<string, unknown> | null; position: number }> {
+  try {
+    const entry = await getActiveEntryForPr(prId, db);
+    if (!entry) return { payload: null, position: 0 };
+    const group = await loadActiveGroup(entry.repositoryId, entry.baseBranch, db);
+    const position = computeEntryPositions(group).get(entry.id) ?? 0;
+    return { payload: toPublicMergeQueue(rowToEntrySnapshot(entry), position), position };
+  } catch (err) {
+    console.warn(
+      '[pullRequests] merge-queue v2 detail decoration failed:',
+      err instanceof Error ? err.message : err
+    );
+    return { payload: null, position: 0 };
+  }
+}
 
 function rowToPublicShape(row: PublicShapeRow, queuePosition = 0) {
   return {
