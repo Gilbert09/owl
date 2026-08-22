@@ -2,6 +2,17 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 96 — The stable desktop release ships itself every night (2026-08-20)
+
+Every `Publish` run since July was a `workflow_dispatch`. `nightly.yml` built on a cron, but as a pre-release, which only nightly-channel users receive. A fix that landed on main reached the stable channel when someone remembered to click Run workflow. Stable is on the cron now.
+
+- **`publish.yml` gained the schedule; `nightly.yml` is gone.** Same 03:00 UTC slot. Keeping both would have built the same commit twice a night under two version numbers. The full matrix ships (macOS arm64+x64 signed and notarized, Windows, Linux), which also closes the ROADMAP gap where an Intel install could hit updater errors when the newest release was an arm64-only nightly.
+- **The skip gate compares against the latest stable release, not a 24h window.** `gh release view` (`/releases/latest`, pre-releases excluded) names the tag and the compare API says how far main is ahead of it. A night the cron misses is caught up the next night rather than waiting for another commit. Dispatch and tag pushes always build, as before. The gate was run verbatim against the live repo: 3 ahead of `v0.2.51` builds, the tag's own commit skips.
+- **A `concurrency` group queues a dispatch behind the schedule.** The `version` job reads "highest release so far" at run time; two runs in flight would stamp the same version and race to create one release.
+- **The channel picker is now a no-op.** Both channels receive the same nightly stable build. Left in place so a pre-release track can return without a client change; removing it, or the "every build as it lands" copy in Settings → About, is a follow-up.
+
+No new secrets: the scheduled path runs with the signing and notarization secrets `Publish` already had.
+
 ## Session 95 — The other unbounded submit path (2026-08-20)
 
 Follow-up from reviewing #53. Session 93 bounded `external_submission_lost`; the ladder's OTHER non-answer had the same shape and was missed.
