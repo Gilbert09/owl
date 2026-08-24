@@ -1,5 +1,6 @@
 import type { AdminRunIndex, AdminRunRow, AdminRunStatus } from '@talyn/shared';
-import type { FleetRun } from '../selfHosted/client.js';
+import type { FleetSandbox } from '../selfHosted/client.js';
+import { cloudStatusForSandbox } from '../selfHosted/poller.js';
 import { listAdminTasks } from './queries.js';
 import { fanOutHosts } from './fleetProxy.js';
 
@@ -7,23 +8,30 @@ import { fanOutHosts } from './fleetProxy.js';
  * "What is happening on the fleet", joined from two sources that each know
  * something the other does not.
  *
- * The fleet's run store is IN-MEMORY (plus a per-run JSON ledger that exists
- * only so a crashed supervisor can adopt in-flight VMs), so run HISTORY dies
- * with the process. The durable record is the `tasks` row. Neither alone
+ * The fleet's record store is IN-MEMORY (plus a per-record JSON ledger that
+ * exists only so a crashed supervisor can adopt in-flight VMs), so history
+ * dies with the process. The durable record is the `tasks` row. Neither alone
  * answers the question:
  *
- *   - `orphan: true` — a run live on a host with no task behind it. A microVM
- *     burning memory for nobody. This is the single most valuable thing this
- *     page surfaces, and it is invisible from either side alone.
+ *   - `orphan: true` — a sandbox live on a host with no task behind it. A
+ *     microVM burning memory for nobody. This is the single most valuable
+ *     thing this page surfaces, and it is invisible from either side alone.
  *   - `live: null` on a non-terminal task — the task believes it is running
  *     and the host has never heard of it. Usually a fleetd restart that lost
- *     the run, which is precisely what the re-credentialing path exists for.
+ *     the record, which is precisely what the re-credentialing path exists for.
  *
- * The join key is the deterministic run id: `talyn-<taskId>`, set by
+ * The live side is `GET /v1/sandboxes` per host — the merged fleet has no run
+ * list any more, so the "runs" this page shows ARE the hosts' sandboxes,
+ * translated back into the run-status vocabulary the console has always
+ * spoken (see cloudStatusForSandbox).
+ *
+ * The join key is the deterministic id: `talyn-<taskId>`, set by
  * services/selfHosted/executor.ts, and echoed back in
  * `metadata.cloudTask.remoteRunId`.
  */
 
+/** The METADATA fallback: `cloudTask.status` is written by the poller in the
+ *  legacy run vocabulary, so this only filters, never translates. */
 function toStatus(raw: string | null | undefined): AdminRunStatus | null {
   switch (raw) {
     case 'queued':
@@ -47,7 +55,7 @@ function iso(value: string | undefined): string | null {
 }
 
 /**
- * A live fleetd run, as the console's row shape.
+ * A live fleetd sandbox, as the console's row shape.
  *
  * Exported so the single-run route returns the SAME shape the list does —
  * two run shapes would mean the detail page reimplementing every derivation
@@ -55,35 +63,41 @@ function iso(value: string | undefined): string | null {
  * names.
  *
  * `orphan: true` by default because this builds from the live side alone; the
- * list overrides it when a task row claims the run.
+ * list overrides it when a task row claims the sandbox.
  */
-export function adminRunFromFleet(run: FleetRun, host: string): AdminRunRow {
+export function adminRunFromFleet(sandbox: FleetSandbox, host: string): AdminRunRow {
   return {
-    runId: run.id,
+    runId: sandbox.id,
     host,
     taskId: null,
-    workspaceId: run.workspaceId ?? null,
+    workspaceId: sandbox.workspaceId ?? null,
     ownerEmail: null,
     repo: null,
-    status: toStatus(run.status),
-    phase: run.phase ?? null,
-    adopted: Boolean(run.adopted),
-    slot: typeof run.slot === 'number' ? run.slot : null,
-    goldenLayer: run.goldenLayer ?? null,
-    createdAt: iso(run.createdAt),
-    startedAt: iso(run.startedAt),
-    endedAt: iso(run.endedAt),
-    deadline: iso(run.deadline),
-    lastHeartbeat: iso(run.lastHeartbeat),
-    lastActivity: iso(run.lastActivity),
-    costUsd: typeof run.costUsd === 'number' ? run.costUsd : null,
-    memUsedMib: typeof run.memUsedMib === 'number' ? run.memUsedMib : null,
-    memMib: typeof run.memMib === 'number' ? run.memMib : null,
-    prUrl: run.prUrl ?? null,
-    error: run.error ?? null,
+    status: cloudStatusForSandbox(sandbox),
+    phase: sandbox.phase ?? null,
+    adopted: Boolean(sandbox.adopted),
+    slot: typeof sandbox.slot === 'number' ? sandbox.slot : null,
+    goldenLayer: sandbox.goldenLayer ?? null,
+    createdAt: iso(sandbox.createdAt),
+    startedAt: iso(sandbox.startedAt),
+    endedAt: iso(sandbox.endedAt),
+    deadline: iso(sandbox.deadline),
+    lastHeartbeat: iso(sandbox.lastHeartbeat),
+    lastActivity: iso(sandbox.lastActivity),
+    costUsd: typeof sandbox.costUsd === 'number' ? sandbox.costUsd : null,
+    memUsedMib: typeof sandbox.memUsedMib === 'number' ? sandbox.memUsedMib : null,
+    memMib: typeof sandbox.memMib === 'number' ? sandbox.memMib : null,
+    prUrl: sandbox.prUrl ?? initialTaskPrUrl(sandbox),
+    error: sandbox.error ?? null,
     orphan: true,
-    selfTest: Boolean(run.task?.selfTest),
+    selfTest: Boolean(sandbox.task?.selfTest),
   };
+}
+
+/** The PR the initial task opened, when the record reports it there rather
+ *  than on the sandbox itself. */
+function initialTaskPrUrl(sandbox: FleetSandbox): string | null {
+  return sandbox.tasks?.[0]?.prUrl ?? null;
 }
 
 /**
@@ -125,18 +139,18 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
       before: filters.before,
       provider: 'selfhosted',
     }),
-    fanOutHosts((client) => client.listRuns()),
+    fanOutHosts((client) => client.listSandboxes()),
   ]);
 
-  const byRunId = new Map<string, { run: FleetRun; host: string }>();
+  const byRunId = new Map<string, { sandbox: FleetSandbox; host: string }>();
   const degraded: Array<{ host: string; error: string }> = [];
   for (const { host, result } of live) {
     if (!result.ok) {
       degraded.push({ host: host.name, error: result.error });
       continue;
     }
-    for (const run of result.value.runs ?? []) {
-      byRunId.set(run.id, { run, host: host.name });
+    for (const sandbox of result.value.sandboxes ?? []) {
+      byRunId.set(sandbox.id, { sandbox, host: host.name });
     }
   }
 
@@ -145,42 +159,43 @@ export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunI
     const runId = task.remoteRunId ?? `talyn-${task.id}`;
     const match = byRunId.get(runId);
     if (match) claimed.add(runId);
-    const run = match?.run;
+    const sandbox = match?.sandbox;
     return {
       runId,
-      // The live host wins over the recorded one: a run adopted after a
+      // The live host wins over the recorded one: a sandbox adopted after a
       // restart is where the fleet says it is, not where dispatch put it.
       host: match?.host ?? task.fleetHost ?? null,
       taskId: task.id,
       workspaceId: task.workspaceId,
       ownerEmail: task.ownerEmail,
       repo: null,
-      status: toStatus(run?.status ?? task.cloudStatus),
-      phase: run?.phase ?? task.phase ?? null,
-      adopted: Boolean(run?.adopted),
-      slot: typeof run?.slot === 'number' ? run.slot : null,
-      goldenLayer: run?.goldenLayer ?? null,
+      status: sandbox ? cloudStatusForSandbox(sandbox) : toStatus(task.cloudStatus),
+      phase: sandbox?.phase ?? task.phase ?? null,
+      adopted: Boolean(sandbox?.adopted),
+      slot: typeof sandbox?.slot === 'number' ? sandbox.slot : null,
+      goldenLayer: sandbox?.goldenLayer ?? null,
       createdAt: task.createdAt,
-      startedAt: iso(run?.startedAt),
-      endedAt: iso(run?.endedAt) ?? task.completedAt,
-      deadline: iso(run?.deadline),
-      lastHeartbeat: iso(run?.lastHeartbeat),
-      lastActivity: iso(run?.lastActivity),
-      costUsd: run?.costUsd ?? task.costUsd,
-      // No task-side fallback: only the live host knows what a run is using
-      // right now, and a stale figure would be worse than an honest blank.
-      memUsedMib: typeof run?.memUsedMib === 'number' ? run.memUsedMib : null,
-      memMib: typeof run?.memMib === 'number' ? run.memMib : null,
-      prUrl: run?.prUrl ?? null,
-      error: run?.error ?? null,
+      startedAt: iso(sandbox?.startedAt),
+      endedAt: iso(sandbox?.endedAt) ?? task.completedAt,
+      deadline: iso(sandbox?.deadline),
+      lastHeartbeat: iso(sandbox?.lastHeartbeat),
+      lastActivity: iso(sandbox?.lastActivity),
+      costUsd: sandbox?.costUsd ?? task.costUsd,
+      // No task-side fallback: only the live host knows what a sandbox is
+      // using right now, and a stale figure would be worse than an honest
+      // blank.
+      memUsedMib: typeof sandbox?.memUsedMib === 'number' ? sandbox.memUsedMib : null,
+      memMib: typeof sandbox?.memMib === 'number' ? sandbox.memMib : null,
+      prUrl: sandbox ? (sandbox.prUrl ?? initialTaskPrUrl(sandbox)) : null,
+      error: sandbox?.error ?? null,
       orphan: false,
-      selfTest: Boolean(run?.task?.selfTest),
+      selfTest: Boolean(sandbox?.task?.selfTest),
     };
   });
 
   const orphans = [...byRunId.entries()]
     .filter(([runId]) => !claimed.has(runId))
-    .map(([, { run, host }]) => adminRunFromFleet(run, host));
+    .map(([, { sandbox, host }]) => adminRunFromFleet(sandbox, host));
 
   // Merged by time, not concatenated.
   //

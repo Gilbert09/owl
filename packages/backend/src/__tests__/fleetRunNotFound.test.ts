@@ -29,6 +29,14 @@ describe('fleet run-not-found detection', () => {
       ['a "run not found" phrasing', 500, 'run not found'],
       ['an "unknown run" phrasing', 500, 'unknown run: abc'],
       ['a 404 whose body says something else entirely', 404, 'nope'],
+      // The merged fleet's phrasings. Both vocabularies must match — a host
+      // mid-rollout can answer with either, and missing one turns a vanished
+      // sandbox back into the 21-hour retry loop.
+      ['the merged fleet\'s "no such sandbox"', 500, 'no such sandbox'],
+      ['a capitalised sandbox variant', 500, 'No such sandbox'],
+      ['an embedded sandbox variant', 500, 'get sandbox talyn-1: no such sandbox'],
+      ['a "sandbox not found" phrasing', 500, 'sandbox not found'],
+      ['an "unknown sandbox" phrasing', 500, 'unknown sandbox: abc'],
     ])('treats %s as terminal', (_label, status, message) => {
       expect(isRunNotFoundResponse(status, message)).toBe(true);
     });
@@ -42,6 +50,8 @@ describe('fleet run-not-found detection', () => {
       // The words in another context must not trip it — this is the risk of
       // matching on a message at all.
       ['an unrelated message mentioning runs', 500, 'too many runs in flight'],
+      ['an unrelated message mentioning sandboxes', 500, 'too many sandboxes in flight'],
+      ['a busy-sandbox refusal', 409, 'sandbox_busy'],
     ])('leaves %s retryable', (_label, status, message) => {
       expect(isRunNotFoundResponse(status, message)).toBe(false);
     });

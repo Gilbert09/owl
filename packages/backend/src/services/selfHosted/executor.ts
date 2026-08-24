@@ -14,12 +14,18 @@ import {
   tasks as tasksTable,
   repositories as repositoriesTable,
   workspaces as workspacesTable,
-  users as usersTable,
 } from '../../db/schema.js';
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { githubService } from '../github.js';
-import { FleetCapacityError, FleetClient } from './client.js';
+import {
+  FleetCapacityError,
+  FleetClient,
+  FleetDispatchUncertainError,
+  type CreateSandboxInput,
+  type FleetSandbox,
+} from './client.js';
+import { cloudStatusForSandbox } from './poller.js';
 import { getSelfHostedCredentials, resolveFleetTarget } from './credentials.js';
 
 // Re-exported, not redeclared. A second definition of this contract is how the
@@ -71,19 +77,33 @@ const SYSTEM_PROMPT =
   'When done, state the URL of the pull request you opened.';
 
 /**
- * Derive the fleet run id from the task id.
+ * Derive the fleet sandbox id from the task id.
  *
- * Deterministic on purpose: the fleet is idempotent on runId (fleet spec
- * §11.5), so a redelivered webhook that re-dispatches the same task cannot
- * spawn a second microVM. A random id here would silently double-spend.
+ * Deterministic on purpose: the fleet is idempotent on the caller-chosen id
+ * (fleet spec §11.5), so a redelivered webhook that re-dispatches the same
+ * task cannot spawn a second microVM. A random id here would silently
+ * double-spend. The name keeps "run": this is still the runId of the
+ * credential-pull wire, and the id contract must not move with the merge.
  */
 export function fleetRunIdForTask(taskId: string): string {
   return `talyn-${taskId}`;
 }
 
 /**
- * Hand a task to the self-hosted fleet: POST a run and let the fleet own the
- * agent loop. The poller drives the local task to completed / failed.
+ * How many times a dispatch that got 504 `dispatch_uncertain` is re-sent.
+ *
+ * The control plane lost the host's answer; the sandbox MAY exist. The only
+ * safe move is the SAME id again — the create is idempotent on it — and never
+ * another provider, which could run the task twice. Bounded so a gateway that
+ * is genuinely down does not hold the queue tick hostage.
+ */
+const DISPATCH_UNCERTAIN_RETRIES = 2;
+const DISPATCH_UNCERTAIN_DELAY_MS = 2_000;
+
+/**
+ * Hand a task to the self-hosted fleet: POST an ephemeral sandbox whose
+ * initial task is the prompt, and let the fleet own the agent loop. The
+ * poller drives the local task to completed / failed.
  *
  * Idempotent: a task already carrying a `cloudTask.remoteTaskId` is a no-op.
  */
@@ -142,34 +162,32 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       DEFAULT_FLEET_MODEL_ID;
 
     // The model decides the provider, and the provider decides what the microVM
-    // can reach: the host builds the run's egress route table from it, so a run
-    // dispatched at an OpenAI model has no route to Anthropic's API at all.
+    // can reach: the host builds the sandbox's egress route table from it, so a
+    // dispatch at an OpenAI model has no route to Anthropic's API at all.
     // Sent explicitly rather than left to the host's default — the route table
     // should be the one this dispatch chose.
     const provider = fleetProviderForModel(model);
 
-    // Which in-guest harness runs this. Gated to an allowlist of workspaces
-    // (FLEET_PI_WORKSPACES) because the Pi harness is proven only as far as the
-    // guest image: everything below the microVM has tests, and a task actually
-    // running on it has not been observed. Absent from the list means the
-    // Claude Agent SDK, which is what every dispatch has meant so far.
-    const harness = await fleetHarnessFor(task.workspaceId);
-
-    const run = await client.createRun({
-      runId,
+    const sandbox = await createSandboxRetryingUncertain(client, {
+      id: runId,
       workspaceId: task.workspaceId,
-      taskType: task.type === 'pr_response' ? 'pr_response' : 'code_writing',
-      prompt,
-      systemPrompt: SYSTEM_PROMPT,
-      model,
-      provider,
-      harness,
-      repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
+      // Ephemeral is what a run was: the host stops and retires the sandbox
+      // the moment its initial task reaches a terminal state.
+      ephemeral: true,
+      task: {
+        taskType: task.type === 'pr_response' ? 'pr_response' : 'code_writing',
+        prompt,
+        systemPrompt: SYSTEM_PROMPT,
+        model,
+        provider,
+        repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
+      },
       githubToken,
-      // The credential for this run's provider, and only that one. Always sent,
-      // never optional: the workspace's own key is the only one in play, and
-      // the fleet has no house key to fall back on — it refuses a dispatch that
-      // arrives without one rather than booting a run that cannot call out.
+      // The credential for this dispatch's provider, and only that one. Always
+      // sent, never optional: the workspace's own key is the only one in play,
+      // and the fleet has no house key to fall back on — it refuses a dispatch
+      // that arrives without one rather than booting a guest that cannot call
+      // out.
       ...(provider === 'openai'
         ? { openaiKey: creds.openaiKey ?? '' }
         : { anthropicKey: creds.claudeToken }),
@@ -177,9 +195,9 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
 
     const cloudTask: CloudTaskMetadata = {
       provider: 'selfhosted',
-      remoteTaskId: run.id,
-      remoteRunId: run.id,
-      status: run.status ?? 'queued',
+      remoteTaskId: sandbox.id,
+      remoteRunId: sandbox.id,
+      status: cloudStatusForSandbox(sandbox),
       extra: { repo: repo.slug, endpoint: target.endpoint, ...(target.host ? { host: target.host } : {}) },
     };
     await patchTaskMetadata(task.id, (existing) => ({ ...existing, cloudTask }));
@@ -190,7 +208,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       .where(eq(tasksTable.id, task.id));
     emitTaskStatus(task.workspaceId, task.id, 'in_progress');
 
-    console.log(`[selfhosted] task ${task.id.slice(0, 8)} → run ${run.id} (${repo.slug})`);
+    console.log(`[selfhosted] task ${task.id.slice(0, 8)} → sandbox ${sandbox.id} (${repo.slug})`);
     return { ok: true };
   } catch (err) {
     if (err instanceof FleetCapacityError) {
@@ -285,33 +303,32 @@ async function workspaceFleetModel(workspaceId: string): Promise<string | undefi
 }
 
 /**
- * Which in-guest harness this workspace's runs use.
+ * POST the create, re-sending the SAME id on 504 `dispatch_uncertain`.
  *
- * Gated on the workspace owner being an admin, which is an existing privilege
- * rather than a new switch: `users.is_admin` already gates draining a fleet
- * host and granting admin, and it is bootstrapped from TALYN_ADMIN_EMAILS. So
- * internal workspaces get the new harness and customers do not, with nothing to
- * configure and nothing to remember to turn off.
- *
- * The coupling is deliberate but worth naming: granting somebody admin now also
- * opts their workspaces onto a harness that has been proven only as far as the
- * guest image. That is the right trade while this is being dogfooded by the
- * people who can read a transcript and tell what went wrong — and the day it
- * stops being, this function is the one place to sever it.
- *
- * Anything unexpected reads as `sdk`: an unknown workspace, a missing owner, a
- * row that is not there. The default has to be the proven path, because this
- * runs on every dispatch and a lookup that fails open would silently move
- * customer traffic onto the new harness.
+ * That status means the control plane lost the host's answer: the sandbox may
+ * or may not exist, and the create is idempotent on the id, so re-asking is
+ * always safe and anything else is not — failing back to another provider here
+ * could run the task twice. If the retries run out the error propagates as a
+ * plain (non-capacity) failure, which is the honest answer: nobody knows
+ * whether the work started, so nothing may re-dispatch it elsewhere.
  */
-async function fleetHarnessFor(workspaceId: string): Promise<'sdk' | 'pi'> {
-  const [row] = await getDbClient()
-    .select({ isAdmin: usersTable.isAdmin })
-    .from(workspacesTable)
-    .innerJoin(usersTable, eq(usersTable.id, workspacesTable.ownerId))
-    .where(eq(workspacesTable.id, workspaceId))
-    .limit(1);
-  return row?.isAdmin ? 'pi' : 'sdk';
+async function createSandboxRetryingUncertain(
+  client: FleetClient,
+  input: CreateSandboxInput,
+): Promise<FleetSandbox> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.createSandbox(input);
+    } catch (err) {
+      if (!(err instanceof FleetDispatchUncertainError) || attempt >= DISPATCH_UNCERTAIN_RETRIES) {
+        throw err;
+      }
+      console.warn(
+        `[fleet] dispatch of ${input.id} uncertain (attempt ${attempt + 1}): ${err.message} — retrying the same id`,
+      );
+      await new Promise((r) => setTimeout(r, DISPATCH_UNCERTAIN_DELAY_MS));
+    }
+  }
 }
 
 function modelFromTask(task: Task): string | undefined {

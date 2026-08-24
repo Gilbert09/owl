@@ -230,4 +230,18 @@ describe('toAgentEvent', () => {
     });
     expect(out.message?.content).toEqual([{ type: 'text', text: 'plain' }]);
   });
+
+  // The merged fleet appends synthetic task_started / task_complete markers to
+  // the event stream so a reader can attribute it. They carry no `raw` and no
+  // SDK message — the poller must ingest them without throwing and keep the
+  // fleet seq, and the renderer skips types it does not know.
+  it.each([
+    ['task_started', { type: 'task_started', taskId: 'task-1' }],
+    ['task_complete', { type: 'task_complete', taskId: 'task-1', status: 'completed' }],
+  ])('tolerates the host\'s synthetic %s marker', (_label, event) => {
+    const out = toAgentEvent({ seq: 7, at: '2026-08-23T10:00:00Z', event });
+    expect(out.seq).toBe(7);
+    expect(out.type).toBe(event.type);
+    expect(out.message).toBeUndefined();
+  });
 });

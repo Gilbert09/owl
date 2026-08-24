@@ -8,10 +8,17 @@ import {
 import { fleetRunIdForTask } from '../services/selfHosted/executor.js';
 import {
   shouldPersistTranscript,
-  isFleetRunTerminal,
-  taskStatusForFleetRun,
+  isFleetSandboxTerminal,
+  taskOutcomeForSandbox,
+  cloudStatusForSandbox,
 } from '../services/selfHosted/poller.js';
-import { FleetCapacityError, FleetThrottleError } from '../services/selfHosted/client.js';
+import {
+  FleetCapacityError,
+  FleetDispatchUncertainError,
+  FleetThrottleError,
+  type FleetSandbox,
+  type FleetSandboxTask,
+} from '../services/selfHosted/client.js';
 
 describe('selfHostedProvider — CloudTaskProvider conformance', () => {
   it('declares the expected identity + capabilities', () => {
@@ -96,45 +103,98 @@ describe('selfHostedProvider — CloudTaskProvider conformance', () => {
   });
 });
 
-describe('selfHosted run ids are deterministic', () => {
-  // The fleet is idempotent on runId, so a redelivered webhook that
-  // re-dispatches the same task must not spawn a second microVM. A random id
-  // here would silently double-spend real compute and LLM tokens.
-  it('derives the same run id for the same task, every time', () => {
+describe('selfHosted sandbox ids are deterministic', () => {
+  // The fleet is idempotent on the caller-chosen id, so a redelivered webhook
+  // that re-dispatches the same task must not spawn a second microVM. A random
+  // id here would silently double-spend real compute and LLM tokens.
+  it('derives the same id for the same task, every time', () => {
     expect(fleetRunIdForTask('abc-123')).toBe(fleetRunIdForTask('abc-123'));
     expect(fleetRunIdForTask('abc-123')).not.toBe(fleetRunIdForTask('abc-124'));
   });
 });
 
+/** A sandbox record with an optional initial-task history entry. */
+function sandbox(
+  status: FleetSandbox['status'],
+  task?: Partial<FleetSandboxTask>,
+  extra?: Partial<FleetSandbox>,
+): FleetSandbox {
+  return {
+    id: 'talyn-1',
+    status,
+    ...(task ? { tasks: [{ taskId: 'task-1', status: 'running', ...task }] } : {}),
+    ...extra,
+  };
+}
+
 describe('selfHosted terminal-state mapping', () => {
   it.each([
     ['queued', false],
-    ['running', false],
+    ['starting', false],
+    ['idle', false],
+    ['busy', false],
+    ['suspended', false],
     [undefined, false],
-    ['completed', true],
+    ['stopped', true],
     ['failed', true],
     ['cancelled', true],
-  ])('isFleetRunTerminal(%s) === %s', (status, expected) => {
-    expect(isFleetRunTerminal(status as string | undefined)).toBe(expected);
+  ])('isFleetSandboxTerminal(%s) === %s', (status, expected) => {
+    expect(isFleetSandboxTerminal(status as string | undefined)).toBe(expected);
   });
 
-  // A run the fleet cancelled — deadline, wedge detection, or an operator —
-  // did not do the work, so it is never `completed`. But it is not `failed`
-  // either, and collapsing the two was costing real signal: five of the
-  // twenty-one failed fleet tasks on record were cancelled runs, so a quarter
-  // of the failure count described something that had not failed. Every one of
-  // those five was reaped by fleetd's wedge detector — a distinct problem the
-  // `failed` label hid. `cancelled` is in `TaskStatus`; use it.
+  // The OUTCOME is the initial task's, never the sandbox's own state: an
+  // ephemeral sandbox stops after its initial task whatever happened, so
+  // `stopped` covers success and failure alike.
+  //
+  // `cancelled` stays distinct from `failed`. Collapsing the two was costing
+  // real signal: five of the twenty-one failed fleet tasks on record were
+  // cancelled runs, so a quarter of the failure count described something that
+  // had not failed. Every one of those five was reaped by fleetd's wedge
+  // detector — a distinct problem the `failed` label hid.
   it.each([
-    ['completed', 'completed'],
-    ['failed', 'failed'],
-    ['cancelled', 'cancelled'],
-    [undefined, 'failed'],
-    // An unrecognised state is a failure, not a silent pass. Defaulting the
-    // other way would report a run we do not understand as having worked.
-    ['something-new', 'failed'],
-  ])('taskStatusForFleetRun(%s) === %s', (fleet, local) => {
-    expect(taskStatusForFleetRun(fleet)).toBe(local);
+    ['a stopped sandbox whose task completed', sandbox('stopped', { status: 'completed' }), 'completed'],
+    ['a stopped sandbox whose task failed', sandbox('stopped', { status: 'failed' }), 'failed'],
+    ['a stopped sandbox whose task was cancelled', sandbox('stopped', { status: 'cancelled' }), 'cancelled'],
+    ['a sandbox the fleet failed outright', sandbox('failed'), 'failed'],
+    ['a sandbox the fleet cancelled outright', sandbox('cancelled'), 'cancelled'],
+    // No history at all — a host mid-rollout, or a guest that died before the
+    // task started. Reporting work we cannot account for as done would be the
+    // worse lie.
+    ['a stopped sandbox with no task history', sandbox('stopped'), 'failed'],
+    // The task record outranks the sandbox state: a cancelled sandbox whose
+    // task had already completed did the work.
+    ['a cancelled sandbox whose task completed first', sandbox('cancelled', { status: 'completed' }), 'completed'],
+  ])('taskOutcomeForSandbox(%s) === %s', (_label, sb, local) => {
+    expect(taskOutcomeForSandbox(sb)).toBe(local);
+  });
+});
+
+/**
+ * The translation back into Talyn's own run-status vocabulary.
+ *
+ * `cloudTask.status` predates the merge and is read by the desktop and the
+ * admin console; both speak queued|running|completed|failed|cancelled. The
+ * sandbox states must fold into that set at the fleet boundary so neither
+ * frontend changes.
+ */
+describe('cloudStatusForSandbox', () => {
+  it.each([
+    ['queued', sandbox('queued'), 'queued'],
+    ['starting', sandbox('starting'), 'running'],
+    ['idle', sandbox('idle'), 'running'],
+    ['busy', sandbox('busy'), 'running'],
+    ['suspended', sandbox('suspended'), 'running'],
+    ['stopped after a completed task', sandbox('stopped', { status: 'completed' }), 'completed'],
+    ['stopped after a failed task', sandbox('stopped', { status: 'failed' }), 'failed'],
+    ['stopped after a cancelled task', sandbox('stopped', { status: 'cancelled' }), 'cancelled'],
+    ['stopped with no history', sandbox('stopped'), 'failed'],
+    ['failed', sandbox('failed'), 'failed'],
+    ['cancelled', sandbox('cancelled'), 'cancelled'],
+    // A state this build has never heard of is still in flight as far as
+    // anyone can prove; concluding would be a guess.
+    ['something new', sandbox('hibernating' as FleetSandbox['status']), 'running'],
+  ])('%s → %s', (_label, sb, expected) => {
+    expect(cloudStatusForSandbox(sb)).toBe(expected);
   });
 });
 
@@ -186,5 +246,16 @@ describe('selfHosted error taxonomy', () => {
     const err = new FleetThrottleError('slow down', 30_000);
     expect(err.status).toBe(429);
     expect(err.retryAfterMs).toBe(30_000);
+  });
+
+  // 504 dispatch_uncertain means the sandbox MAY exist. It must be neither
+  // capacity (fail-back to another provider could run the task twice) nor a
+  // not-found — the only safe move is the SAME id again.
+  it('keeps dispatch-uncertain distinct from capacity, so nothing fails back on it', () => {
+    const err = new FleetDispatchUncertainError('the control plane lost the answer');
+    expect(err.status).toBe(504);
+    expect(err.isDispatchUncertain).toBe(true);
+    expect(err).not.toBeInstanceOf(FleetCapacityError);
+    expect((err as { isCapacity?: boolean }).isCapacity).toBeUndefined();
   });
 });

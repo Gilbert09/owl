@@ -167,27 +167,32 @@ export function adminFleetRoutes(): Router {
     res.json({ success: true, data: index } as ApiResponse<typeof index>);
   });
 
-  /** Whether the host simply no longer has this run (retired, or never had it). */
+  /** Whether the host simply no longer has this sandbox (retired, or never
+   *  had it). Matches both the pre-merge "run" phrasings and the sandbox ones:
+   *  a host mid-rollout can answer with either. */
   const isRunNotFound = (err: unknown): boolean =>
     err instanceof FleetRunNotFoundError ||
-    (err instanceof Error && /no such run|run not found|unknown run/i.test(err.message));
+    (err instanceof Error &&
+      /no such run|run not found|unknown run|no such sandbox|sandbox not found|unknown sandbox/i.test(
+        err.message,
+      ));
 
   router.get('/hosts/:name/runs/:runId', async (req, res) => {
     try {
       const { client } = await fleetClientForHost(req.params.name);
-      const { run, terminal } = await client.getRun(req.params.runId);
+      const { sandbox, terminal } = await client.getSandbox(req.params.runId);
       // Mapped to the SAME row shape the list uses, so the detail page does
       // not reimplement idle time, wedge detection and the status pill
       // against a second set of field names.
       const data: AdminRunDetail = {
-        run: adminRunFromFleet(run, req.params.name),
+        run: adminRunFromFleet(sandbox, req.params.name),
         terminal,
       };
       res.json({ success: true, data } as ApiResponse<AdminRunDetail>);
     } catch (err) {
-      // The host retires a terminal run's record two hours after it ends, so
-      // "no such run" is the NORMAL answer for anything older than an
-      // afternoon — not an error worth showing. The task row outlives it.
+      // The host eventually drops a terminal sandbox's tombstone, so "no such
+      // sandbox" is the NORMAL answer for anything old enough — not an error
+      // worth showing. The task row outlives it.
       const retired = isRunNotFound(err) ? await retiredRun(req.params.runId, req.params.name) : null;
       if (retired) {
         const data: AdminRunDetail = { run: retired, terminal: true };
@@ -438,17 +443,17 @@ export function adminFleetRoutes(): Router {
         async () => {
           const { client } = await fleetClientForHost(req.params.name);
           try {
-            await client.cancelRun(req.params.runId);
+            await client.cancelSandbox(req.params.runId);
           } catch (err) {
-            // A run the host does not have cannot be cancelled, and reporting
-            // that as a failure leaves the operator pressing a button that can
-            // never succeed on a row they can plainly see. The intent — "make
-            // this go away" — is satisfiable: the run is already gone. So this
-            // resolves rather than 502s, and the audit row still records the
-            // attempt (settled by withRemoteAudit either way).
+            // A sandbox the host does not have cannot be cancelled, and
+            // reporting that as a failure leaves the operator pressing a
+            // button that can never succeed on a row they can plainly see. The
+            // intent — "make this go away" — is satisfiable: it is already
+            // gone. So this resolves rather than 502s, and the audit row still
+            // records the attempt (settled by withRemoteAudit either way).
             if (!(err instanceof FleetRunNotFoundError)) throw err;
             console.warn(
-              `[admin] cancel ${req.params.runId} on ${req.params.name}: run already gone — ` +
+              `[admin] cancel ${req.params.runId} on ${req.params.name}: sandbox already gone — ` +
                 'nothing to cancel on the host',
             );
           }

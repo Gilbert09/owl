@@ -198,14 +198,14 @@ describe('fanOutHosts', () => {
   it('skips offline hosts entirely', async () => {
     await seedHost();
     await seedHost({ name: 'gone', apiEndpoint: 'http://10.0.0.9:8080', reportedAt: STALE() });
-    fetchMock.mockResolvedValue(jsonResponse({ runs: [] }));
-    const results = await fanOutHosts((c) => c.listRuns());
+    fetchMock.mockResolvedValue(jsonResponse({ sandboxes: [] }));
+    const results = await fanOutHosts((c) => c.listSandboxes());
     expect(results.map((r) => r.host.name)).toEqual(['hetzner-64']);
   });
 
   it('skips hosts with no endpoint', async () => {
     await seedHost({ name: 'no-endpoint', apiEndpoint: null });
-    const results = await fanOutHosts((c) => c.listRuns());
+    const results = await fanOutHosts((c) => c.listSandboxes());
     expect(results).toHaveLength(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -213,7 +213,7 @@ describe('fanOutHosts', () => {
   it('reports a per-host failure without failing the whole fan-out', async () => {
     await seedHost();
     fetchMock.mockRejectedValue(new Error('boom'));
-    const results = await fanOutHosts((c) => c.listRuns());
+    const results = await fanOutHosts((c) => c.listSandboxes());
     expect(results).toHaveLength(1);
     expect(results[0]!.result.ok).toBe(false);
   });

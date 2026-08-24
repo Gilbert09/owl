@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { adminRunFromFleet } from '../services/admin/runIndex.js';
-import type { FleetRun } from '../services/selfHosted/client.js';
+import type { FleetSandbox } from '../services/selfHosted/client.js';
 
 /**
  * How the Runs page orders and labels rows.
@@ -19,10 +19,10 @@ import type { FleetRun } from '../services/selfHosted/client.js';
  *      were supposed to happen, which is how a warning stops being read.
  */
 
-function fleetRun(overrides: Partial<FleetRun> = {}): FleetRun {
+function fleetRun(overrides: Partial<FleetSandbox> = {}): FleetSandbox {
   return {
     id: 'talyn-1',
-    status: 'running',
+    status: 'busy',
     startedAt: '2026-08-04T10:00:00.000Z',
     createdAt: '2026-08-04T09:59:00.000Z',
     ...overrides,
@@ -154,5 +154,49 @@ describe('adminRunFromFleet memory', () => {
   it('keeps a genuine zero distinct from absent', () => {
     const row = adminRunFromFleet(fleetRun({ memUsedMib: 0 }), 'hetzner-64');
     expect(row.memUsedMib).toBe(0);
+  });
+});
+
+/**
+ * The console still speaks the pre-merge run vocabulary.
+ *
+ * `AdminRunStatus` is queued|running|completed|failed|cancelled, and the admin
+ * frontend renders exactly those pills — so every sandbox state must fold into
+ * that set at this boundary, and a stopped EPHEMERAL sandbox must report its
+ * initial task's outcome rather than a literal "stopped" nobody upstream
+ * understands.
+ */
+describe('adminRunFromFleet status translation', () => {
+  it.each([
+    ['queued', fleetRun({ status: 'queued' }), 'queued'],
+    ['starting', fleetRun({ status: 'starting' }), 'running'],
+    ['busy', fleetRun({ status: 'busy' }), 'running'],
+    ['idle', fleetRun({ status: 'idle' }), 'running'],
+    ['suspended', fleetRun({ status: 'suspended' }), 'running'],
+    [
+      'stopped after a completed task',
+      fleetRun({ status: 'stopped', tasks: [{ taskId: 't', status: 'completed' }] }),
+      'completed',
+    ],
+    [
+      'stopped after a failed task',
+      fleetRun({ status: 'stopped', tasks: [{ taskId: 't', status: 'failed' }] }),
+      'failed',
+    ],
+    ['failed', fleetRun({ status: 'failed' }), 'failed'],
+    ['cancelled', fleetRun({ status: 'cancelled' }), 'cancelled'],
+  ])('renders a %s sandbox as %s', (_label, sandbox, expected) => {
+    expect(adminRunFromFleet(sandbox, 'hetzner-64').status).toBe(expected);
+  });
+
+  it('surfaces the PR from the task history when the record has none', () => {
+    const row = adminRunFromFleet(
+      fleetRun({
+        status: 'stopped',
+        tasks: [{ taskId: 't', status: 'completed', prUrl: 'https://github.com/o/r/pull/1' }],
+      }),
+      'hetzner-64'
+    );
+    expect(row.prUrl).toBe('https://github.com/o/r/pull/1');
   });
 });

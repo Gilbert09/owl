@@ -13,7 +13,7 @@ import type { CloudTaskRow } from '../cloudProviders/types.js';
 import { githubService } from '../github.js';
 import { getSelfHostedClient, getSelfHostedCredentials } from './credentials.js';
 import { FleetRunNotFoundError } from './client.js';
-import type { FleetClient, FleetEvent, FleetRun } from './client.js';
+import type { FleetClient, FleetEvent, FleetSandbox, FleetSandboxTask } from './client.js';
 
 // Re-exported, not redeclared. This module and claudeCode/poller.ts each had a
 // byte-identical copy of the predicate and the two constants behind it; a
@@ -21,7 +21,7 @@ import type { FleetClient, FleetEvent, FleetRun } from './client.js';
 export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
 
 /**
- * How long a task may be `in_progress` with no fleet run before it is failed.
+ * How long a task may be `in_progress` with no fleet sandbox before it is failed.
  *
  * Five minutes: long enough that no dispatch in flight could still be inside it
  * (the executor's own request timeout is twenty seconds), short enough that a
@@ -29,32 +29,80 @@ export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
  */
 export const DISPATCH_GRACE_MS = 5 * 60_000;
 
-/** A fleet run is terminal exactly when the fleet says so — it owns the
- *  lifecycle and reports one of three end states. */
-export function isFleetRunTerminal(status: string | undefined): boolean {
-  return status === 'completed' || status === 'failed' || status === 'cancelled';
+/** A sandbox is terminal exactly when the fleet says so — it owns the
+ *  lifecycle. Terminal = stopped | failed | cancelled (fleet docs/MERGE.md). */
+export function isFleetSandboxTerminal(status: string | undefined): boolean {
+  return status === 'stopped' || status === 'failed' || status === 'cancelled';
+}
+
+/** The initial task on a sandbox — the one Talyn's dispatch created. The
+ *  ephemeral policy stops the sandbox after it, so it is the only entry. */
+export function initialTaskOf(sandbox: FleetSandbox): FleetSandboxTask | undefined {
+  return sandbox.tasks?.[0];
 }
 
 /**
- * Map a fleet outcome onto a local task status.
+ * Map a terminal sandbox onto a local task outcome.
  *
- * `cancelled` used to collapse into `failed` on the grounds that "the local
- * model has no cancelled state for a cloud run". It does — `TaskStatus`
- * carries `cancelled`, and Session 52 established that an aborted cloud run
- * lands there rather than in `failed`. The self-hosted provider simply never
- * got that mapping.
+ * The sandbox's own terminal state is not the answer: an EPHEMERAL sandbox
+ * stops after its initial task whatever happened, so `stopped` covers success
+ * and failure alike. The task history entry is what carries the outcome; the
+ * sandbox status is only the fallback for a record with no history (a host
+ * mid-rollout, or a guest that died before the task started).
  *
- * It is not cosmetic. Five of the twenty-one failed fleet tasks on record were
- * cancelled runs, so a quarter of the failure count described something that
- * had not failed — and every one of those five was reaped by fleetd's wedge
- * detector, which is a distinct problem that the `failed` label hid rather than
- * surfaced. Keeping the two apart is what makes the failure count mean
- * something.
+ * `cancelled` stays distinct from `failed` on purpose. Five of the twenty-one
+ * failed fleet tasks on record were cancelled runs, so a quarter of the
+ * failure count described something that had not failed — and every one of
+ * those five was reaped by fleetd's wedge detector, a distinct problem the
+ * `failed` label hid. Keeping the two apart is what makes the failure count
+ * mean something.
  */
-export function taskStatusForFleetRun(status: string | undefined): TaskStatus {
-  if (status === 'completed') return 'completed';
-  if (status === 'cancelled') return 'cancelled';
+export function taskOutcomeForSandbox(sandbox: FleetSandbox): TaskStatus {
+  const task = initialTaskOf(sandbox);
+  if (task?.status === 'completed') return 'completed';
+  if (task?.status === 'cancelled') return 'cancelled';
+  if (task?.status === 'failed') return 'failed';
+  // No task history. The sandbox states that name an outcome keep it; a bare
+  // `stopped` — or anything unrecognised — reads as failed, because reporting
+  // work we cannot account for as done would be the worse lie.
+  if (sandbox.status === 'cancelled') return 'cancelled';
   return 'failed';
+}
+
+/**
+ * Map a sandbox onto the run-status vocabulary Talyn's own records use.
+ *
+ * `cloudTask.status` predates the merge and is read by the desktop, the admin
+ * console's run index and the vanished-run bookkeeping, all of which speak
+ * queued|running|completed|failed|cancelled. Translating at the fleet boundary
+ * keeps every one of those surfaces — and the frontends on top of them —
+ * unchanged.
+ */
+export function cloudStatusForSandbox(
+  sandbox: FleetSandbox,
+): 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' {
+  switch (sandbox.status) {
+    case 'queued':
+      return 'queued';
+    case 'starting':
+    case 'idle':
+    case 'busy':
+    case 'suspended':
+      return 'running';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    case 'stopped': {
+      // Ephemeral teardown: the outcome lives on the initial task.
+      const outcome = taskOutcomeForSandbox(sandbox);
+      return outcome === 'completed' || outcome === 'cancelled' ? outcome : 'failed';
+    }
+    default:
+      // A state this build has never heard of is still in flight as far as
+      // anyone can prove; the poller keeps watching rather than concluding.
+      return 'running';
+  }
 }
 
 /**
@@ -77,7 +125,10 @@ export function taskStatusForFleetRun(status: string | undefined): TaskStatus {
  * type-checks a jsonb column.
  *
  * Falls back to the event itself when there is no `raw`, so an older fleet that
- * does not wrap still ingests rather than producing empty entries.
+ * does not wrap still ingests rather than producing empty entries. The host's
+ * synthetic `task_started` / `task_complete` markers take the same path: they
+ * carry no `raw`, pass through whole, and the renderer skips types it does not
+ * know — tolerated, never fatal.
  */
 export function toAgentEvent(ev: FleetEvent): AgentEvent {
   const wrapper = ev.event as { raw?: unknown } | undefined;
@@ -130,16 +181,18 @@ class SelfHostedPoller {
 
     // Any error here (including the capacity/throttle types) propagates to the
     // generic poller, which logs it and retries next tick. A failed poll must
-    // never fail the task — the run is still going on the metal.
+    // never fail the task — the work is still going on the metal.
     //
-    // The exception is a reachable host telling us the run does not exist. That
-    // is terminal: the VM is gone (fleetd restarted without adopting it, or it
-    // was reclaimed) and no future tick can change the answer. Retrying it is an
-    // infinite loop — two tasks sat in it for 21 hours on 2026-08-06, filling the
-    // log with one identical failure per tick while the host sat idle.
-    let run: FleetRun;
+    // The exception is a reachable host telling us the sandbox does not exist.
+    // That is terminal: the VM is gone (fleetd restarted without adopting it,
+    // or it was reclaimed) and no future tick can change the answer. Retrying
+    // it is an infinite loop — two tasks sat in it for 21 hours on 2026-08-06,
+    // filling the log with one identical failure per tick while the host sat
+    // idle. A retired sandbox is NOT this case: the tombstone still answers
+    // `{sandbox, terminal, retired: true}` and carries the task outcome.
+    let sandbox: FleetSandbox;
     try {
-      ({ run } = await client.getRun(runId));
+      ({ sandbox } = await client.getSandbox(runId));
     } catch (err) {
       if (err instanceof FleetRunNotFoundError) {
         await this.failVanishedRun(row, runId, err.message);
@@ -147,18 +200,18 @@ class SelfHostedPoller {
       }
       throw err;
     }
-    const terminal = isFleetRunTerminal(run.status);
+    const terminal = isFleetSandboxTerminal(sandbox.status);
 
-    // An ADOPTED run survived a fleetd restart, but its credentials did not:
-    // the fleet holds them only in memory, deliberately, so the surviving VM
-    // cannot authenticate anything until somebody hands them back. We are the
-    // only party that still has them.
+    // An ADOPTED sandbox survived a fleetd restart, but its credentials did
+    // not: the fleet holds them only in memory, deliberately, so the surviving
+    // VM cannot authenticate anything until somebody hands them back. We are
+    // the only party that still has them.
     //
-    // Done before the transcript sync so the run is working again as early in
+    // Done before the transcript sync so the guest is working again as early in
     // this tick as possible — every second it spends un-credentialed is a
     // second of its deadline spent on requests that will 502.
-    if (run.adopted && !terminal) {
-      await this.recredential(row, client, runId, run.adoptedAt);
+    if (sandbox.adopted && !terminal) {
+      await this.recredential(row, client, runId, sandbox.adoptedAt);
     }
 
     // Cursor-based, unlike the other providers: the fleet assigns `seq`
@@ -174,21 +227,26 @@ class SelfHostedPoller {
     if (row.watched && !terminal) this.ensureFollow(row, client, runId);
     if (terminal) this.stopFollow(row.id);
 
-    const prUrl = run.prUrl ?? cloud.prUrl ?? null;
+    // The PR can be reported on the task history entry or on the sandbox
+    // record itself, depending on which side of the merge the host is.
+    const prUrl = sandbox.prUrl ?? initialTaskOf(sandbox)?.prUrl ?? cloud.prUrl ?? null;
+    // Everything Talyn stores and emits keeps the pre-merge run-status
+    // vocabulary — see cloudStatusForSandbox.
+    const cloudStatus = cloudStatusForSandbox(sandbox);
     await patchTaskMetadata(row.id, (existing) => {
       const prev = (existing.cloudTask as CloudTaskMetadata | undefined) ?? cloud;
       return {
         ...existing,
         cloudTask: {
           ...prev,
-          status: run.status ?? prev.status,
+          status: cloudStatus,
           prUrl: prUrl ?? prev.prUrl,
-          extra: { ...(prev.extra ?? {}), phase: run.phase, costUsd: run.costUsd },
+          extra: { ...(prev.extra ?? {}), phase: sandbox.phase, costUsd: sandbox.costUsd },
         },
       };
     });
     emitTaskUpdate(row.workspaceId, row.id, {
-      metadata: { cloudTask: { status: run.status, prUrl: prUrl ?? undefined } },
+      metadata: { cloudTask: { status: cloudStatus, prUrl: prUrl ?? undefined } },
     });
 
     if (!terminal) return;
@@ -196,7 +254,7 @@ class SelfHostedPoller {
     if (prUrl && row.repositoryId) {
       await this.linkPr(row.workspaceId, row.repositoryId, row.id, prUrl);
     }
-    await this.finalize(row.id, row.workspaceId, run, prUrl);
+    await this.finalize(row.id, row.workspaceId, sandbox, prUrl);
   }
 
   private async syncTranscript(
@@ -258,14 +316,14 @@ class SelfHostedPoller {
         return;
       }
       const repo = (readCloudTaskMeta({ metadata: row.metadata })?.extra as { repo?: string })?.repo;
-      await client.setRunCredentials(runId, {
+      await client.setSandboxCredentials(runId, {
         githubToken,
         anthropicKey: creds.claudeToken,
         ...(repo ? { repo } : {}),
       });
       // Marked only on success, so a failed attempt is retried next tick.
       this.recredentialed.set(row.id, key);
-      console.log(`[selfhosted] re-supplied credentials to adopted run ${runId}`);
+      console.log(`[selfhosted] re-supplied credentials to adopted sandbox ${runId}`);
     } catch (err) {
       console.warn(
         `[selfhosted] could not re-supply credentials to ${runId}:`,
@@ -468,12 +526,12 @@ class SelfHostedPoller {
   }
 
   /**
-   * Fail a task whose run no longer exists on the host.
+   * Fail a task whose sandbox no longer exists on the host.
    *
-   * Deliberately not routed through `finalize`, which needs a FleetRun to derive
-   * status and summary from — there is no run to describe. The summary names the
-   * cause, because "Fleet run ended failed" would send someone looking for a
-   * failure on the metal that never happened.
+   * Deliberately not routed through `finalize`, which needs a FleetSandbox to
+   * derive status and summary from — there is no record to describe. The
+   * summary names the cause, because "Fleet run ended failed" would send
+   * someone looking for a failure on the metal that never happened.
    */
   private async failVanishedRun(
     row: CloudTaskRow,
@@ -485,8 +543,8 @@ class SelfHostedPoller {
     this.cursor.delete(row.id);
 
     const summary =
-      'The fleet host no longer has this run — it was lost when the host restarted ' +
-      'or the sandbox was reclaimed. Retry the task to start a fresh run.';
+      'The fleet host no longer has this sandbox — it was lost when the host restarted ' +
+      'or the microVM was reclaimed. Retry the task to start a fresh one.';
     const result: TaskResult = { success: false, summary, error: `run ${runId} not found: ${detail}` };
 
     const now = new Date();
@@ -521,13 +579,16 @@ class SelfHostedPoller {
   private async finalize(
     taskId: string,
     workspaceId: string,
-    run: FleetRun,
+    sandbox: FleetSandbox,
     prUrl: string | null,
   ): Promise<void> {
     this.stopStreaming(taskId);
     clearWatched(taskId);
 
-    const status = taskStatusForFleetRun(run.status);
+    // The OUTCOME is the initial task's, not the sandbox's own state — an
+    // ephemeral sandbox reports `stopped` after success and failure alike.
+    const status = taskOutcomeForSandbox(sandbox);
+    const failureDetail = initialTaskOf(sandbox)?.error || sandbox.error;
     const result: TaskResult =
       status === 'completed'
         ? {
@@ -536,8 +597,8 @@ class SelfHostedPoller {
           }
         : {
             success: false,
-            summary: run.error || `Fleet run ended ${run.status}`,
-            error: run.error || `Run ended with status "${run.status}"`,
+            summary: failureDetail || `Fleet run ended ${status}`,
+            error: failureDetail || `Sandbox ended with status "${sandbox.status}"`,
           };
 
     const now = new Date();
@@ -551,7 +612,7 @@ class SelfHostedPoller {
       })
       .where(eq(tasksTable.id, taskId));
     emitTaskStatus(workspaceId, taskId, status, result);
-    void this.captureOutcome(taskId, workspaceId, status, result, run, now);
+    void this.captureOutcome(taskId, workspaceId, status, result, sandbox, now);
   }
 
   private async captureOutcome(
@@ -559,7 +620,7 @@ class SelfHostedPoller {
     workspaceId: string,
     status: TaskStatus,
     result: TaskResult,
-    run: FleetRun,
+    sandbox: FleetSandbox,
     finishedAt: Date,
   ): Promise<void> {
     try {
@@ -585,10 +646,10 @@ class SelfHostedPoller {
           provider: 'selfhosted',
           opened_pr: Boolean(meta.pullRequest || cloud?.prUrl),
           duration_total_ms: finishedAt.getTime() - new Date(row.createdAt).getTime(),
-          // The fleet reports what the run actually cost. Note it is the SDK's
-          // own client-side estimate, so it is for trend and attribution, not
-          // for billing.
-          ...(run.costUsd ? { cost_usd: run.costUsd } : {}),
+          // The fleet reports what the sandbox actually cost. Note it is the
+          // agent's own client-side estimate, so it is for trend and
+          // attribution, not for billing.
+          ...(sandbox.costUsd ? { cost_usd: sandbox.costUsd } : {}),
           ...(result.error ? { error_reason: result.error } : {}),
         },
       );

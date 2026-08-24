@@ -9,12 +9,49 @@
 import { createSseJsonParser } from '@talyn/shared';
 import { debugBus } from '../debugBus.js';
 
-/** A run as the fleet reports it. Field names match internal/fleet/store.go. */
-export interface FleetRun {
+/**
+ * A sandbox's lifecycle states. Terminal = stopped | failed | cancelled.
+ *
+ * The fleet merged runs and sandboxes into one kind (fleet docs/MERGE.md): a
+ * sandbox is the microVM, and each prompt on it is a TASK with its own
+ * terminal outcome. Talyn dispatches `ephemeral: true` sandboxes, which the
+ * host stops as soon as the initial task ends — the old run behaviour.
+ */
+export type FleetSandboxStatus =
+  | 'queued'
+  | 'starting'
+  | 'idle'
+  | 'busy'
+  | 'suspended'
+  | 'stopped'
+  | 'failed'
+  | 'cancelled';
+
+/** One entry in a sandbox's task history. Talyn's outcome for a dispatched
+ *  task is the INITIAL entry's terminal status — an ephemeral sandbox stops
+ *  right after it, so `stopped` alone says nothing about how the work went. */
+export interface FleetSandboxTask {
+  taskId: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt?: string;
+  endedAt?: string;
+  error?: string;
+  prUrl?: string;
+}
+
+/** A sandbox as the fleet reports it. Field names match internal/fleet/store.go. */
+export interface FleetSandbox {
   id: string;
   workspaceId?: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: FleetSandboxStatus;
+  /** Keeps its run meaning while a task is live; `agent` when idle. */
   phase?: string;
+  /** The prompt history — see FleetSandboxTask. Talyn's dispatch creates the
+   *  initial entry; a host older than the merge may omit the field. */
+  tasks?: FleetSandboxTask[];
+  /** True on Talyn's dispatches: the host stops and retires the sandbox as
+   *  soon as its initial task reaches a terminal state. */
+  ephemeral?: boolean;
   createdAt?: string;
   startedAt?: string;
   endedAt?: string;
@@ -62,9 +99,9 @@ export interface FleetRun {
    */
   lastActivity?: string;
   /**
-   * The run's task, redacted by the fleet to the four fields it is willing to
-   * fan out (`fvspTaskRedacted`) — never the prompt, which embeds customer
-   * code.
+   * The sandbox's initial task, redacted by the fleet to the four fields it is
+   * willing to fan out (`fvspTaskRedacted`) — never the prompt, which embeds
+   * customer code.
    */
   task?: {
     taskType?: string;
@@ -166,9 +203,9 @@ export interface FleetEvent {
   event: Record<string, unknown>;
 }
 
-export interface CreateRunInput {
-  runId: string;
-  workspaceId: string;
+/** The initial task on a dispatched sandbox — the old dispatch body, nested
+ *  under `task`. No `harness` field: pi is the only in-guest agent loop. */
+export interface CreateSandboxTaskInput {
   taskType: string;
   prompt: string;
   systemPrompt?: string;
@@ -177,15 +214,6 @@ export interface CreateRunInput {
   maxTurns?: number;
   maxBudgetUsd?: number;
   timeoutSec?: number;
-  githubToken?: string;
-  /**
-   * The credential for THIS run's provider, and only that one. The fleet holds
-   * no key of its own and refuses a dispatch that arrives without the one its
-   * provider needs, so an omitted key is a 400 rather than a run that boots and
-   * then fails on its first call.
-   */
-  anthropicKey?: string;
-  openaiKey?: string;
   /**
    * Which LLM API the model belongs to. Omitted means anthropic, which is what
    * every dispatch predating the field meant — but it is sent explicitly so the
@@ -193,12 +221,26 @@ export interface CreateRunInput {
    * it inherited.
    */
   provider?: string;
+}
+
+export interface CreateSandboxInput {
+  /** Caller-chosen and idempotent: the fleet returns the existing sandbox for
+   *  a repeated id rather than booting a second microVM. */
+  id: string;
+  workspaceId: string;
+  /** Talyn always dispatches ephemeral sandboxes — stop after the initial
+   *  task, exactly what a run was. */
+  ephemeral: boolean;
+  task: CreateSandboxTaskInput;
+  githubToken?: string;
   /**
-   * Which in-guest agent loop runs the task: `sdk` (the Claude Agent SDK, and
-   * what an absent value means) or `pi`. Gated per workspace by the backend —
-   * see fleetHarnessFor.
+   * The credential for THIS sandbox's provider, and only that one. The fleet
+   * holds no key of its own and refuses a dispatch that arrives without the
+   * one its provider needs, so an omitted key is a 400 rather than a guest
+   * that boots and then fails on its first call.
    */
-  harness?: string;
+  anthropicKey?: string;
+  openaiKey?: string;
 }
 
 /**
@@ -228,19 +270,24 @@ export class FleetCapacityError extends Error {
 }
 
 /**
- * The host is reachable and says the run does not exist.
+ * The host is reachable and says the sandbox does not exist.
  *
  * Unlike every other fleet error, this one is TERMINAL: capacity, throttle and
- * unreachable all mean "ask again later, the run is still going on the metal",
- * but a healthy host is authoritative about its own runs. A run disappears when
- * fleetd restarts without adopting it, or the microVM is reclaimed — and the task
- * can never progress again, so retrying is a loop with no exit. Two of them ran
- * for 21 hours on 2026-08-06, reconciling every tick and failing identically.
+ * unreachable all mean "ask again later, the work is still going on the metal",
+ * but a healthy host is authoritative about its own sandboxes. One disappears
+ * when fleetd restarts without adopting it, or the microVM is reclaimed — and
+ * the task can never progress again, so retrying is a loop with no exit. Two of
+ * them ran for 21 hours on 2026-08-06, reconciling every tick and failing
+ * identically.
  *
  * Matched on the status AND the message on purpose: fleetd's source is not in
- * this repo, so which status it pairs with "no such run" is unverified here, and
- * the message is the only part actually observed in production. Either signal is
- * enough; neither alone is trustworthy.
+ * this repo, so which status it pairs with the message is unverified here, and
+ * the message is the only part actually observed in production. Either signal
+ * is enough; neither alone is trustworthy.
+ *
+ * The name keeps "run" because the id this matches on is still the run id of
+ * the credential wire (`talyn-<taskId>`), and every caller branches on the
+ * class rather than the noun.
  */
 export class FleetRunNotFoundError extends Error {
   readonly isRunNotFound = true;
@@ -250,11 +297,32 @@ export class FleetRunNotFoundError extends Error {
   }
 }
 
-/** Whether a fleet error response means "no such run". Exported for the poller,
- *  which must distinguish terminal from retryable without string-matching at the
- *  call site. */
+/** Whether a fleet error response means "no such sandbox". Exported for the
+ *  poller, which must distinguish terminal from retryable without
+ *  string-matching at the call site. Accepts both the pre-merge "run" phrasings
+ *  and the sandbox ones: a host mid-rollout can answer with either. */
 export function isRunNotFoundResponse(status: number, message: string): boolean {
-  return status === 404 || /no such run|run not found|unknown run/i.test(message);
+  return (
+    status === 404 ||
+    /no such run|run not found|unknown run|no such sandbox|sandbox not found|unknown sandbox/i.test(
+      message,
+    )
+  );
+}
+
+/**
+ * The control plane lost the host's answer to a dispatch (504
+ * `dispatch_uncertain`). The sandbox MAY exist: the caller must retry with the
+ * SAME id — the create is idempotent on it — and never fail back to another
+ * provider, which could run the task twice.
+ */
+export class FleetDispatchUncertainError extends Error {
+  readonly isDispatchUncertain = true;
+  readonly status = 504;
+  constructor(message: string) {
+    super(message);
+    this.name = 'FleetDispatchUncertainError';
+  }
 }
 
 /** A rate-limit response. Shaped for the generic poller's ThrottleBackoff,
@@ -451,6 +519,13 @@ export class FleetClient {
     if (resp.status === 429) {
       throw new FleetThrottleError(await errorMessage(resp, 'rate limited'), parseRetryAfterMs(resp));
     }
+    if (resp.status === 504) {
+      // The control plane started the create and never heard how it ended.
+      // Retry the SAME id (idempotent), never another provider.
+      throw new FleetDispatchUncertainError(
+        await errorMessage(resp, 'the fleet lost the answer to this request'),
+      );
+    }
     if (!resp.ok) {
       const message = await errorMessage(resp, `fleet returned ${resp.status}`);
       // Terminal, not retryable — see FleetRunNotFoundError.
@@ -544,8 +619,8 @@ export class FleetClient {
     return text.length > maxBytes ? text.slice(0, maxBytes) : text;
   }
 
-  async listRuns(): Promise<{ runs: FleetRun[] }> {
-    return this.request('/v1/runs');
+  async listSandboxes(): Promise<{ sandboxes: FleetSandbox[] }> {
+    return this.request('/v1/sandboxes');
   }
 
   async listGoldens(): Promise<FleetGoldensView> {
@@ -592,25 +667,32 @@ export class FleetClient {
     return this.request('/v1/goldens/rebake', { method: 'POST', body: JSON.stringify(input) });
   }
 
-  async createRun(input: CreateRunInput): Promise<FleetRun> {
-    return this.request('/v1/runs', { method: 'POST', body: JSON.stringify(input) });
+  /** Dispatch: 202 with the sandbox record, idempotent on `input.id`. */
+  async createSandbox(input: CreateSandboxInput): Promise<FleetSandbox> {
+    return this.request('/v1/sandboxes', { method: 'POST', body: JSON.stringify(input) });
   }
 
-  async getRun(runId: string): Promise<{ run: FleetRun; terminal: boolean }> {
-    return this.request(`/v1/runs/${encodeURIComponent(runId)}`);
+  /**
+   * One sandbox. A terminal one keeps answering from a tombstone with
+   * `retired: true` rather than 404ing straight away.
+   */
+  async getSandbox(
+    id: string,
+  ): Promise<{ sandbox: FleetSandbox; terminal: boolean; retired?: boolean }> {
+    return this.request(`/v1/sandboxes/${encodeURIComponent(id)}`);
   }
 
   async getEvents(
-    runId: string,
+    id: string,
     after: number,
     limit?: number,
   ): Promise<{ events: FleetEvent[]; cursor: number; terminal: boolean }> {
     const suffix = limit ? `&limit=${limit}` : '';
-    return this.request(`/v1/runs/${encodeURIComponent(runId)}/events?after=${after}${suffix}`);
+    return this.request(`/v1/sandboxes/${encodeURIComponent(id)}/events?after=${after}${suffix}`);
   }
 
   /**
-   * Follow a run's transcript as server-sent events.
+   * Follow a sandbox's transcript as server-sent events.
    *
    * The cursor poll above is correct but its latency is the caller's poll
    * interval — 10s here, which is what an agent's output arriving in
@@ -619,17 +701,17 @@ export class FleetClient {
    * {events, cursor, terminal} object `getEvents` returns, so this and the
    * poll share one shape and a dropped stream resumes from the same cursor.
    *
-   * Yields frames until the run is terminal, the caller aborts, or the stream
-   * breaks. A broken stream is NOT an error worth surfacing: the poll is still
-   * running underneath and will finish the job a little less promptly.
+   * Yields frames until the sandbox is terminal, the caller aborts, or the
+   * stream breaks. A broken stream is NOT an error worth surfacing: the poll is
+   * still running underneath and will finish the job a little less promptly.
    */
   async *followEvents(
-    runId: string,
+    id: string,
     after: number,
     signal: AbortSignal,
   ): AsyncGenerator<{ events: FleetEvent[]; cursor: number; terminal: boolean }> {
     const resp = await fetch(
-      this.url(`/v1/runs/${encodeURIComponent(runId)}/events?follow=1&after=${after}`),
+      this.url(`/v1/sandboxes/${encodeURIComponent(id)}/events?follow=1&after=${after}`),
       {
         headers: { Authorization: `Bearer ${this.token}`, Accept: 'text/event-stream' },
         signal,
@@ -638,7 +720,7 @@ export class FleetClient {
       },
     );
     if (!resp.ok || !resp.body) {
-      throw new Error(`follow ${runId}: ${resp.status} ${resp.statusText}`);
+      throw new Error(`follow ${id}: ${resp.status} ${resp.statusText}`);
     }
 
     const reader = resp.body.getReader();
@@ -665,27 +747,29 @@ export class FleetClient {
     }
   }
 
-  async cancelRun(runId: string): Promise<void> {
-    await this.request(`/v1/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' });
+  /** Cancel the running task. On Talyn's ephemeral sandboxes the host then
+   *  stops the sandbox too. */
+  async cancelSandbox(id: string): Promise<void> {
+    await this.request(`/v1/sandboxes/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
   }
 
   /**
-   * Hand a run's credentials back after the fleet restarted under it.
+   * Hand a sandbox's credentials back after the fleet restarted under it.
    *
    * The fleet never writes credentials to disk, so a `fleetd` restart loses
    * them and the surviving microVM cannot authenticate anything — its next call
-   * returns `502 no Anthropic credential was supplied for this run`, and it then
-   * burns the rest of its deadline before being reported as "deadline exceeded".
+   * returns `502 no Anthropic credential was supplied`, and it then burns the
+   * rest of its deadline before being reported as "deadline exceeded".
    *
    * We are the only party that still has them. Re-supplying is what makes a
    * fleet deploy survivable for a task that is already running, which is what
    * lets deploys happen at all rather than waiting for an idle host.
    */
-  async setRunCredentials(
-    runId: string,
+  async setSandboxCredentials(
+    id: string,
     creds: { githubToken: string; anthropicKey?: string; repo?: string },
   ): Promise<void> {
-    await this.request(`/v1/runs/${encodeURIComponent(runId)}/credentials`, {
+    await this.request(`/v1/sandboxes/${encodeURIComponent(id)}/credentials`, {
       method: 'POST',
       body: JSON.stringify(creds),
     });
