@@ -95,7 +95,7 @@ describe('the gateway must not be reached through the tailnet proxy', () => {
   };
   beforeEach(() => {
     process.env.FLEET_HTTP_PROXY = 'http://localhost:1055';
-    process.env.FLEET_PINNED_ENDPOINT = 'https://yasctl-production.up.railway.app';
+    process.env.FLEET_PINNED_ENDPOINT = 'https://api.yetanothersandbox.dev';
   });
   afterEach(async () => {
     if (saved.proxy === undefined) delete process.env.FLEET_HTTP_PROXY;
@@ -112,7 +112,7 @@ describe('the gateway must not be reached through the tailnet proxy', () => {
   // internet, and sending its requests into a tailscale SOCKS proxy cannot work.
   it('sends the pinned gateway direct, not through the proxy', async () => {
     const mod = await import('../services/selfHosted/client.js');
-    expect(mod.fleetDispatcher('https://yasctl-production.up.railway.app')).toBeUndefined();
+    expect(mod.fleetDispatcher('https://api.yetanothersandbox.dev')).toBeUndefined();
   });
 
   // And the proxy must still be used for a HOST, which is the only reason it
@@ -125,14 +125,14 @@ describe('the gateway must not be reached through the tailnet proxy', () => {
   // A path-only difference is the same host and must still bypass.
   it('matches on host, not on the whole URL', async () => {
     const mod = await import('../services/selfHosted/client.js');
-    expect(mod.targetBypassesProxy('https://yasctl-production.up.railway.app/v1/runs')).toBe(true);
+    expect(mod.targetBypassesProxy('https://api.yetanothersandbox.dev/v1/sandboxes')).toBe(true);
   });
 
   // With no pin configured nothing bypasses: the deployment has no gateway.
   it('bypasses nothing when no gateway is pinned', async () => {
     delete process.env.FLEET_PINNED_ENDPOINT;
     const mod = await import('../services/selfHosted/client.js');
-    expect(mod.targetBypassesProxy('https://yasctl-production.up.railway.app')).toBe(false);
+    expect(mod.targetBypassesProxy('https://api.yetanothersandbox.dev')).toBe(false);
   });
 
   it('treats an unparseable target as needing the proxy', async () => {
