@@ -5,6 +5,7 @@ import { encryptString } from '../services/tokenCrypto.js';
 import { prAutoMergeWatcher } from '../services/prAutoMergeWatcher.js';
 import { prMonitorService } from '../services/prMonitor.js';
 import { graphqlBudget } from '../services/graphqlBudget.js';
+import { githubRateGate } from '../services/githubRateGate.js';
 import { githubService } from '../services/github.js';
 import { _resetMergeGateCache } from '../services/repoMergeGate.js';
 import { _resetExternalQueueState } from '../services/externalQueueState.js';
@@ -410,33 +411,53 @@ describe('prAutoMergeWatcher', () => {
     });
   });
 
-  // The top-of-tick freshness refetch is an opportunistic GraphQL poll — it must
-  // back off when the account's points budget is in the reserve (like the
-  // reconcile sweep) and proceed on the existing row, rather than burning the
-  // last points and hard-tripping the rate limit.
-  describe('freshness refetch — GraphQL budget deferral', () => {
+  // The top-of-tick freshness refetch is an opportunistic GraphQL poll. It must
+  // back off when the account's points budget is in the reserve or its GraphQL
+  // is already gated (proceeding on the existing row instead), and it must ask
+  // for every stale PR in a repo in ONE call — a per-PR loop against one shared
+  // installation budget is what earns the account-wide secondary rate limit.
+  describe('freshness refetch — batching + backoff', () => {
     let refreshSpy: ReturnType<typeof vi.spyOn>;
     beforeEach(() => {
-      refreshSpy = vi.spyOn(prMonitorService, 'refreshPr').mockResolvedValue(undefined);
+      refreshSpy = vi.spyOn(prMonitorService, 'refreshPrNumbers').mockResolvedValue(undefined);
+      vi.spyOn(githubRateGate, 'isBlocked').mockReturnValue(false);
     });
-    async function staleBlockedPr() {
+    async function staleBlockedPr(): Promise<number> {
       const prId = await insertPr(db, { autoMergeState: { attempts: 0, accounted: true } });
-      await db
+      const [updated] = await db
         .update(pullRequestsTable)
         .set({ lastPolledAt: new Date(Date.now() - 10 * 60_000) }) // well past FRESHNESS_MS
-        .where(eq(pullRequestsTable.id, prId));
-      return prId;
+        .where(eq(pullRequestsTable.id, prId))
+        .returning({ number: pullRequestsTable.number });
+      return updated.number;
     }
 
     it('refetches a stale PR when the budget is healthy', async () => {
       vi.spyOn(graphqlBudget, 'shouldDefer').mockReturnValue(false);
-      await staleBlockedPr();
+      const number = await staleBlockedPr();
       await prAutoMergeWatcher.runOnce();
-      expect(refreshSpy).toHaveBeenCalledWith('ws1', 'a', 'b', expect.any(Number));
+      expect(refreshSpy).toHaveBeenCalledWith('ws1', 'a', 'b', [number]);
+    });
+
+    it('asks for every stale PR in a repo in one call', async () => {
+      vi.spyOn(graphqlBudget, 'shouldDefer').mockReturnValue(false);
+      const numbers = [await staleBlockedPr(), await staleBlockedPr(), await staleBlockedPr()];
+      await prAutoMergeWatcher.runOnce();
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      const asked = (refreshSpy.mock.calls[0] as unknown as [string, string, string, number[]])[3];
+      expect([...asked].sort((a, b) => a - b)).toEqual(numbers.sort((a, b) => a - b));
     });
 
     it('skips the stale refetch when the budget is in the reserve', async () => {
       vi.spyOn(graphqlBudget, 'shouldDefer').mockReturnValue(true);
+      await staleBlockedPr();
+      await prAutoMergeWatcher.runOnce();
+      expect(refreshSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips the stale refetch while the account GraphQL is rate-gated', async () => {
+      vi.spyOn(graphqlBudget, 'shouldDefer').mockReturnValue(false);
+      vi.spyOn(githubRateGate, 'isBlocked').mockReturnValue(true);
       await staleBlockedPr();
       await prAutoMergeWatcher.runOnce();
       expect(refreshSpy).not.toHaveBeenCalled();

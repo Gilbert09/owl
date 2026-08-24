@@ -4,6 +4,7 @@ import {
   isRefreshEvent,
   isSlowEvent,
   extractPrNumbers,
+  terminalOutcomeFromPayload,
   processWebhookDelivery,
   _resetCoalesce,
   type WebhookDelivery,
@@ -112,6 +113,42 @@ describe('webhook classification helpers', () => {
   });
 });
 
+describe('terminalOutcomeFromPayload', () => {
+  const pr = (p: Record<string, unknown>) => ({ pull_request: p });
+
+  it('only answers for a `closed` action', () => {
+    expect(terminalOutcomeFromPayload('synchronize', pr({ merged: true }))).toBeNull();
+    expect(terminalOutcomeFromPayload('opened', pr({}))).toBeNull();
+    expect(terminalOutcomeFromPayload(undefined, pr({}))).toBeNull();
+    expect(terminalOutcomeFromPayload('closed', {})).toBeNull();
+  });
+
+  it('reads a merge and its instant', () => {
+    expect(
+      terminalOutcomeFromPayload('closed', pr({ merged: true, merged_at: '2026-08-24T11:36:14Z' })),
+    ).toEqual({ merged: true, mergedAt: new Date('2026-08-24T11:36:14Z') });
+  });
+
+  it('trusts merged_at even when `merged` is absent', () => {
+    const out = terminalOutcomeFromPayload('closed', pr({ merged_at: '2026-08-24T11:36:14Z' }));
+    expect(out?.merged).toBe(true);
+  });
+
+  it('keeps a merge with an unusable timestamp a merge, stamped now', () => {
+    // Downgrading it to `closed` would put the PR in the wrong tab forever.
+    const out = terminalOutcomeFromPayload('closed', pr({ merged: true, merged_at: 'not-a-date' }));
+    expect(out?.merged).toBe(true);
+    expect(out?.mergedAt).toBeInstanceOf(Date);
+  });
+
+  it('reports a plain close with no merge instant', () => {
+    expect(terminalOutcomeFromPayload('closed', pr({ merged: false, merged_at: null }))).toEqual({
+      merged: false,
+      mergedAt: null,
+    });
+  });
+});
+
 describe('processWebhookDelivery (fan-out + coalescing)', () => {
   let db: Database;
   let cleanup: () => Promise<void>;
@@ -217,6 +254,69 @@ describe('processWebhookDelivery (fan-out + coalescing)', () => {
       expect.arrayContaining([target('wsA', 'rA'), target('wsB', 'rB')]),
     );
     expect(targets).toHaveLength(2);
+  });
+
+  // A merged PR must leave the open list off the PAYLOAD alone. The refresh
+  // that used to carry this is GraphQL, and when the installation is inside a
+  // secondary-rate-limit backoff it throws, the delivery is acked, and the
+  // merged PR keeps its last open summary — "Ready", with a live merge button —
+  // for as long as the gate lasts (2026-08-24: ~an hour).
+  describe('pull_request/closed — terminal state from the payload', () => {
+    const closedDelivery = (pr: Record<string, unknown>) =>
+      delivery({ action: 'closed', payload: { pull_request: { number: 7, ...pr } } });
+
+    const stateOf = async (id: string) => {
+      const rows = await db
+        .select({ state: pullRequestsTable.state, mergedAt: pullRequestsTable.mergedAt })
+        .from(pullRequestsTable)
+        .where(eq(pullRequestsTable.id, id));
+      return rows[0];
+    };
+
+    it('marks every watching workspace\'s row merged, with GitHub\'s timestamp', async () => {
+      await seedTrackedPr('rA', 'wsA', 7);
+      await seedTrackedPr('rB', 'wsB', 7);
+      await processWebhookDelivery(
+        closedDelivery({ merged: true, merged_at: '2026-08-24T11:36:14Z' }),
+        1_000,
+      );
+      for (const id of ['pr-rA-7', 'pr-rB-7']) {
+        const row = await stateOf(id);
+        expect(row?.state).toBe('merged');
+        expect(row?.mergedAt?.toISOString()).toBe('2026-08-24T11:36:14.000Z');
+      }
+    });
+
+    it('still closes the row when the follow-up GraphQL refresh fails', async () => {
+      // The whole point: the payload write runs BEFORE the refresh, so a gated
+      // account no longer leaves a merged PR on the list.
+      refreshSpy.mockRejectedValue(new Error('GitHub rate-limited; retry in 298s'));
+      await seedTrackedPr('rA', 'wsA', 7);
+      await processWebhookDelivery(
+        closedDelivery({ merged: true, merged_at: '2026-08-24T11:36:14Z' }),
+        1_000,
+      );
+      expect(await stateOf('pr-rA-7')).toMatchObject({ state: 'merged' });
+    });
+
+    it('records a PR closed without merging as closed, not merged', async () => {
+      await seedTrackedPr('rA', 'wsA', 7);
+      await processWebhookDelivery(closedDelivery({ merged: false, merged_at: null }), 1_000);
+      const row = await stateOf('pr-rA-7');
+      expect(row?.state).toBe('closed');
+      expect(row?.mergedAt).toBeNull();
+    });
+
+    it('leaves a row that is already terminal alone', async () => {
+      await seedTrackedPr('rA', 'wsA', 7);
+      await db
+        .update(pullRequestsTable)
+        .set({ state: 'merged', mergedAt: new Date('2026-08-24T10:00:00Z') })
+        .where(eq(pullRequestsTable.id, 'pr-rA-7'));
+      await processWebhookDelivery(closedDelivery({ merged: false }), 1_000);
+      // A late `closed` delivery must not rewrite a merge as a plain close.
+      expect((await stateOf('pr-rA-7'))?.state).toBe('merged');
+    });
   });
 
   // Read the cached summary of the seeded PR row.

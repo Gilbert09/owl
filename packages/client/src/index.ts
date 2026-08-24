@@ -932,6 +932,10 @@ export const pullRequests = {
    * (trunk.io / GitHub native), SUBMIT it to that queue instead and answer
    * `{ merged: false, submitted: true }`. Talyn can't merge such a branch: its
    * ruleset exempts only that system's App.
+   *
+   * `alreadyTerminal` means the button was clicked on a PR that had ALREADY
+   * merged or closed on GitHub — the row was stale. Nothing was merged by this
+   * call; the backend reconciled the row and broadcast the correction.
    */
   merge: (id: string, method: 'merge' | 'squash' | 'rebase' = 'squash') =>
     request<{
@@ -940,6 +944,7 @@ export const pullRequests = {
       message: string;
       submitted?: boolean;
       via?: 'auto_merge' | 'label';
+      alreadyTerminal?: boolean;
     }>('POST', `/pull-requests/${id}/merge`, { method }),
 };
 

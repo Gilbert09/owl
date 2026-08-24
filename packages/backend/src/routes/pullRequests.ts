@@ -1064,6 +1064,10 @@ export function pullRequestRoutes(): Router {
         repo: pullRequestsTable.repo,
         number: pullRequestsTable.number,
         lastSummary: pullRequestsTable.lastSummary,
+        repositoryId: pullRequestsTable.repositoryId,
+        // Both only for the terminal reconcile on a refused merge below.
+        state: pullRequestsTable.state,
+        mergeQueued: pullRequestsTable.mergeQueued,
       })
       .from(pullRequestsTable)
       .where(eq(pullRequestsTable.id, req.params.id))
@@ -1182,10 +1186,15 @@ export function pullRequestRoutes(): Router {
       // here — `batchPullRequests` filters to `states: [OPEN]`, so a
       // just-merged PR comes back empty and the row would stay stuck on
       // its last open state ("Ready"). The merge succeeded, so set it.
-      await db
-        .update(pullRequestsTable)
-        .set({ state: 'merged', mergedAt: new Date(), updatedAt: new Date() })
-        .where(eq(pullRequestsTable.id, row.id));
+      //
+      // Through the shared close-out, so this path gets what the poll's does:
+      // the merge-queue columns cleared (a merged head holding "#1" stalls its
+      // whole (repo, base) group), the WS echo that drops the row from every
+      // OTHER client's open list, and the queue's group/stack advance.
+      await prMonitorService.markPrTerminal([{ repositoryId: row.repositoryId }], row.number, {
+        merged: true,
+        mergedAt: new Date(),
+      });
       res.json({ success: true, data: result } as ApiResponse<typeof result>);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Merge failed';
@@ -1215,6 +1224,27 @@ export function pullRequestRoutes(): Router {
           return;
         }
         if (outcome === 'reported') return;
+      }
+      // Before reporting a failure: is the PR simply already gone? GitHub
+      // refuses a merge on a PR that is already merged or closed, and the row
+      // says "open" only because the close-out never ran — the whole reason the
+      // button was still there to click. Ask REST (authoritative, and a
+      // different budget from the GraphQL the poll couldn't get), correct the
+      // row, and answer with what actually happened instead of an error the
+      // user can do nothing about.
+      const reconciled = await reconcileTerminalState(row);
+      if (reconciled && reconciled.state !== 'open') {
+        return res.json({
+          success: true,
+          data: {
+            merged: reconciled.state === 'merged',
+            alreadyTerminal: true,
+            message:
+              reconciled.state === 'merged'
+                ? 'This pull request was already merged on GitHub.'
+                : 'This pull request was already closed on GitHub.',
+          },
+        });
       }
       res.status(400).json({ success: false, error: message });
     }
@@ -1262,7 +1292,10 @@ interface PullRequestRow {
  * or null if nothing changed / the lookup failed.
  */
 async function reconcileTerminalState(
-  row: PullRequestRow
+  row: Pick<
+    PullRequestRow,
+    'id' | 'workspaceId' | 'owner' | 'repo' | 'number' | 'state' | 'mergeQueued'
+  >
 ): Promise<PullRequestRow | null> {
   let pr: Awaited<ReturnType<typeof githubService.getPullRequest>>;
   try {
@@ -1286,7 +1319,8 @@ async function reconcileTerminalState(
   const db = getDbClient();
   // A PR that left 'open' can't be merged by the queue — drop it off so it
   // never blocks its (repo, base) group.
-  const queueReset = nextState !== 'open' && row.mergeQueued ? QUEUE_RESET_COLUMNS : {};
+  const dropFromQueue = nextState !== 'open' && row.mergeQueued;
+  const queueReset = dropFromQueue ? QUEUE_RESET_COLUMNS : {};
   await db
     .update(pullRequestsTable)
     .set({ state: nextState, mergedAt, updatedAt: new Date(), ...queueReset })
@@ -1296,7 +1330,25 @@ async function reconcileTerminalState(
     .from(pullRequestsTable)
     .where(eq(pullRequestsTable.id, row.id))
     .limit(1);
-  return (fresh[0] as PullRequestRow | undefined) ?? null;
+  const updated = (fresh[0] as PullRequestRow | undefined) ?? null;
+  // Tell every client, not just the caller. The reconcile is usually triggered
+  // by ONE surface (a detail sheet opening, a merge that GitHub refused), but
+  // the row it corrects is on the open-only list of every connected client —
+  // and that list is exactly where a merged PR was still showing "Ready".
+  if (updated) {
+    emitPullRequestUpdated(updated.workspaceId, {
+      id: updated.id,
+      taskId: updated.taskId,
+      repositoryId: updated.repositoryId,
+      owner: updated.owner,
+      repo: updated.repo,
+      number: updated.number,
+      state: updated.state,
+      lastSummary: (updated.lastSummary as Record<string, unknown> | null) ?? {},
+      ...(dropFromQueue ? { mergeQueued: false, mergeQueueState: null } : {}),
+    });
+  }
+  return updated;
 }
 
 /** The compact watcher state the desktop renders (toggle + badge). */

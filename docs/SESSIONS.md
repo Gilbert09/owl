@@ -2,6 +2,30 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 97 — A merged PR that stayed on the list for an hour (2026-08-24)
+
+PostHog/posthog#87429 merged at 11:36Z. At 12:15Z it was still in the GitHub panel wearing "Ready", with a live merge button. Its neighbour #87427 (genuinely open) held a summary from 11:21Z against GitHub's 12:14Z — so the workspace was stale wholesale, not just the merged row.
+
+The cause was in the logs, and it was not the merge: **the installation was inside GitHub's SECONDARY GraphQL rate limit**, which `githubRateGate` scopes as `'all'` because GitHub shares that throttle across REST and GraphQL. Nine 300s backoffs on three installations in 41 minutes, 85 repo-poll failures, 169 failed auto-merge freshness refetches, plus a scatter of 502/504s. Talyn's own load earned it.
+
+**Every path that takes a merged PR off the list was GraphQL-shaped, and each dropped the fact rather than deferring it:**
+
+- **The `pull_request/closed` webhook already carried the answer** (`merged`, `merged_at`) and threw it away to go ASK GitHub over GraphQL. A gated fetch throws, the delivery is acked, and nothing retries. Now `prMonitorService.markPrTerminal` writes the terminal state straight from the payload, BEFORE the refresh, so correctness no longer depends on a call that can be gated. The refresh still runs as a best-effort top-up.
+- **`sweepClosed` was the LAST step of `pollRepo`**, after the searches and the batched summary refetch — so the one step most likely to fail took the close-out down with it, every tick, for the repo that fails most. The refetch error is now held, the sweep and the flag reconcile run, and then it rethrows (the tick still reports failed).
+- **The reconcile sweep's REST-only close-out (`sweepClosedViaRest`, zero GraphQL points) only ran on the budget-reserve branch.** A poll that FAILED got no fallback at all, which was the bigger hole in practice. `pollWorkspace` swallows per-repo errors, so it now RETURNS `{ failedRepos }` and the sweep runs the REST close-out on any non-zero count (and on a throw).
+- **Clicking Merge on a stale row reported a merge failure and left the row alone** — the symptom of a stale row was also the last chance to fix it. A refused merge now runs `reconcileTerminalState` (REST, a different budget from the GraphQL that failed) and answers `alreadyTerminal` instead of an error the user can do nothing about.
+
+**And the load that earned the gate.** The auto-keep-mergeable watcher refetched each stale PR with its OWN `refreshPr` — one GraphQL round-trip per watched PR per 60s tick, all against one installation's shared budget, which is precisely the shape GitHub answers with a secondary limit. It is now one batched call per repo (`refreshPrNumbers`), skipped entirely while that account's GraphQL is gated or its points are in the reserve. This watcher was gating the poll, the webhooks, and the merge queue on a backoff it earned itself.
+
+**Two smaller things fixed on the way through**, both the same class of "a merge that doesn't propagate":
+
+- `closeTrackedRow` never emitted `pr:snapshot`, so a merge observed by the poll sweep (or now the webhook payload) left the merge queue's group-advance and stack-advance waiting on the 2-minute reconciler — exactly when it should be moving.
+- `reconcileTerminalState` corrected the DB and told nobody. It now broadcasts, so a merged PR clears from every client's open list, not just the one whose detail sheet opened. The merge route's success path goes through the shared `markPrTerminal` for the same reason (plus the queue-column reset it was missing — a merged head holding "#1" stalls its whole group).
+
+**What is NOT fixed:** under a shared `'all'` secondary block, REST is gated too, so the REST close-out degrades to zero closes. The webhook payload write is the path that works regardless, because it makes no GitHub call at all. That is the one to reach for first if this recurs.
+
+Tests: `terminalOutcomeFromPayload` (merged/closed/bad-timestamp precedence) + four delivery cases including "still closes when the follow-up refresh rejects"; a poll test asserting the close-out survives a failing refetch (distinguished by the refetch's dedupe window); a new `prReconcileSweep.test.ts` for the fallback matrix; the merge route's already-merged vs genuinely-open split; and the watcher's batching (three stale PRs → one call) plus both backoff guards.
+
 ## Session 96 — The stable desktop release ships itself every night (2026-08-20)
 
 Every `Publish` run since July was a `workflow_dispatch`. `nightly.yml` built on a cron, but as a pre-release, which only nightly-channel users receive. A fix that landed on main reached the stable channel when someone remembered to click Run workflow. Stable is on the cron now.
@@ -12,6 +36,7 @@ Every `Publish` run since July was a `workflow_dispatch`. `nightly.yml` built on
 - **The channel picker is now a no-op.** Both channels receive the same nightly stable build. Left in place so a pre-release track can return without a client change; removing it, or the "every build as it lands" copy in Settings → About, is a follow-up.
 
 No new secrets: the scheduled path runs with the signing and notarization secrets `Publish` already had.
+
 
 ## Session 95 — The other unbounded submit path (2026-08-20)
 

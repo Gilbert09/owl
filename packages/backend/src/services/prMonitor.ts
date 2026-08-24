@@ -229,15 +229,21 @@ class PRMonitorService extends EventEmitter {
    * App (re)connect, after a paused→active transition, and by the low-frequency
    * reconcile sweep to catch any webhook deliveries that were dropped or missed.
    * Re-derives buckets + summaries exactly as a scheduled tick would.
+   *
+   * Returns how many watched repos FAILED. A per-repo error is swallowed (one
+   * bad repo must not skip the rest), so this count is the only way a caller
+   * can tell a clean sweep from one that saw nothing — the reconcile sweep uses
+   * it to decide whether its REST-only close-out still needs to run.
    */
-  async refreshWorkspaceNow(workspaceId: string): Promise<void> {
-    await this.pollWorkspace(workspaceId);
+  async refreshWorkspaceNow(workspaceId: string): Promise<{ failedRepos: number }> {
+    return this.pollWorkspace(workspaceId);
   }
 
-  private async pollWorkspace(workspaceId: string): Promise<void> {
+  private async pollWorkspace(workspaceId: string): Promise<{ failedRepos: number }> {
     const login = await this.resolveCurrentUser(workspaceId);
-    if (!login) return;
+    if (!login) return { failedRepos: 0 };
     const repos = await this.getWatchedRepos(workspaceId);
+    let failedRepos = 0;
 
     for (const repo of repos) {
       const accessKey = `${workspaceId}:${repo.fullName}`;
@@ -271,9 +277,15 @@ class PRMonitorService extends EventEmitter {
           }
           continue;
         }
+        // Counted only here: a rename is a recovery, and a repo the App can't
+        // read is permanently unreachable by REST too, so neither is worth
+        // waking the caller's fallback for. This branch is the transient one
+        // (rate-limit gate, 5xx) where a cheaper retry can still succeed.
+        failedRepos++;
         console.error(`PR monitor: ${repo.fullName} poll failed:`, msg);
       }
     }
+    return { failedRepos };
   }
 
   /**
@@ -396,34 +408,45 @@ class PRMonitorService extends EventEmitter {
       ? await this.filterStale(workspaceId, repo.id, candidateNumbers, untrackedSet)
       : [];
 
+    // The summary refetch is the heaviest, most failure-prone step of the tick
+    // (one big GraphQL call per chunk — the one that catches a 502 or a
+    // rate-limit gate). It is NOT allowed to take the close-out down with it:
+    // the searches above already told us which PRs are still open, and the
+    // close-out is what drops a merged PR off the list. Hold the error, sweep,
+    // then rethrow so the tick still reports as failed.
+    let refetchError: unknown = null;
     if (staleNumbers.length > 0) {
-      const results = await this.resolveUnknownMergeable(
-        workspaceId,
-        repo,
-        await batchPullRequestsByNumber({
+      try {
+        const results = await this.resolveUnknownMergeable(
           workspaceId,
-          owner: repo.owner,
-          repo: repo.repo,
-          numbers: staleNumbers,
-          // De-dup the shared-repo amplification: when many workspaces poll the
-          // same big org (16 track PostHog/posthog), each re-fetches the same PRs
-          // against one GraphQL budget. A PR fetched for one workspace this window
-          // serves the others too. Window ≤ the poll's own freshness tolerance,
-          // so no workspace sees data staler than it already accepts.
-          dedupeWindowMs: BULK_POLL_DEDUPE_MS,
-        })
-      );
+          repo,
+          await batchPullRequestsByNumber({
+            workspaceId,
+            owner: repo.owner,
+            repo: repo.repo,
+            numbers: staleNumbers,
+            // De-dup the shared-repo amplification: when many workspaces poll the
+            // same big org (16 track PostHog/posthog), each re-fetches the same PRs
+            // against one GraphQL budget. A PR fetched for one workspace this window
+            // serves the others too. Window ≤ the poll's own freshness tolerance,
+            // so no workspace sees data staler than it already accepts.
+            dedupeWindowMs: BULK_POLL_DEDUPE_MS,
+          })
+        );
 
-      for (const result of results) {
-        if (!result.pr) continue;
-        await this.annotateReviewRequest(workspaceId, result.pr);
-        await upsertFromBatchResult({
-          workspaceId,
-          repositoryId: repo.id,
-          summary: result.pr,
-          reviewRequested: pendingSet.has(result.pr.number),
-          authored: authoredSet.has(result.pr.number),
-        });
+        for (const result of results) {
+          if (!result.pr) continue;
+          await this.annotateReviewRequest(workspaceId, result.pr);
+          await upsertFromBatchResult({
+            workspaceId,
+            repositoryId: repo.id,
+            summary: result.pr,
+            reviewRequested: pendingSet.has(result.pr.number),
+            authored: authoredSet.has(result.pr.number),
+          });
+        }
+      } catch (err) {
+        refetchError = err;
       }
     }
 
@@ -434,6 +457,7 @@ class PRMonitorService extends EventEmitter {
     // (e.g. it fell out of review-requested, or the user just reviewed it)
     // still flips. Without this an approved PR lingers on the Review list.
     await this.reconcileRelationshipFlags(workspaceId, repo.id, authoredSet, pendingSet);
+    if (refetchError) throw refetchError;
   }
 
   /**
@@ -831,6 +855,72 @@ class PRMonitorService extends EventEmitter {
   }
 
   /**
+   * Record a PR as merged/closed from an outcome the caller ALREADY KNOWS — a
+   * `pull_request/closed` webhook payload, or a merge we just performed — with
+   * no GitHub call of its own.
+   *
+   * For the webhook that is the whole point. A `closed` delivery carries the
+   * authoritative answer (`merged` / `merged_at`), so the refresh the worker
+   * used to depend on told us nothing new — and it is GraphQL. While an
+   * installation sits inside a secondary-rate-limit backoff (or GitHub 502s)
+   * that fetch throws, the delivery is acked, and the merged PR keeps its last
+   * OPEN summary on the list: "Ready", with a live merge button, for as long as
+   * the gate lasts. Reading what we were handed cannot fail that way.
+   *
+   * Only touches rows still marked `open`, so it can never contradict a later,
+   * fresher write, and it re-uses `closeTrackedRow` — the same close-out the
+   * poll sweep runs — so the queue reset, the WS echo and the merge-queue
+   * advance are identical whichever path observes the merge first. Returns the
+   * rows closed.
+   */
+  async markPrTerminal(
+    targets: Array<{ repositoryId: string }>,
+    number: number,
+    outcome: { merged: boolean; mergedAt: Date | null }
+  ): Promise<number> {
+    const repoIds = [...new Set(targets.map((t) => t.repositoryId))];
+    if (repoIds.length === 0) return 0;
+    const rows = await this.db
+      .select({
+        id: pullRequestsTable.id,
+        workspaceId: pullRequestsTable.workspaceId,
+        repositoryId: pullRequestsTable.repositoryId,
+        taskId: pullRequestsTable.taskId,
+        owner: pullRequestsTable.owner,
+        repo: pullRequestsTable.repo,
+        number: pullRequestsTable.number,
+        mergeQueued: pullRequestsTable.mergeQueued,
+      })
+      .from(pullRequestsTable)
+      .where(
+        and(
+          inArray(pullRequestsTable.repositoryId, repoIds),
+          eq(pullRequestsTable.number, number),
+          eq(pullRequestsTable.state, 'open')
+        )
+      );
+    if (rows.length === 0) return 0;
+
+    const nextState = outcome.merged ? 'merged' : 'closed';
+    const workspacesWithQueued = new Set<string>();
+    for (const row of rows) {
+      await this.closeTrackedRow(
+        row.workspaceId,
+        row.repositoryId,
+        row,
+        nextState,
+        outcome.mergedAt
+      );
+      if (row.mergeQueued) workspacesWithQueued.add(row.workspaceId);
+    }
+    // A queued PR left the group — reshuffle the survivors' "#N" badges now.
+    for (const workspaceId of workspacesWithQueued) {
+      await broadcastMergeQueuePositions(workspaceId);
+    }
+    return rows.length;
+  }
+
+  /**
    * Mark one tracked row merged/closed and tell the desktop, clearing the
    * merge-queue bookkeeping in the same write — a PR that left `open` can't
    * be merged by the queue, and leaving the flags set once stalled the whole
@@ -854,6 +944,7 @@ class PRMonitorService extends EventEmitter {
       .update(pullRequestsTable)
       .set({ state: nextState, mergedAt, updatedAt: new Date(), ...QUEUE_RESET_COLUMNS })
       .where(eq(pullRequestsTable.id, row.id));
+    const summary = (prev[0]?.lastSummary as Record<string, unknown> | null) ?? {};
     emitPullRequestUpdated(workspaceId, {
       id: row.id,
       taskId: row.taskId,
@@ -862,9 +953,24 @@ class PRMonitorService extends EventEmitter {
       repo: row.repo,
       number: row.number,
       state: nextState,
-      lastSummary: (prev[0]?.lastSummary as Record<string, unknown> | null) ?? {},
+      lastSummary: summary,
       mergeQueued: false,
       mergeQueueState: null,
+    });
+    // Merge-queue v2 trigger. A PR going terminal is the group-advance signal
+    // (a same-base sibling merged → promote the next head) and, for a stack,
+    // the ONLY signal the children parked on this PR's head branch ever get.
+    // The close-out paths reach this state without a prCache upsert, so
+    // without emitting here the queue waits for the 2-minute reconciler —
+    // exactly when it should be moving.
+    domainEvents.emit('pr:snapshot', {
+      workspaceId,
+      repositoryId,
+      prId: row.id,
+      baseBranch: typeof summary.baseBranch === 'string' ? summary.baseBranch : '',
+      headBranch: typeof summary.headBranch === 'string' ? summary.headBranch : '',
+      state: nextState,
+      trigger: 'prmonitor:close-out',
     });
   }
 
@@ -984,16 +1090,37 @@ class PRMonitorService extends EventEmitter {
     number: number,
     opts: { resolveMergeable?: boolean; repositoryId?: string } = {}
   ): Promise<void> {
+    await this.refreshPrNumbers(workspaceId, owner, repo, [number], opts);
+  }
+
+  /**
+   * The same refresh for SEVERAL PRs in one repo, in ONE batched GraphQL call
+   * per chunk instead of one call per PR.
+   *
+   * A caller holding a list of PRs to re-poll (the auto-keep-mergeable watcher
+   * every 60s) used to loop `refreshPr`, which is one round-trip each against
+   * the installation's single shared budget — the shape GitHub answers with a
+   * secondary rate limit, and once it does, every OTHER path (the poll, the
+   * webhook refresh, the merge queue) is gated behind the same backoff.
+   * `batchPullRequestsByNumber` already chunks and bounds concurrency.
+   */
+  async refreshPrNumbers(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    numbers: number[],
+    opts: { resolveMergeable?: boolean; repositoryId?: string } = {}
+  ): Promise<void> {
+    if (numbers.length === 0) return;
     // The webhook fan-out already resolved the repo (id + canonical owner/repo
     // from the in-memory watch index), so it passes `repositoryId` to skip the
     // getWatchedRepos DB round-trip + URL parse on the hot path. Other callers
     // (merge queue, auto-merge) omit it and resolve from the DB.
     const watched = await this.resolveWatchedForRefresh(workspaceId, owner, repo, opts.repositoryId);
     if (!watched) return;
-    const results = await this.fetchPrSummaries(workspaceId, watched, [number], opts);
+    const results = await this.fetchPrSummaries(workspaceId, watched, numbers, opts);
     await this.applyPrResults(
       { workspaceId, repositoryId: watched.id, fullName: watched.fullName },
-      number,
       results
     );
   }
@@ -1037,7 +1164,6 @@ class PRMonitorService extends EventEmitter {
       for (const target of group) {
         await this.applyPrResults(
           { workspaceId: target.workspaceId, repositoryId: target.repositoryId, fullName: watched.fullName },
-          number,
           results
         );
       }
@@ -1108,7 +1234,6 @@ class PRMonitorService extends EventEmitter {
    */
   private async applyPrResults(
     target: { workspaceId: string; repositoryId: string; fullName: string },
-    number: number,
     results: BatchPRByNumberResult[]
   ): Promise<void> {
     const login = await this.resolveCurrentUser(target.workspaceId);
@@ -1116,7 +1241,7 @@ class PRMonitorService extends EventEmitter {
       if (!result.pr) {
         if (WEBHOOK_TRACE) {
           whTrace(
-            `      refreshPr ${target.fullName}#${number}: GitHub returned no PR ` +
+            `      refreshPr ${target.fullName}#${result.number}: GitHub returned no PR ` +
               `(deleted/transferred or not visible) — nothing to update`
           );
         }

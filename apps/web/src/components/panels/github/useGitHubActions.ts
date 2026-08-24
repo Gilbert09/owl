@@ -145,6 +145,15 @@ export function useGitHubActions() {
         await refreshPullRequests();
         return;
       }
+      // The PR had already merged/closed on GitHub and our row was stale — the
+      // backend reconciled it. Don't claim WE merged it (and don't count it as
+      // a merge), just drop the row and say what was actually true.
+      if (result.alreadyTerminal) {
+        toast.success(`${ref} was already ${result.merged ? 'merged' : 'closed'}`, result.message);
+        removeRow(row.id);
+        await refreshPullRequests();
+        return;
+      }
       // GitHub can 200 with `merged: false` — treat that as failure so we
       // don't claim success and wrongly drop the row.
       if (!result.merged) {

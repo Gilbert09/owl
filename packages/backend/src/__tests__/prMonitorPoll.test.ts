@@ -600,6 +600,71 @@ describe('prMonitor — poll orchestration', () => {
     expect(rows[0].state).toBe('open');
   });
 
+  it('still closes a merged PR when the summary refetch fails', async () => {
+    // The refetch is the heaviest, most failure-prone step of the tick, and it
+    // used to take the close-out down with it: one 502 (or one secondary
+    // rate-limit gate) and every merged PR kept its last OPEN summary on the
+    // list — "Ready", with a live merge button — until a tick happened to
+    // succeed. The searches already said which PRs are still open, so the
+    // close-out has everything it needs whether or not the refetch answered.
+    await db.insert(pullRequestsTable).values([
+      {
+        id: 'pr-stale',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 1,
+        state: 'open',
+        authored: true,
+        lastPolledAt: new Date(Date.now() - 60 * 60_000),
+        lastSummary: { headBranch: 'feature/a' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      {
+        id: 'pr-merged',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'acme',
+        repo: 'widgets',
+        number: 2,
+        state: 'open',
+        authored: true,
+        lastPolledAt: new Date(Date.now() - 60 * 60_000),
+        lastSummary: { headBranch: 'feature/b', baseBranch: 'main' },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+    ]);
+    // #1 is still open on GitHub; #2 has dropped out of the searches (merged).
+    mockSearch([1]);
+    vi.spyOn(graphqlModule, 'batchPullRequestsByNumber').mockImplementation(
+      async (opts: { numbers: number[]; dedupeWindowMs?: number }) => {
+        // The poll's bulk refetch is the one that carries a dedupe window; the
+        // close-out sweep's lookup does not. Fail only the refetch.
+        if (opts.dedupeWindowMs !== undefined) throw new Error('GitHub GraphQL error: Bad Gateway');
+        return opts.numbers.map((number) => ({
+          number,
+          pr: fakeSummary({
+            number,
+            state: 'merged',
+            mergedAt: '2026-08-24T11:36:14Z',
+          }),
+        }));
+      }
+    );
+
+    await prMonitorService.forcePoll();
+
+    const rows = await db
+      .select({ state: pullRequestsTable.state, mergedAt: pullRequestsTable.mergedAt })
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, 'pr-merged'));
+    expect(rows[0].state).toBe('merged');
+    expect(rows[0].mergedAt?.toISOString()).toBe('2026-08-24T11:36:14.000Z');
+  });
+
   it('isolates per-workspace failures (one repo throwing does not stop others)', async () => {
     await db.insert(repositoriesTable).values({
       id: 'repo2',

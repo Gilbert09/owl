@@ -272,6 +272,15 @@ export async function processWebhookDelivery(
   // alongside the normal refresh below, which still materialises the PR row.
   if (delivery.eventType === 'pull_request') {
     await pruneOnPullRequest(delivery).catch(() => undefined);
+    // A `closed` delivery already TELLS us the PR's terminal state. Write it
+    // now, from the payload, before the GraphQL refresh below that may not get
+    // an answer — see applyTerminalStateFromPayload.
+    await applyTerminalStateFromPayload(delivery, targets, numbers).catch((err) => {
+      console.warn(
+        `[webhookWorker] terminal write ${delivery.repoFullName}#${numbers.join(',')}: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    });
     // Metadata-only actions (label/title/draft) change a field we persist
     // verbatim, or nothing at all — patch it from the payload and skip the
     // ~1-2s refreshPr. `null` = "needs the full refresh" (falls through below).
@@ -326,14 +335,70 @@ async function pruneOnPullRequest(delivery: WebhookDelivery): Promise<void> {
 }
 
 /**
+ * Read a merged/closed outcome off a `pull_request` payload. Pure, so the
+ * precedence between `merged` and `merged_at` is unit-testable: GitHub sets
+ * both on a merge, but only `merged_at` carries the instant, and a bad
+ * timestamp must not downgrade the merge to a plain close. Returns null when
+ * the payload doesn't describe a close.
+ */
+export function terminalOutcomeFromPayload(
+  action: string | undefined,
+  payload: Record<string, unknown>,
+): { merged: boolean; mergedAt: Date | null } | null {
+  if (action !== 'closed') return null;
+  const pr = payload.pull_request as
+    | { merged?: unknown; merged_at?: unknown }
+    | undefined;
+  if (!pr) return null;
+  let mergedAt: Date | null = null;
+  if (typeof pr.merged_at === 'string') {
+    const parsed = new Date(pr.merged_at);
+    if (!Number.isNaN(parsed.getTime())) mergedAt = parsed;
+  }
+  const merged = pr.merged === true || mergedAt !== null;
+  // A merge with no usable timestamp is still a merge — stamp it now rather
+  // than leaving the row in `merged` with a null mergedAt.
+  return { merged, mergedAt: merged ? (mergedAt ?? new Date()) : null };
+}
+
+/**
+ * Apply a `pull_request/closed` delivery's terminal state to every watching
+ * workspace's row, straight from the payload — no GitHub call.
+ *
+ * The refresh further down handles `closed` too, but it has to ASK GitHub what
+ * the payload just told us, over GraphQL. When the installation is inside a
+ * secondary-rate-limit backoff the refresh throws, the delivery is acked, and
+ * the merged PR sits on the open list wearing its last "Ready" summary until a
+ * poll happens to succeed (2026-08-24: ~an hour, through nine 300s backoffs).
+ * This write cannot fail that way, and it runs FIRST so the refresh is a
+ * best-effort top-up rather than the thing the correctness depends on.
+ */
+async function applyTerminalStateFromPayload(
+  delivery: WebhookDelivery,
+  targets: WatchTarget[],
+  numbers: number[],
+): Promise<void> {
+  const outcome = terminalOutcomeFromPayload(delivery.action, delivery.payload);
+  if (!outcome) return;
+  for (const number of numbers) {
+    const closed = await prMonitorService.markPrTerminal(targets, number, outcome);
+    whTrace(
+      `  pull_request/closed ${delivery.repoFullName}#${number}: ` +
+        `${outcome.merged ? 'merged' : 'closed'} from payload → ${closed} row(s)`,
+    );
+  }
+}
+
+/**
  * Handle `pull_request` actions whose effect is fully contained in the payload —
  * a persisted field we copy verbatim (title, draft, labels) — without a GitHub
  * fetch. Returns the rows-updated count when handled, or `null` to signal "this
  * action needs the full `refreshPr`".
  *
  * Deliberately NOT shortcut (→ refreshPr): `opened`/`reopened`/`synchronize`
- * (new/changed head → checks + mergeability), `closed`/merged (flows through the
- * cursor/delta + merge-queue path), `review_requested*` (recomputes the
+ * (new/changed head → checks + mergeability), `closed`/merged (its terminal
+ * state is already written from the payload above; the refresh is the
+ * best-effort final summary + cursor/delta pass), `review_requested*` (recomputes the
  * viewer-relative `reviewRequestVia`), and `edited` that changed the base branch
  * (mergeability). Validated against `summaryToJsonb`: `draft`/`title`/`labels`
  * feed no derived field (mergeable/reviewDecision/blockingReason) — labels are

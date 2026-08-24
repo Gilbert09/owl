@@ -843,6 +843,64 @@ describe('routes/pullRequests', () => {
       expect(row[0].mergedAt).toBeNull();
     });
 
+    // Clicking Merge on a PR that had already merged is the SYMPTOM of a stale
+    // row, so the click is the last chance to correct it. REST is authoritative
+    // here, and it draws on a different budget from the GraphQL the poll
+    // couldn't get — which is exactly why the row was stale.
+    it('reconciles an already-merged PR instead of reporting a merge failure', async () => {
+      const id = await insertPR(db, { state: 'open' });
+      vi.spyOn(githubService, 'mergePullRequest').mockRejectedValue(
+        new Error('GitHub API error 405 Method Not Allowed: Pull Request is not mergeable')
+      );
+      vi.spyOn(githubService, 'getPullRequest').mockResolvedValue(
+        fakeRESTPR({ state: 'closed', merged: true, mergedAt: '2026-08-24T11:36:14Z' }) as never
+      );
+
+      const res = await fetch(`${serverUrl}/pull-requests/${id}/merge`, {
+        method: 'POST',
+        headers: authMine,
+        body: JSON.stringify({ method: 'squash' }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        success: boolean;
+        data: { merged: boolean; alreadyTerminal: boolean; message: string };
+      };
+      expect(body.data.alreadyTerminal).toBe(true);
+      expect(body.data.merged).toBe(true);
+
+      const row = await db
+        .select()
+        .from(pullRequestsTable)
+        .where(eq(pullRequestsTable.id, id))
+        .limit(1);
+      expect(row[0].state).toBe('merged');
+      expect(row[0].mergedAt?.toISOString()).toBe('2026-08-24T11:36:14.000Z');
+    });
+
+    it('reports a genuine merge failure as a 400 when the PR really is still open', async () => {
+      const id = await insertPR(db, { state: 'open' });
+      vi.spyOn(githubService, 'mergePullRequest').mockRejectedValue(
+        new Error('GitHub API error 405 Method Not Allowed: Pull Request is not mergeable')
+      );
+      vi.spyOn(githubService, 'getPullRequest').mockResolvedValue(
+        fakeRESTPR({ state: 'open' }) as never
+      );
+
+      const res = await fetch(`${serverUrl}/pull-requests/${id}/merge`, {
+        method: 'POST',
+        headers: authMine,
+        body: JSON.stringify({ method: 'squash' }),
+      });
+      expect(res.status).toBe(400);
+      const row = await db
+        .select()
+        .from(pullRequestsTable)
+        .where(eq(pullRequestsTable.id, id))
+        .limit(1);
+      expect(row[0].state).toBe('open');
+    });
+
     it('does not mark the row merged when GitHub returns merged:false', async () => {
       const id = await insertPR(db, { state: 'open' });
       vi.spyOn(githubService, 'mergePullRequest').mockResolvedValue({

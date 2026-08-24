@@ -17,6 +17,7 @@ import { getExternalMergeGate } from './repoMergeGate.js';
 import { readExternalQueueState } from './externalQueueState.js';
 import { githubService } from './github.js';
 import { graphqlBudget } from './graphqlBudget.js';
+import { githubRateGate } from './githubRateGate.js';
 import { prMonitorService } from './prMonitor.js';
 import { emitPullRequestUpdated } from './websocket.js';
 import { debugBus } from './debugBus.js';
@@ -220,6 +221,11 @@ class PRAutoMergeWatcher {
           );
         watched = rows.length;
 
+        // Refresh every stale summary FIRST, batched per repo — see
+        // refreshStaleSummaries. processPr then works off rows that were
+        // brought current together rather than fetching its own.
+        await this.refreshStaleSummaries(rows);
+
         const workspaceLabelsCache = new Map<string, string[]>();
         for (const row of rows) {
           try {
@@ -259,6 +265,53 @@ class PRAutoMergeWatcher {
     }
   }
 
+  /**
+   * Bring every stale watched summary up to date in ONE GraphQL call per repo
+   * (per chunk), before any PR is processed.
+   *
+   * This used to be a per-PR `refreshPr` inside `processPr`: one round-trip per
+   * watched PR per 60s tick, all against the installation's single shared
+   * budget. On a big org that is the exact shape GitHub answers with a
+   * SECONDARY rate limit — and that limit is scoped to the whole account, so
+   * the poll, the webhook refreshes, and the merge queue all get gated behind
+   * the backoff this watcher earned (2026-08-24: 169 of its refetches failed in
+   * 41 minutes while merged PRs sat stuck on the list). Batching turns N calls
+   * into ceil(N / chunk) per repo.
+   *
+   * Skipped for an account whose GraphQL is already gated, or whose points
+   * budget is in the reserve: this is an OPPORTUNISTIC re-poll — processPr
+   * proceeds on the existing row either way, and the next tick refetches once
+   * the window clears. One warning per repo, not one per PR.
+   */
+  private async refreshStaleSummaries(rows: PRRow[]): Promise<void> {
+    const now = Date.now();
+    const groups = new Map<string, { workspaceId: string; owner: string; repo: string; numbers: number[] }>();
+    for (const row of rows) {
+      if (now - new Date(row.lastPolledAt).getTime() <= FRESHNESS_MS) continue;
+      const key = `${row.workspaceId}|${row.owner}/${row.repo}`;
+      const group = groups.get(key);
+      if (group) group.numbers.push(row.number);
+      else groups.set(key, { workspaceId: row.workspaceId, owner: row.owner, repo: row.repo, numbers: [row.number] });
+    }
+    for (const group of groups.values()) {
+      const accountKey = githubService.accountKeyFor(group.workspaceId);
+      if (graphqlBudget.shouldDefer(accountKey)) continue;
+      // Already backed off. The call would throw before it reached GitHub, so
+      // this costs nothing but the log line — which is the whole point.
+      if (githubRateGate.isBlocked(accountKey, 'graphql')) continue;
+      await prMonitorService
+        .refreshPrNumbers(group.workspaceId, group.owner, group.repo, group.numbers)
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : 'unknown error';
+          console.warn(
+            `[prAutoMergeWatcher] freshness refetch failed for ${group.owner}/${group.repo} ` +
+              `(${group.numbers.length} PR(s)):`,
+            msg
+          );
+        });
+    }
+  }
+
   private async processPr(
     initialRow: PRRow,
     workspaceLabelsCache: Map<string, string[]>
@@ -279,24 +332,12 @@ class PRAutoMergeWatcher {
     //    at the end. The watcher resumes on its own if the PR is dequeued.
     if (initialRow.mergeQueued) return;
 
-    // 1. Freshness — refetch a stale summary so we don't fire (or pause) off
-    //    outdated blocker state. refreshPr is a no-op if the repo isn't watched.
+    // 1. Freshness — the batched pre-pass (refreshStaleSummaries) has already
+    //    run for this tick, so a row that WAS stale needs re-reading to pick up
+    //    what it wrote. Never fire (or pause) off outdated blocker state.
     let row = initialRow;
     const freshnessStale = Date.now() - new Date(row.lastPolledAt).getTime() > FRESHNESS_MS;
-    // Skip this opportunistic re-poll when the account's GraphQL budget is in the
-    // reserve (same guard the reconcile sweep uses) — proceed on the existing row
-    // rather than burning a scarce point and hard-tripping the rate limit. The
-    // next tick (post budget-reset) refetches cleanly.
-    if (freshnessStale && !graphqlBudget.shouldDefer(githubService.accountKeyFor(row.workspaceId))) {
-      await prMonitorService
-        .refreshPr(row.workspaceId, row.owner, row.repo, row.number)
-        .catch((err) => {
-          const msg = err instanceof Error ? err.message : 'unknown error';
-          console.warn(
-            `[prAutoMergeWatcher] freshness refetch failed for ${row.owner}/${row.repo}#${row.number}:`,
-            msg
-          );
-        });
+    if (freshnessStale) {
       const reread = await db
         .select(WATCH_COLUMNS)
         .from(pullRequestsTable)
