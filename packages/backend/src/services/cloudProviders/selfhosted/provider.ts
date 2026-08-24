@@ -7,6 +7,7 @@ import {
   storeSelfHostedCredentials,
   removeSelfHostedCredentials,
   fleetApiToken,
+  fleetGatewayToken,
   fleetPinnedEndpoint,
   FleetNotDeployedError,
 } from '../../selfHosted/credentials.js';
@@ -53,20 +54,25 @@ export const selfHostedProvider: CloudTaskProvider = {
       };
     }
 
-    // The fleet API bearer is deployment config, not something the workspace
-    // supplies — see fleetApiToken(). Without it there is nothing to ping with,
-    // and storing a Claude token against a fleet the backend cannot talk to
-    // would just defer the failure to dispatch.
-    const bearer = fleetApiToken();
+    // Ping WHAT DISPATCH WOULD ACTUALLY USE — the same endpoint and the same
+    // bearer. Storing a credential nobody has tried is how a bad setup surfaces
+    // hours later, on somebody else's task, as a dispatch failure rather than a
+    // form error.
+    //
+    // "The same bearer" is the part that was wrong and could not be caught. The
+    // gateway and a fleet host are different trust domains with different
+    // credentials (see fleetGatewayToken), and this pinged the gateway holding
+    // FLEET_API_TOKEN — which the gateway does not know. It passed anyway,
+    // because /healthz is the one gateway route that takes no credential at all,
+    // so the check exercised the URL and never the key. A gateway-only
+    // deployment also failed here outright, on a variable it has no reason to
+    // set. Resolving the target the way dispatch does fixes both.
+    const gateway = fleetPinnedEndpoint();
+    const bearer = gateway ? fleetGatewayToken() : fleetApiToken();
     if (!bearer) return { ok: false, error: new FleetNotDeployedError().message };
 
-    // Ping whatever dispatch would ACTUALLY pick — the operator's pin if there
-    // is one, else the registry's choice. Storing a credential nobody has tried
-    // is how a bad setup surfaces hours later, on somebody else's task, as a
-    // dispatch failure rather than a form error.
-    const pinned = fleetPinnedEndpoint();
-    const host = pinned ? null : await pickFleetHost();
-    const endpoint = pinned || host?.apiEndpoint;
+    const host = gateway ? null : await pickFleetHost();
+    const endpoint = gateway || host?.apiEndpoint;
     if (!endpoint) {
       return {
         ok: false,
@@ -76,7 +82,16 @@ export const selfHostedProvider: CloudTaskProvider = {
       };
     }
     try {
-      await new FleetClient(endpoint, bearer).ping();
+      const client = new FleetClient(endpoint, bearer);
+      // Against the GATEWAY, list the tenant's sandboxes rather than ping: it
+      // is the cheapest route that actually presents the key, and a bad key is
+      // exactly what this form has to catch. /healthz would answer 200 for a
+      // credential the gateway has never seen or has revoked.
+      //
+      // Against a HOST, ping stays: every route there is authenticated, and
+      // /healthz already proves the bearer.
+      if (gateway) await client.listGatewaySandboxes();
+      else await client.ping();
     } catch (err) {
       const where = host?.name ?? endpoint;
       return {

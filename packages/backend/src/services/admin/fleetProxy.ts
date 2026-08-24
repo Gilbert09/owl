@@ -6,8 +6,12 @@ import {
   type AdminFleetHost,
   type AdminFleetLiveErrorCode,
 } from '@talyn/shared';
-import { FleetClient } from '../selfHosted/client.js';
-import { fleetApiToken } from '../selfHosted/credentials.js';
+import { FleetClient, type FleetSandbox } from '../selfHosted/client.js';
+import {
+  fleetApiToken,
+  fleetGatewayToken,
+  fleetPinnedEndpoint,
+} from '../selfHosted/credentials.js';
 import { getFleetHost, listFleetHosts, type FleetHostView } from '../fleetHosts.js';
 
 /**
@@ -186,6 +190,95 @@ export async function fanOutHosts<T>(
     }))
   );
   return settled;
+}
+
+/**
+ * Every sandbox that is live right now, with the host holding it.
+ *
+ * # Why this cannot just be a fan-out any more
+ *
+ * It used to be `fanOutHosts(c => c.listSandboxes())`, which asks each box for
+ * its own records. That still works — for records this backend dispatched
+ * DIRECTLY, holding FLEET_API_TOKEN. fleetd resolves that shared token to the
+ * EMPTY tenant, deliberately: `Principal.Operator` answers "may I see the
+ * host?" and never "may I see the customers?", so an operator credential reads
+ * runs through exactly the same tenant-scoped accessor as anyone else.
+ *
+ * A sandbox dispatched through the gateway belongs to tenant `talyn`. So after
+ * the cutover the fan-out returns rows for nothing, every gateway-dispatched
+ * run reads as having no live data, and the console quietly falls back to the
+ * task row's last-known status — which is the one shape an operator page must
+ * not have, because it looks like a working page.
+ *
+ * So when a gateway is configured the live set comes from IT: its index names
+ * the ids and their hosts, and each id is then read back for the record only
+ * the host can produce (status, phase, slot, memory, cost). N+1, and it earns
+ * it — the index lists LIVE rows only, which is a handful.
+ *
+ * The operator surface is untouched and stays a direct dial: capacity, stats,
+ * metrics, goldens and drain are host questions the gateway does not serve, and
+ * splitting them is deliberate rather than incidental.
+ *
+ * Never throws, like every other read here.
+ */
+export async function liveFleetSandboxes(): Promise<{
+  live: Array<{ sandbox: FleetSandbox; host: string }>;
+  degraded: Array<{ host: string; error: string }>;
+}> {
+  const gateway = fleetPinnedEndpoint();
+  if (!gateway) {
+    const settled = await fanOutHosts((client) => client.listSandboxes());
+    const live: Array<{ sandbox: FleetSandbox; host: string }> = [];
+    const degraded: Array<{ host: string; error: string }> = [];
+    for (const { host, result } of settled) {
+      if (!result.ok) {
+        degraded.push({ host: host.name, error: result.error });
+        continue;
+      }
+      for (const sandbox of result.value.sandboxes ?? []) {
+        live.push({ sandbox, host: host.name });
+      }
+    }
+    return { live, degraded };
+  }
+
+  const token = fleetGatewayToken();
+  if (!token) {
+    return { live: [], degraded: [{ host: gateway, error: new FleetNotConfiguredError().message }] };
+  }
+  const client = new FleetClient(gateway, token, { timeoutMs: ADMIN_READ_TIMEOUT_MS });
+
+  let refs;
+  try {
+    ({ sandboxes: refs } = await client.listGatewaySandboxes());
+  } catch (err) {
+    // One degraded entry keyed by the GATEWAY, not by a host. The console shows
+    // it as a reachability problem with the thing that was actually unreachable,
+    // rather than blaming every box in the registry for one control plane.
+    return {
+      live: [],
+      degraded: [{ host: gateway, error: err instanceof Error ? err.message : String(err) }],
+    };
+  }
+
+  const degraded: Array<{ host: string; error: string }> = [];
+  const hydrated = await Promise.all(
+    (refs ?? []).map(async (ref) => {
+      try {
+        const { sandbox } = await client.getSandbox(ref.id);
+        return { sandbox, host: ref.host };
+      } catch (err) {
+        // One id that could not be read is not a broken page. Reporting it
+        // against its own host is what tells an operator WHICH box went quiet.
+        degraded.push({
+          host: ref.host,
+          error: `${ref.id}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return null;
+      }
+    }),
+  );
+  return { live: hydrated.filter((x): x is { sandbox: FleetSandbox; host: string } => x !== null), degraded };
 }
 
 /** The registry row, as the console's view type, with no live data attached. */

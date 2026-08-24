@@ -332,8 +332,15 @@ unreachable", and every small-payload check you would reach for to test that
 passes.
 
 The entrypoint defaults `TS_DEBUG_MTU` to 1000. Raise it only with a measurement
-in hand: fetch something over a few KB (`/v1/runs`, `/metrics`) through the
+in hand: fetch something over a few KB (`/v1/sandboxes`, `/metrics`) through the
 proxy and check the byte count, not just the status code.
+
+The yas control plane hit the identical wall from its own Railway container and
+1000 is now measured on both sides of the cliff there: at 1280 a 1 KB exec
+response took 196 s and 20 KB never arrived at all, while at 1000 the same
+sandbox returned 1,000,000 bytes in 1.29 s. 1280 was re-applied afterwards and
+the hang came back, so the number is the cause and not the restart that applied
+it. See yas `cmd/yasctl/docker-entrypoint.sh`.
 
 **The two fleet tokens run in opposite directions and are not interchangeable:**
 
@@ -356,16 +363,45 @@ workspace's to give — *which host* a run lands on is answered by the registry
 from reports seconds old, and nobody using the product can see which box is
 least loaded or which stopped reporting four minutes ago.
 
-To force every run onto one box while debugging it:
+#### Dispatching through the sandbox gateway
 
 ```
-FLEET_PINNED_ENDPOINT=http://100.x.y.z:8080   # blank/unset = use the registry
+FLEET_PINNED_ENDPOINT=https://api.yetanothersandbox.dev
+FLEET_GATEWAY_TOKEN=yas_sk_...              # blank/unset = use the registry
 ```
 
-It bypasses load and health checks entirely, which is what you want while
-bisecting a host and what you very much do not want otherwise. **Unset it when
-you are done** — a stale pin routes every task to a machine that may have been
-offline for a week, and nothing in the product will say so.
+**This is the normal path as of 2026-08-24.** The variable keeps its old name —
+it began as a debugging pin and renaming a deployed variable is a coordinated
+restart to change a string — but what it points at is now the yas control plane,
+which does the placing itself.
+
+Read that as the opposite of the old warning rather than a repeat of it. Pinned
+at a HOST it really was dangerous: one box, chosen once, no idea whether it is
+draining or offline, and a stale value silently routed every task to a machine
+that had been down for a week. Pinned at the GATEWAY it is safer than the
+registry, because the gateway holds the placement index and can refuse to offer
+an AGENTIC id to a second host when a create's answer is lost. This backend
+cannot: a duplicated sandbox is idle capacity, a duplicated agent is a second
+LLM bill for the same work, and only the party holding the index can prevent it.
+
+**The two tokens are different trust domains and are not interchangeable.**
+`FLEET_API_TOKEN` is a deployment secret every host shares; a gateway key is a
+per-tenant key the gateway minted and can revoke on its own. Sending either to
+the other 401s. Both stay set, because both destinations are still in use: the
+operator console keeps dialling hosts DIRECTLY for capacity, stats, metrics,
+goldens and drain, which are host questions the gateway does not serve.
+
+**Cut over when nothing is in flight.** A run this backend dispatched straight
+to a host carries the EMPTY tenant on that host's record, and the gateway
+refuses to adopt an unowned record — correctly, since an unowned record cannot
+prove the caller may read it. So an in-flight run at the moment of the switch
+becomes a `404` on the next poll, which the poller reads as a vanished run and
+fails. Check `GET /api/v1/fleet/hosts` (or the host's `/v1/capacity`) for
+`runsLive: 0` first.
+
+To force every run onto one BOX while debugging it, the same variable still
+works — point it at `http://100.x.y.z:8080` and leave `FLEET_GATEWAY_TOKEN`
+unset so it falls back to `FLEET_API_TOKEN`. **Unset it when you are done.**
 
 **`FLEET_REPORT_TOKEN` unset means the report endpoint refuses everything.** An
 open one lets anyone invent a host, and an invented host with an

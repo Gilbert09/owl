@@ -86,15 +86,30 @@ export function fleetGatewayToken(): string {
 }
 
 /**
- * Force every run onto one host, bypassing the registry. Blank = registry.
+ * The ONE endpoint dispatch addresses: the sandbox gateway. Blank falls back to
+ * dialling a host out of the registry.
  *
- * This is a DEBUGGING escape hatch and it is deployment-level for the same
- * reason the bearer is: which box a run lands on is infrastructure. A workspace
- * has no way to know which host is healthy, which is draining, or which is the
- * one you are currently bisecting a bug on — the registry does, from reports
- * seconds old. Exposing the pin as a settings field asked users to answer a
- * question they cannot answer, and a stale one silently routed every task to a
- * box that had been offline for a week.
+ * # This is the normal path now, not an override
+ *
+ * The variable is called `FLEET_PINNED_ENDPOINT` because it began as a
+ * debugging pin — force every run onto one box while you bisect it — and the
+ * name is deployed, so renaming it would be a coordinated restart of the
+ * backend to change a string. What it points at changed on 2026-08-24: it is
+ * the control plane, which does the placing itself.
+ *
+ * That inverts the old warning rather than repeating it. Pinned at a HOST this
+ * really was dangerous — one box, chosen once, no idea whether it is draining
+ * or offline, and a stale value silently routed every task to a machine that
+ * had been down for a week. Pinned at the GATEWAY it is the opposite: the
+ * gateway reads the same reports the registry does, places per create, retries
+ * a 503 on the next candidate, and — the part no client-side registry can do —
+ * refuses to offer an AGENTIC id to a second host when an answer is lost. A
+ * duplicated sandbox is idle capacity; a duplicated agent is a second LLM bill
+ * for the same work, and only the party holding the index can prevent it.
+ *
+ * The registry fallback stays, and is not dead code: it is what a deployment
+ * with no control plane uses, and it is the path every run took before this.
+ * It is also still the operator console's path — see fleetGatewayToken.
  */
 export function fleetPinnedEndpoint(): string {
   return (process.env.FLEET_PINNED_ENDPOINT ?? '').replace(/\/+$/, '');
@@ -104,7 +119,8 @@ export function fleetPinnedEndpoint(): string {
 export class FleetNotDeployedError extends Error {
   constructor() {
     super(
-      'FLEET_API_TOKEN is not set on the backend, so it cannot authenticate to any fleet host. ' +
+      'Neither FLEET_GATEWAY_TOKEN nor FLEET_API_TOKEN is set on the backend, so it cannot ' +
+        'authenticate to the sandbox gateway or to any fleet host. ' +
         'This is deployment configuration, not a workspace setting.',
     );
     this.name = 'FleetNotDeployedError';
@@ -171,25 +187,34 @@ export async function getSelfHostedClient(workspaceId: string): Promise<FleetCli
 export interface FleetTarget {
   endpoint: string;
   token: string;
-  /** The registered host this resolved to, when it came from the registry.
-   *  Absent when FLEET_PINNED_ENDPOINT overrode it. */
+  /**
+   * The host this resolved to, when the REGISTRY chose it.
+   *
+   * Absent for the gateway, which has not placed anything yet at the moment this
+   * is called. Nothing may treat that absence as "unknown forever": the create
+   * answers with the name (FleetClient.createSandbox), and the dispatch records
+   * it, because `resolveRunCredentials` refuses a credential pull for a run with
+   * no host on it.
+   */
   host?: string;
 }
 
 /**
- * Resolve which fleet host this workspace's next run should go to.
+ * Resolve where this workspace's next run goes, and how to authenticate to it.
  *
- * The credential says WHETHER a workspace may use the fleet; the registry says
- * WHERE. Splitting them is what makes more than one host possible: a workspace
- * does not know which box is least loaded, or which is draining, or which has
- * stopped reporting, so it was never in a position to choose one.
+ * The credential says WHETHER a workspace may use the fleet; something else
+ * says WHERE. Splitting them is what makes more than one host possible: a
+ * workspace does not know which box is least loaded, or which is draining, or
+ * which has stopped reporting, so it was never in a position to choose one.
  *
  * Order:
- *   1. FLEET_PINNED_ENDPOINT, if the operator set one. A debugging override —
- *      it forces every run onto one box regardless of load or health, which is
- *      exactly what you want while bisecting a host and exactly what you do not
- *      want otherwise.
- *   2. The least-loaded dispatchable host in the registry. The normal path.
+ *   1. The GATEWAY (`FLEET_PINNED_ENDPOINT`), when one is configured. The
+ *      normal path: it does the placing, so this returns no `host` and the
+ *      caller learns which box took the work from the create's own answer —
+ *      see FleetTarget.host and FleetClient.createSandbox.
+ *   2. The least-loaded dispatchable host in the local registry. The path a
+ *      deployment with no control plane takes, and the one every run took
+ *      before the gateway.
  *
  * Returns null when the workspace has no credential at all — the fleet is not
  * configured for it, which is different from "configured and nothing is up".
@@ -205,15 +230,17 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
   // an operator error and every workspace hits it identically. Reporting it as
   // "not configured" would send the user back to a settings form they have
   // already filled in correctly.
-  // The pin is resolved BEFORE the host token, because a pinned endpoint is
-  // authenticated by a different credential — see fleetGatewayToken. Reading
-  // FLEET_API_TOKEN first would make a gateway-only deployment fail on a
-  // variable it has no reason to set.
-  const pinned = fleetPinnedEndpoint();
-  if (pinned) {
+  // The gateway is resolved BEFORE the host token, because it is authenticated
+  // by a different credential — see fleetGatewayToken. Reading FLEET_API_TOKEN
+  // first would make a gateway-only deployment fail on a variable it has no
+  // reason to set.
+  const gateway = fleetPinnedEndpoint();
+  if (gateway) {
     const gatewayToken = fleetGatewayToken();
     if (!gatewayToken) throw new FleetNotDeployedError();
-    return { endpoint: pinned, token: gatewayToken };
+    // No `host`, and that is the honest answer rather than a gap: placement has
+    // not happened yet. The create's response names the box that took it.
+    return { endpoint: gateway, token: gatewayToken };
   }
 
   const token = fleetApiToken();

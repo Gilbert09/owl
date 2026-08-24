@@ -2,7 +2,7 @@ import type { AdminRunIndex, AdminRunRow, AdminRunStatus } from '@talyn/shared';
 import type { FleetSandbox } from '../selfHosted/client.js';
 import { cloudStatusForSandbox } from '../selfHosted/poller.js';
 import { listAdminTasks } from './queries.js';
-import { fanOutHosts } from './fleetProxy.js';
+import { liveFleetSandboxes } from './fleetProxy.js';
 
 /**
  * "What is happening on the fleet", joined from two sources that each know
@@ -132,26 +132,23 @@ export interface AdminRunFilters {
  * page four would defeat the point of surfacing them.
  */
 export async function listAdminRuns(filters: AdminRunFilters): Promise<AdminRunIndex> {
-  const [page, live] = await Promise.all([
+  const [page, { live, degraded }] = await Promise.all([
     listAdminTasks({
       host: filters.host,
       limit: filters.limit,
       before: filters.before,
       provider: 'selfhosted',
     }),
-    fanOutHosts((client) => client.listSandboxes()),
+    // Not a host fan-out any more. Through the gateway a sandbox belongs to a
+    // TENANT, and this backend's own FLEET_API_TOKEN resolves to the empty one
+    // — so asking each box directly returns nothing for every run the gateway
+    // placed. See liveFleetSandboxes.
+    liveFleetSandboxes(),
   ]);
 
   const byRunId = new Map<string, { sandbox: FleetSandbox; host: string }>();
-  const degraded: Array<{ host: string; error: string }> = [];
-  for (const { host, result } of live) {
-    if (!result.ok) {
-      degraded.push({ host: host.name, error: result.error });
-      continue;
-    }
-    for (const sandbox of result.value.sandboxes ?? []) {
-      byRunId.set(sandbox.id, { sandbox, host: host.name });
-    }
+  for (const entry of live) {
+    byRunId.set(entry.sandbox.id, entry);
   }
 
   const claimed = new Set<string>();

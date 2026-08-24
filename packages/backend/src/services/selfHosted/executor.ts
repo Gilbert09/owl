@@ -168,7 +168,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     // should be the one this dispatch chose.
     const provider = fleetProviderForModel(model);
 
-    const sandbox = await createSandboxRetryingUncertain(client, {
+    const { sandbox, host } = await createSandboxRetryingUncertain(client, {
       id: runId,
       workspaceId: task.workspaceId,
       // Ephemeral is what a run was: the host stops and retires the sandbox
@@ -193,12 +193,36 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
         : { anthropicKey: creds.claudeToken }),
     });
 
+    // WHICH BOX IS RUNNING THIS, from whichever party actually knows.
+    //
+    // Dialling a host directly, the registry chose it and `target.host` says so.
+    // Through the gateway the registry chose nothing — the gateway placed it —
+    // so the name arrives on the create's response and `host` carries it.
+    //
+    // Recorded because it is an authorization input, not a label: when that
+    // host's fleetd restarts it asks us for this run's credentials back, and
+    // `resolveRunCredentials` answers only for a run dispatched TO THE ASKING
+    // HOST. A row with no host refuses every pull, and the run goes on failing
+    // every LLM call for the rest of its deadline. It is also what the operator
+    // console's host column and host filter read.
+    const fleetHost = target.host ?? host;
+    if (!fleetHost) {
+      // Not fatal — the run is dispatched and will do its work. Said out loud
+      // because the consequence surfaces much later and somewhere else: the
+      // credential pull after a fleetd restart, refused, with nothing at the
+      // refusal naming this moment.
+      console.warn(
+        `[fleet] dispatch of ${runId} recorded no host (endpoint ${target.endpoint}); ` +
+          'a credential pull after a host restart will be refused. ' +
+          'The gateway names the host in X-Fleet-Host — is it too old to send one?',
+      );
+    }
     const cloudTask: CloudTaskMetadata = {
       provider: 'selfhosted',
       remoteTaskId: sandbox.id,
       remoteRunId: sandbox.id,
       status: cloudStatusForSandbox(sandbox),
-      extra: { repo: repo.slug, endpoint: target.endpoint, ...(target.host ? { host: target.host } : {}) },
+      extra: { repo: repo.slug, endpoint: target.endpoint, ...(fleetHost ? { host: fleetHost } : {}) },
     };
     await patchTaskMetadata(task.id, (existing) => ({ ...existing, cloudTask }));
 
@@ -315,7 +339,7 @@ async function workspaceFleetModel(workspaceId: string): Promise<string | undefi
 async function createSandboxRetryingUncertain(
   client: FleetClient,
   input: CreateSandboxInput,
-): Promise<FleetSandbox> {
+): Promise<{ sandbox: FleetSandbox; host?: string }> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await client.createSandbox(input);

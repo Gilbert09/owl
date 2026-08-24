@@ -117,6 +117,32 @@ export interface FleetSandbox {
   };
 }
 
+/**
+ * The response header the sandbox gateway sets to name the host that took a
+ * create. Hosts answering directly do not send it.
+ *
+ * Named here rather than inlined because two places have to agree on it and one
+ * of them is in another repository (yas `internal/control.HostHeader`).
+ */
+export const FLEET_HOST_HEADER = 'X-Fleet-Host';
+
+/**
+ * One row of the GATEWAY's placement index — not a sandbox record.
+ *
+ * Deliberately a separate type from FleetSandbox with no optional overlap: the
+ * gateway cannot answer status, phase or cost (they live on the host and change
+ * every second), and a shared type would let a caller read `status` off one of
+ * these and get `undefined` where it meant `stopped`.
+ */
+export interface GatewaySandboxRef {
+  id: string;
+  host: string;
+  createdAt?: string;
+  placed?: boolean;
+  agentic?: boolean;
+  templateId?: string;
+}
+
 /** fleetd's `GET /v1/capacity`. */
 export interface FleetCapacity {
   draining: boolean;
@@ -459,7 +485,22 @@ export class FleetClient {
     return `${this.endpoint.replace(/\/+$/, '')}${path}`;
   }
 
+  /**
+   * The ordinary call: the decoded body and nothing else.
+   *
+   * Almost everything wants this. `requestWithMeta` exists for the one caller
+   * that needs a response HEADER — see `createSandbox` and FLEET_HOST_HEADER —
+   * and routing every other method through a two-field object to serve it would
+   * put an unwrap at forty call sites to inform one.
+   */
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    return (await this.requestWithMeta<T>(path, init)).data;
+  }
+
+  private async requestWithMeta<T>(
+    path: string,
+    init: RequestInit = {},
+  ): Promise<{ data: T; host?: string }> {
     const started = Date.now();
     const method = init.method ?? 'GET';
     let resp: Response;
@@ -534,8 +575,13 @@ export class FleetClient {
       }
       throw new Error(message);
     }
-    if (resp.status === 204) return undefined as T;
-    return (await resp.json()) as T;
+    // The gateway names the host that took a create, because Talyn has to bound
+    // a later credential pull BY HOST and cannot read that off a registry it no
+    // longer consults. A host answering directly does not send it, and its
+    // absence is not an error — the registry supplied the name on that path.
+    const host = resp.headers.get(FLEET_HOST_HEADER) ?? undefined;
+    if (resp.status === 204) return { data: undefined as T, host };
+    return { data: (await resp.json()) as T, host };
   }
 
   /**
@@ -623,6 +669,22 @@ export class FleetClient {
     return this.request('/v1/sandboxes');
   }
 
+  /**
+   * The same path against the GATEWAY, which answers a different thing.
+   *
+   * A host serves its own full records here. The gateway serves its placement
+   * INDEX — id, host, and little else — because it holds no live state and a
+   * list that fanned out to every host would go blank whenever one was down.
+   * So the two share a route and not a shape, and giving them one method would
+   * hand the console `status: undefined` for every row and call it live data.
+   *
+   * The ids come back live-only (the gateway drops rows it has marked gone), so
+   * a caller wanting real status hydrates each one with `getSandbox`.
+   */
+  async listGatewaySandboxes(): Promise<{ sandboxes: GatewaySandboxRef[] }> {
+    return this.request('/v1/sandboxes');
+  }
+
   async listGoldens(): Promise<FleetGoldensView> {
     return this.request('/v1/goldens');
   }
@@ -667,9 +729,25 @@ export class FleetClient {
     return this.request('/v1/goldens/rebake', { method: 'POST', body: JSON.stringify(input) });
   }
 
-  /** Dispatch: 202 with the sandbox record, idempotent on `input.id`. */
-  async createSandbox(input: CreateSandboxInput): Promise<FleetSandbox> {
-    return this.request('/v1/sandboxes', { method: 'POST', body: JSON.stringify(input) });
+  /**
+   * Dispatch: 202 with the sandbox record, idempotent on `input.id`.
+   *
+   * Returns the host alongside it when the endpoint named one. Through the
+   * gateway that is the only way to learn it — the record in the body is
+   * fleetd's and says nothing about which fleetd wrote it — and it is not
+   * cosmetic: `resolveRunCredentials` answers a host's credential pull only for
+   * a run dispatched to THAT host, and a dispatch that recorded no host refuses
+   * every pull. Dialling a host directly the answer is already known, so `host`
+   * is absent there and the caller keeps what the registry told it.
+   */
+  async createSandbox(
+    input: CreateSandboxInput,
+  ): Promise<{ sandbox: FleetSandbox; host?: string }> {
+    const { data, host } = await this.requestWithMeta<FleetSandbox>('/v1/sandboxes', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return { sandbox: data, host };
   }
 
   /**
