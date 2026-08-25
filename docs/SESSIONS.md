@@ -2,6 +2,23 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 98 — A fix run that re-affirmed its own stale verdict (2026-08-25)
+
+PostHog/posthog#84358 sat blocked for five days on one red check. Twelve fix runs across 2026-08-20 → 25 published the same conclusion: `semgrep-devex` is a "pre-existing, repo-wide CI infra bug", the job runs `semgrep --baseline-commit` in a raw `docker run` with no `git config --global --add safe.directory /src`, none of the findings belong to this PR.
+
+**That was true on 2026-08-22.** That day's job scanned 32,535 files and reported 3,407 findings — the baseline diff really was broken, so the whole repo read as new. Master fixed the job afterwards. The 2026-08-25 job scanned **4 files** and reported **exactly 1 blocking finding**, `tuple-return-prefer-dataclass`, in a file the PR itself adds. The run posted the old verdict 16 minutes after that log existed.
+
+The prompt handed the run `- Failing CI checks: 2/199` and nothing else. Told a count, an agent goes looking for which ones — and the cheapest thing to find on that PR is its own comment history, five status updates deep, each one citing the last. A stale conclusion that is cited enough times stops reading as stale.
+
+**Two changes, both in the prompt:**
+
+- **Name the red jobs at dispatch**, pinned to the head they were read on: `- Failing CI checks: 2/199 — \`semgrep-devex\`, \`Semgrep Checks Pass\` (as of head 8fb1572)`. The head is part of the fact, not decoration — it is what makes a verdict quoted from an older head recognisable as the older fact. The names are NOT in `last_summary` (that row ships every poll tick — `failingChecksDigest` is a hash for exactly that reason), so `services/failingChecks.ts` reads them live at dispatch, which is rare enough to afford. Over REST (`githubService.listFailingCheckNames`), not the GraphQL rollup: Session 97 is what the shared GraphQL budget costs, and check names for a prompt are not worth spending it. Covers check runs AND legacy commit statuses, because `checks.failed` — the count these names sit next to — counts both. **A failed read returns `undefined`, never an empty list**: absent must read as "we didn't look", never as "nothing is failing", and it must never gate the fix run.
+- **Say plainly that an earlier status comment is not evidence.** The shipped `mergeable` template now sends the run to the failing job's own log for the CURRENT head, and makes "pre-existing / repo-wide / not this PR's fault" a claim that has to be proven against that log — quote the finding, show the file it names is one this PR neither adds nor edits. If it names a file the PR touches, it is the PR's to fix.
+
+Wired into all three server-side dispatch paths (merge-queue v2 executor, the manual fix button in `prCloudFix`, the keep-mergeable watcher). The front ends build the prompt from the cached summary alone and simply omit the field.
+
+**Still open — the loop had no bound.** `blockerSignature` was identical across all twelve runs, but the recurrence guard is scoped per head SHA and a new head clears it (`decide.ts`). Each run's own `update_branch_from_base` minted a new head, so every run bought itself a fresh budget by syncing the base while fixing nothing. Naming the checks addresses why the runs were wrong; nothing yet addresses why they were free to repeat.
+
 ## Session 97 — A merged PR that stayed on the list for an hour (2026-08-24)
 
 PostHog/posthog#87429 merged at 11:36Z. At 12:15Z it was still in the GitHub panel wearing "Ready", with a live merge button. Its neighbour #87427 (genuinely open) held a summary from 11:21Z against GitHub's 12:14Z — so the workspace was stale wholesale, not just the merged row.

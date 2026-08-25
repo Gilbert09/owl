@@ -27,6 +27,7 @@ import {
   tasks as tasksTable,
   workspaces as workspacesTable,
 } from '../../db/schema.js';
+import { readFailingChecks } from '../failingChecks.js';
 import { githubService, MergeNotPermittedForAppError } from '../github.js';
 import { fetchUnsignedCommitCount } from '../githubGraphql.js';
 import { githubRateGate } from '../githubRateGate.js';
@@ -1314,6 +1315,13 @@ async function fireFixRun(
   // Phase B — create the cloud task (only the claim winner reaches here).
   const ref = `${ctx.pr.owner}/${ctx.pr.repo}#${ctx.pr.number}`;
   const summary = ctx.prSnap.summary;
+  const failingChecks = await readFailingChecks(
+    ctx.pr.workspaceId,
+    ctx.pr.owner,
+    ctx.pr.repo,
+    ctx.pr.number,
+    summary
+  );
   const prTitle = (ctx.pr.lastSummary as { title?: string } | null)?.title ?? '';
   let created: { id: string };
   try {
@@ -1335,6 +1343,11 @@ async function fireFixRun(
         summary,
         provider: resolved.provider,
         resignCommits: resign,
+        // Names the red jobs in the prompt. Without them the run is told only
+        // "N/M checks failing" and goes looking — and the first thing it finds
+        // is the PR's own comment history, which is how a stale verdict gets
+        // re-affirmed instead of re-derived against the current head.
+        failingChecks,
         // Starts the run at the provider's failure output rather than the PR's
         // own (green) checks — see queueFailureRule.
         queueFailure,

@@ -17,6 +17,7 @@ import {
   workspaces as workspacesTable,
   environments as environmentsTable,
 } from '../db/schema.js';
+import { readFailingChecks } from './failingChecks.js';
 import { getCloudProvider } from './cloudProviders/registry.js';
 import { fleetRefusalReason, workspaceMayUseFleet } from './cloudProviders/fleetAccess.js';
 import { createCloudTask } from './taskCreate.js';
@@ -183,6 +184,13 @@ export async function startPrMergeableRun(
 
   const summary = (row.lastSummary ?? {}) as PRMergeableSummary;
   const ref = `${row.owner}/${row.repo}#${row.number}`;
+  const failingChecks = await readFailingChecks(
+    row.workspaceId,
+    row.owner,
+    row.repo,
+    row.number,
+    summary
+  );
   const prTitle = summary.title ?? '';
   const template = await workspacePromptTemplate(row.workspaceId, 'mergeable');
 
@@ -198,6 +206,7 @@ export async function startPrMergeableRun(
       number: row.number,
       summary,
       provider,
+      failingChecks,
       template,
     }),
     repositoryId: row.repositoryId,

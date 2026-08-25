@@ -131,8 +131,28 @@ export function mergeBlockerReason(s: PRMergeableSummary): string {
   return 'needs attention';
 }
 
+/**
+ * The checks GitHub reports as failing, read live at dispatch rather than off
+ * the cached summary.
+ *
+ * `last_summary` carries only a COUNT and a hash of the failing set — the names
+ * are deliberately not persisted, because that row ships on every poll tick (see
+ * the DB-egress rules). So a run that needs to be pointed at a specific red job
+ * has to be told at dispatch time, which is rare enough to afford one call.
+ *
+ * `headSha` is part of the fact, not decoration: it is what lets the agent tell
+ * this reading from an older one it may find quoted in a PR comment.
+ */
+export interface FailingChecksReading {
+  headSha: string;
+  names: string[];
+}
+
 /** Bulleted list of the issues we detected, for the agent prompt. */
-export function buildIssuesSummary(s: PRMergeableSummary): string {
+export function buildIssuesSummary(
+  s: PRMergeableSummary,
+  failingChecks?: FailingChecksReading
+): string {
   const lines: string[] = [];
   if (s.blockingReason === 'merge_conflicts' || s.mergeable === 'CONFLICTING') {
     lines.push('- Merge conflicts with the base branch');
@@ -145,9 +165,18 @@ export function buildIssuesSummary(s: PRMergeableSummary): string {
   }
   if (s.checks.failed > 0) {
     const optional = s.blockingReason === 'checks_failed_optional';
+    // Name them when we have them. "Failing CI checks: 2/199" sends the agent
+    // to look for itself, and what it finds first is the PR's own comment
+    // history — which is how a stale verdict gets re-affirmed instead of
+    // re-derived. The head SHA pins the reading to a commit so a quoted
+    // conclusion from an earlier head is recognisable as the older fact.
+    const named = failingChecks?.names.length
+      ? ` — ${failingChecks.names.map((n) => `\`${n}\``).join(', ')} (as of head ${failingChecks.headSha.slice(0, 7)})`
+      : '';
     lines.push(
       `- Failing CI checks: ${s.checks.failed}/${s.checks.total}` +
-        (optional ? ' (none required — not blocking the merge)' : '')
+        (optional ? ' (none required — not blocking the merge)' : '') +
+        named
     );
   }
   return lines.length > 0
@@ -215,6 +244,13 @@ export interface MergeablePromptInput {
   repo: string;
   number: number;
   summary: PRMergeableSummary;
+  /**
+   * The names of the checks currently failing on the PR's head. Optional
+   * everywhere: the front ends build this prompt from the cached summary alone
+   * and simply omit it, and a backend dispatch that cannot read them must still
+   * dispatch. Absent means "we didn't look", never "nothing is failing".
+   */
+  failingChecks?: FailingChecksReading;
   /**
    * The PR's base branch enforces "require signed commits" AND the branch
    * currently has unsigned commits — so the merge will be refused until every
@@ -382,7 +418,7 @@ export function mergeablePromptVariables(
   const ref = `${owner}/${repo}#${number}`;
   const claude = provider === 'claude_code';
   const issues =
-    buildIssuesSummary(s) +
+    buildIssuesSummary(s, input.failingChecks) +
     (input.resignCommits
       ? '\n- Some commits on the branch are UNSIGNED and the base requires signed commits — re-sign the whole branch (see the COMMIT SIGNING section above).'
       : '') +

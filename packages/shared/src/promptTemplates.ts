@@ -240,6 +240,8 @@ Your job is to keep iterating on this PR until ALL of the following are true and
 2. CI is fully green on the latest commit of the PR branch.
    - Inspect the check runs / status checks via {{githubTools}}.
    - If any required check is failing, investigate the failure (logs, test output) and fix the underlying problem in code, then publish the fix to the PR branch per the publishing rules above.
+   - Read the failing job's OWN log for the CURRENT head. Status updates already posted on this PR — including ones you wrote in an earlier run — are not evidence. CI configuration moves, so a verdict that was correct days ago can be wrong today. Re-derive it from the live log every time.
+   - Before you conclude that a failure is pre-existing, repo-wide, someone else's, or otherwise "not this PR's fault", prove it against that log: quote the finding and show that the file it names is one this PR neither adds nor edits. If the finding points at a file this PR touches, it is this PR's to fix — fix it.
    - Flaky tests: re-run them once to confirm they're actually flaky; if they are, document it briefly in a PR comment, but otherwise still try to fix the root cause rather than ignoring it.
    - Do not bypass checks (no --no-verify, no skipping required checks). Fix the real issue.
 

@@ -15,6 +15,7 @@ import { createCloudTask } from './taskCreate.js';
 import { TaskLimitError } from './billing/entitlements.js';
 import { getExternalMergeGate } from './repoMergeGate.js';
 import { readExternalQueueState } from './externalQueueState.js';
+import { readFailingChecks } from './failingChecks.js';
 import { githubService } from './github.js';
 import { graphqlBudget } from './graphqlBudget.js';
 import { githubRateGate } from './githubRateGate.js';
@@ -393,6 +394,13 @@ class PRAutoMergeWatcher {
     const ref = `${row.owner}/${row.repo}#${row.number}`;
     const prTitle = (row.lastSummary as { title?: string } | null)?.title ?? '';
     const template = await workspacePromptTemplate(row.workspaceId, 'mergeable');
+    const failingChecks = await readFailingChecks(
+      row.workspaceId,
+      row.owner,
+      row.repo,
+      row.number,
+      summary
+    );
     let created;
     try {
       created = await createCloudTask({
@@ -406,6 +414,7 @@ class PRAutoMergeWatcher {
           number: row.number,
           summary,
           provider,
+          failingChecks,
           template,
         }),
         repositoryId: row.repositoryId,

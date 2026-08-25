@@ -1769,6 +1769,105 @@ class GitHubService extends EventEmitter {
    * Never throws for per-run failures; the `reason` tells the caller what to
    * put in front of the user when nothing could be re-run.
    */
+  /**
+   * The latest attempt of every check run on a commit.
+   *
+   * `filter=latest` drops superseded attempts; a big repo (posthog: ~200 checks
+   * per head) still spans several pages.
+   */
+  private async fetchLatestCheckRuns(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    headSha: string
+  ): Promise<
+    Array<{
+      id: number;
+      name: string;
+      conclusion: string | null;
+      app?: { slug?: string } | null;
+      check_suite?: { id?: number } | null;
+    }>
+  > {
+    const all: Array<{
+      id: number;
+      name: string;
+      conclusion: string | null;
+      app?: { slug?: string } | null;
+      check_suite?: { id?: number } | null;
+    }> = [];
+    for (let page = 1; page <= 3; page++) {
+      const res = await this.apiRequest<{ check_runs: typeof all }>(
+        workspaceId,
+        `/repos/${owner}/${repo}/commits/${headSha}/check-runs?filter=latest&per_page=100&page=${page}`
+      );
+      const runs = res.check_runs ?? [];
+      all.push(...runs);
+      if (runs.length < 100) break;
+    }
+    return all;
+  }
+
+  /**
+   * The names of the checks failing on a PR's head, for a fix run's prompt.
+   *
+   * REST rather than the GraphQL rollup that produces `failingChecksDigest`:
+   * this runs at fix-run dispatch, and the GraphQL points budget is shared
+   * account-wide with the poll loops, the merge queue, and manual refresh
+   * (Session 97). Check names for a prompt are not worth spending it on.
+   *
+   * Covers both surfaces GitHub reports a red check on — check runs and the
+   * legacy commit statuses — because `checks.failed`, the count the prompt puts
+   * these names next to, counts both.
+   *
+   * Returns null when the read fails. The caller dispatches the run regardless:
+   * naming the checks makes a prompt sharper, and must never gate the fix.
+   */
+  async listFailingCheckNames(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    number: number
+  ): Promise<{ headSha: string; names: string[] } | null> {
+    try {
+      const pr = await this.getPullRequest(workspaceId, owner, repo, number);
+      const headSha = pr.head?.sha;
+      if (!headSha) return null;
+
+      const names = new Set<string>();
+      const runs = await this.fetchLatestCheckRuns(workspaceId, owner, repo, headSha);
+      for (const run of runs) {
+        // Same reading of "failed" the check counters use: a cancelled or
+        // action_required check is red to GitHub and blocks the merge, so a
+        // prompt that omitted it would send the agent looking for a failure it
+        // had been told was not there.
+        if (
+          run.conclusion === 'failure' ||
+          run.conclusion === 'timed_out' ||
+          run.conclusion === 'cancelled' ||
+          run.conclusion === 'action_required'
+        ) {
+          names.add(run.name);
+        }
+      }
+
+      const status = await this.apiRequest<{
+        statuses?: Array<{ context: string; state: string }>;
+      }>(workspaceId, `/repos/${owner}/${repo}/commits/${headSha}/status?per_page=100`);
+      for (const ctx of status.statuses ?? []) {
+        if (ctx.state === 'failure' || ctx.state === 'error') names.add(ctx.context);
+      }
+
+      return { headSha, names: [...names].sort() };
+    } catch (err) {
+      console.warn(
+        `[github] could not read failing check names for ${owner}/${repo}#${number}:`,
+        err instanceof Error ? err.message : err
+      );
+      return null;
+    }
+  }
+
   async rerequestFailedCheckRuns(
     workspaceId: string,
     owner: string,
@@ -1782,35 +1881,15 @@ class GitHubService extends EventEmitter {
     const headSha = pr.head?.sha;
     if (!headSha) return { requested: 0, reason: 'no-failing-check-runs' };
 
-    // `filter=latest` returns only the newest attempt of each check; a big
-    // repo (posthog: ~200 checks per head) spans multiple pages.
-    const failing: Array<{ id: number; name: string; appSlug: string; suiteId?: number }> = [];
-    for (let page = 1; page <= 3; page++) {
-      const res = await this.apiRequest<{
-        check_runs: Array<{
-          id: number;
-          name: string;
-          conclusion: string | null;
-          app?: { slug?: string } | null;
-          check_suite?: { id?: number } | null;
-        }>;
-      }>(
-        workspaceId,
-        `/repos/${owner}/${repo}/commits/${headSha}/check-runs?filter=latest&per_page=100&page=${page}`
-      );
-      const runs = res.check_runs ?? [];
-      failing.push(
-        ...runs
-          .filter((c) => c.conclusion === 'failure' || c.conclusion === 'timed_out')
-          .map((c) => ({
-            id: c.id,
-            name: c.name,
-            appSlug: c.app?.slug ?? '',
-            suiteId: c.check_suite?.id,
-          }))
-      );
-      if (runs.length < 100) break;
-    }
+    const runs = await this.fetchLatestCheckRuns(workspaceId, owner, repo, headSha);
+    const failing = runs
+      .filter((c) => c.conclusion === 'failure' || c.conclusion === 'timed_out')
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        appSlug: c.app?.slug ?? '',
+        suiteId: c.check_suite?.id,
+      }));
     if (failing.length === 0) return { requested: 0, reason: 'no-failing-check-runs' };
 
     let requested = 0;
