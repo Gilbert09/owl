@@ -7,6 +7,7 @@ import type {
   DebugWebhookLag,
 } from '@talyn/shared';
 import { graphqlBudget } from './graphqlBudget.js';
+import { mergeableSettleStats } from './mergeableSettle.js';
 
 /**
  * Owner filter for the admin Debug panel. A FastOwl account id shows only that
@@ -458,6 +459,7 @@ class DebugBus {
       bufferSize: this.buffer.length,
       wsClients: this.clientCounter?.() ?? 0,
       graphqlBudgets: graphqlBudget.snapshot(),
+      mergeableSettle: mergeableSettleStats(),
       owners,
       dbStats: { requests: this.dbRequestCount, egressBytes: this.dbEgressBytes },
       webhookLag: this.computeWebhookLag(this.webhookLatencies, this.lastWebhookProcessedAt),

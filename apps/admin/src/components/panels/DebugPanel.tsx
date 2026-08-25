@@ -5,6 +5,7 @@ import type {
   DebugCategory,
   DebugEvent,
   DebugGraphqlBudget,
+  DebugMergeableSettle,
   DebugSnapshot,
 } from '@talyn/shared';
 import { api } from '../../lib/api';
@@ -224,6 +225,66 @@ function resetIn(iso: string): string {
 /** A GraphQL points-budget card for one rate-limit account. Bar reddens as the
  *  budget runs low; an amber "deferring" state means non-urgent loops are being
  *  held back to protect the reserve. Compact — there are only a few accounts. */
+/**
+ * How often the webhook refresh path lands on `mergeable: UNKNOWN`, and whether
+ * the deferred re-ask is keeping up.
+ *
+ * GitHub computes mergeability lazily, so the hot path (which does not block on
+ * it) writes UNKNOWN — and `blockingReason: 'unknown'` is in NO list bucket, so
+ * the PR silently leaves both "Needs attention" and "Ready to merge" and loses
+ * its merge button. `deferred` + `failed` are the ones that still wait for the
+ * 5-6 min reconcile sweep; a rising `pending` means the drain is behind.
+ */
+function MergeableSettleCard({ m }: { m: DebugMergeableSettle }) {
+  const unhandled = m.deferred + m.failed;
+  const stat = (label: string, value: string, tone?: string) => (
+    <span className="flex flex-col">
+      <span className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</span>
+      <span className={cn('font-mono text-xs', tone ?? 'text-zinc-200')}>{value}</span>
+    </span>
+  );
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+      <Tip
+        side="bottom"
+        content={
+          <span className="block">
+            <span className="font-medium text-zinc-100">Mergeable settle</span>
+            <span className="mt-1 block">
+              GitHub computes <span className="font-mono">mergeable</span> lazily, so the webhook
+              refresh writes UNKNOWN rather than blocking on it. An UNKNOWN verdict is in no list
+              bucket, so the PR drops out of both &ldquo;Needs attention&rdquo; and &ldquo;Ready to
+              merge&rdquo;. These are the deferred re-asks that settle it.
+            </span>
+            <span className="mt-1 block text-zinc-500">
+              {m.observed.toLocaleString()} observed · {m.settled.toLocaleString()} settled (avg{' '}
+              {m.avgSettleMs}ms) · {m.deferred.toLocaleString()} deferred for budget ·{' '}
+              {m.failed.toLocaleString()} failed. Anything not settled falls back to the reconcile
+              sweep.
+            </span>
+          </span>
+        }
+      >
+        <span className="flex items-center gap-1 text-xs text-zinc-200">
+          Mergeable settle
+          <Info className="h-3 w-3 shrink-0 text-zinc-600" />
+        </span>
+      </Tip>
+      <div className="mt-1.5 flex flex-wrap gap-3">
+        {stat('observed', m.observed.toLocaleString())}
+        {stat('settled', m.settled.toLocaleString(), 'text-emerald-400')}
+        {stat('avg', `${m.avgSettleMs}ms`)}
+        {stat(
+          'to sweep',
+          unhandled.toLocaleString(),
+          unhandled > 0 ? 'text-amber-400' : 'text-zinc-200'
+        )}
+        {stat('pending', m.pending.toLocaleString())}
+      </div>
+    </div>
+  );
+}
+
 function GraphqlBudgetCard({ b }: { b: DebugGraphqlBudget }) {
   const pct = b.limit > 0 ? Math.max(0, Math.min(1, b.remaining / b.limit)) : 0;
   const bar = b.deferring
@@ -664,7 +725,7 @@ export function DebugPanel() {
           })}
         </div>
 
-        {(snapshot?.graphqlBudgets?.length ?? 0) > 0 && (
+        {((snapshot?.graphqlBudgets?.length ?? 0) > 0 || snapshot?.mergeableSettle) && (
           <>
             <div className="mt-3 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">
               <Gauge className="h-3.5 w-3.5" />
@@ -674,6 +735,9 @@ export function DebugPanel() {
               {(snapshot?.graphqlBudgets ?? []).map((b) => (
                 <GraphqlBudgetCard key={b.accountKey} b={b} />
               ))}
+              {snapshot?.mergeableSettle && (
+                <MergeableSettleCard m={snapshot.mergeableSettle} />
+              )}
             </div>
           </>
         )}

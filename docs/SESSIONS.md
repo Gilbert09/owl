@@ -2,6 +2,28 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 99 — The list said one thing, the detail sheet said another (2026-08-25)
+
+PR rows in the GitHub panel read stale against GitHub, and opening the detail sheet showed the real state. That is not a coincidence: `GET /pull-requests` is a pure read of `last_summary`, while `GET /pull-requests/:id` fetches live and, when the result differs materially, **writes it back and broadcasts** `pull_request:updated`. Opening the detail does not display the truth — it repairs the cache, which is why the list snaps into line right after.
+
+What let the cache drift is a chain of deliberate load-protection decisions that together left ONE field with no fast path. There is **no periodic PR poll any more** (`prMonitor.init()`: "webhooks drive realtime freshness + buckets, and the reconcile sweep is the backstop"), and none of the webhook paths can settle mergeability:
+
+- `push` is **skipped entirely** — a merge to a busy base changes every open PR's mergeability and behind-ness, and the 5-6 min sweep is documented as the authoritative base-advance check.
+- `check_suite` is a no-op; `check_run` updates counts incrementally, neither touches mergeability.
+- The refresh that DOES run passes `resolveMergeable: false`, and GitHub computes `mergeable` **lazily** — the first ask after any invalidation answers `UNKNOWN`. So the hot path writes `UNKNOWN` over a known value and nothing asks again.
+
+The bite is that `computeBlockingReason` maps `mergeable: 'UNKNOWN'` → `blockingReason: 'unknown'`, and **`'unknown'` is in no list bucket**: `isNeedsAttention` matches `changes_requested`/`checks_failed`/`merge_conflicts`, `canMerge` matches `mergeable`/`checks_failed_optional`. A PR whose mergeability is unresolved silently leaves BOTH "Needs attention" and "Ready to merge" and loses its merge button — and it is most likely to land there right after the last check finishes, which is exactly when the answer matters.
+
+Two things stretch the window past the nominal 5-6 min: the sweep **skips any account whose GraphQL points are in the reserve** (Session 97's territory), and `filterStale` gives the cohort you are NOT looking at a 300s TTL against a 300-360s sweep, so an inactive-cohort PR can miss a sweep and wait ~12 min.
+
+**`services/mergeableSettle.ts`** closes it without putting the wait back on the hot path: a PR whose freshly-written summary says open + `UNKNOWN` is queued, coalesced per PR, and re-asked by a timer `UNKNOWN_MERGEABLE_BACKOFF_MS` later — running the SAME `resolveUnknownMergeable` the sweep uses. The timings now live in the settler and prMonitor imports them, so the inline resolve and the deferred settle cannot answer "how long does GitHub take" with different numbers. The drain is **sequential and reserve-aware** (same `graphqlBudget.shouldDefer` check the sweep makes) because this is the least urgent consumer of a budget the merge queue and manual refresh share. `RefreshPrOptions.settleUnknown: false` is what stops the settle's own re-apply from re-queueing itself — without it, a PR GitHub is still computing loops forever.
+
+**Nothing it gives up on is worse off than before**: a gated account, a failed fetch, or a PR still UNKNOWN after the retries falls back to the sweep exactly as it did.
+
+Measurement is a **Debug panel tile** (`mergeableSettle` on the debug snapshot), kept **debug-bus-independent the way `graphqlBudget` is** — the bus reads the counters on snapshot rather than the settler pushing events into it. An aggregate is the better instrument anyway: a per-occurrence event stream on a busy workspace buries the number under its own noise. `observed` is how often the hot path lands on UNKNOWN, `deferred` + `failed` are the ones still waiting on the sweep, `pending` shows the drain falling behind.
+
+**Not changed, and worth knowing.** Two of the three holes are still open by design: `push` is still skipped (fanning out a refresh per open PR on a busy base is what the skip exists to prevent), and the inactive-cohort 300s TTL still races the sweep interval. The settle only fixes rows a webhook actually touched. A base-branch merge that makes a PR conflict is still invisible until the sweep.
+
 ## Session 98 — A fix run that re-affirmed its own stale verdict (2026-08-25)
 
 PostHog/posthog#84358 sat blocked for five days on one red check. Twelve fix runs across 2026-08-20 → 25 published the same conclusion: `semgrep-devex` is a "pre-existing, repo-wide CI infra bug", the job runs `semgrep --baseline-commit` in a raw `docker run` with no `git config --global --add safe.directory /src`, none of the findings belong to this PR.

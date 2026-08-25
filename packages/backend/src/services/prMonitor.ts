@@ -17,6 +17,12 @@ import {
 } from './githubGraphql.js';
 import { upsertFromBatchResult } from './prCache.js';
 import { ttlFor, isCohortActive } from './prFocus.js';
+import {
+  initMergeableSettler,
+  scheduleMergeableSettle,
+  UNKNOWN_MERGEABLE_BACKOFF_MS,
+  UNKNOWN_MERGEABLE_RETRIES,
+} from './mergeableSettle.js';
 import { emitPullRequestUpdated } from './websocket.js';
 import { domainEvents } from './events.js';
 import {
@@ -51,6 +57,18 @@ interface TrackedOpenRow {
  * coalesce too). Create a fresh one per tick — a stale open list must not
  * outlive the tick that fetched it.
  */
+/**
+ * Options shared by every single-PR refresh entry point.
+ *
+ * `settleUnknown` exists so the deferred settle can re-apply its own result
+ * without re-queueing itself — see `mergeableSettle.ts`.
+ */
+export interface RefreshPrOptions {
+  resolveMergeable?: boolean;
+  repositoryId?: string;
+  settleUnknown?: boolean;
+}
+
 export interface RestSweepCache {
   openLists: Map<string, Promise<Set<number> | null>>;
   prLookups: Map<string, Promise<{ state: 'open' | 'closed'; mergedAt: string | null } | null>>;
@@ -65,9 +83,9 @@ export function createRestSweepCache(): RestSweepCache {
 // to UNKNOWN until recomputed. On a busy repo a single poll usually lands
 // on UNKNOWN, which renders as a blank status pill. Re-query the still-
 // UNKNOWN open PRs a few times with a short backoff so we persist the
-// resolved MERGEABLE/CONFLICTING instead.
-const UNKNOWN_MERGEABLE_RETRIES = 3;
-const UNKNOWN_MERGEABLE_BACKOFF_MS = 1_500;
+// resolved MERGEABLE/CONFLICTING instead. The timings live in
+// `mergeableSettle.ts` so the inline resolve and the deferred settle answer
+// the same question with the same numbers.
 
 // Cross-workspace fetch de-dup window for the bulk poll. When many workspaces
 // track one shared org, a PR fetched for one this window serves the rest (see
@@ -119,6 +137,18 @@ class PRMonitorService extends EventEmitter {
     githubService.on('disconnected', (workspaceId: string) => {
       this.invalidateUserLogin(workspaceId);
     });
+    // The webhook path writes `mergeable: UNKNOWN` rather than blocking on
+    // GitHub's lazy computation; this is what asks again, off that path.
+    // Registered rather than imported so mergeableSettle never depends on us.
+    initMergeableSettler((target) =>
+      this.refreshPrNumbers(target.workspaceId, target.owner, target.repo, [target.number], {
+        resolveMergeable: true,
+        repositoryId: target.repositoryId,
+        // The settle IS the resolution attempt. Re-queueing from its own
+        // re-apply would loop on a PR GitHub is still computing.
+        settleUnknown: false,
+      })
+    );
     // No periodic loop and no poller tile: webhooks drive realtime freshness +
     // buckets, and the reconcile sweep is the backstop. `poll()` survives only
     // as the on-demand entry point (user Refresh / forced).
@@ -1088,7 +1118,7 @@ class PRMonitorService extends EventEmitter {
     owner: string,
     repo: string,
     number: number,
-    opts: { resolveMergeable?: boolean; repositoryId?: string } = {}
+    opts: RefreshPrOptions = {}
   ): Promise<void> {
     await this.refreshPrNumbers(workspaceId, owner, repo, [number], opts);
   }
@@ -1109,7 +1139,7 @@ class PRMonitorService extends EventEmitter {
     owner: string,
     repo: string,
     numbers: number[],
-    opts: { resolveMergeable?: boolean; repositoryId?: string } = {}
+    opts: RefreshPrOptions = {}
   ): Promise<void> {
     if (numbers.length === 0) return;
     // The webhook fan-out already resolved the repo (id + canonical owner/repo
@@ -1121,7 +1151,8 @@ class PRMonitorService extends EventEmitter {
     const results = await this.fetchPrSummaries(workspaceId, watched, numbers, opts);
     await this.applyPrResults(
       { workspaceId, repositoryId: watched.id, fullName: watched.fullName },
-      results
+      results,
+      opts
     );
   }
 
@@ -1234,7 +1265,8 @@ class PRMonitorService extends EventEmitter {
    */
   private async applyPrResults(
     target: { workspaceId: string; repositoryId: string; fullName: string },
-    results: BatchPRByNumberResult[]
+    results: BatchPRByNumberResult[],
+    opts: RefreshPrOptions = {}
   ): Promise<void> {
     const login = await this.resolveCurrentUser(target.workspaceId);
     for (const result of results) {
@@ -1272,6 +1304,25 @@ class PRMonitorService extends EventEmitter {
         reviewRequested,
         authored,
       });
+      // The row we just wrote says GitHub hasn't computed mergeability yet, so
+      // its `blockingReason` is 'unknown' — a verdict that belongs to no list
+      // bucket and hides the merge button. Ask again shortly, off this path.
+      // Skipped when the caller already resolved (the sweep) or IS the settle.
+      if (
+        opts.settleUnknown !== false &&
+        opts.resolveMergeable !== true &&
+        summary.state === 'open' &&
+        summary.mergeable === 'UNKNOWN'
+      ) {
+        const [owner, repo] = target.fullName.split('/');
+        scheduleMergeableSettle({
+          workspaceId: target.workspaceId,
+          repositoryId: target.repositoryId,
+          owner: owner ?? '',
+          repo: repo ?? '',
+          number: summary.number,
+        });
+      }
     }
   }
 

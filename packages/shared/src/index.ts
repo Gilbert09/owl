@@ -680,6 +680,31 @@ export interface DebugGraphqlBudget {
   deferring: boolean;
 }
 
+/**
+ * Deferred `mergeable: UNKNOWN` settles since boot.
+ *
+ * GitHub computes mergeability lazily, so the webhook refresh path (which does
+ * not block on it) writes UNKNOWN — a verdict that belongs to no list bucket
+ * and hides the merge button. A short-delay re-ask settles it instead of
+ * leaving the row for the 5-6 min reconcile sweep. `observed` is how often the
+ * hot path lands there; `deferred` + `failed` are the cases that fall back to
+ * the sweep exactly as before.
+ */
+export interface DebugMergeableSettle {
+  /** Rows the hot path left on `mergeable: UNKNOWN` (counts repeats). */
+  observed: number;
+  /** Settles that ran to completion. */
+  settled: number;
+  /** Skipped — the account's GraphQL points are in the reserve. */
+  deferred: number;
+  /** The re-ask threw (gated, revoked token, network). */
+  failed: number;
+  /** PRs queued for a settle right now. */
+  pending: number;
+  /** Mean wall-clock of a settle, ms. Dominated by GitHub's own compute time. */
+  avgSettleMs: number;
+}
+
 /** Point-in-time view of the backend's internals for the Debug panel. */
 export interface DebugSnapshot {
   pollers: DebugPollerState[];
@@ -691,6 +716,8 @@ export interface DebugSnapshot {
   wsClients: number;
   /** GitHub GraphQL points budget per account, with deferral status. */
   graphqlBudgets: DebugGraphqlBudget[];
+  /** Deferred `mergeable: UNKNOWN` re-asks — see {@link DebugMergeableSettle}. */
+  mergeableSettle: DebugMergeableSettle;
   /** Accounts with attributed debug activity, for the per-user filter. */
   owners: DebugOwner[];
   /** Cumulative Postgres query stats since the last clear. */
