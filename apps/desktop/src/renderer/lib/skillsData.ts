@@ -17,6 +17,8 @@ export interface SkillsSnapshot {
   localFiles: LocalSkillFile[];
   usage: Record<string, SkillUsageEntry>;
   repoStatus: ListSkillsResponse['repoStatus'];
+  /** Why repo discovery failed, when it did — GitHub's own message. */
+  repoError?: string;
 }
 
 const cache = new Map<string, SkillsSnapshot>();
@@ -62,6 +64,7 @@ export async function loadSkills(
       localFiles,
       usage: backend.value.usage,
       repoStatus: backend.value.repoStatus,
+      repoError: backend.value.repoError,
     };
     cache.set(key, snapshot);
     return { snapshot, error: null };
@@ -72,7 +75,7 @@ export async function loadSkills(
   const stale = cache.get(key);
   if (stale) return { snapshot: stale, error };
   return {
-    snapshot: { skills: localSummaries, localFiles, usage: {}, repoStatus: 'error' },
+    snapshot: { skills: localSummaries, localFiles, usage: {}, repoStatus: 'error', repoError: error },
     error,
   };
 }

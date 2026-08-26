@@ -166,6 +166,35 @@ function encodeGitHubPath(path: string): string {
   return path.split('/').map(encodeURIComponent).join('/');
 }
 
+/** One entry of a git tree listing (see {@link GitHubService.getTreeRecursive}). */
+export interface GitTreeEntry {
+  /** Path relative to the tree that was requested. */
+  path: string;
+  /** `blob` = file, `tree` = directory, `commit` = submodule. */
+  type: 'blob' | 'tree' | 'commit';
+  /** Git file mode; `120000` is a symlink, which reports as a `blob`. */
+  mode: string;
+  sha: string;
+  /** Blobs only. */
+  size?: number;
+}
+
+interface GitTreeResponse {
+  tree?: GitTreeEntry[];
+  truncated?: boolean;
+}
+
+/**
+ * Encode a tree-addressing expression for the trees API. The `HEAD:<dir>`
+ * form's colon is a separator GitHub must still see, so only the path part is
+ * percent-encoded.
+ */
+function encodeGitTreeish(treeish: string): string {
+  const sep = treeish.indexOf(':');
+  if (sep === -1) return encodeURIComponent(treeish);
+  return `${encodeURIComponent(treeish.slice(0, sep))}:${encodeGitHubPath(treeish.slice(sep + 1))}`;
+}
+
 /**
  * Resolve a symlink `target` against the symlink's own repo path (e.g.
  * `.claude/skills` + `../.agents/skills` → `.agents/skills`). Returns null
@@ -195,6 +224,11 @@ const SYMLINK_FOLLOW_DEPTH = 3;
  */
 function isGitHubNotFound(err: unknown): boolean {
   return err instanceof Error && /GitHub API error 404\b/.test(err.message);
+}
+
+/** A 422 — GitHub understood the request but the object was the wrong kind. */
+function isGitHubUnprocessable(err: unknown): boolean {
+  return err instanceof Error && /GitHub API error 422\b/.test(err.message);
 }
 
 interface GitHubUser {
@@ -1333,23 +1367,93 @@ class GitHubService extends EventEmitter {
     ref?: string,
     followDepth: number = SYMLINK_FOLLOW_DEPTH
   ): Promise<GitHubContentsEntry[] | null> {
+    const resolved = await this.getDirectoryListingResolved(
+      workspaceId,
+      owner,
+      repo,
+      path,
+      ref,
+      followDepth
+    );
+    return resolved?.entries ?? null;
+  }
+
+  /**
+   * {@link getDirectoryListing} plus the repo path the listing actually lives
+   * at — the caller's path for a real directory, the link target for a
+   * symlink. The git APIs (trees, blobs) address a *tree object*, so a caller
+   * that wants to switch to them has to know the resolved path first:
+   * `git/trees/HEAD:.claude/skills` 422s on posthog/posthog, because that
+   * entry is a symlink blob, not a tree.
+   */
+  async getDirectoryListingResolved(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    path: string,
+    ref?: string,
+    followDepth: number = SYMLINK_FOLLOW_DEPTH
+  ): Promise<{ path: string; entries: GitHubContentsEntry[] } | null> {
     const refQuery = ref ? `?ref=${encodeURIComponent(ref)}` : '';
     try {
       const entries = await this.apiRequest<GitHubContentsEntry[] | GitHubContentsEntry>(
         workspaceId,
         `/repos/${owner}/${repo}/contents/${encodeGitHubPath(path)}${refQuery}`
       );
-      if (Array.isArray(entries)) return entries;
+      if (Array.isArray(entries)) return { path, entries };
       if (entries.type === 'symlink' && entries.target && followDepth > 0) {
         const resolved = resolveRepoRelativePath(entries.path ?? path, entries.target);
         if (resolved) {
-          return this.getDirectoryListing(workspaceId, owner, repo, resolved, ref, followDepth - 1);
+          return this.getDirectoryListingResolved(
+            workspaceId,
+            owner,
+            repo,
+            resolved,
+            ref,
+            followDepth - 1
+          );
         }
       }
       // A plain file path — callers asked for a directory.
       return null;
     } catch (err) {
       if (isGitHubNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * Every entry under a directory in ONE call, via the git trees API.
+   *
+   * The contents API lists a single level, so walking a directory of N
+   * subdirectories costs N+1 requests — a burst that trips GitHub's
+   * concurrent-request secondary limit long before it costs real budget
+   * (posthog/posthog's 88 skill dirs were 89 listings per discovery). A
+   * recursive tree on the subdirectory is one request, and it carries each
+   * blob's `sha` and `size`, so callers can skip content they already have.
+   *
+   * `treeish` is a tree-addressing expression — a sha, a branch, or the
+   * `HEAD:<dir>` form. Returns null when it doesn't resolve to a tree (404
+   * for a missing path, 422 for a blob — e.g. a symlink, which is why
+   * callers resolve the path with {@link getDirectoryListingResolved}
+   * first). `truncated` is GitHub's own flag: over ~100k entries or 7MB it
+   * returns a partial tree, and a partial listing must NOT be read as the
+   * whole directory.
+   */
+  async getTreeRecursive(
+    workspaceId: string,
+    owner: string,
+    repo: string,
+    treeish: string
+  ): Promise<{ entries: GitTreeEntry[]; truncated: boolean } | null> {
+    try {
+      const tree = await this.apiRequest<GitTreeResponse>(
+        workspaceId,
+        `/repos/${owner}/${repo}/git/trees/${encodeGitTreeish(treeish)}?recursive=1`
+      );
+      return { entries: tree.tree ?? [], truncated: Boolean(tree.truncated) };
+    } catch (err) {
+      if (isGitHubNotFound(err) || isGitHubUnprocessable(err)) return null;
       throw err;
     }
   }

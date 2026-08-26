@@ -1040,6 +1040,12 @@ export interface ListSkillsResponse {
   repo: SkillSummary[];
   /** 'none' = repo has no .claude/skills dir; 'error' = GitHub fetch failed. */
   repoStatus: 'ok' | 'none' | 'error';
+  /**
+   * Why discovery failed, on `repoStatus: 'error'` — GitHub's own message
+   * (a rate-limit backoff reads very differently from a permission problem,
+   * and "Couldn't load this repo's skills" alone can't tell them apart).
+   */
+  repoError?: string;
   /** Usage stats for every skill key the workspace has ever run. */
   usage: Record<SkillKey, SkillUsageEntry>;
 }

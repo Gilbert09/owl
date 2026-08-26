@@ -2,6 +2,29 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 100 — The skill picker asked GitHub 178 questions to list 88 skills (2026-08-26)
+
+"Couldn't load this repo's skills" on a PostHog/posthog PR. The picker fell back to local skills only, and Retry did not help.
+
+Repo-skill discovery walked the directory tree one request at a time. It listed `.claude/skills`, then listed EVERY subdirectory to find each `SKILL.md`, then read each file — all through one unbounded `Promise.all`. On posthog/posthog that is **89 listings plus 88 reads: 178 requests, up to 88 of them in flight together**, per discovery. Measured against the live repo: 178 calls, 4.1s.
+
+**That shape is what GitHub's *secondary* limit counts.** The secondary limit caps concurrent requests per ACCOUNT — the same budget the poll loops, the merge queue, and every other workspace on that installation spend, and the one Session 97 is about. It is not visible in `/rate_limit`; it appears as a 403 on a live request. Once `githubRateGate` closes over an account, `waitIfBlocked` throws for any wait over 60s, so the FIRST call of discovery fails and the picker reports the generic error for the whole backoff. The desktop makes this worse at exactly the wrong moment: `prefetchSkills` fires discovery for every watched repo the moment a workspace loads.
+
+**Discovery is now three shapes cheaper:**
+
+- **One recursive git tree instead of a listing per directory.** `getTreeRecursive` reads `HEAD:<dir>?recursive=1` and returns every path under the skills dir in ONE call, with each blob's `sha` and `size`. 89 listings → 1. The tree API addresses a *tree object*, so the symlink must be resolved first — `git/trees/HEAD:.claude/skills` returns 422 on posthog/posthog, because that entry is a symlink blob pointing at `.agents/skills`. That is why `getDirectoryListingResolved` exists: it is the old listing plus the path it actually resolved to.
+- **Blob shas skip content that has not changed.** A `SKILL.md`'s sha only moves when the file moves. The content cache is keyed by sha and outlives the 10-minute listing TTL, so a re-discovery reads the skills that changed and nothing else. It is rebuilt from the shas each discovery saw, so a deleted skill's blob does not linger. A **warm re-discovery costs 2 calls**. A blob already known to be over `SKILL_MAX_BYTES` is listed from its tree size and never read at all.
+- **The reads that remain share ONE process-wide slot pool.** A per-call bound would still multiply by the repo count under prefetch — the same burst, reassembled. `CONTENT_CONCURRENCY` is 10: about a tenth of GitHub's 100-concurrent ceiling, which reads a cold 88-skill repo in ~6s (~12s at 6). `releaseSlot` HANDS its slot to the next waiter rather than freeing it — decrement-then-reacquire leaves the counter low for a microtask, which is long enough for a fresh caller to claim the same slot.
+
+Cold discovery on posthog/posthog is now **91 calls at a peak concurrency of 6-10**, and 2 calls once warm.
+
+**Two smaller repairs, both about not staying broken:**
+
+- **An error result is no longer cached.** It said nothing about the repo, and holding it kept the picker broken for the rest of the 10-minute TTL after the gate cleared.
+- **The picker now shows GitHub's own reason.** `repoStatus: 'error'` carries an optional `repoError`, so "GitHub rate-limited; retry in 285s" reads as itself instead of as a permission problem. Both front ends render it inline.
+
+**What did NOT change.** The walk is still there, and is still the only way to read a *symlinked* skill directory — the tree carries the link, not its target. It also covers a truncated tree, because a partial listing must never be read as the whole directory. Both paths now run against the shared pool.
+
 ## Session 99 — The list said one thing, the detail sheet said another (2026-08-25)
 
 PR rows in the GitHub panel read stale against GitHub, and opening the detail sheet showed the real state. That is not a coincidence: `GET /pull-requests` is a pure read of `last_summary`, while `GET /pull-requests/:id` fetches live and, when the result differs materially, **writes it back and broadcasts** `pull_request:updated`. Opening the detail does not display the truth — it repairs the cache, which is why the list snaps into line right after.

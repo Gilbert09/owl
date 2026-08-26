@@ -19,7 +19,12 @@ import {
 import { getDbClient } from '../db/client.js';
 import { skills as skillsTable } from '../db/schema.js';
 import { handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
-import { getRepoSkillContent, getSkillUsage, listRepoSkills } from '../services/skills.js';
+import {
+  getRepoSkillContent,
+  getSkillUsage,
+  listRepoSkills,
+  type RepoSkillsResult,
+} from '../services/skills.js';
 
 export const SKILL_LIST_COLUMNS = {
   id: skillsTable.id,
@@ -102,7 +107,7 @@ export function skillRoutes(): Router {
         getSkillUsage(workspaceId),
         repositoryId
           ? listRepoSkills(workspaceId, repositoryId, { refresh })
-          : Promise.resolve({ status: 'none' as const, skills: [] }),
+          : Promise.resolve<RepoSkillsResult>({ status: 'none', skills: [] }),
       ]);
       const data: ListSkillsResponse = {
         platform: platformRows.map(listRowToSummary),
@@ -110,6 +115,7 @@ export function skillRoutes(): Router {
         // via /repo/content when actually needed.
         repo: repoResult.skills.map(({ content: _content, ...summary }) => summary),
         repoStatus: repositoryId ? repoResult.status : 'none',
+        ...(repositoryId && repoResult.error ? { repoError: repoResult.error } : {}),
         usage,
       };
       res.json({ success: true, data });

@@ -140,6 +140,25 @@ describe('githubService contents API', () => {
     expect(file).toEqual({ content: '# skill body', size: 12 });
   });
 
+  it('reports the resolved path alongside a symlinked listing', async () => {
+    global.fetch = mockFetch({
+      '/repos/acme/widgets/contents/.claude/skills': {
+        type: 'symlink',
+        path: '.claude/skills',
+        target: '../.agents/skills',
+        size: 17,
+      },
+      '/repos/acme/widgets/contents/.agents/skills': [],
+    }) as typeof fetch;
+
+    const resolved = await githubService.getDirectoryListingResolved(
+      'ws1', 'acme', 'widgets', '.claude/skills'
+    );
+    // The git APIs address tree objects, so a caller switching to them needs
+    // the target path — `git/trees/HEAD:.claude/skills` 422s on the symlink.
+    expect(resolved?.path).toBe('.agents/skills');
+  });
+
   it('returns size-only for a file over maxBytes', async () => {
     global.fetch = mockFetch({
       '/repos/acme/widgets/contents/big.md': {
@@ -153,5 +172,99 @@ describe('githubService contents API', () => {
 
     const file = await githubService.getFileContent('ws1', 'acme', 'widgets', 'big.md', undefined, 1024);
     expect(file).toEqual({ content: null, size: 2048 });
+  });
+});
+
+describe('githubService git trees API', () => {
+  let db: Database;
+  let cleanup: () => Promise<void>;
+  const originalEnv = { ...process.env };
+  const originalFetch = global.fetch;
+
+  beforeEach(async () => {
+    process.env.TALYN_TOKEN_KEY = randomBytes(32).toString('base64');
+    const testDb = await createTestDb();
+    db = testDb.db;
+    cleanup = testDb.cleanup;
+    await seedUser(db, { id: TEST_USER_ID });
+    await db.insert(workspacesTable).values({ id: 'ws1', ownerId: TEST_USER_ID, name: 'ws', settings: {} });
+    await githubService.storeToken('ws1', 'gho_test_token', 'Bearer', 'repo');
+  });
+
+  afterEach(async () => {
+    global.fetch = originalFetch;
+    process.env = { ...originalEnv };
+    await cleanup();
+  });
+
+  it('reads a subdirectory tree in one request, keeping the treeish colon', async () => {
+    const seen: string[] = [];
+    global.fetch = vi.fn(async (input: FetchInput) => {
+      seen.push(typeof input === 'string' ? input : input.toString());
+      return new Response(
+        JSON.stringify({
+          truncated: false,
+          tree: [
+            { path: 'react-doctor/SKILL.md', type: 'blob', mode: '100644', sha: 'abc', size: 12 },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }) as typeof fetch;
+
+    const tree = await githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:.agents/skills');
+    expect(tree).toEqual({
+      truncated: false,
+      entries: [{ path: 'react-doctor/SKILL.md', type: 'blob', mode: '100644', sha: 'abc', size: 12 }],
+    });
+    expect(seen).toHaveLength(1);
+    // GitHub must still see the `HEAD:` separator; only the path is encoded.
+    expect(seen[0]).toContain('/git/trees/HEAD:.agents/skills?recursive=1');
+  });
+
+  it('percent-encodes path segments but not the separators', async () => {
+    const seen: string[] = [];
+    global.fetch = vi.fn(async (input: FetchInput) => {
+      seen.push(typeof input === 'string' ? input : input.toString());
+      return new Response(JSON.stringify({ tree: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    await githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:docs/my skills');
+    expect(seen[0]).toContain('/git/trees/HEAD:docs/my%20skills?recursive=1');
+  });
+
+  it('surfaces a truncated tree rather than a partial directory', async () => {
+    global.fetch = mockFetch({
+      '/git/trees/': { truncated: true, tree: [{ path: 'a/SKILL.md', type: 'blob', mode: '100644', sha: 'a' }] },
+    }) as typeof fetch;
+
+    const tree = await githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:x');
+    expect(tree?.truncated).toBe(true);
+  });
+
+  it('returns null when the treeish is not a tree (404 / 422)', async () => {
+    global.fetch = mockFetch({
+      '/git/trees/': { status: 404, payload: { message: 'Not Found' } },
+    }) as typeof fetch;
+    expect(await githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:missing')).toBeNull();
+
+    // A symlink path: GitHub understands it and refuses — "SHA must identify
+    // a commit or a tree".
+    global.fetch = mockFetch({
+      '/git/trees/': { status: 422, payload: { message: 'Invalid object requested.' } },
+    }) as typeof fetch;
+    expect(await githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:.claude/skills')).toBeNull();
+  });
+
+  it('propagates other failures so the caller can fall back or retry', async () => {
+    global.fetch = mockFetch({
+      '/git/trees/': { status: 403, payload: { message: 'You have exceeded a secondary rate limit' } },
+    }) as typeof fetch;
+    await expect(
+      githubService.getTreeRecursive('ws1', 'acme', 'widgets', 'HEAD:x')
+    ).rejects.toThrow(/403/);
   });
 });

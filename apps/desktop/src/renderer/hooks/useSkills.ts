@@ -15,6 +15,8 @@ export interface UseSkillsResult {
   localFiles: LocalSkillFile[];
   usage: Record<string, SkillUsageEntry>;
   repoStatus: ListSkillsResponse['repoStatus'];
+  /** Why repo discovery failed, when it did — GitHub's own message. */
+  repoError?: string;
   /** True only while fetching with nothing cached to show. */
   loading: boolean;
   /** True while ANY fetch is in flight, cached or not — drives refresh spinners. */

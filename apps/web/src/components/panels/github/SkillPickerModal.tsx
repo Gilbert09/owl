@@ -57,7 +57,7 @@ export function SkillPickerModal({
   onOpenIntegrations,
 }: SkillPickerModalProps) {
   const { currentWorkspaceId } = useWorkspaceStore();
-  const { skills, localFiles, usage, repoStatus, loading, refresh } = useSkills(
+  const { skills, localFiles, usage, repoStatus, repoError, loading, refresh } = useSkills(
     open ? currentWorkspaceId : null,
     open ? row.repositoryId ?? null : null
   );
@@ -265,9 +265,14 @@ export function SkillPickerModal({
 
             {repoStatus === 'error' && (
               <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400">
-                <span className="flex items-center gap-1.5">
+                <span className="flex min-w-0 items-center gap-1.5">
                   <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                  Couldn&apos;t load this repo&apos;s skills
+                  <span className="truncate" title={repoError ?? undefined}>
+                    Couldn&apos;t load this repo&apos;s skills
+                    {/* GitHub's own reason: a rate-limit backoff names the
+                        wait, which reads nothing like a permission error. */}
+                    {repoError ? <span className="opacity-70"> — {repoError}</span> : null}
+                  </span>
                 </span>
                 <button
                   type="button"
