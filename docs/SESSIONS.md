@@ -2,6 +2,27 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 101 — Saved PR filters, and a Clear button (2026-08-27)
+
+The PR list shipped with the filters Talyn chose: a repo dropdown, three attention toggles, a text search. Nothing let a user say "this is the slice I care about" and keep it.
+
+**A saved filter is a named view the user defines**, stored on the workspace (`settings.prFilters`) rather than per client, so the same views follow the user between the desktop and app.talyn.dev. It tests repos (by `owner/repo` full name), labels (match any / match all, plus an exclude list), a case-insensitive title substring, and authors — and it is created from a modal that carries the name field alongside the criteria.
+
+Three decisions worth keeping straight:
+
+- **The matcher lives in `packages/shared/src/prFilters.ts`, not in either front end.** `apps/web` is a deliberate fork of the desktop renderer, so a second copy of the predicate would let the same named filter quietly show different PRs on each client — the same argument that put stack linking in `shared/stacks.ts`.
+- **Criteria AND within a filter; selected filters OR across.** Within one filter every criterion narrows, which is what "repo X with label Y" has to mean. Across chips it must be the other way round: they are saved VIEWS, and selecting "Frontend" and "Backend" means show me both. Making them AND would give the user a dead end whose only symptom is an empty list.
+- **A filter with no criteria is refused, not saved.** It would match every PR — a named view that filters nothing. The modal disables Create and says so; `validatePRFilters` throws on the same case, so a hand-written PATCH cannot store one either.
+- **Repos are stored by full name, not by repository id.** A row id is minted fresh when a repo is removed from the workspace and re-added, which would silently empty the filter.
+
+**Labels come off `last_summary.labels`**, which older cached rows do not carry. An include criterion treats absent labels as "does not match" and an EXCLUDE criterion treats it as "does not reject" — the row genuinely does not say the PR has the label, and it self-heals on the next poll.
+
+**The `Clear` button** appears on the filter row the moment anything is filtering — the repo dropdown, any toggle, a selected chip, or the search box — and resets all of them at once. It is hidden while nothing is active rather than sitting there disabled.
+
+The chips sit on their **own row** under the existing filter bar (`GitHubPageShell`'s new `filtersSecondary` slot). The chip set grows with whatever the user saves; wrapping it into the row that carries the search box would shove the search box around every time a filter is added. Each chip shows how many of the page's PRs it matches, counted against the page cohort rather than the filtered list, so a chip never reads 0 just because another chip is on.
+
+Wired into **My PRs** and **Reviews**. The Merge Queue page is a different view (queue groups, not a PR list) and was left alone.
+
 ## Session 100 — The skill picker asked GitHub 178 questions to list 88 skills (2026-08-26)
 
 "Couldn't load this repo's skills" on a PostHog/posthog PR. The picker fell back to local skills only, and Retry did not help.

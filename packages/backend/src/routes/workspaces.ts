@@ -11,6 +11,7 @@ import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middle
 import {
   PROMPT_KINDS,
   validatePromptTemplate,
+  validatePRFilters,
   type Workspace,
   type WorkspaceLogo,
   type Repository,
@@ -255,6 +256,17 @@ export function workspaceRoutes(): Router {
           validateVisualReview(body.settings.visualReview);
         } catch (err) {
           const msg = err instanceof Error ? err.message : 'invalid visualReview';
+          return res.status(400).json({ success: false, error: msg });
+        }
+      }
+      // The whole list is sent on every edit and replaces what's stored (jsonb
+      // `||` at the top level), so what lands is the NORMALISED array — trimmed
+      // and de-duplicated — rather than whatever the client happened to hold.
+      if (body.settings.prFilters !== undefined) {
+        try {
+          body.settings.prFilters = validatePRFilters(body.settings.prFilters);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'invalid prFilters';
           return res.status(400).json({ success: false, error: msg });
         }
       }

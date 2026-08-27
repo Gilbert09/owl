@@ -4,6 +4,7 @@ import { Button } from '../../ui/button';
 import { Input } from '../../ui/input';
 import { ScrollArea } from '../../ui/scroll-area';
 import { api, type PRRow } from '../../../lib/api';
+import { cn } from '../../../lib/utils';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
 import { useGitHubActions } from './useGitHubActions';
@@ -41,6 +42,13 @@ interface GitHubPageShellProps {
   searchPlaceholder?: string;
   /** Page-specific filter controls, rendered left of the search box. */
   filters?: React.ReactNode;
+  /**
+   * A second filter row, under the first — where the saved-filter chips live.
+   * Its own line because the chip set grows with whatever the user saves, and
+   * wrapping it into the row that carries the search box would push the search
+   * box around every time a filter is added.
+   */
+  filtersSecondary?: React.ReactNode;
   /** The page's filtered + sorted rows — drives Copy list + empty states. */
   rows: PRRow[];
   /** Per-row stack placement (when the page stacks PRs) — Copy list uses it
@@ -62,6 +70,7 @@ export function GitHubPageShell({
   onSearch,
   searchPlaceholder = 'Search title, repo or #number… (⌘F)',
   filters,
+  filtersSecondary,
   rows,
   stackMeta,
   emptyIcon,
@@ -152,7 +161,12 @@ export function GitHubPageShell({
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-xs">
+      <div
+        className={cn(
+          'flex flex-wrap items-center gap-2 px-4 py-2 text-xs',
+          filtersSecondary ? '' : 'border-b'
+        )}
+      >
         {filters}
         <div className="relative ml-auto flex-1 min-w-[160px] max-w-md">
           <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -175,6 +189,8 @@ export function GitHubPageShell({
           )}
         </div>
       </div>
+
+      {filtersSecondary && <div className="border-b px-4 pb-2">{filtersSecondary}</div>}
 
       {/* The list always keeps its full width; the detail panel floats over its
           right edge as a `contained` overlay (absolute to this relative row)

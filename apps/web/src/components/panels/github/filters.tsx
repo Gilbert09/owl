@@ -1,6 +1,26 @@
-import { ArrowUpDown } from 'lucide-react';
+import { ArrowUpDown, FilterX } from 'lucide-react';
 
 export type SortDir = 'asc' | 'desc';
+
+/**
+ * Reset every filter on the page at once — the repo dropdown, the toggles, the
+ * saved-filter chips, and the search box. Hidden while nothing is filtering, so
+ * the bar doesn't carry a control that would do nothing.
+ */
+export function ClearFiltersButton({ active, onClear }: { active: boolean; onClear: () => void }) {
+  if (!active) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      className="flex items-center gap-1 rounded-md border px-2 py-1 text-muted-foreground transition-colors hover:text-foreground"
+      title="Clear every filter on this page, including the search box"
+    >
+      <FilterX className="h-3 w-3" />
+      Clear
+    </button>
+  );
+}
 
 /** Repo dropdown — native select keeps the bar compact + keyboard-friendly. */
 export function RepoFilter({

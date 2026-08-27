@@ -18,6 +18,10 @@ export * from './skillPrompt.js';
 // Editable prompt templates (Settings → Instructions) + the shipped defaults.
 export * from './promptTemplates.js';
 
+// Saved PR filters — the one matcher behind the PR list's named filter chips,
+// shared so the desktop and web forks can't disagree about what a filter shows.
+export * from './prFilters.js';
+
 // The operator console's contract (admin.talyn.dev ⇄ /api/v1/admin).
 export * from './admin.js';
 export * from './transcript.js';
@@ -28,6 +32,7 @@ export * from './sse.js';
 
 import type { SkillKey, SkillSource, SkillSummary, SkillUsageEntry } from './skills.js';
 import type { PromptTemplateSettings } from './promptTemplates.js';
+import type { PRFilterDefinition } from './prFilters.js';
 
 // ============================================================================
 // Workspace
@@ -272,6 +277,13 @@ export interface WorkspaceSettings {
    * prompt kind (Settings → Instructions). Absent kind = the shipped default.
    */
   prompts?: PromptTemplateSettings;
+  /**
+   * The user's own named filters over the PR list (My PRs / Reviews), shown as
+   * toggle chips on the filter bar's second row. Workspace-scoped so the same
+   * views follow the user between the desktop and the web app. Absent = none;
+   * the PR pages then show only the "New filter" button.
+   */
+  prFilters?: PRFilterDefinition[];
   /**
    * PostHog Visual Review — the screenshot-regression gate on posthog/posthog.
    * Absent = off, and off is the only safe default: finalizing REWRITES the
