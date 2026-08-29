@@ -151,7 +151,25 @@ describe('POST /tasks/:id/stop', () => {
     expect(body.data.result).toEqual({ success: false, error: 'Cancelled by user' });
   });
 
-  it.each(['queued', 'pending', 'completed', 'failed', 'cancelled'])(
+  it.each(['queued', 'pending'])(
+    'cancels a %s task in place without a remote cancel',
+    async (status) => {
+      const { provider, cancel, stopStreaming } = makeFakeProvider();
+      registerCloudProvider(provider);
+      await seedTask(status, { posthogTaskId: 'ph-1' });
+
+      const res = await fetch(`${url}/tasks/t1/stop`, { method: 'POST', headers });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { data: Task };
+      expect(body.data.status).toBe('cancelled');
+      expect(body.data.result).toEqual({ success: false, error: 'Cancelled by user' });
+      expect(body.data.completedAt).toBeTruthy();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(stopStreaming).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(['completed', 'failed', 'cancelled'])(
     'rejects stop with 400 when the task is %s',
     async (status) => {
       const { provider, cancel } = makeFakeProvider();

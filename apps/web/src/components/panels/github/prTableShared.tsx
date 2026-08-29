@@ -17,6 +17,7 @@ import {
   Zap,
   Clock,
   Layers,
+  Square,
 } from 'lucide-react';
 import type { PRRow, PRSummaryShape } from '../../../lib/api';
 import { copyRich, prMarkdownLink } from '../../../lib/prClipboard';
@@ -62,6 +63,9 @@ interface PRTableProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onOpenTask: (taskId: string) => void;
+  /** Stop the row's linked task while it is queued or running. Rejects with
+   *  the backend's reason so the row can toast it. */
+  onStopTask: (taskId: string) => Promise<void>;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
@@ -106,6 +110,7 @@ export function PRTable({
   selectedId,
   onSelect,
   onOpenTask,
+  onStopTask,
   onMerge,
   onSetMergeQueue,
   onSetMergeQueueStack,
@@ -174,6 +179,7 @@ export function PRTable({
             isSelected={row.id === selectedId}
             onSelect={() => onSelect(row.id)}
             onOpenTask={onOpenTask}
+            onStopTask={onStopTask}
             onMerge={onMerge}
             onSetMergeQueue={onSetMergeQueue}
             onSetMergeQueueStack={onSetMergeQueueStack}
@@ -213,6 +219,7 @@ function PRTableRow({
   isSelected,
   onSelect,
   onOpenTask,
+  onStopTask,
   onMerge,
   onSetMergeQueue,
   onSetMergeQueueStack,
@@ -236,6 +243,7 @@ function PRTableRow({
   isSelected: boolean;
   onSelect: () => void;
   onOpenTask: (taskId: string) => void;
+  onStopTask: (taskId: string) => Promise<void>;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
@@ -260,7 +268,9 @@ function PRTableRow({
   const summary = row.summary;
   const updatedTooltip = new Date(summary.updatedAt || row.lastPolledAt).toLocaleString();
   const [confirmMerge, setConfirmMerge] = useState(false);
-  const [busy, setBusy] = useState<null | 'merge' | 'posthog' | 'queue' | 'stack'>(null);
+  const [busy, setBusy] = useState<null | 'merge' | 'posthog' | 'stop' | 'queue' | 'stack'>(
+    null
+  );
   // Queuing several PRs at once is worth a second click, and it may publish
   // drafts on the way — same two-step shape as the merge confirm.
   const [confirmStack, setConfirmStack] = useState(false);
@@ -340,8 +350,11 @@ function PRTableRow({
   const taskRunning =
     taskStatus === 'pending' || taskStatus === 'queued' || taskStatus === 'in_progress';
   // A task is failed/cancelled — distinct from a clean completion so the
-  // badge can flag it (and a follow-up run still makes sense).
-  const taskFailed = taskStatus === 'failed' || taskStatus === 'cancelled';
+  // badge can flag it (and a follow-up run still makes sense). A stop from
+  // this row lands in `cancelled`, so the badge names that rather than
+  // reading as a failure.
+  const taskStopped = taskStatus === 'cancelled';
+  const taskFailed = taskStatus === 'failed' || taskStopped;
   // The badge only shows while there's something actionable: a run in
   // flight or a failure to look at. A cleanly completed task (or one not
   // loaded in the store, which in practice means it's long done) renders
@@ -435,6 +448,24 @@ function PRTableRow({
       }
     } catch (err) {
       setRowError(err instanceof Error ? err.message : 'Could not start cloud task');
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Stop the linked task. The store update from the stop request flips
+  // `taskStatus` to cancelled, which swaps this button back to the start one.
+  async function runStopTask(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!row.taskId) return;
+    setBusy('stop');
+    setRowError(null);
+    try {
+      await onStopTask(row.taskId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Could not stop the task';
+      setRowError(message);
+      toast.error(`Couldn't stop the task on ${row.owner}/${row.repo}#${row.number}`, message);
     } finally {
       setBusy(null);
     }
@@ -554,6 +585,8 @@ function PRTableRow({
                   title={
                     taskRunning
                       ? 'A task is working this PR — click to open it'
+                      : taskStopped
+                      ? 'The linked task was stopped — click to open it'
                       : 'The linked task failed — click to open it'
                   }
                 >
@@ -563,6 +596,8 @@ function PRTableRow({
                       <Loader2 className="h-2.5 w-2.5 animate-spin" />
                       Working
                     </>
+                  ) : taskStopped ? (
+                    'Stopped'
                   ) : (
                     'Failed'
                   )}
@@ -843,39 +878,61 @@ function PRTableRow({
                 <GitMerge className="h-3.5 w-3.5" />
               </button>
             ))}
+          {/* One slot, two buttons: the robot starts a run; while the run is
+              queued or in progress the same slot is a Stop button, and it turns
+              back into the robot once the task lands in cancelled. */}
           {variant !== 'review' && row.state === 'open' && (
             <div className="relative inline-flex">
-              <button
-                type="button"
-                data-attr="pr-row-fix-with-posthog"
-                onClick={runCreatePostHogTask}
-                onContextMenu={openTaskMenu}
-                disabled={!canFollowUp || busy !== null}
-                className="rounded p-1 text-muted-foreground transition-colors hover:bg-violet-500/10 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground dark:hover:text-violet-400"
-                title={
-                  posthogStarted
-                    ? 'Cloud run started — see the Tasks panel'
-                    : taskRunning
-                    ? 'A task is already working this PR — open it from the Working badge'
-                    : !canFollowUp
-                    ? 'Nothing to fix — no conflicts, failing checks, or unresolved review comments'
-                    : atTaskLimit
-                    ? `Free plan limit reached (${billingStatus.activeTasks}/${billingStatus.activeTaskLimit} active tasks) — upgrade for unlimited`
-                    : taskMenuEnabled
-                    ? 'Get this PR mergeable — choose a cloud provider'
-                    : `Get this PR mergeable with a cloud agent (resolve comments, fix CI, resolve conflicts)${
-                        taskMenuAvailable ? ' — right-click to pick a different agent' : ''
-                      }`
-                }
-              >
-                {busy === 'posthog' ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : posthogStarted ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-600" />
-                ) : (
-                  <Bot className="h-3.5 w-3.5" />
-                )}
-              </button>
+              {taskRunning && row.taskId ? (
+                <button
+                  type="button"
+                  data-attr="pr-row-stop-task"
+                  onClick={runStopTask}
+                  disabled={busy !== null}
+                  className="rounded p-1 text-muted-foreground transition-colors hover:bg-red-500/10 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground dark:hover:text-red-400"
+                  title={
+                    taskStatus === 'in_progress'
+                      ? 'Stop the task working this PR — cancels the cloud run'
+                      : 'Stop the task queued for this PR before it starts'
+                  }
+                >
+                  {busy === 'stop' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Square className="h-3.5 w-3.5" fill="currentColor" />
+                  )}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  data-attr="pr-row-fix-with-posthog"
+                  onClick={runCreatePostHogTask}
+                  onContextMenu={openTaskMenu}
+                  disabled={!canFollowUp || busy !== null}
+                  className="rounded p-1 text-muted-foreground transition-colors hover:bg-violet-500/10 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground dark:hover:text-violet-400"
+                  title={
+                    posthogStarted
+                      ? 'Cloud run started — see the Tasks panel'
+                      : !canFollowUp
+                      ? 'Nothing to fix — no conflicts, failing checks, or unresolved review comments'
+                      : atTaskLimit
+                      ? `Free plan limit reached (${billingStatus.activeTasks}/${billingStatus.activeTaskLimit} active tasks) — upgrade for unlimited`
+                      : taskMenuEnabled
+                      ? 'Get this PR mergeable — choose a cloud provider'
+                      : `Get this PR mergeable with a cloud agent (resolve comments, fix CI, resolve conflicts)${
+                          taskMenuAvailable ? ' — right-click to pick a different agent' : ''
+                        }`
+                  }
+                >
+                  {busy === 'posthog' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : posthogStarted ? (
+                    <Check className="h-3.5 w-3.5 text-emerald-600" />
+                  ) : (
+                    <Bot className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              )}
 
               {taskMenuOpen && taskMenuAvailable && (
                 <>
@@ -939,7 +996,7 @@ function PRTableRow({
               className="rounded p-1 text-muted-foreground transition-colors hover:bg-violet-500/10 hover:text-violet-600 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground dark:hover:text-violet-400"
               title={
                 taskRunning
-                  ? 'A task is already working this PR — open it from the Working badge'
+                  ? 'A task is already working this PR — stop it first, or open it from the Working badge'
                   : 'Run a skill on this PR with a cloud agent'
               }
             >

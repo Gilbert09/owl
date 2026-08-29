@@ -367,8 +367,11 @@ export function taskRoutes(): Router {
     res.json({ success: true, data: rowToTask(updated[0]) } as ApiResponse<Task>);
   });
 
-  // Stop a running cloud task — cancel the remote run (when the provider
-  // supports it), drop the transcript stream, and mark the task cancelled.
+  // Stop a cloud task — cancel the remote run (when the provider supports
+  // it), drop the transcript stream, and mark the task cancelled. A task the
+  // queue has not dispatched yet has no remote run: it is cancelled in place,
+  // conditionally on still being undispatched, so a dispatch that lands in
+  // between falls through to the remote cancel instead of being overwritten.
   router.post('/:id/stop', async (req, res) => {
     try {
       await requireTaskAccess(req, req.params.id);
@@ -376,15 +379,35 @@ export function taskRoutes(): Router {
       return handleAccessError(err, res);
     }
     const db = getDbClient();
-    const rows = await db
-      .select(taskColumnsNoTranscript)
-      .from(tasksTable)
-      .where(eq(tasksTable.id, req.params.id))
-      .limit(1);
-    if (!rows[0]) {
+    const readTask = async () => {
+      const rows = await db
+        .select(taskColumnsNoTranscript)
+        .from(tasksTable)
+        .where(eq(tasksTable.id, req.params.id))
+        .limit(1);
+      return rows[0] ? rowToTask(rows[0]) : null;
+    };
+    let task = await readTask();
+    if (!task) {
       return res.status(404).json({ success: false, error: 'Task not found' });
     }
-    const task = rowToTask(rows[0]);
+    if (task.status === 'pending' || task.status === 'queued') {
+      const result = { success: false, error: 'Cancelled by user' };
+      const now = new Date();
+      const cancelled = await db
+        .update(tasksTable)
+        .set({ status: 'cancelled', result, completedAt: now, updatedAt: now })
+        .where(
+          and(eq(tasksTable.id, task.id), inArray(tasksTable.status, ['pending', 'queued']))
+        )
+        .returning({ id: tasksTable.id });
+      if (cancelled.length > 0) {
+        emitTaskStatus(task.workspaceId, task.id, 'cancelled', result);
+        const updated = await readTask();
+        return res.json({ success: true, data: updated } as ApiResponse<Task>);
+      }
+      task = (await readTask())!;
+    }
     if (task.status !== 'in_progress') {
       return res.status(400).json({ success: false, error: 'Task is not running' });
     }

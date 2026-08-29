@@ -130,13 +130,15 @@ export class PostHogCodeClient {
   }
 
   /**
-   * Cancel a run. PostHog has no dedicated cancel action — a PATCH to
-   * `status: cancelled` is the cancellation path (it signals the Temporal
-   * workflow and marks the run completed_at server-side).
+   * Cancel a run through PostHog's dedicated action: it interrupts the agent's
+   * current turn, tears down the sandbox and marks the run cancelled, and it
+   * still cleans up when the run's workflow is already gone. A PATCH to
+   * `status: cancelled` only flips the row. Idempotent on a finished run
+   * (200 with the run unchanged); 202 when the cancellation was accepted.
    */
   async cancelRun(taskId: string, runId: string): Promise<PostHogRun> {
-    return this.request<PostHogRun>('PATCH', `/tasks/${taskId}/runs/${runId}/`, {
-      status: 'cancelled',
+    return this.request<PostHogRun>('POST', `/tasks/${taskId}/runs/${runId}/cancel/`, {
+      reason: 'Stopped from Talyn',
     });
   }
 
