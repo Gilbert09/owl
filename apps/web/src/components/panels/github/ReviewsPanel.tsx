@@ -198,6 +198,7 @@ export function ReviewsPanel() {
             selectedId={selectedId}
             onSelect={onSelect}
             onOpenTask={actions.openTask}
+            onStopTask={actions.stopTask}
             onMerge={actions.mergeRow}
             onSetMergeQueue={actions.setMergeQueue}
             onCreatePostHogTask={actions.createPostHogTask}

@@ -41,7 +41,7 @@ export function useGitHubActions() {
     openSettings,
     openConnectAgent,
   } = useWorkspaceStore();
-  const { createTask } = useTaskActions();
+  const { createTask, stopTask: stopTaskRequest } = useTaskActions();
   const { patchRow, removeRow } = usePullRequestStore.getState();
 
   // Which cloud providers this workspace has connected — read from the shared
@@ -122,6 +122,15 @@ export function useGitHubActions() {
       }
     },
     [setActivePanel, selectTask, tasks, addTask]
+  );
+
+  // Stop a row's linked task from the row itself. The store update flips the
+  // badge and brings the start button back; the row toasts a failure.
+  const stopTask = useCallback(
+    async (taskId: string) => {
+      await stopTaskRequest(taskId);
+    },
+    [stopTaskRequest]
   );
 
   // Squash-merge a PR straight from its row. Throws (with GitHub's reason) if
@@ -455,6 +464,7 @@ export function useGitHubActions() {
   return {
     providerReady,
     openTask,
+    stopTask,
     mergeRow,
     setMergeQueue,
     setMergeQueueStack,

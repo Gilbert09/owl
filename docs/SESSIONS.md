@@ -2,6 +2,19 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 102: Stop a running task from the PR row (2026-08-29)
+
+A PR with a task already working it showed a disabled robot button whose tooltip said "open it from the Working badge". Stopping that run meant leaving the page, finding the task in the Tasks panel and pressing Abort there.
+
+**The robot's slot is now one button with two faces.** The robot starts a run. While the linked task is `pending`, `queued` or `in_progress` the same slot is a Stop button (`data-attr="pr-row-stop-task"`), and it turns back into the robot once the task lands in `cancelled`. The Working badge still deep-links to the run. A cancelled task's badge reads "Stopped" rather than "Failed", since that is what the user just did. Same change in the `apps/web` fork.
+
+Two backend changes underneath:
+
+- **PostHog runs are cancelled through the dedicated action.** `POST /tasks/{id}/runs/{id}/cancel/` (`products/tasks/backend/facade/cancellation.py`) records who asked, interrupts the agent's current turn, signals the workflow to complete as cancelled and still tears the run down when its workflow is already gone. The old `PATCH status=cancelled` went through the generic `update_task_run` path, which only signals the terminal transition. 202 means accepted, 200 means the run was already finished (idempotent), 503 means the workflow could not be reached and the caller may retry. Our `/stop` route already treats any error as "cancelled locally, the run may still finish".
+- **`POST /tasks/:id/stop` also cancels a task the queue has not dispatched yet.** The badge shows Working for `pending`/`queued`, so the Stop button has to cover them. An undispatched task is cancelled in place with a conditional update (`status IN ('pending', 'queued')`); if the queue dispatched it between the read and the write, the update matches nothing and the request falls through to the remote-cancel path instead of overwriting a live run. Terminal tasks still 400.
+
+Row tests: `apps/desktop/src/__tests__/prRowStopTask.test.tsx` (jest) and `apps/web/src/__tests__/prRowStopTask.test.tsx` (vitest, plain matchers since the web suite has no jest-dom). Known unrelated failure: `apps/web`'s `prSavedFilters.test.tsx` dies importing the workspace store under the current Node, whose built-in `localStorage` shadows jsdom's.
+
 ## Session 101 — Saved PR filters, and a Clear button (2026-08-27)
 
 The PR list shipped with the filters Talyn chose: a repo dropdown, three attention toggles, a text search. Nothing let a user say "this is the slice I care about" and keep it.
