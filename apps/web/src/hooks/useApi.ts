@@ -391,22 +391,34 @@ export function useInitialDataLoad() {
         api.environments.list(),
       ]);
 
-      // No silent default-workspace creation: a true first run lands on the
-      // onboarding wizard (step 1 creates the first workspace). But a
-      // returning user who already has workspaces must never see the wizard —
-      // this is the only place with the fetched server-side list, so mark
-      // them onboarded here if the persisted flag isn't set yet. Only on the
-      // first load, so the workspace the wizard creates doesn't trip it.
+      // Has this user been through onboarding? `onboardingComplete` is
+      // per-device localStorage, so a returning user on a new machine (or from
+      // before the flag shipped) needs to be recognised from server state, and
+      // this is the only place holding the fetched list.
+      //
+      // The signal is a GITHUB CONNECTION, not `workspaces.length > 0`. The
+      // backend now bootstraps a workspace for every owner
+      // (services/workspaceBootstrap.ts), so a row exists ten seconds after
+      // signup and its presence says nothing about setup — keying off it would
+      // skip the wizard for every new user, including the REQUIRED GitHub step,
+      // and strand them in an app that cannot see any PRs. Connecting GitHub is
+      // the one thing the wizard insists on, so it is the honest evidence that
+      // it was completed.
+      //
+      // Only evaluated on the very first load: `loadData` re-runs when the
+      // active workspace changes, and connecting GitHub mid-wizard must not
+      // retroactively decide the user was already onboarded.
       if (!migrationCheckedRef.current) {
         migrationCheckedRef.current = true;
         const onboarded = useWorkspaceStore.getState().onboardingComplete;
-        if (workspaces.length > 0 && !onboarded) {
+        const githubConnected = workspaces.some((w) => !!w.integrations?.github);
+        if (githubConnected && !onboarded) {
           setOnboardingComplete(true);
-        } else if (workspaces.length === 0 && onboarded) {
-          // The inverse migration: the server has no workspaces (fresh DB or
-          // a backend switch) but a previous session's persisted flag says
-          // "onboarded" — without this the user lands in an empty MainLayout
-          // with no way to create a workspace. Re-run the wizard.
+        } else if (!githubConnected && onboarded) {
+          // The inverse: a persisted flag says "onboarded" but the server has
+          // no GitHub connection (fresh DB, a backend switch, or a disconnect).
+          // Without this the user lands in a MainLayout that can never show a
+          // PR, with the connect flow buried in Settings. Re-run the wizard.
           setOnboardingComplete(false);
         }
       }

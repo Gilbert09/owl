@@ -3,7 +3,11 @@ import express from 'express';
 import { createServer, type Server } from 'http';
 import { AddressInfo } from 'net';
 import { eq } from 'drizzle-orm';
-import { PROMPT_TEMPLATE_MAX_CHARS, defaultPromptTemplateHash } from '@talyn/shared';
+import {
+  DEFAULT_WORKSPACE_NAME,
+  PROMPT_TEMPLATE_MAX_CHARS,
+  defaultPromptTemplateHash,
+} from '@talyn/shared';
 import { workspaceRoutes } from '../../routes/workspaces.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
@@ -138,10 +142,15 @@ describe('routes/workspaces', () => {
       expect(alpha.integrations.github).toEqual({ enabled: true, watchedRepos: [] });
     });
 
-    it('returns an empty array for a user with no workspaces', async () => {
+    it('bootstraps one rather than returning empty, for a user with none', async () => {
+      // Deliberately not `[]` any more: every owner has at least one workspace,
+      // minted by this route. The bootstrap's own behaviour is covered in
+      // routes/workspaceBootstrap.test.ts — this pins that the LIST is where it
+      // happens, since that is the call every client makes on boot.
       const res = await fetch(`${serverUrl}/workspaces`, { headers: authHeaders });
       const body = await res.json();
-      expect(body.data).toEqual([]);
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0].name).toBe(DEFAULT_WORKSPACE_NAME);
     });
   });
 

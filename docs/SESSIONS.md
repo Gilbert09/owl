@@ -2,6 +2,18 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 106 — Onboarding stops asking you to name a workspace (2026-08-30)
+
+The wizard opened by asking a new user to name their first workspace. That is a question nobody can answer well at that moment: a workspace groups repos, and they have connected none yet — so the honest answers are a placeholder or a guess. The backend now mints one (`services/workspaceBootstrap.ts`, name `DEFAULT_WORKSPACE_NAME` = "My workspace") and onboarding opens on connecting GitHub instead. Renaming lives in Settings, and `CreateWorkspaceModal` still makes more.
+
+**The bootstrap runs on `GET /workspaces`**, which is not a write endpoint but IS the one call every client makes on boot — so desktop, web, CLI and MCP all get the invariant without any of them knowing it exists. It no-ops once a workspace is there.
+
+**Serialized per owner.** Two clients signing in together, or a reconnect racing the first load, would both read empty and both insert — there is no unique constraint on workspaces to catch it, and the user would land on two identical ones. Same shape as the free-plan gates: advisory lock, re-check inside it, `pg_advisory_xact_lock` on the request's ownerScope transaction when there is one, and skipped on pglite (single connection would self-deadlock). Worth knowing that the race test therefore pins the guard shape, not the lock — only a multi-connection DB can prove the lock.
+
+**The part that could have gone quietly wrong.** This auto-create existed before, client-side in the desktop's initial data load, and was deleted when the wizard shipped. The reason is still live: `useInitialDataLoad` decided "returning user, skip the wizard" from `workspaces.length > 0`. With a bootstrap that is true ten seconds after signup, so every new user would have skipped onboarding — including the REQUIRED GitHub step — and landed in an app that can never show a PR. Both forks now read a **GitHub connection** instead (`Workspace.integrations.github`, already on the list payload, so no extra call). It is the honest signal: connecting GitHub is the one thing the wizard insists on, so its presence is evidence the wizard was completed. The inverse still holds too — a persisted flag saying "onboarded" with no GitHub connection re-runs the wizard, which now covers a disconnect as well as a fresh DB.
+
+Deleted `WorkspaceNameStep` from both forks; nothing else referenced it. `apps/desktop` gained an onboarding test it never had, so the fork has parity.
+
 ## Session 105 — "Keep new PRs green" becomes the paid feature (2026-08-30)
 
 The workspace default that arms auto-keep-mergeable on every PR you open is now an Unlimited feature, and it got a home on the My PRs header instead of only living in Settings.

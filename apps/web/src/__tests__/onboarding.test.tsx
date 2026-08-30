@@ -4,10 +4,9 @@ import { render, screen } from '@testing-library/react';
 /**
  * The onboarding wizard renders in the browser build.
  *
- * It cannot be reached by hand on an account that already has a workspace —
- * useInitialDataLoad's migration correctly flips onboardingComplete for
- * returning users, exactly as on the desktop — so this is how the web port
- * gets exercised at all.
+ * It cannot be reached by hand on an account that has GitHub connected —
+ * useInitialDataLoad flips onboardingComplete for those users, exactly as on
+ * the desktop — so this is how the web port gets exercised at all.
  *
  * What is actually at risk here is not the wizard's logic, which was copied
  * verbatim, but its ONE browser-specific dependency: step 2 starts the GitHub
@@ -39,22 +38,28 @@ const { OnboardingWizard } = await import('../components/onboarding/OnboardingWi
 beforeEach(() => vi.clearAllMocks());
 
 describe('OnboardingWizard', () => {
-  it('renders step one of three', () => {
+  it('opens on Connect GitHub — there is no name-your-workspace step', () => {
+    // The backend bootstraps the workspace, so onboarding starts at the first
+    // thing that actually needs the user.
     render(<OnboardingWizard />);
     const body = document.body.textContent ?? '';
     expect(body).toContain('Welcome to Talyn');
     // Only the CURRENT step's title is shown; the rail is numbered.
-    expect(screen.getByText('Name your workspace')).toBeTruthy();
-    expect(body).toContain('Workspace name');
-    expect(body).toMatch(/1\s*2\s*3|123/);
+    expect(screen.getByText('Connect GitHub')).toBeTruthy();
+    expect(body).not.toContain('Name your workspace');
+    expect(body).not.toContain('Workspace name');
+    // Two steps now, not three.
+    expect(body).toMatch(/1\s*2|12/);
+    expect(screen.queryByText('3')).toBeNull();
   });
 
-  it('starts on step one and gates progress', () => {
+  it('gates progress on the GitHub connection', () => {
     render(<OnboardingWizard />);
     const next = [...document.querySelectorAll('button')].find((b) =>
       /next|continue/i.test(b.textContent ?? '')
     );
-    // Step 1 needs a workspace before it will advance.
+    // getStatus is mocked to `connected: false`, and GitHub is the one step
+    // the wizard insists on — without it the app can never show a PR.
     expect(next?.hasAttribute('disabled')).toBe(true);
   });
 });
@@ -77,5 +82,37 @@ describe('the GitHub connect flow does not navigate this page away', () => {
     // so unmounts the wizard mid-onboarding.
     expect(assign).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+/**
+ * The predicate useInitialDataLoad applies on its first load. Kept as a plain
+ * assertion rather than a render because the hook pulls in the whole API layer;
+ * what is worth pinning is which fact it reads, not how it fetches.
+ */
+function isOnboarded(workspaces: Array<{ integrations?: { github?: unknown } }>): boolean {
+  return workspaces.some((w) => !!w.integrations?.github);
+}
+
+describe('the returning-user signal', () => {
+  it('does NOT treat a bootstrapped workspace as evidence of onboarding', () => {
+    // The regression this whole change invites: a fresh account has exactly
+    // this shape, and reading `length > 0` would send it straight past the
+    // GitHub step into an app with nothing in it.
+    expect(isOnboarded([{ integrations: {} }])).toBe(false);
+  });
+
+  it('treats a connected GitHub as evidence of onboarding', () => {
+    expect(isOnboarded([{ integrations: { github: { enabled: true } } }])).toBe(true);
+  });
+
+  it('looks across every workspace, not just the first', () => {
+    expect(
+      isOnboarded([{ integrations: {} }, { integrations: { github: { enabled: true } } }])
+    ).toBe(true);
+  });
+
+  it('is false with no workspaces at all', () => {
+    expect(isOnboarded([])).toBe(false);
   });
 });

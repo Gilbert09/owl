@@ -9,6 +9,7 @@ import {
 } from '../db/schema.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import { assertCanEnableAutoKeepDefault } from '../services/billing/entitlements.js';
+import { ensureDefaultWorkspace } from '../services/workspaceBootstrap.js';
 import {
   PROMPT_KINDS,
   validatePromptTemplate,
@@ -145,6 +146,11 @@ export function workspaceRoutes(): Router {
   router.get('/', async (req, res) => {
     const user = assertUser(req);
     const db = getDbClient();
+    // Every owner has at least one workspace, minted here on first sight rather
+    // than asked for during onboarding. Doing it on the list is what makes it
+    // true for every client without any of them knowing — they all list
+    // workspaces on boot. No-ops once one exists.
+    await ensureDefaultWorkspace(user.id);
     const rows = await db
       .select()
       .from(workspacesTable)

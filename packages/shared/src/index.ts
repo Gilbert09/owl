@@ -47,6 +47,14 @@ export type WorkspaceLogo =
   | { kind: 'identicon'; seed: string }
   | { kind: 'image'; dataUrl: string };
 
+/**
+ * Name given to the workspace every owner is bootstrapped with
+ * (`services/workspaceBootstrap.ts`). Deliberately generic: it is minted before
+ * the user has connected anything, so there is nothing to name it after yet.
+ * Renaming lives in Settings.
+ */
+export const DEFAULT_WORKSPACE_NAME = 'My workspace';
+
 export interface Workspace {
   id: string;
   name: string;

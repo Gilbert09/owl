@@ -5,22 +5,29 @@ import { Button } from '../ui/button';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useGithubConnection } from '../../hooks/useGithubConnection';
 import { trackEvent } from '../../lib/analytics';
-import { WorkspaceNameStep } from './steps/WorkspaceNameStep';
 import { ConnectGitHubStep } from './steps/ConnectGitHubStep';
 import { WatchReposStep } from './steps/WatchReposStep';
 
 const STEPS = [
-  { title: 'Name your workspace', optional: false },
   { title: 'Connect GitHub', optional: false },
   { title: 'Watch repositories', optional: true },
 ] as const;
 
 /**
  * First-run onboarding. Walks a new user through the minimum setup needed to
- * see their PR queue: a named workspace, a GitHub connection, and repos to
- * watch. A cloud agent is NOT part of setup — task buttons render regardless,
- * and the first time the user dispatches one the ConnectAgentModal prompts them
- * to connect a provider (then auto-runs the task). Shown by App in place of
+ * see their PR queue: a GitHub connection, and repos to watch.
+ *
+ * There is no "name your workspace" step. The backend bootstraps one for every
+ * owner (services/workspaceBootstrap.ts), because naming a workspace is a
+ * question nobody can answer well before they have seen the product — it groups
+ * repos, and at that point they have connected none. Renaming lives in
+ * Settings. `currentWorkspaceId` is therefore always set by the time this
+ * renders; if it somehow is not, the repo step waits rather than offering to
+ * create one.
+ *
+ * A cloud agent is NOT part of setup — task buttons render regardless, and the
+ * first time the user dispatches one the ConnectAgentModal prompts them to
+ * connect a provider (then auto-runs the task). Shown by App in place of
  * MainLayout until `onboardingComplete` flips true.
  */
 export function OnboardingWizard() {
@@ -32,8 +39,7 @@ export function OnboardingWizard() {
   const githubConnected = Boolean(status?.connected);
 
   // Required steps gate the Next button; optional steps are always advanceable.
-  const canAdvance =
-    step === 0 ? !!currentWorkspaceId : step === 1 ? githubConnected : true;
+  const canAdvance = step === 0 ? githubConnected : true;
 
   const isLast = step === STEPS.length - 1;
 
@@ -94,11 +100,10 @@ export function OnboardingWizard() {
             )}
           </h2>
 
-          {step === 0 && <WorkspaceNameStep />}
-          {step === 1 && (
+          {step === 0 && (
             <ConnectGitHubStep workspaceId={currentWorkspaceId} status={status} user={user} />
           )}
-          {step === 2 && currentWorkspaceId && (
+          {step === 1 && currentWorkspaceId && (
             <WatchReposStep workspaceId={currentWorkspaceId} />
           )}
         </div>
