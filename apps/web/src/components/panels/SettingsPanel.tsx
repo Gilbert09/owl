@@ -42,7 +42,6 @@ import { getSupabase, isSupabaseConfigured } from '../../lib/supabase';
 import { setLogoutReason } from '../../lib/logoutReason';
 import { cn } from '../../lib/utils';
 import { maybeHandleBillingLimit } from '../../stores/billing';
-import { toast } from '../../stores/toast';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Card } from '../ui/card';
