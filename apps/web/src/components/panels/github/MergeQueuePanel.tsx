@@ -196,6 +196,7 @@ export function MergeQueuePanel() {
                 onStopTask={actions.stopTask}
                 onMerge={actions.mergeRow}
                 onSetMergeQueue={actions.setMergeQueue}
+            onUnwatch={actions.unwatchPr}
                 onSetMergeQueueStack={actions.setMergeQueueStack}
                 onCreatePostHogTask={actions.createPostHogTask}
                 onRunSkill={actions.runSkillTask}

@@ -36,6 +36,7 @@ function row(taskId: string | null): PRRow {
     state: 'open',
     reviewRequested: false,
     authored: true,
+    watching: false,
     mergedAt: null,
     lastPolledAt: '',
     autoKeepMergeable: false,

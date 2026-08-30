@@ -678,6 +678,7 @@ class PRMonitorService extends EventEmitter {
         lastPolledAt: pullRequestsTable.lastPolledAt,
         authored: pullRequestsTable.authored,
         reviewRequested: pullRequestsTable.reviewRequested,
+        watching: pullRequestsTable.watching,
       })
       .from(pullRequestsTable)
       .where(
@@ -691,7 +692,13 @@ class PRMonitorService extends EventEmitter {
     // The id matches the `pull_requests.id` we hand out in /focus.
     const cached = new Map<
       number,
-      { id: string; lastPolledAt: Date; authored: boolean; reviewRequested: boolean }
+      {
+        id: string;
+        lastPolledAt: Date;
+        authored: boolean;
+        reviewRequested: boolean;
+        watching: boolean;
+      }
     >();
     for (const row of rows) {
       if (numbers.includes(row.number)) {
@@ -700,6 +707,7 @@ class PRMonitorService extends EventEmitter {
           lastPolledAt: row.lastPolledAt,
           authored: row.authored,
           reviewRequested: row.reviewRequested,
+          watching: row.watching,
         });
       }
     }
@@ -712,7 +720,11 @@ class PRMonitorService extends EventEmitter {
       // tick fires every 30 s so a focused PR can refetch the moment it ages.
       const ttl = ttlFor(workspaceId, entry.id, {
         cohortActive: isCohortActive(workspaceId, entry),
-        untracked: untracked?.has(number) ?? false,
+        // A manually watched PR appears in none of the three searches, so it
+        // lands in `untracked` — but the user added it to watch its CI and it
+        // renders on My PRs, so give it an authored PR's cadence rather than
+        // the 5-minute slack TTL.
+        untracked: (untracked?.has(number) ?? false) && !entry.watching,
       });
       return now - entry.lastPolledAt.getTime() >= ttl;
     });
@@ -1453,6 +1465,90 @@ class PRMonitorService extends EventEmitter {
       )
       .limit(1);
     return rows.length > 0;
+  }
+
+  /**
+   * Track an arbitrary PR — typically one someone ELSE authored — so the user
+   * can watch its CI, checks and mergeable state. Called only by
+   * `POST /pull-requests/watch`; the repo must already be watched (the route
+   * adds it first, with the user's confirmation).
+   *
+   * Everything downstream then maintains the row for free: `applyPrResults`
+   * refreshes any row that already exists regardless of relationship,
+   * `sweepClosed` skips a still-open PR that appears in no search, and
+   * `getTrackedOpenNumbers` has no relationship predicate. All this has to do
+   * is create the row with a real summary and set the flag.
+   *
+   * Deliberately does NOT go through `prCache.forceFetchAndUpsert`: that path
+   * bails unless the cached row already carries a `headBranch`, which is never
+   * true for a brand-new watch.
+   *
+   * Returns `alreadyTracked` when the poller (or a previous watch) beat us to
+   * the row, so the route can report "already in your list" rather than an
+   * error — pasting a link twice should be idempotent.
+   */
+  async watchPullRequest(opts: {
+    workspaceId: string;
+    repo: WatchedRepo;
+    number: number;
+  }): Promise<
+    | { ok: true; rowId: string; alreadyTracked: boolean; summary: PRSummary }
+    | { ok: false; reason: 'not_found' | 'not_open'; summary: PRSummary | null }
+  > {
+    const { workspaceId, repo, number } = opts;
+    const alreadyTracked = await this.prRowExists(workspaceId, repo.id, number);
+
+    // No `dedupeWindowMs`: a user-initiated add must be authoritative, not
+    // served from another workspace's in-flight batch.
+    const [result] = await batchPullRequestsByNumber({
+      workspaceId,
+      owner: repo.owner,
+      repo: repo.repo,
+      numbers: [number],
+    });
+    const summary = result?.pr ?? null;
+    if (!summary) return { ok: false, reason: 'not_found', summary: null };
+    // The list holds open rows only (the desktop store drops any non-open row
+    // on the WS echo), so watching a merged PR would silently do nothing.
+    if (summary.state !== 'open' || summary.mergedAt) {
+      return { ok: false, reason: 'not_open', summary };
+    }
+
+    // Get the relationship right immediately for the case where the pasted URL
+    // happens to be the user's own PR, or one they're a requested reviewer on.
+    // A failure here must not fail the add — the next poll's reconcile is the
+    // authoritative backstop either way.
+    await this.annotateReviewRequest(workspaceId, summary).catch(() => undefined);
+    const login = await this.resolveCurrentUser(workspaceId).catch(() => null);
+    const flags = relationshipFlags(summary, login);
+
+    const { rowId } = await upsertFromBatchResult({
+      workspaceId,
+      repositoryId: repo.id,
+      summary,
+      authored: flags.authored,
+      reviewRequested: flags.reviewRequested,
+    });
+    await this.db
+      .update(pullRequestsTable)
+      .set({ watching: true, updatedAt: new Date() })
+      .where(eq(pullRequestsTable.id, rowId));
+
+    emitPullRequestUpdated(workspaceId, {
+      id: rowId,
+      taskId: null,
+      repositoryId: repo.id,
+      owner: repo.owner,
+      repo: repo.repo,
+      number,
+      state: summary.state,
+      lastSummary: summary as unknown as Record<string, unknown>,
+      authored: flags.authored,
+      reviewRequested: flags.reviewRequested,
+      watching: true,
+    });
+
+    return { ok: true, rowId, alreadyTracked, summary };
   }
 
   /**

@@ -920,6 +920,107 @@ describe('prMonitor — poll orchestration', () => {
     expect(graphqlSpy.mock.calls[0][0].numbers).toEqual([9]);
   });
 
+  it('survives the sweep and the flag reconcile when it appears in no search', async () => {
+    // The load-bearing regression for manually watched PRs. A PR someone ELSE
+    // authored matches none of the three searches, so both close-out paths run
+    // over it every tick: sweepClosed must leave a still-open PR alone, and
+    // reconcileRelationshipFlags must rewrite ONLY authored/reviewRequested.
+    await db.insert(pullRequestsTable).values({
+      id: 'pr-watched',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'acme',
+      repo: 'widgets',
+      number: 9,
+      state: 'open',
+      authored: false,
+      reviewRequested: false,
+      watching: true,
+      lastPolledAt: new Date(Date.now() - 6 * 60_000),
+      lastSummary: { headBranch: 'feature/i' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    mockSearch([]);
+    vi.spyOn(graphqlModule, 'batchPullRequestsByNumber').mockResolvedValue([
+      { number: 9, pr: fakeSummary({ number: 9, author: 'someone-else', state: 'open' }) },
+    ]);
+
+    await prMonitorService.forcePoll();
+
+    const row = (await db.select().from(pullRequestsTable)).find((r) => r.number === 9);
+    expect(row?.watching).toBe(true);
+    expect(row?.state).toBe('open');
+    expect(row?.authored).toBe(false);
+    expect(row?.reviewRequested).toBe(false);
+  });
+
+  it('refetches a watched row on the 60 s cohort TTL, not the 5 min untracked one', async () => {
+    // 2 min old. An ordinary fallen-out row waits the full 5 min (the test
+    // above); a watched one is on the My PRs page, so it gets an authored PR's
+    // cadence — five minutes of lag on the page the user is staring at is the
+    // whole thing they asked us not to do.
+    await db.insert(pullRequestsTable).values({
+      id: 'pr-watched-ttl',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'acme',
+      repo: 'widgets',
+      number: 9,
+      state: 'open',
+      watching: true,
+      lastPolledAt: new Date(Date.now() - 2 * 60_000),
+      lastSummary: { headBranch: 'feature/i' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    setActiveView('ws1', 'mine');
+    mockSearch([]);
+    // Call 1 is the early refetch the TTL exemption buys; call 2 is the
+    // closed-sweep's batched state-check, which runs every tick regardless.
+    const graphqlSpy = vi
+      .spyOn(graphqlModule, 'batchPullRequestsByNumber')
+      .mockResolvedValue([
+        { number: 9, pr: fakeSummary({ number: 9, headBranch: 'feature/i' }) },
+      ]);
+
+    await prMonitorService.forcePoll();
+
+    expect(graphqlSpy).toHaveBeenCalledTimes(2);
+    expect(graphqlSpy.mock.calls[0][0].numbers).toEqual([9]);
+  });
+
+  it('leaves a watched row on the slack TTL while the GitHub panel is hidden', async () => {
+    // 2 min old under view 'none': nothing is on screen, so there is nothing to
+    // keep live and the exemption must not fire.
+    await db.insert(pullRequestsTable).values({
+      id: 'pr-watched-hidden',
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      owner: 'acme',
+      repo: 'widgets',
+      number: 9,
+      state: 'open',
+      watching: true,
+      lastPolledAt: new Date(Date.now() - 2 * 60_000),
+      lastSummary: { headBranch: 'feature/i' },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    setActiveView('ws1', 'none');
+    mockSearch([]);
+    const graphqlSpy = vi
+      .spyOn(graphqlModule, 'batchPullRequestsByNumber')
+      .mockResolvedValue([
+        { number: 9, pr: fakeSummary({ number: 9, headBranch: 'feature/i' }) },
+      ]);
+
+    await prMonitorService.forcePoll();
+
+    // The sweep's state-check only.
+    expect(graphqlSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('refetches a fallen-out tracked-open row early when the user focuses it', async () => {
     // 90 s old: past the focused TTL (30 s) but well within the untracked
     // TTL (5 min). Focus must win so the open detail sheet stays live.

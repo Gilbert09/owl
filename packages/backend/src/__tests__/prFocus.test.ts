@@ -136,6 +136,19 @@ describe('prFocus — active view', () => {
     expect(isCohortActive('ws1', { authored: false, reviewRequested: true })).toBe(false);
   });
 
+  it('counts a manually watched PR into "mine" — that is the page it renders on', () => {
+    const watched = { authored: false, reviewRequested: false, watching: true };
+    setActiveView('ws1', 'mine');
+    expect(isCohortActive('ws1', watched)).toBe(true);
+    setActiveView('ws1', 'all');
+    expect(isCohortActive('ws1', watched)).toBe(true);
+    // Not the Reviews page, and nothing is active when the panel is hidden.
+    setActiveView('ws1', 'review');
+    expect(isCohortActive('ws1', watched)).toBe(false);
+    setActiveView('ws1', 'none');
+    expect(isCohortActive('ws1', watched)).toBe(false);
+  });
+
   it('a PR that is both authored and review-requested is active in either single view', () => {
     setActiveView('ws1', 'mine');
     expect(isCohortActive('ws1', { authored: true, reviewRequested: true })).toBe(true);

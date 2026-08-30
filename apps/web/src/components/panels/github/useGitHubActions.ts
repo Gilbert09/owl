@@ -213,6 +213,30 @@ export function useGitHubActions() {
   );
 
   /**
+   * Stop tracking a manually watched PR.
+   *
+   * Optimistic: clearing `watching` drops the row out of My PRs' cohort right
+   * away (unless you also authored it, in which case it just loses its badge).
+   * The backend NEVER cancels a queue entry or an armed watcher here, so a
+   * queued PR keeps merging — it only stops appearing on your list.
+   */
+  const unwatchPr = useCallback(
+    async (row: PRRow) => {
+      patchRow(row.id, { watching: false });
+      try {
+        await api.pullRequests.unwatch(row.id);
+      } catch (err) {
+        patchRow(row.id, { watching: true });
+        toast.error(
+          `Couldn't stop tracking ${row.owner}/${row.repo}#${row.number}`,
+          err instanceof Error ? err.message : undefined
+        );
+      }
+    },
+    [patchRow]
+  );
+
+  /**
    * Queue or dequeue a whole stack of dependent PRs in one call.
    *
    * The server resolves the chain — the client's own derivation only decides
@@ -468,6 +492,7 @@ export function useGitHubActions() {
     mergeRow,
     setMergeQueue,
     setMergeQueueStack,
+    unwatchPr,
     createPostHogTask,
     runSkillTask,
     connect,

@@ -638,6 +638,18 @@ export interface PRRow {
   reviewRequested: boolean;
   /** True when the PR was opened by the user. Drives the "Mine" tab. */
   authored: boolean;
+  /**
+   * True when the user manually added this PR to their list — typically one
+   * someone ELSE wrote, tracked for its CI. Also drives the "Mine" tab: that
+   * page's cohort is `authored || watching`.
+   *
+   * Separate from {@link authored} because the backend rewrites `authored` and
+   * `reviewRequested` from GitHub's searches on every poll, so this is the only
+   * flag a manual choice can survive in. NOTE that WS echoes carry it only when
+   * they CHANGE it — preserve the current value with `??` (never `||`: an
+   * un-watch sends `false`).
+   */
+  watching: boolean;
   mergedAt: string | null;
   lastPolledAt: string;
   summary: PRSummaryShape;
@@ -849,7 +861,7 @@ export const pullRequests = {
     repo?: string;
     taskOnly?: boolean;
     search?: string;
-    relationship?: 'authored' | 'review_requested' | 'all';
+    relationship?: 'authored' | 'review_requested' | 'watching' | 'all';
   }) => {
     const query = new URLSearchParams();
     query.set('workspaceId', params.workspaceId);
@@ -867,6 +879,27 @@ export const pullRequests = {
     ),
   refresh: (id: string) =>
     request<PRRow>('POST', `/pull-requests/${id}/refresh`),
+  /**
+   * Track an arbitrary PR by URL, so its CI shows up on My PRs.
+   *
+   * Two-phase when the PR's repo isn't in the workspace: the first call throws
+   * an {@link ApiError} with `status: 409` and `code: 'repo_not_watched'`
+   * (carrying nothing that costs GitHub budget — the check runs before any API
+   * call), and the caller re-sends with `confirmAddRepo` once the user has
+   * agreed to add the repo. `alreadyTracked` means the PR was already on the
+   * list; that is a 200, not an error.
+   */
+  watch: (params: { workspaceId: string; url: string; confirmAddRepo?: boolean }) =>
+    request<PRRow & { repoAdded: boolean; alreadyTracked: boolean }>(
+      'POST',
+      '/pull-requests/watch',
+      params
+    ),
+  /** Stop tracking a manually watched PR. Never cancels a queue entry or an
+   *  armed watcher — it only clears the flag (and drops the row when nothing
+   *  else references it). */
+  unwatch: (id: string) =>
+    request<{ deleted: boolean }>('DELETE', `/pull-requests/${id}/watch`),
   focus: (id: string, focused = true) =>
     request<null>('POST', `/pull-requests/${id}/focus`, { focused }),
   // Toggle the auto-keep-mergeable watcher for a PR (repeatedly fires a

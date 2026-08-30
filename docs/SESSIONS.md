@@ -2,6 +2,25 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 103 — Watch a PR you did not write (2026-08-30)
+
+Talyn only ever tracked PRs it DISCOVERED. `pollRepo` runs three searches per watched repo — `author:me`, `review-requested:me`, `reviewed-by:me` — and the two booleans they produce, `authored` and `review_requested`, were the only relationships a `pull_requests` row could have. There was no way to say "track this one" about someone else's PR whose CI you care about.
+
+**`POST /pull-requests/watch` takes a PR link and puts the PR on your list.** It folds into My PRs, whose cohort is now `authored || watching`, with a "Watching" toggle beside the three attention toggles and a sky "Watched" chip on the row. Watched PRs get the full action set — merge queue, fix runs, merge — because you are trusted to only do that where you have write access.
+
+**Almost all the machinery already worked; what was missing was a flag the monitor cannot clobber.** `sweepClosed` already skips a still-open PR that fell out of the searches (that guard exists for a review-requested PR you have since reviewed), `applyPrResults` already refreshes any row that EXISTS regardless of relationship, and `getTrackedOpenNumbers` has no relationship predicate. So once the row exists, the webhook path and the poll path maintain it for free.
+
+The flag had to be its own column. `reconcileRelationshipFlags` rewrites `authored` / `review_requested` from the search results on every tick, so a row faking `authored = true` would lose the fake within a minute — and worse, `prCache`'s insert path arms the commit-pushing auto-keep-mergeable watcher for `authored && open` rows, so the fake would have pushed commits to a branch that is not ours. `watching` (migration `0046`) is written by the two `/watch` routes and by nothing else.
+
+**The WS field is OPTIONAL, and the client preserves it with `??`.** Every `prCache` upsert and every flag reconcile emits `pull_request:updated` without knowing about `watching`; making it required would cost a read-back on the hottest write path. So the store keeps its own value when the echo omits the field — `??` and never `||`, because the un-watch echo sends `false` and it must not be swallowed. **Get that one line wrong and the symptom is: the user adds a PR, one tick later it silently disappears from My PRs.**
+
+**A repo the workspace does not watch is a decision, not an error.** A `pull_requests` row cannot exist without a `repositories` row (NOT NULL FK), and that row is also what makes GitHub webhooks reach the PR at all — `webhookIndex` drops any delivery for an unwatched repo. But adding a repo is not free: the poller then spends three searches per tick on it, and it surfaces the user's own PRs there too. So the route answers **409 `repo_not_watched`** and the modal asks before re-sending with `confirmAddRepo`. The check runs BEFORE any GitHub call, which is why there is no separate preflight endpoint duplicating it — the refusal costs one DB query and zero API budget, and one decision point means no TOCTOU.
+
+**The one freshness bug worth fixing.** A watched PR someone else wrote matches none of the three searches, so it landed in `filterStale`'s `untracked` set and got the 5-minute slack TTL — five minutes of CI lag on the page the user is staring at. `filterStale` now suppresses `untracked` for a watched row and `isCohortActive` counts it into `'mine'`, so it gets an authored PR's 60s cadence while My PRs is on screen and the slack TTL when it is not. Separately, the add primes `noteHeadSha`: the receiver drops a `check_run` whose head SHA is not in the per-repo index, and that index only reseeds every 60s — without the prime, every check event for the PR the user JUST added to watch CI on is dropped for up to a minute.
+
+**Un-watching clears the flag and cancels nothing else.** `merge_queue_entries` cascades on the PR row, so deleting a queued PR's row would destroy its entry AND its whole audit timeline from a one-click affordance. The row is deleted only when nothing at all references it — not authored, not review-requested, no task, not queued, no armed watcher, no active v2 entry. A queued PR keeps merging; it just stops appearing on your list, and the button says so.
+
+**Known cost, not fixed here:** watching one PR in a big repo buys three search queries per poll tick forever. A `repositories.watch_only` flag that skips the searches and refreshes only `getTrackedOpenNumbers` is the right answer, and is a separate change.
 ## Session 102: Stop a running task from the PR row (2026-08-29)
 
 A PR with a task already working it showed a disabled robot button whose tooltip said "open it from the Working badge". Stopping that run meant leaving the page, finding the task in the Tasks panel and pressing Abort there.

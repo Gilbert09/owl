@@ -1,23 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
-import { GitPullRequest } from 'lucide-react';
+import { GitPullRequest, Plus } from 'lucide-react';
 import { useWorkspaceStore } from '../../../stores/workspace';
 import { usePullRequestStore } from '../../../stores/pullRequests';
 import type { TaskStatus, AnyCloudProviderType, PRFilterDefinition } from '@talyn/shared';
 import { prMatchesAnyFilter } from '@talyn/shared';
 import { taskCloudProvider } from '../../../lib/providerMeta';
 import { cn } from '../../../lib/utils';
+import { Button } from '../../ui/button';
 import { GitHubPageShell } from './GitHubPageShell';
 import { PRTable, isNeedsAttention, isAwaitingReview, isReadyToMerge } from './prTableShared';
 import { ClearFiltersButton, RepoFilter, SortToggle, prMatchesText, type SortDir } from './filters';
 import { PRFilterModal, SavedFilterBar, useSavedPRFilters } from './savedFilters';
+import { WatchPRModal } from './WatchPRModal';
 import { buildStackedRows } from './stacks';
 import { useGitHubActions } from './useGitHubActions';
 
 /**
- * "My PRs" — every open PR you authored, across watched repos. Carries the
- * repo dropdown, the created-at sort, the "Needs attention" toggle (blocking
- * issues you own), the "Needs review" toggle (still awaiting a review), and
- * the "Ready to merge" toggle (nothing left to do but merge).
+ * "My PRs" — every open PR you authored, plus any you manually added to watch
+ * (someone else's PR you care about the CI of), across watched repos. Carries
+ * the repo dropdown, the created-at sort, the "Needs attention" toggle
+ * (blocking issues you own), the "Needs review" toggle (still awaiting a
+ * review), the "Ready to merge" toggle (nothing left to do but merge), and the
+ * "Watching" toggle (the manually added ones).
  */
 export function MyPRsPanel() {
   const repositories = useWorkspaceStore((s) => s.repositories);
@@ -31,6 +35,8 @@ export function MyPRsPanel() {
   const [needsAttention, setNeedsAttention] = useState(false);
   const [needsReview, setNeedsReview] = useState(false);
   const [readyToMerge, setReadyToMerge] = useState(false);
+  const [watchingOnly, setWatchingOnly] = useState(false);
+  const [watchModalOpen, setWatchModalOpen] = useState(false);
   const [search, setSearch] = useState('');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
@@ -68,6 +74,7 @@ export function MyPRsPanel() {
     () => rows.filter((r) => r.authored && isReadyToMerge(r)).length,
     [rows]
   );
+  const watchingCount = useMemo(() => rows.filter((r) => r.watching).length, [rows]);
 
   const taskStatusById = useMemo(() => {
     const m = new Map<string, TaskStatus>();
@@ -82,8 +89,10 @@ export function MyPRsPanel() {
   }, [tasks, environments]);
 
   // The page's cohort before any filter — what the chips count against and
-  // what the modal previews a draft filter over.
-  const cohort = useMemo(() => rows.filter((r) => r.authored), [rows]);
+  // what the modal previews a draft filter over. `watching` is in here because
+  // a manually tracked PR is one you asked to see; it is a separate flag from
+  // `authored` because the poller rewrites `authored` from GitHub's searches.
+  const cohort = useMemo(() => rows.filter((r) => r.authored || r.watching), [rows]);
 
   const filtered = useMemo(() => {
     let out = cohort;
@@ -95,9 +104,19 @@ export function MyPRsPanel() {
     if (needsAttention) out = out.filter(isNeedsAttention);
     if (needsReview) out = out.filter(isAwaitingReview);
     if (readyToMerge) out = out.filter(isReadyToMerge);
+    if (watchingOnly) out = out.filter((r) => r.watching);
     if (activeCriteria.length > 0) out = out.filter((r) => prMatchesAnyFilter(r, activeCriteria));
     return out;
-  }, [cohort, repoFilter, search, needsAttention, needsReview, readyToMerge, activeCriteria]);
+  }, [
+    cohort,
+    repoFilter,
+    search,
+    needsAttention,
+    needsReview,
+    readyToMerge,
+    watchingOnly,
+    activeCriteria,
+  ]);
 
   const anyFilterActive =
     repoFilter !== 'all' ||
@@ -105,6 +124,7 @@ export function MyPRsPanel() {
     needsAttention ||
     needsReview ||
     readyToMerge ||
+    watchingOnly ||
     activeFilterIds.length > 0;
 
   const clearFilters = () => {
@@ -113,6 +133,7 @@ export function MyPRsPanel() {
     setNeedsAttention(false);
     setNeedsReview(false);
     setReadyToMerge(false);
+    setWatchingOnly(false);
     setActiveFilterIds([]);
   };
 
@@ -133,6 +154,18 @@ export function MyPRsPanel() {
         onSearch={setSearch}
         rows={ordered}
         stackMeta={stackMeta}
+        headerActions={
+          <Button
+            size="sm"
+            variant="ghost"
+            data-attr="my-prs-add-pr"
+            onClick={() => setWatchModalOpen(true)}
+            title="Track any PR by its GitHub link — it doesn't have to be yours"
+          >
+            <Plus className="mr-1 h-4 w-4" />
+            Add PR
+          </Button>
+        }
         filters={
           <>
             <RepoFilter
@@ -182,6 +215,21 @@ export function MyPRsPanel() {
               Ready to merge
               {readyCount > 0 && <span className="ml-1">{readyCount}</span>}
             </button>
+            <button
+              type="button"
+              data-attr="my-prs-watching-filter"
+              onClick={() => setWatchingOnly((v) => !v)}
+              className={cn(
+                'rounded-md border px-2 py-1 transition-colors',
+                watchingOnly
+                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-400'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+              title="Only show PRs you added manually to track"
+            >
+              Watching
+              {watchingCount > 0 && <span className="ml-1">{watchingCount}</span>}
+            </button>
             <SortToggle sortDir={sortDir} onToggle={() => setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))} />
             <ClearFiltersButton active={anyFilterActive} onClear={clearFilters} />
           </>
@@ -213,6 +261,7 @@ export function MyPRsPanel() {
             onStopTask={actions.stopTask}
             onMerge={actions.mergeRow}
             onSetMergeQueue={actions.setMergeQueue}
+            onUnwatch={actions.unwatchPr}
             onSetMergeQueueStack={actions.setMergeQueueStack}
             onCreatePostHogTask={actions.createPostHogTask}
             onRunSkill={actions.runSkillTask}
@@ -236,6 +285,7 @@ export function MyPRsPanel() {
         saving={savedFilters.saving}
         rows={cohort}
       />
+      <WatchPRModal open={watchModalOpen} onOpenChange={setWatchModalOpen} />
     </>
   );
 }

@@ -16,6 +16,7 @@ function makeRow(id: string, over: Partial<PRRow> = {}): PRRow {
     state: 'open',
     reviewRequested: false,
     authored: true,
+    watching: false,
     mergedAt: null,
     lastPolledAt: '2026-06-05T00:00:00Z',
     summary: { title: `PR ${id}` } as PRRow['summary'],

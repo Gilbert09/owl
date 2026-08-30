@@ -44,7 +44,9 @@ export function Sidebar({ className }: SidebarProps) {
   // Live PR counts for the three GitHub nav badges. The PR store is kept
   // current by usePullRequestSync, so these re-render on every WS update.
   const prRows = usePullRequestStore((s) => s.rows);
-  const myPrCount = prRows.filter((r) => r.authored).length;
+  // My PRs holds `authored || watching` — a manually tracked PR renders
+  // there, so the badge must count it or it disagrees with the page.
+  const myPrCount = prRows.filter((r) => r.authored || r.watching).length;
   const reviewCount = prRows.filter((r) => r.reviewRequested).length;
   const queueCount = prRows.filter((r) => r.mergeQueued).length;
 

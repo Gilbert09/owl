@@ -33,6 +33,7 @@ function makeRow(opts: {
     state: opts.state ?? 'open',
     reviewRequested: false,
     authored: true,
+    watching: false,
     mergedAt: null,
     lastPolledAt: createdAt,
     summary: {

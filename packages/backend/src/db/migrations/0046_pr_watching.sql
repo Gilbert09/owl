@@ -1,0 +1,26 @@
+-- Manually watched PRs: track a PR someone ELSE authored.
+--
+-- Until now a pull_requests row could only exist because the poller DISCOVERED
+-- it: pollRepo runs three searches per repo (author:me, review-requested:me,
+-- reviewed-by:me) and `authored` / `review_requested` are the only relationships
+-- a row can carry. There was no way to say "track this one PR" about someone
+-- else's work, which is what you want when you care about its CI.
+--
+-- It is deliberately NOT a third value folded into the existing flags.
+-- `reconcileRelationshipFlags` rewrites `authored` / `review_requested` from the
+-- authoritative search results on every poll, so a row faking `authored = true`
+-- would lose the fake within one tick. Worse, prCache's insert path arms the
+-- commit-pushing auto-keep-mergeable watcher for `authored && open` rows — a
+-- fake would push commits to a branch that isn't ours.
+--
+-- Nothing in the monitor writes this column: only POST /pull-requests/watch and
+-- DELETE /pull-requests/:id/watch do. That is what makes the row survive the
+-- sweep — sweepClosed already skips a still-open PR that fell out of the
+-- searches, and applyPrResults already refreshes any row that exists.
+--
+-- No index: every read is already gated by workspace_id (idx_pull_requests_
+-- workspace) plus state, and a low-cardinality boolean over tens of rows buys
+-- nothing. No RLS change either — the grants in 0024 are table-level, so the
+-- existing pull_requests_workspace policy covers the new column.
+ALTER TABLE "pull_requests"
+  ADD COLUMN IF NOT EXISTS "watching" boolean NOT NULL DEFAULT false;

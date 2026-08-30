@@ -39,6 +39,9 @@ interface GitHubPageShellProps {
    * box around every time a filter is added.
    */
   filtersSecondary?: React.ReactNode;
+  /** Page-specific header buttons, rendered left of Copy list. An ACTION, not
+   *  a filter — which is why it lives up here and not in the filter row. */
+  headerActions?: React.ReactNode;
   /** The page's filtered + sorted rows — drives Copy list + empty states. */
   rows: PRRow[];
   /** Per-row stack placement (when the page stacks PRs) — Copy list uses it
@@ -61,6 +64,7 @@ export function GitHubPageShell({
   searchPlaceholder = 'Search title, repo or #number… (⌘F)',
   filters,
   filtersSecondary,
+  headerActions,
   rows,
   stackMeta,
   emptyIcon,
@@ -121,6 +125,7 @@ export function GitHubPageShell({
           {title}
         </h2>
         <div className="app-region-no-drag flex items-center gap-1">
+          {headerActions}
           <Button
             size="sm"
             variant="ghost"

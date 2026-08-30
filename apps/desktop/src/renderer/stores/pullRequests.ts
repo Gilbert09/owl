@@ -23,6 +23,7 @@ export interface PullRequestUpdatePayload {
   lastSummary: Partial<PRSummaryShape>;
   reviewRequested?: boolean;
   authored?: boolean;
+  watching?: boolean;
   autoKeepMergeable?: boolean;
   autoMergeState?: { attempts: number; paused: boolean } | null;
   mergeQueued?: boolean;
@@ -63,6 +64,10 @@ interface PullRequestState {
    */
   applyPullRequestUpdate: (p: PullRequestUpdatePayload) => boolean;
 
+  /** Insert a row we already hold in full, or replace it if it's there.
+   *  Used when the client MINTS a row rather than discovering it — watching a
+   *  PR by URL returns the whole row, so re-listing would be wasted work. */
+  upsertRow: (row: PRRow) => void;
   /** Optimistic single-row patch (merge-queue toggle, task linking). */
   patchRow: (id: string, updates: Partial<PRRow>) => void;
   /** Drop a row (optimistic merge, or it left the open set). */
@@ -117,6 +122,11 @@ export const usePullRequestStore = create<PullRequestState>((set, get) => ({
       // the row (e.g. it left Review after being reviewed); else keep ours.
       reviewRequested: p.reviewRequested ?? next[idx].reviewRequested,
       authored: p.authored ?? next[idx].authored,
+      // Same rule, and it matters more here: the poll's flag reconcile and every
+      // prCache upsert emit this event WITHOUT `watching`, so a `||` (or a
+      // bare assign) would drop a just-watched PR off My PRs on the next tick.
+      // `??` keeps ours, and still honours the un-watch echo's explicit false.
+      watching: p.watching ?? next[idx].watching,
       // Watcher state only rides along when it changed; otherwise keep ours.
       autoKeepMergeable: p.autoKeepMergeable ?? next[idx].autoKeepMergeable,
       autoMergeState:
@@ -130,6 +140,15 @@ export const usePullRequestStore = create<PullRequestState>((set, get) => ({
     set({ rows: next });
     return false;
   },
+
+  upsertRow: (row) =>
+    set((state) => {
+      const idx = state.rows.findIndex((r) => r.id === row.id);
+      if (idx === -1) return { rows: [row, ...state.rows] };
+      const rows = state.rows.slice();
+      rows[idx] = row;
+      return { rows };
+    }),
 
   patchRow: (id, updates) =>
     set((state) => ({

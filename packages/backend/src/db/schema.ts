@@ -420,6 +420,17 @@ export const pullRequests = pgTable(
      * e.g. one the user already reviewed — and then belongs to neither tab).
      */
     authored: boolean('authored').notNull().default(false),
+    /**
+     * True when the user manually added this PR to their list to track its CI /
+     * mergeable state — typically a PR someone ELSE authored. A separate column
+     * from {@link authored} on purpose: `reconcileRelationshipFlags` rewrites
+     * `authored`/`reviewRequested` from the GitHub searches on every poll, so a
+     * faked `authored = true` would be cleared within one tick — and would also
+     * arm the commit-pushing auto-keep-mergeable watcher on someone else's
+     * branch (see prCache's upsertRow). Nothing in the monitor writes this
+     * column; only the two /watch routes do.
+     */
+    watching: boolean('watching').notNull().default(false),
     mergedAt: timestamp('merged_at', { withTimezone: true }),
     /**
      * Drives the TTL: prCache returns this row if `last_polled_at` is

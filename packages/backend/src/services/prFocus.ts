@@ -27,6 +27,13 @@ const UNFOCUSED_TTL_MS = 60_000;
 // much slacker cadence so they don't add per-tick GraphQL load. The same
 // slack TTL covers the cohort the user isn't currently looking at (e.g.
 // review-requested PRs while they're on the "My PRs" tab).
+//
+// A MANUALLY WATCHED PR is exempt. It appears in none of the three searches,
+// so it looks untracked to the poller — but the user added it on purpose to
+// watch its CI, and it renders on the My PRs page. Five minutes of lag on the
+// page they are staring at is the one thing they asked us not to do, so
+// prMonitor's filterStale suppresses the `untracked` flag for those rows and
+// isCohortActive below counts them into 'mine'.
 const UNTRACKED_TTL_MS = 300_000;
 const COOLDOWN_MS = 5_000;
 
@@ -92,16 +99,18 @@ export function getActiveView(workspaceId: string): ActiveView {
  * Is this PR's cohort the one the user is currently looking at? An authored
  * PR is "active" under 'mine'/'all', a review-requested one under
  * 'review'/'all'. Under 'none' neither is active. A PR can be both authored
- * and review-requested (rare); either match counts.
+ * and review-requested (rare); either match counts. A manually watched PR
+ * counts as 'mine' — that is the page it renders on.
  */
 export function isCohortActive(
   workspaceId: string,
-  pr: { authored: boolean; reviewRequested: boolean }
+  pr: { authored: boolean; reviewRequested: boolean; watching?: boolean }
 ): boolean {
   const view = getActiveView(workspaceId);
   if (view === 'all') return true;
   if (view === 'none') return false;
-  if (view === 'mine') return pr.authored;
+  // 'mine' is the My PRs page, whose cohort is `authored || watching`.
+  if (view === 'mine') return pr.authored || pr.watching === true;
   return pr.reviewRequested; // 'review'
 }
 

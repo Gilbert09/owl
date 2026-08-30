@@ -13,6 +13,7 @@ function makeRow(summary: Partial<PRRow['summary']>): PRRow {
     state: 'open',
     reviewRequested: false,
     authored: true,
+    watching: false,
     mergedAt: null,
     lastPolledAt: '2026-06-05T00:00:00Z',
     summary: { title: 'PR', draft: false, ...summary } as PRRow['summary'],

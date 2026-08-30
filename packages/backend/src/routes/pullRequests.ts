@@ -15,6 +15,7 @@ import {
   type PRSummary,
 } from '../services/githubGraphql.js';
 import { githubService, MergeNotPermittedForAppError } from '../services/github.js';
+import { GitHubRateLimitError } from '../services/githubRateGate.js';
 import {
   setFocused,
   clearFocused,
@@ -26,6 +27,8 @@ import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middle
 import { withMergeQueueLimitGate } from '../services/billing/entitlements.js';
 import { bypassesPaywall } from '../services/billing/clientGate.js';
 import { emitPullRequestUpdated } from '../services/websocket.js';
+import { noteHeadSha } from '../services/webhookHeadIndex.js';
+import { refreshWebhookIndex } from '../services/webhookIndex.js';
 import { mergeQueueProcessor } from '../services/mergeQueueProcessor.js';
 import {
   closeActiveEntry,
@@ -74,6 +77,8 @@ import type { ApiResponse } from '@talyn/shared';
  *   POST  /pull-requests/:id/merge-queue  add/remove from the merge queue
  *   POST  /pull-requests/:id/focus        mark focused (adaptive-poll TTL)
  *   POST  /pull-requests/:id/merge        merge the PR (merge|squash|rebase)
+ *   POST  /pull-requests/watch            track an arbitrary PR by URL
+ *   DELETE /pull-requests/:id/watch       stop tracking it
  */
 
 /**
@@ -105,6 +110,13 @@ const PR_FLAG_COLUMNS = {
   lastSummary: pullRequestsTable.lastSummary,
   mergeMethod: pullRequestsTable.mergeMethod,
   mergeQueuedAt: pullRequestsTable.mergeQueuedAt,
+  // The un-watch route reads these to decide whether anything else still
+  // references the row (see DELETE /:id/watch).
+  authored: pullRequestsTable.authored,
+  reviewRequested: pullRequestsTable.reviewRequested,
+  watching: pullRequestsTable.watching,
+  autoKeepMergeable: pullRequestsTable.autoKeepMergeable,
+  mergeQueued: pullRequestsTable.mergeQueued,
 } as const;
 
 /** A row read through {@link PR_FLAG_COLUMNS}. The `Pick` is the egress guard. */
@@ -128,6 +140,7 @@ const LIST_COLUMNS = {
   state: pullRequestsTable.state,
   reviewRequested: pullRequestsTable.reviewRequested,
   authored: pullRequestsTable.authored,
+  watching: pullRequestsTable.watching,
   mergedAt: pullRequestsTable.mergedAt,
   lastPolledAt: pullRequestsTable.lastPolledAt,
   lastSummary: pullRequestsTable.lastSummary,
@@ -141,6 +154,30 @@ const LIST_COLUMNS = {
   updatedAt: pullRequestsTable.updatedAt,
 } as const;
 
+/**
+ * Parse a user-pasted PR reference into (owner, repo, number).
+ *
+ * Accepts the full URL in every shape GitHub hands out — `http`/`https`, a
+ * bare `github.com/…`, and any trailing `/files`, `?diff=split` or
+ * `#issuecomment-…` — plus the `owner/repo#1234` shorthand.
+ *
+ * A bare `#1234` is deliberately refused: there is no repo to hang it on, and
+ * guessing one is worse than asking. `[\w.-]` for the owner because an org can
+ * carry a dot; the repo lookup then matches case-insensitively.
+ */
+export function parsePrRef(
+  input: string
+): { owner: string; repo: string; number: number } | null {
+  const raw = input.trim();
+  const url = raw.match(/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/);
+  const short = url ? null : raw.match(/^([\w.-]+)\/([\w.-]+)(?:#|\/pull\/)(\d+)$/);
+  const m = url ?? short;
+  if (!m) return null;
+  const number = Number(m[3]);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return { owner: m[1], repo: m[2].replace(/\.git$/, ''), number };
+}
+
 export function pullRequestRoutes(): Router {
   const router = Router();
 
@@ -148,7 +185,7 @@ export function pullRequestRoutes(): Router {
   // 'merged' | 'all', default 'open'), repo (repository_id),
   // taskOnly (true → only PRs linked to a task), search (substring
   // match on title or owner/repo), relationship ('authored' |
-  // 'review_requested' | 'all', default 'all').
+  // 'review_requested' | 'watching' | 'all', default 'all').
   router.get('/', async (req, res) => {
     const workspaceId = req.query.workspaceId as string | undefined;
     if (!workspaceId) {
@@ -182,6 +219,8 @@ export function pullRequestRoutes(): Router {
       // `reviewRequested` already means "awaiting my review" — the monitor
       // clears it once the user reviews the PR, so an approved PR is gone.
       conditions.push(eq(pullRequestsTable.reviewRequested, true));
+    } else if (relationship === 'watching') {
+      conditions.push(eq(pullRequestsTable.watching, true));
     }
     // `taskOnly` + `search` used to filter in JS after loading every open PR;
     // do it in SQL so a workspace with hundreds of PRs neither ships nor walks
@@ -236,6 +275,203 @@ export function pullRequestRoutes(): Router {
         mergeQueue: v2ByPrId.get(r.id) ?? null,
       })),
     } as ApiResponse<Array<ReturnType<typeof rowToPublicShape> & { mergeQueue: unknown }>>);
+  });
+
+  // Track an arbitrary PR by URL — typically one someone ELSE authored, so the
+  // user can watch its CI. Registered BEFORE `/:id` or Express routes "watch"
+  // into the detail handler.
+  //
+  // A pull_requests row cannot exist without a repositories row (NOT NULL FK),
+  // and that row is also what makes GitHub webhooks reach the PR at all
+  // (webhookIndex drops any delivery for an unwatched repo). So a PR in an
+  // unconnected repo needs the repo added — which has consequences the user
+  // should agree to first (the poller then also surfaces THEIR PRs in that
+  // repo, at three search queries per tick). Hence the two-phase confirm:
+  // answer 409 `repo_not_watched`, and let the client re-POST with
+  // `confirmAddRepo`. The check runs before any GitHub call, so the refusal
+  // costs one DB query and zero API budget — which is why there's no separate
+  // preflight endpoint duplicating it.
+  router.post('/watch', async (req, res) => {
+    const { workspaceId, url, confirmAddRepo } = req.body ?? {};
+    if (!workspaceId || !url) {
+      return res
+        .status(400)
+        .json({ success: false, error: 'workspaceId and url are required' });
+    }
+    try {
+      await requireWorkspaceAccess(req, workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+
+    const ref = parsePrRef(String(url));
+    if (!ref) {
+      return res.status(400).json({
+        success: false,
+        code: 'invalid_url',
+        error:
+          'Paste a GitHub PR link, e.g. https://github.com/owner/repo/pull/1234',
+      });
+    }
+
+    try {
+      const watched = await prMonitorService.getWatchedRepos(workspaceId);
+      let repo = watched.find(
+        (r) =>
+          r.owner.toLowerCase() === ref.owner.toLowerCase() &&
+          r.repo.toLowerCase() === ref.repo.toLowerCase()
+      );
+      let repoAdded = false;
+      if (!repo) {
+        if (!confirmAddRepo) {
+          return res.status(409).json({
+            success: false,
+            code: 'repo_not_watched',
+            owner: ref.owner,
+            repo: ref.repo,
+            error:
+              `Talyn isn't watching ${ref.owner}/${ref.repo} yet — ` +
+              'watching this PR will add the repo to this workspace.',
+          });
+        }
+        repo = await prMonitorService.addWatchedRepo(workspaceId, ref.owner, ref.repo);
+        repoAdded = true;
+        // Without this the receiver drops every delivery for the new repo until
+        // the index's own 30s refresh (routes/repositories.ts does the same).
+        void refreshWebhookIndex().catch(() => undefined);
+      }
+
+      const result = await prMonitorService.watchPullRequest({
+        workspaceId,
+        repo,
+        number: ref.number,
+      });
+      if (!result.ok) {
+        if (result.reason === 'not_found') {
+          // A single-number GraphQL request can't tell "no such PR" from "the
+          // repo node came back empty", so the message hedges. Note the repo
+          // row, if we just created one, is deliberately NOT rolled back: the
+          // user was told it would be added, and silently un-adding it is the
+          // more surprising outcome.
+          return res.status(404).json({
+            success: false,
+            code: 'pr_not_found',
+            error:
+              `${ref.owner}/${ref.repo}#${ref.number} doesn't exist, or Talyn ` +
+              "can't see it (a private repo without access).",
+          });
+        }
+        const verb = result.summary?.state === 'merged' ? 'merged' : 'closed';
+        return res.status(409).json({
+          success: false,
+          code: 'pr_not_open',
+          error: `${ref.owner}/${ref.repo}#${ref.number} is already ${verb}.`,
+        });
+      }
+
+      // The receiver drops a `check_run` whose head SHA isn't in the per-repo
+      // index, and that index is only reseeded from `pull_requests` every 60s —
+      // so without this, every check event for the PR the user JUST added to
+      // watch CI on is dropped for up to a minute. Same short-TTL `recent` set
+      // the receiver uses for a freshly-opened PR.
+      void noteHeadSha(repo.fullName, result.summary.headSha).catch(() => undefined);
+
+      const db = getDbClient();
+      const [row] = await db
+        .select(LIST_COLUMNS)
+        .from(pullRequestsTable)
+        .where(eq(pullRequestsTable.id, result.rowId))
+        .limit(1);
+      if (!row) {
+        return res.status(500).json({ success: false, error: 'Failed to read the new row' });
+      }
+      const { payload } = await mergeQueueForPr(result.rowId, db);
+      return res.status(result.alreadyTracked ? 200 : 201).json({
+        success: true,
+        data: {
+          ...rowToPublicShape(row),
+          mergeQueue: payload,
+          repoAdded,
+          alreadyTracked: result.alreadyTracked,
+        },
+      });
+    } catch (err: unknown) {
+      if (err instanceof GitHubRateLimitError) {
+        // Transient and retryable — a 500 would tell the user to give up.
+        const retryAfterMs = err.retryAfterMs;
+        if (retryAfterMs) {
+          res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+        }
+        return res.status(503).json({
+          success: false,
+          code: 'rate_limited',
+          error: 'GitHub is rate-limiting Talyn right now — try again in a moment.',
+        });
+      }
+      console.error('[pullRequests] watch failed:', err);
+      return res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Failed to watch this PR',
+      });
+    }
+  });
+
+  // Stop tracking a manually-watched PR.
+  //
+  // Clears the flag; it does NOT cancel anything else the user asked for. A
+  // queued PR keeps its queue entry and an armed watcher keeps running — "stop
+  // showing me this" must not silently abandon a merge. The row is deleted only
+  // when nothing at all references it, because merge_queue_entries cascades on
+  // this row: deleting a queued PR's row would destroy its entry AND its whole
+  // audit timeline from a one-click affordance.
+  router.delete('/:id/watch', async (req, res) => {
+    const db = getDbClient();
+    const [row] = await db
+      .select(PR_FLAG_COLUMNS)
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, req.params.id))
+      .limit(1);
+    if (!row) {
+      return res.status(404).json({ success: false, error: 'Pull request not found' });
+    }
+    try {
+      await requireWorkspaceAccess(req, row.workspaceId);
+    } catch (err) {
+      return handleAccessError(err, res);
+    }
+
+    await db
+      .update(pullRequestsTable)
+      .set({ watching: false, updatedAt: new Date() })
+      .where(eq(pullRequestsTable.id, row.id));
+
+    // `mergeQueued` is the legacy mirror; the v2 entry is the source of truth,
+    // so check both before deciding the row is unreferenced.
+    const activeEntry = await getActiveEntryForPr(row.id, db).catch(() => null);
+    const unreferenced =
+      !row.authored &&
+      !row.reviewRequested &&
+      row.taskId === null &&
+      !row.mergeQueued &&
+      !row.autoKeepMergeable &&
+      !activeEntry;
+    if (unreferenced) {
+      await db.delete(pullRequestsTable).where(eq(pullRequestsTable.id, row.id));
+    }
+
+    emitPullRequestUpdated(row.workspaceId, {
+      id: row.id,
+      taskId: row.taskId,
+      repositoryId: row.repositoryId,
+      owner: row.owner,
+      repo: row.repo,
+      number: row.number,
+      state: row.state,
+      lastSummary: (row.lastSummary as Record<string, unknown>) ?? {},
+      watching: false,
+    });
+
+    return res.json({ success: true, data: { deleted: unreferenced } });
   });
 
   // Single PR detail. Always returns the persisted row plus a fresh
@@ -1264,6 +1500,7 @@ interface PullRequestRow {
   state: string;
   reviewRequested: boolean;
   authored: boolean;
+  watching: boolean;
   mergedAt: Date | null;
   lastPolledAt: Date;
   lastSummary: unknown;
@@ -1430,6 +1667,7 @@ type PublicShapeRow = Pick<
   | 'state'
   | 'reviewRequested'
   | 'authored'
+  | 'watching'
   | 'mergedAt'
   | 'lastPolledAt'
   | 'lastSummary'
@@ -1488,6 +1726,7 @@ function rowToPublicShape(row: PublicShapeRow, queuePosition = 0) {
     state: row.state,
     reviewRequested: row.reviewRequested,
     authored: row.authored,
+    watching: row.watching,
     mergedAt: row.mergedAt ? row.mergedAt.toISOString() : null,
     lastPolledAt: row.lastPolledAt.toISOString(),
     summary: row.lastSummary,

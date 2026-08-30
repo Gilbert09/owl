@@ -59,6 +59,7 @@ describe('Drizzle migration', () => {
       'repo',
       'number',
       'state',
+      'watching',
       'merged_at',
       'last_polled_at',
       'last_summary',

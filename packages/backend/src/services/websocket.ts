@@ -420,6 +420,14 @@ export function emitPullRequestUpdated(
     // reviews it. Optional: emitters that don't change them omit them.
     reviewRequested?: boolean;
     authored?: boolean;
+    // Manual-watch flag. Optional for the SAME reason as the two above, but the
+    // consequence is sharper: prCache's upsert and the monitor's flag reconcile
+    // both emit this event and neither knows about `watching`, so a REQUIRED
+    // field would cost a read-back on the hottest write path. Only the two
+    // /watch routes ever set it — every other emitter omits it, and the client
+    // preserves its current value with `??` (never `||`: the un-watch emit
+    // sends `false` and it must not be swallowed).
+    watching?: boolean;
     // Auto-keep-mergeable watcher state, so the toggle + row badge update live.
     // Optional: emitters that don't change them omit them.
     autoKeepMergeable?: boolean;

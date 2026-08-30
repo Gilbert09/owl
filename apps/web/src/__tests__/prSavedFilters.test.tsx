@@ -33,6 +33,7 @@ function row(opts: { id: string; repo?: string; title?: string; labels?: string[
     state: 'open',
     reviewRequested: false,
     authored: true,
+    watching: false,
     mergedAt: null,
     lastPolledAt: '',
     autoKeepMergeable: false,
