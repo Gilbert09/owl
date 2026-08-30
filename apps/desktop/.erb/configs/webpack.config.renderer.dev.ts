@@ -13,6 +13,7 @@ import { execSync, spawn } from 'child_process';
 import ReactRefreshWebpackPlugin from '@pmmmwh/react-refresh-webpack-plugin';
 import baseConfig from './webpack.config.base';
 import webpackPaths from './webpack.paths';
+import { resolveAppVersion } from './appVersion';
 import checkNodeEnv from '../scripts/check-node-env';
 
 // When an ESLint server is running, we can't set the NODE_ENV so we'll check if it's
@@ -155,10 +156,9 @@ const configuration: webpack.Configuration = {
       // PostHog analytics. Empty key => analytics disabled (see lib/posthog).
       TALYN_POSTHOG_KEY: '',
       TALYN_POSTHOG_HOST: 'https://us.i.posthog.com',
-      // Baked app version for analytics — see the prod config note.
-      TALYN_APP_VERSION:
-        // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
-        require('../../release/app/package.json').version,
+      // Baked app version for analytics — see the prod config note. A local
+      // build reports `dev`, never the committed placeholder.
+      TALYN_APP_VERSION: resolveAppVersion(),
     }),
 
     new webpack.LoaderOptionsPlugin({

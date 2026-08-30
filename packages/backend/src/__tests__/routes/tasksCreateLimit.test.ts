@@ -25,10 +25,12 @@ import { eq } from 'drizzle-orm';
  * one production serves.
  */
 
-// Enforcement is FAIL-CLOSED (services/billing/clientGate.ts): only a bare
-// X.Y.Z older than MIN_TASK_PAYWALL_CLIENT is exempt. A missing header is
-// NOT — that used to be the exemption, which let the CLI, the MCP server,
-// and plain curl through.
+// Enforcement is UNCONDITIONAL. There was once a transitional exemption for
+// desktop builds that predated the upgrade UI, keyed on the client version
+// header; it was deleted once those builds aged out, because the only thing
+// still claiming it was an unstamped local build reporting the repo's
+// placeholder version. The header is still sent, but nothing in billing reads
+// it — these suites pin that every caller shape is enforced alike.
 const headers = {
   ...internalProxyHeaders(TEST_USER_ID),
   'content-type': 'application/json',
@@ -38,9 +40,15 @@ const headerlessHeaders = {
   ...internalProxyHeaders(TEST_USER_ID),
   'content-type': 'application/json',
 };
-const prePaywallHeaders = {
+// Versions that the deleted exemption would have let through: the old floor,
+// and the `0.1.0` placeholder an unstamped local build used to report.
+const legacyClientHeaders = {
   ...headerlessHeaders,
-  'x-talyn-client-version': '0.2.2', // one below MIN_TASK_PAYWALL_CLIENT
+  'x-talyn-client-version': '0.2.2',
+};
+const placeholderClientHeaders = {
+  ...headerlessHeaders,
+  'x-talyn-client-version': '0.1.0',
 };
 const savedPolarToken = process.env.POLAR_ACCESS_TOKEN;
 
@@ -160,9 +168,9 @@ describe('free-plan task limit at the route surface', () => {
     });
   });
 
-  // The bypass is fail-closed: identifying as a pre-paywall build exempts you,
-  // omitting the header does not. Every activation path is covered on both
-  // sides — a gap here is a silent, unmetered paywall hole.
+  // Every activation path is covered for every caller shape — a gap here is a
+  // silent, unmetered paywall hole, which is exactly what the old exemption
+  // turned out to be.
   describe('headerless callers (CLI / MCP / curl) are enforced', () => {
     it(`POST /tasks 402s with ${TASK_LIMIT_ERROR_CODE} at the limit`, async () => {
       await fillToLimit();
@@ -208,39 +216,50 @@ describe('free-plan task limit at the route surface', () => {
     });
   });
 
-  describe('pre-paywall builds (version below the floor) stay exempt', () => {
-    it('POST /tasks is not enforced at the limit', async () => {
+  describe.each([
+    ['an old release (0.2.2)', () => legacyClientHeaders],
+    ['an unstamped local build (0.1.0)', () => placeholderClientHeaders],
+  ])('%s is enforced like everyone else', (_label, hdrs) => {
+    it('POST /tasks 402s at the limit', async () => {
       await fillToLimit();
       const res = await fetch(`${url}/tasks`, {
         method: 'POST',
-        headers: prePaywallHeaders,
+        headers: hdrs(),
         body: createBody(),
       });
-      expect(res.status).toBe(201);
+      expect(res.status).toBe(402);
+      expect(((await res.json()) as { code: string }).code).toBe(TASK_LIMIT_ERROR_CODE);
+      const rows = await db.select({ id: tasksTable.id }).from(tasksTable);
+      expect(rows).toHaveLength(FREE_PLAN_ACTIVE_TASK_LIMIT);
     });
 
     it.each([
       { label: 'retry', path: (id: string) => `/tasks/${id}/retry` },
       { label: 'start', path: (id: string) => `/tasks/${id}/start` },
-    ])('$label of an inactive task is not enforced at the limit', async ({ path }) => {
+    ])('$label of an inactive task 402s at the limit', async ({ path }) => {
       await fillToLimit();
       const failedId = await insertTask('failed');
       const res = await fetch(`${url}${path(failedId)}`, {
         method: 'POST',
-        headers: prePaywallHeaders,
+        headers: hdrs(),
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(402);
+      const rows = await db
+        .select({ status: tasksTable.status })
+        .from(tasksTable)
+        .where(eq(tasksTable.id, failedId));
+      expect(rows[0].status).toBe('failed');
     });
 
-    it('PATCH to an active status is not enforced at the limit', async () => {
+    it('PATCH to an active status 402s at the limit', async () => {
       await fillToLimit();
       const failedId = await insertTask('failed');
       const res = await fetch(`${url}/tasks/${failedId}`, {
         method: 'PATCH',
-        headers: prePaywallHeaders,
+        headers: hdrs(),
         body: JSON.stringify({ status: 'queued' }),
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(402);
     });
   });
 

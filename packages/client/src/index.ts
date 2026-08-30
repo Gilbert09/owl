@@ -153,10 +153,10 @@ async function request<T>(
 ): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    // Identifies the build to the backend's paywall exemption
-    // (services/billing/clientGate.ts). That check is fail-closed, so this
-    // header omitted or unrecognised means ENFORCE — it is no longer a way
-    // to opt out of the free-plan limits.
+    // Identifies the build to the backend, for logs and support. It carries
+    // NO entitlement any more: the free-plan gates used to exempt builds that
+    // predated the upgrade UI, and that exemption is deleted — every caller is
+    // enforced alike, whatever it claims here.
     'X-Talyn-Client-Version': getConfig().clientVersion,
   };
   const token = await getAuthToken();

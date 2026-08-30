@@ -23,9 +23,11 @@ import { eq } from 'drizzle-orm';
  * Free-plan merge-queue cap at the route surface: POST /:id/merge-queue must
  * 402 with MERGE_QUEUE_LIMIT_ERROR_CODE once the owner has
  * FREE_PLAN_MERGE_QUEUE_LIMIT PRs queued — and pass for comped/unlimited
- * users, legacy (headerless) clients, dequeues, and re-arms of an
- * already-queued PR. Uses the REAL apiErrorHandler so the status/code
- * contract is the one production serves.
+ * users, dequeues, and re-arms of an already-queued PR. Uses the REAL
+ * apiErrorHandler so the status/code contract is the one production serves.
+ *
+ * Enforcement is unconditional: the transitional client-version exemption is
+ * gone, so the version header changes nothing here.
  */
 
 const headers = {
@@ -37,12 +39,16 @@ const headerlessHeaders = {
   ...internalProxyHeaders(TEST_USER_ID),
   'content-type': 'application/json',
 };
-// One below MIN_MERGE_QUEUE_PAYWALL_CLIENT — and deliberately ABOVE the task
-// floor, pinning the fact that the two gates have separate floors: this build
-// renders a task 402 but not a merge-queue one.
-const prePaywallHeaders = {
+// Versions the deleted exemption would once have waved through: the old
+// merge-queue floor, and the `0.1.0` placeholder an unstamped local build
+// reported (the shape that was still claiming the exemption in production).
+const legacyClientHeaders = {
   ...headerlessHeaders,
   'x-talyn-client-version': '0.2.8',
+};
+const placeholderClientHeaders = {
+  ...headerlessHeaders,
+  'x-talyn-client-version': '0.1.0',
 };
 const savedPolarToken = process.env.POLAR_ACCESS_TOKEN;
 
@@ -227,10 +233,20 @@ describe('free-plan merge-queue limit at the route surface', () => {
     expect(rows[0]?.mergeQueued).toBe(false);
   });
 
-  it('pre-paywall builds (version below the floor) bypass the gate', async () => {
+  it.each([
+    ['an old release (0.2.8)', () => legacyClientHeaders],
+    ['an unstamped local build (0.1.0)', () => placeholderClientHeaders],
+  ])('%s is enforced like everyone else', async (_label, hdrs) => {
     await fillQueue();
     const pr = await insertPr({ queued: false });
-    expect((await enqueue(pr, prePaywallHeaders)).status).toBe(200);
+    const res = await enqueue(pr, hdrs());
+    expect(res.status).toBe(402);
+    expect((await res.json()).code).toBe(MERGE_QUEUE_LIMIT_ERROR_CODE);
+    const rows = await db
+      .select({ mergeQueued: pullRequestsTable.mergeQueued })
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, pr));
+    expect(rows[0]?.mergeQueued).toBe(false);
   });
 
   it('no POLAR env → no enforcement (the kill switch)', async () => {

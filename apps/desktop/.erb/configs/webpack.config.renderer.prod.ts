@@ -16,6 +16,7 @@ import { merge } from 'webpack-merge';
 import TerserPlugin from 'terser-webpack-plugin';
 import baseConfig from './webpack.config.base';
 import webpackPaths from './webpack.paths';
+import { resolveAppVersion } from './appVersion';
 import checkNodeEnv from '../scripts/check-node-env';
 import deleteSourceMaps from '../scripts/delete-source-maps';
 
@@ -125,10 +126,9 @@ const configuration: webpack.Configuration = {
       // super property synchronously (the IPC getVersion round-trip raced
       // event capture and the property never landed). CI stamps
       // release/app/package.json before building, so this matches
-      // app.getVersion().
-      TALYN_APP_VERSION:
-        // eslint-disable-next-line @typescript-eslint/no-var-requires, global-require
-        require('../../release/app/package.json').version,
+      // app.getVersion(); an unstamped local build reports `dev` rather than
+      // the committed placeholder — see ./appVersion.
+      TALYN_APP_VERSION: resolveAppVersion(),
     }),
 
     new MiniCssExtractPlugin({

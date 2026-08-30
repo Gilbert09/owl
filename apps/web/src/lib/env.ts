@@ -16,11 +16,10 @@ export const POSTHOG_HOST =
   import.meta.env.VITE_TALYN_POSTHOG_HOST ?? 'https://us.i.posthog.com';
 
 /**
- * Namespaced on purpose. This becomes `X-Talyn-Client-Version`, which the
- * backend's paywall gate parses (services/billing/clientGate.ts). That gate is
- * fail-closed and only exempts a bare `X.Y.Z` below its floor — a `web/<sha>`
- * value can never be mistaken for an old desktop semver, so the web app is
- * always enforced.
+ * Namespaced on purpose: this becomes `X-Talyn-Client-Version`, and a
+ * `web/<sha>` value says which client and which build without being mistakable
+ * for a desktop release number. It carries no entitlement — the backend's
+ * free-plan gates read nothing from it.
  */
 export const CLIENT_VERSION = `web/${import.meta.env.VITE_TALYN_BUILD_SHA ?? 'dev'}`;
 

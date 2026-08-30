@@ -13,9 +13,9 @@ import { adminFleetRoutes } from './fleet.js';
  * # Why a new router rather than growing /debug and /fleet
  *
  * Both of those are consumed by SHIPPED desktop builds, and there is no API
- * version negotiation — `X-Talyn-Client-Version` exists for the paywall gate
- * and nothing else. Reshaping their responses breaks installs in the field
- * that nobody can force-update.
+ * version negotiation — `X-Talyn-Client-Version` is identification only, and
+ * nothing branches on it. Reshaping their responses breaks installs in the
+ * field that nobody can force-update.
  *
  * `/api/v1/fleet` has a second reason: it already has a split personality.
  * `fleetPublicRoutes()` mounts BEFORE requireAuth with a shared bearer so a

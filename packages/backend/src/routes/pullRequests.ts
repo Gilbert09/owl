@@ -25,7 +25,6 @@ import {
 } from '../services/prFocus.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import { withMergeQueueLimitGate } from '../services/billing/entitlements.js';
-import { bypassesPaywall } from '../services/billing/clientGate.js';
 import { emitPullRequestUpdated } from '../services/websocket.js';
 import { noteHeadSha } from '../services/webhookHeadIndex.js';
 import { refreshWebhookIndex } from '../services/webhookIndex.js';
@@ -732,11 +731,7 @@ export function pullRequestRoutes(): Router {
       typeof req.body?.model === 'string' && req.body.model.trim()
         ? req.body.model.trim()
         : undefined;
-    const result = await startPrMergeableRun(row, {
-      model,
-      // Transitional billing rollout — see services/billing/clientGate.ts.
-      bypassTaskLimit: bypassesPaywall(req, 'task'),
-    });
+    const result = await startPrMergeableRun(row, { model });
     if (!result.ok) {
       return res.status(400).json({
         success: false,
@@ -968,11 +963,10 @@ export function pullRequestRoutes(): Router {
         trigger: enabled ? 'user:enqueue' : 'user:dequeue',
       });
 
-    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
+    if (enabled) {
       // Free-plan queue cap — MergeQueueLimitError → 402 via the error
       // middleware. The PR itself is excluded from the count so re-arming an
-      // already-queued PR never self-blocks. Pre-paywall builds skip the gate
-      // (they can't render the upgrade flow) — see billing/clientGate.ts.
+      // already-queued PR never self-blocks.
       await withMergeQueueLimitGate(assertUser(req).id, { excludePrId: row.id }, apply);
     } else {
       await apply();
@@ -1125,7 +1119,7 @@ export function pullRequestRoutes(): Router {
       }
     };
 
-    if (enabled && !bypassesPaywall(req, 'merge_queue')) {
+    if (enabled) {
       // One advisory lock spanning the count AND every insert, so a stack that
       // does not fit is refused whole. Every member is excluded from the count
       // — an already-queued member must not make its own stack unaffordable.

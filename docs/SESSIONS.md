@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 104 — The paywall a heavy user had never seen (2026-08-30)
+
+A user who lives in the app had never hit the free plan. Digging into it turned up two independent reasons, and the second one is the interesting one.
+
+**The measured picture first.** Across three months of production analytics: 1,921 `task_created`, 5,090 `task_dispatched`, 1,741 `merge_queue_toggled` — and **five `paywall_shown` events, from four people, ever**. Two checkouts, two upgrades. The paywall was not converting badly; it was barely firing.
+
+**Reason one — the client-version exemption was still live, for exactly the wrong client.** `clientGate.ts` waved through any caller identifying as a bare `X.Y.Z` below the release that shipped each paywall UI, on the reasoning that an old build can only render a bare error. The user in question was the ONLY source of `billing_paywall_bypassed` in the entire dataset: **12 exemptions, all `merge_queue`, all `client_version: 0.1.0`** — 12 merge-queue refusals waived.
+
+`0.1.0` is not an old release. It is the placeholder committed in `apps/desktop/release/app/package.json`, which only CI stamps (`publish.yml`), so **any build made anywhere else reported itself as a release that predated the paywall and was silently exempt from both caps**. It is also invisible: a local build bakes no analytics key, so it emits no client events to notice it by — the exemptions only showed up because the bypass event is captured server-side. `resolveAppVersion()` (`apps/desktop/.erb/configs/appVersion.ts`) now maps the placeholder to `dev`, which does not parse as a version, and the gate is deleted outright: the last genuine pre-paywall user had already moved to a current build, so it was protecting nobody.
+
+**Reason two — the dominant path cannot show a paywall at all.** That user had 214 `task_dispatched` against **2** `task_created`: ~99% of their tasks are created server-side by the merge-queue executor and the auto-keep watcher, not by a request. All three watcher paths treat `TaskLimitError` as a transient deferral and retry later — correct behaviour, but there is no HTTP response to turn into a 402, so no `paywall_shown`, no UpgradeModal. The v2 executor writes a `deferred_task_limit` entry to the queue timeline; the other two log to stdout.
+
+They were hitting the cap constantly. Reconstructing concurrency from dispatch/terminal spans (deduped by `task_id` — a retried task fires `task_dispatched` more than once, which inflates a naive sweep), **they sat at 3 concurrent tasks 133 times in 90 days** and saw nothing. That reconstruction is a LOWER bound: the gate counts `pending` and `queued` too, and those never emit a dispatch event.
+
+**Not changed, on purpose:** the merge-queue cap was already 3, already enforced with no ungated path (the only two writers are both behind `withMergeQueueLimitGate`), and already documented on the marketing site in two places. Surfacing the watcher deferral to the user — the thing that would actually move the funnel — is left as its own change, because it needs a notification surface and a decision about how loud it should be.
+
 ## Session 103 — Watch a PR you did not write (2026-08-30)
 
 Talyn only ever tracked PRs it DISCOVERED. `pollRepo` runs three searches per watched repo — `author:me`, `review-requested:me`, `reviewed-by:me` — and the two booleans they produce, `authored` and `review_requested`, were the only relationships a `pull_requests` row could have. There was no way to say "track this one" about someone else's PR whose CI you care about.

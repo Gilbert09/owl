@@ -174,8 +174,6 @@ export async function startPrMergeableRun(
     title?: string;
     description?: string;
     model?: string;
-    /** See CreateCloudTaskInput.bypassTaskLimit (transitional billing rollout). */
-    bypassTaskLimit?: boolean;
   } = {}
 ): Promise<PrFixResult> {
   const resolved = await resolveCloudEnv(row.workspaceId);
@@ -213,7 +211,6 @@ export async function startPrMergeableRun(
     assignedEnvironmentId: envId,
     pullRequestId: row.id,
     model: opts.model,
-    bypassTaskLimit: opts.bypassTaskLimit,
   });
   return { ok: true, task };
 }

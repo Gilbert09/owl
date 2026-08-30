@@ -10,7 +10,6 @@ import {
   ACTIVE_TASK_STATUSES,
   assertCanActivateTask,
 } from '../services/billing/entitlements.js';
-import { bypassesPaywall } from '../services/billing/clientGate.js';
 import { rowToTask, taskColumnsNoTranscript } from '../services/taskSerialize.js';
 import { taskQueueService } from '../services/taskQueue.js';
 import {
@@ -190,7 +189,6 @@ export function taskRoutes(): Router {
       runtimeAdapter: body.runtimeAdapter,
       model: body.model,
       skill: body.skill,
-      bypassTaskLimit: bypassesPaywall(req, 'task'),
     });
     res.status(201).json({ success: true, data: rowToTask(row) } as ApiResponse<Task>);
   });
@@ -231,8 +229,7 @@ export function taskRoutes(): Router {
     // never self-blocks.
     if (
       body.status !== undefined &&
-      (ACTIVE_TASK_STATUSES as readonly string[]).includes(body.status) &&
-      !bypassesPaywall(req, 'task')
+      (ACTIVE_TASK_STATUSES as readonly string[]).includes(body.status)
     ) {
       await assertCanActivateTask(assertUser(req).id, req.params.id);
     }
@@ -306,9 +303,7 @@ export function taskRoutes(): Router {
     }
 
     // Free-plan gate: a retry re-occupies a slot. Throws → 402.
-    if (!bypassesPaywall(req, 'task')) {
-      await assertCanActivateTask(assertUser(req).id, req.params.id);
-    }
+    await assertCanActivateTask(assertUser(req).id, req.params.id);
 
     // Clear the prior cloud run so dispatch starts a fresh one rather than
     // treating the task as already dispatched (idempotency short-circuit).
@@ -354,9 +349,7 @@ export function taskRoutes(): Router {
     const task = rowToTask(rows[0]);
     if (task.status !== 'in_progress') {
       // Free-plan gate: queueing re-occupies a slot. Throws → 402.
-      if (!bypassesPaywall(req, 'task')) {
-        await assertCanActivateTask(assertUser(req).id, task.id);
-      }
+      await assertCanActivateTask(assertUser(req).id, task.id);
       await taskQueueService.queueTask(task.id);
     }
     const updated = await db

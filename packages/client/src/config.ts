@@ -16,11 +16,10 @@ export interface ApiClientConfig {
   /** Backend origin, e.g. `https://prod.talyn.dev`. No trailing slash. */
   baseUrl: string;
   /**
-   * Sent as `X-Talyn-Client-Version` on every request. The backend's paywall
-   * exemption reads it (services/billing/clientGate.ts) — it is fail-closed,
-   * so an omitted or unparseable value ENFORCES rather than exempting.
-   * Namespace non-desktop clients (`web/<sha>`) so a version comparison can
-   * never mistake a build SHA for a semver.
+   * Sent as `X-Talyn-Client-Version` on every request, for logs and support.
+   * Nothing branches on it: the free-plan gates once exempted builds below a
+   * version floor, and that exemption is deleted. Still namespace non-desktop
+   * clients (`web/<sha>`) so the value says which client it came from.
    */
   clientVersion: string;
   /** Current access token, or null when signed out. */
