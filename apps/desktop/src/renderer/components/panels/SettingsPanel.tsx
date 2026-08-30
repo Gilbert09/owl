@@ -43,6 +43,8 @@ import { toast } from '../../stores/toast';
 import { getSupabase, isSupabaseConfigured } from '../../lib/supabase';
 import { setLogoutReason } from '../../lib/logoutReason';
 import { cn } from '../../lib/utils';
+import { maybeHandleBillingLimit } from '../../stores/billing';
+import { toast } from '../../stores/toast';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Card } from '../ui/card';
@@ -1123,6 +1125,11 @@ function SelfHostedFleetCard() {
  * authored. Persists to `workspace.settings.defaultAutoKeepMergeable`; the
  * backend applies it only to authored PRs on first sighting (never a PR you're
  * only reviewing). Individual PRs stay hand-toggleable in the PR detail sheet.
+ *
+ * Turning it ON is an Unlimited feature — the backend 402s an OFF→ON change on
+ * a free plan and the upgrade modal opens. A workspace that already has it on
+ * is grandfathered and can keep it (but not re-enable it after turning it off).
+ * The same toggle, more prominently, lives in the My PRs header.
  */
 function AutoKeepMergeableDefaultToggle() {
   const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
@@ -1146,6 +1153,15 @@ function AutoKeepMergeableDefaultToggle() {
             : w,
         ),
       );
+    } catch (err) {
+      // Turning it on needs Unlimited — surface the upgrade flow rather than
+      // letting the 402 reject unhandled and leave the checkbox looking stuck.
+      if (!maybeHandleBillingLimit(err, 'auto_keep_default_settings')) {
+        toast.error(
+          'Could not change the auto-keep setting',
+          err instanceof Error ? err.message : undefined,
+        );
+      }
     } finally {
       setSaving(false);
     }

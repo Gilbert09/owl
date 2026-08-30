@@ -32,6 +32,7 @@ export function UpgradeModal({
   onOpenChange: (open: boolean) => void;
 }) {
   const status = useBillingStore((s) => s.status);
+  const upgradeReason = useBillingStore((s) => s.upgradeReason);
   const startCheckoutPollBurst = useBillingStore((s) => s.startCheckoutPollBurst);
   const [period, setPeriod] = useState<Period>('annual');
   const [opening, setOpening] = useState(false);
@@ -47,6 +48,16 @@ export function UpgradeModal({
 
   const pitch = () => {
     if (upgraded) return 'Your plan is active — run as many tasks as you like.';
+    // A FEATURE refusal, not a cap: there is no count to quote and nothing to
+    // wait out, so this has to be checked before the usage branches below —
+    // they would otherwise pitch a limit the user is nowhere near.
+    if (upgradeReason === 'auto_keep_default') {
+      return (
+        'Auto-keeping every new PR mergeable is an Unlimited feature. It arms the ' +
+        'watcher on each PR you open, so a cloud agent clears conflicts and red CI ' +
+        'without you asking. You can still arm individual PRs by hand on the free plan.'
+      );
+    }
     if (atQueueLimit && !atTaskLimit) {
       const qLimit = status?.mergeQueueLimit ?? limit;
       return (

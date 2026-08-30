@@ -247,7 +247,7 @@ export const pricing = {
       features: [
         "The whole PR dashboard, every repo, every workspace",
         "All agent providers, switch per task",
-        "Skills, merge queue & auto-keep-mergeable",
+        "Skills, the merge queue & auto-keep-mergeable on any PR you flag",
         "Up to 3 tasks running and 3 PRs queued at once",
       ],
       cta: "Download for {platform}",
@@ -264,6 +264,7 @@ export const pricing = {
         "Everything in Free",
         "Unlimited concurrent tasks",
         "Unlimited PRs in the merge queue",
+        "Keep every new PR green automatically, without flagging them one by one",
         "Automation never waits for a slot: merge queue and auto-keep always dispatch",
         "Cancel anytime, in-app",
       ],
@@ -292,7 +293,7 @@ export const faq = [
   },
   {
     q: "How does auto-keep-mergeable work?",
-    a: "Flag a PR and Talyn watches it. When it falls behind main, hits a conflict, or fails CI, Talyn dispatches a cloud fix run automatically. Once the checks are green again, the merge queue lands it in order.",
+    a: "Flag a PR and Talyn watches it. When it falls behind main, hits a conflict, or fails CI, Talyn dispatches a cloud fix run automatically. Once the checks are green again, the merge queue lands it in order. Flagging PRs one at a time is free; having every new PR you open flagged automatically is an Unlimited feature.",
   },
   {
     q: "Is my code safe?",
@@ -300,7 +301,7 @@ export const faq = [
   },
   {
     q: "What does it cost?",
-    a: "The free plan is the full app with up to 3 tasks running and 3 PRs in the merge queue at once. Unlimited removes both caps for $15/month (or $150/year, 2 months free), managed entirely in-app with cancel-anytime. Either way you bring your own cloud-agent credits: runs execute under the provider account you connect.",
+    a: "The free plan is the full app with up to 3 tasks running and 3 PRs in the merge queue at once, and auto-keep-mergeable on any PR you flag by hand. Unlimited removes both caps and keeps every new PR you open mergeable automatically, for $15/month (or $150/year, 2 months free), managed entirely in-app with cancel-anytime. Either way you bring your own cloud-agent credits: runs execute under the provider account you connect.",
   },
   {
     q: "What platforms are supported?",

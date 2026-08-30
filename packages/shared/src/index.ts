@@ -257,6 +257,14 @@ export interface WorkspaceSettings {
    * mergeable until it merges). Scoped to authored PRs on purpose — arming it
    * pushes commits, so it must never auto-fire on someone else's
    * review-requested PR. Individual PRs can still be toggled by hand. Unset = off.
+   *
+   * **An Unlimited feature.** Turning it ON requires a paid plan
+   * ({@link AUTO_KEEP_DEFAULT_ERROR_CODE}), because it commits the account to an
+   * open-ended stream of cloud runs — one per PR opened, indefinitely. The gate
+   * is on the OFF→ON transition only, so a free workspace that already has it on
+   * keeps working; turning it off gives up the grandfathered state, and turning
+   * it back on then needs the upgrade. Nothing reads the plan when APPLYING the
+   * setting — only when changing it.
    */
   defaultAutoKeepMergeable?: boolean;
   /** GitHub labels the watcher adds (never removes) to every open PR it watches. Empty = off. */
@@ -901,6 +909,14 @@ export const TASK_LIMIT_ERROR_CODE = 'task_limit_reached';
 
 /** ApiResponse.code when queueing a PR is rejected by the free merge-queue limit. */
 export const MERGE_QUEUE_LIMIT_ERROR_CODE = 'merge_queue_limit_reached';
+
+/**
+ * ApiResponse.code when a free plan tries to turn ON the workspace default
+ * "auto-keep new PRs mergeable". Unlike the two limit codes this is a FEATURE
+ * gate, not a usage cap — there is no count to wait out, so the client must
+ * pitch the upgrade rather than "wait for a slot".
+ */
+export const AUTO_KEEP_DEFAULT_ERROR_CODE = 'auto_keep_default_requires_unlimited';
 
 /**
  * The user's billing state as served by `GET /billing/status` and pushed on

@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 105 — "Keep new PRs green" becomes the paid feature (2026-08-30)
+
+The workspace default that arms auto-keep-mergeable on every PR you open is now an Unlimited feature, and it got a home on the My PRs header instead of only living in Settings.
+
+**The gate is on the TRANSITION, not the state.** `assertCanEnableAutoKeepDefault` runs in the workspace PATCH only when `defaultAutoKeepMergeable` is going from not-`'true'` to `true`, which is what makes grandfathering fall out for free: a workspace that already has it on keeps working, and a client that PATCHes the whole settings object on an unrelated edit cannot trip the gate. Turning it OFF is always allowed and gives the grandfathered state up — the next turn-on costs. Nothing reads the plan when APPLYING the setting, only when changing it, so the watcher keeps serving grandfathered users untouched.
+
+Reading the current value needed care: the probe pulls `settings ->> 'defaultAutoKeepMergeable'` rather than the settings jsonb, which by now carries the prompt overrides and the saved PR filters.
+
+**It is a feature gate, not a usage cap**, so it gets its own error class and code (`auto_keep_default_requires_unlimited`) rather than reusing the limit errors. The distinction is load-bearing in the modal: `UpgradeModal`'s pitch is derived from live usage ("you're using all 3"), and a feature refusal has no count behind it. The billing store now carries an `upgradeReason` alongside the open flag, and the feature branch is checked BEFORE the usage branches — otherwise it quotes a limit the user is nowhere near.
+
+**The toggle explains itself before it acts.** First time anyone turns it on, a modal says what it will do: only PRs you author, it spends agent credits, per-PR arming still works. Confirmed once, it never shows again (`fastowl-auto-keep-explained` in localStorage, same shape as the theme key). The flag is set on CONFIRM only — someone who cancelled has not knowingly enabled anything, so the safety net stays up. Turning it OFF never explains. On a free plan the explainer comes FIRST and its button becomes "See Unlimited": learning what something is should come before being asked to pay for it.
+
+Two details in the toggle worth keeping. An unknown plan (`status` is null until the first billing fetch lands) is treated as PAID — guessing "free" would flash an upgrade modal at someone who already pays, and the worst case of guessing paid is one refused round-trip. And the local `locked` check is only a shortcut: the 402 is the authority, so a stale snapshot still lands in `maybeHandleBillingLimit`.
+
+Marketing moved with it — the Free tier had read "Skills, merge queue & auto-keep-mergeable", which is now only true per-PR.
+
 ## Session 104 — The paywall a heavy user had never seen (2026-08-30)
 
 A user who lives in the app had never hit the free plan. Digging into it turned up two independent reasons, and the second one is the interesting one.

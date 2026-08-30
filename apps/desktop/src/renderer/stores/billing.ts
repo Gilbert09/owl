@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import {
+  AUTO_KEEP_DEFAULT_ERROR_CODE,
   MERGE_QUEUE_LIMIT_ERROR_CODE,
   TASK_LIMIT_ERROR_CODE,
   type BillingStatus,
@@ -24,8 +25,10 @@ const POLL_BURST_MAX_MS = 2 * 60_000;
 interface BillingState {
   status: BillingStatus | null;
   upgradeModalOpen: boolean;
+  /** What the user was refused, so the modal can pitch that thing. */
+  upgradeReason: UpgradeReason | null;
   setStatus: (status: BillingStatus) => void;
-  setUpgradeModalOpen: (open: boolean) => void;
+  setUpgradeModalOpen: (open: boolean, reason?: UpgradeReason | null) => void;
   /** Re-fetch the snapshot from the backend. Safe to call repeatedly. */
   refresh: () => Promise<void>;
   /** Start (or restart) the post-checkout poll burst. */
@@ -39,6 +42,7 @@ let pollDeadline = 0;
 export const useBillingStore = create<BillingState>((set, get) => ({
   status: null,
   upgradeModalOpen: false,
+  upgradeReason: null,
 
   setStatus: (status) => {
     const prev = get().status;
@@ -57,7 +61,9 @@ export const useBillingStore = create<BillingState>((set, get) => ({
     }
   },
 
-  setUpgradeModalOpen: (upgradeModalOpen) => set({ upgradeModalOpen }),
+  setUpgradeModalOpen: (upgradeModalOpen, reason) =>
+    // Clear the reason on close so the next open can't inherit stale copy.
+    set({ upgradeModalOpen, upgradeReason: upgradeModalOpen ? (reason ?? null) : null }),
 
   refresh: async () => {
     try {
@@ -92,7 +98,22 @@ export const useBillingStore = create<BillingState>((set, get) => ({
 const BILLING_LIMIT_CODES: ReadonlySet<string> = new Set([
   TASK_LIMIT_ERROR_CODE,
   MERGE_QUEUE_LIMIT_ERROR_CODE,
+  AUTO_KEEP_DEFAULT_ERROR_CODE,
 ]);
+
+/**
+ * Why the modal opened. The two limit codes are usage caps the modal can
+ * describe from the live snapshot ("you're using all 3"); a FEATURE code has no
+ * count behind it, so the modal has to be told which feature was asked for or
+ * it pitches a limit the user is nowhere near.
+ */
+export type UpgradeReason = 'task_limit' | 'merge_queue_limit' | 'auto_keep_default';
+
+function reasonFor(code: string): UpgradeReason {
+  if (code === MERGE_QUEUE_LIMIT_ERROR_CODE) return 'merge_queue_limit';
+  if (code === AUTO_KEEP_DEFAULT_ERROR_CODE) return 'auto_keep_default';
+  return 'task_limit';
+}
 
 /**
  * Shared 402 interception: when `err` is a free-plan limit rejection (task
@@ -110,9 +131,10 @@ export function maybeHandleBillingLimit(err: unknown, trigger?: string): boolean
   }
   const store = useBillingStore.getState();
   const status = store.status;
+  const reason = reasonFor(err.code);
   trackEvent('paywall_shown', {
-    // 'task_limit' | 'merge_queue_limit' — the cap that was hit.
-    reason: err.code === MERGE_QUEUE_LIMIT_ERROR_CODE ? 'merge_queue_limit' : 'task_limit',
+    // 'task_limit' | 'merge_queue_limit' | 'auto_keep_default' — what was refused.
+    reason,
     trigger: trigger ?? 'unknown',
     // Live usage at the moment of the wall (the pre-refresh snapshot).
     active_tasks: status?.activeTasks,
@@ -122,6 +144,6 @@ export function maybeHandleBillingLimit(err: unknown, trigger?: string): boolean
     plan: status?.plan,
   });
   void store.refresh();
-  store.setUpgradeModalOpen(true);
+  store.setUpgradeModalOpen(true, reason);
   return true;
 }

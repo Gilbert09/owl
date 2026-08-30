@@ -8,6 +8,7 @@ import {
   integrations as integrationsTable,
 } from '../db/schema.js';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
+import { assertCanEnableAutoKeepDefault } from '../services/billing/entitlements.js';
 import {
   PROMPT_KINDS,
   validatePromptTemplate,
@@ -222,7 +223,15 @@ export function workspaceRoutes(): Router {
     const db = getDbClient();
     const body = req.body as UpdateWorkspaceRequest;
     const existing = await db
-      .select({ id: workspacesTable.id })
+      .select({
+        id: workspacesTable.id,
+        ownerId: workspacesTable.ownerId,
+        // Only the one flag, via ->>, so the probe never ships the settings
+        // jsonb (prompts + prFilters live in there) just to read a boolean.
+        autoKeepDefault: sql<
+          string | null
+        >`${workspacesTable.settings} ->> 'defaultAutoKeepMergeable'`,
+      })
       .from(workspacesTable)
       .where(eq(workspacesTable.id, req.params.id))
       .limit(1);
@@ -269,6 +278,18 @@ export function workspaceRoutes(): Router {
           const msg = err instanceof Error ? err.message : 'invalid prFilters';
           return res.status(400).json({ success: false, error: msg });
         }
+      }
+      // Turning the auto-keep default ON is an Unlimited feature. Gate the
+      // TRANSITION, not the state: a workspace that already has it on predates
+      // the gate and keeps it, so a free user is never made to pay to stay
+      // where they are. Turning it off gives that up, and the next turn-on
+      // needs the upgrade. Throws AutoKeepDefaultPlanError → 402 via the error
+      // middleware, which is what opens the desktop UpgradeModal.
+      if (
+        body.settings.defaultAutoKeepMergeable === true &&
+        existing[0].autoKeepDefault !== 'true'
+      ) {
+        await assertCanEnableAutoKeepDefault(existing[0].ownerId);
       }
       updates.settings = mergedSettingsSql(body.settings, prompts);
     }

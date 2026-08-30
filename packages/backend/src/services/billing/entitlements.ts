@@ -1,5 +1,6 @@
 import { and, eq, inArray, ne, notInArray, sql } from 'drizzle-orm';
 import {
+  AUTO_KEEP_DEFAULT_ERROR_CODE,
   FREE_PLAN_ACTIVE_TASK_LIMIT,
   FREE_PLAN_MERGE_QUEUE_LIMIT,
   MERGE_QUEUE_LIMIT_ERROR_CODE,
@@ -76,6 +77,26 @@ export class MergeQueueLimitError extends Error {
           `Upgrade for an unlimited queue, or wait for a queued PR to land.`
     );
     this.name = 'MergeQueueLimitError';
+  }
+}
+
+/**
+ * Thrown when a free owner tries to turn ON the workspace default "auto-keep
+ * new PRs mergeable".
+ *
+ * A FEATURE gate rather than a usage cap: the other two errors mean "wait for a
+ * slot", this one means "there is no free version of this". Kept a distinct
+ * class so the 402 carries its own code and the client can pitch accordingly
+ * instead of quoting a limit the user is not at.
+ */
+export class AutoKeepDefaultPlanError extends Error {
+  readonly code = AUTO_KEEP_DEFAULT_ERROR_CODE;
+  constructor() {
+    super(
+      'Auto-keeping every new PR mergeable is an Unlimited feature. ' +
+        'Upgrade to turn it on, or arm individual PRs by hand.'
+    );
+    this.name = 'AutoKeepDefaultPlanError';
   }
 }
 
@@ -348,4 +369,21 @@ async function withFreePlanGate<T>(
  */
 export async function assertCanActivateTask(ownerId: string, taskId: string): Promise<void> {
   await withTaskLimitGate(ownerId, { excludeTaskId: taskId }, async () => undefined);
+}
+
+/**
+ * Gate for turning ON the workspace default "auto-keep new PRs mergeable".
+ *
+ * Callers MUST only invoke this on an OFF→ON transition. A workspace that
+ * already has the setting on predates the gate and keeps it — the product
+ * promise is that nobody loses a feature they were already using. Turning it
+ * off is always allowed, and gives that grandfathered state up.
+ *
+ * Deliberately not a `withFreePlanGate` wrapper: there is nothing to count and
+ * nothing to serialize, so it needs neither the advisory lock nor the race
+ * safety those gates buy.
+ */
+export async function assertCanEnableAutoKeepDefault(ownerId: string): Promise<void> {
+  const entitlement = await resolveEntitlement(ownerId);
+  if (entitlement.plan === 'free') throw new AutoKeepDefaultPlanError();
 }

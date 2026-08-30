@@ -12,6 +12,7 @@ import { PRTable, isNeedsAttention, isAwaitingReview, isReadyToMerge } from './p
 import { ClearFiltersButton, RepoFilter, SortToggle, prMatchesText, type SortDir } from './filters';
 import { PRFilterModal, SavedFilterBar, useSavedPRFilters } from './savedFilters';
 import { WatchPRModal } from './WatchPRModal';
+import { AutoKeepToggle } from './AutoKeepToggle';
 import { buildStackedRows } from './stacks';
 import { useGitHubActions } from './useGitHubActions';
 
@@ -155,16 +156,19 @@ export function MyPRsPanel() {
         rows={ordered}
         stackMeta={stackMeta}
         headerActions={
-          <Button
-            size="sm"
-            variant="ghost"
-            data-attr="my-prs-add-pr"
-            onClick={() => setWatchModalOpen(true)}
-            title="Track any PR by its GitHub link — it doesn't have to be yours"
-          >
-            <Plus className="mr-1 h-4 w-4" />
-            Add PR
-          </Button>
+          <>
+            <AutoKeepToggle />
+            <Button
+              size="sm"
+              variant="ghost"
+              data-attr="my-prs-add-pr"
+              onClick={() => setWatchModalOpen(true)}
+              title="Track any PR by its GitHub link — it doesn't have to be yours"
+            >
+              <Plus className="mr-1 h-4 w-4" />
+              Add PR
+            </Button>
+          </>
         }
         filters={
           <>
