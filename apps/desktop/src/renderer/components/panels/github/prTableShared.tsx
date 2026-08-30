@@ -78,8 +78,11 @@ interface PRTableProps {
     enabled: boolean,
     opts?: { includeDescendants?: boolean }
   ) => Promise<void>;
-  /** Stop tracking a manually watched PR (absent → no un-watch button). */
-  onUnwatch?: (row: PRRow) => Promise<void>;
+  /** Start/stop tracking this PR. The stop face shows wherever a watched PR
+   *  renders; the start face only on Reviews, where it is the one place the
+   *  flag adds something — a reviewed PR leaves that list, and watching keeps
+   *  it on My PRs. */
+  onSetWatching?: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Create a cloud task for the row. Resolves true when a task was actually
    *  created (false when nothing's connected / the user dismissed the picker),
    *  so the button only flashes its confirmation on a real start. An explicit
@@ -118,7 +121,7 @@ export function PRTable({
   onMerge,
   onSetMergeQueue,
   onSetMergeQueueStack,
-  onUnwatch,
+  onSetWatching,
   onCreatePostHogTask,
   onRunSkill,
   taskAsk,
@@ -188,7 +191,7 @@ export function PRTable({
             onMerge={onMerge}
             onSetMergeQueue={onSetMergeQueue}
             onSetMergeQueueStack={onSetMergeQueueStack}
-            onUnwatch={onUnwatch}
+            onSetWatching={onSetWatching}
             onCreatePostHogTask={onCreatePostHogTask}
             onOpenSkillPicker={onRunSkill ? () => setSkillPickerRowId(row.id) : undefined}
             taskAsk={taskAsk}
@@ -229,7 +232,7 @@ function PRTableRow({
   onMerge,
   onSetMergeQueue,
   onSetMergeQueueStack,
-  onUnwatch,
+  onSetWatching,
   onCreatePostHogTask,
   onOpenSkillPicker,
   taskAsk,
@@ -261,8 +264,11 @@ function PRTableRow({
     enabled: boolean,
     opts?: { includeDescendants?: boolean }
   ) => Promise<void>;
-  /** Stop tracking a manually watched PR (absent → no un-watch button). */
-  onUnwatch?: (row: PRRow) => Promise<void>;
+  /** Start/stop tracking this PR. The stop face shows wherever a watched PR
+   *  renders; the start face only on Reviews, where it is the one place the
+   *  flag adds something — a reviewed PR leaves that list, and watching keeps
+   *  it on My PRs. */
+  onSetWatching?: (row: PRRow, enabled: boolean) => Promise<void>;
   onCreatePostHogTask: (row: PRRow, providerType?: string) => Promise<boolean>;
   /** Open the table-level skill picker for this row (absent → no skill button). */
   onOpenSkillPicker?: () => void;
@@ -278,7 +284,7 @@ function PRTableRow({
   const updatedTooltip = new Date(summary.updatedAt || row.lastPolledAt).toLocaleString();
   const [confirmMerge, setConfirmMerge] = useState(false);
   const [busy, setBusy] = useState<
-    null | 'merge' | 'posthog' | 'stop' | 'queue' | 'stack' | 'unwatch'
+    null | 'merge' | 'posthog' | 'stop' | 'queue' | 'stack' | 'watch'
   >(null);
   // Queuing several PRs at once is worth a second click, and it may publish
   // drafts on the way — same two-step shape as the merge confirm.
@@ -425,14 +431,18 @@ function PRTableRow({
     }
   }
 
-  async function runUnwatch(e: React.MouseEvent) {
+  async function runToggleWatch(e: React.MouseEvent) {
     e.stopPropagation();
-    setBusy('unwatch');
+    setBusy('watch');
     setRowError(null);
     try {
-      await onUnwatch!(row);
+      await onSetWatching!(row, !row.watching);
     } catch (err) {
-      setRowError(err instanceof Error ? err.message : 'Could not stop tracking this PR');
+      setRowError(
+        err instanceof Error
+          ? err.message
+          : `Could not ${row.watching ? 'stop tracking' : 'track'} this PR`
+      );
     } finally {
       setBusy(null);
     }
@@ -851,23 +861,32 @@ function PRTableRow({
                 <Layers className="h-3.5 w-3.5" />
               </button>
             ))}
-          {row.watching && onUnwatch && (
+          {onSetWatching && (row.watching || variant === 'review') && (
             <button
               type="button"
-              data-attr="pr-row-unwatch"
-              onClick={runUnwatch}
+              data-attr={row.watching ? 'pr-row-unwatch' : 'pr-row-watch'}
+              onClick={runToggleWatch}
               disabled={busy !== null}
-              className="rounded p-1 text-muted-foreground opacity-0 transition-colors hover:bg-sky-500/10 hover:text-sky-600 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40 group-hover:opacity-100 dark:hover:text-sky-400"
+              className={cn(
+                'rounded p-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                row.watching
+                  ? 'text-sky-600 hover:bg-sky-500/10 dark:text-sky-400'
+                  : 'text-muted-foreground opacity-0 hover:bg-sky-500/10 hover:text-sky-600 focus:opacity-100 group-hover:opacity-100 dark:hover:text-sky-400'
+              )}
               title={
-                row.mergeQueued || row.autoKeepMergeable
-                  ? 'Stop tracking this PR — its merge queue entry stays active'
-                  : 'Stop tracking this PR'
+                row.watching
+                  ? row.mergeQueued || row.autoKeepMergeable
+                    ? 'Stop tracking this PR — its merge queue entry stays active'
+                    : 'Stop tracking this PR'
+                  : "Track this PR — keeps it on My PRs after you've reviewed it"
               }
             >
-              {busy === 'unwatch' ? (
+              {busy === 'watch' ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
+              ) : row.watching ? (
                 <BookmarkX className="h-3.5 w-3.5" />
+              ) : (
+                <Bookmark className="h-3.5 w-3.5" />
               )}
             </button>
           )}

@@ -78,7 +78,7 @@ import type { ApiResponse } from '@talyn/shared';
  *   POST  /pull-requests/:id/focus        mark focused (adaptive-poll TTL)
  *   POST  /pull-requests/:id/merge        merge the PR (merge|squash|rebase)
  *   POST  /pull-requests/watch            track an arbitrary PR by URL
- *   DELETE /pull-requests/:id/watch       stop tracking it
+ *   POST  /pull-requests/:id/watch        start/stop tracking a row we hold
  */
 
 /**
@@ -111,7 +111,7 @@ const PR_FLAG_COLUMNS = {
   mergeMethod: pullRequestsTable.mergeMethod,
   mergeQueuedAt: pullRequestsTable.mergeQueuedAt,
   // The un-watch route reads these to decide whether anything else still
-  // references the row (see DELETE /:id/watch).
+  // references the row (see POST /:id/watch).
   authored: pullRequestsTable.authored,
   reviewRequested: pullRequestsTable.reviewRequested,
   watching: pullRequestsTable.watching,
@@ -416,15 +416,23 @@ export function pullRequestRoutes(): Router {
     }
   });
 
-  // Stop tracking a manually-watched PR.
+  // Start or stop tracking a PR we ALREADY hold a row for.
   //
-  // Clears the flag; it does NOT cancel anything else the user asked for. A
-  // queued PR keeps its queue entry and an armed watcher keeps running — "stop
-  // showing me this" must not silently abandon a merge. The row is deleted only
-  // when nothing at all references it, because merge_queue_entries cascades on
-  // this row: deleting a queued PR's row would destroy its entry AND its whole
-  // audit timeline from a one-click affordance.
-  router.delete('/:id/watch', async (req, res) => {
+  // Distinct from `POST /pull-requests/watch` above, which takes a URL and has
+  // to resolve (and possibly add) a repo and fetch the PR from GitHub. Here the
+  // row exists — a review-requested PR on the Reviews page, say — so this is a
+  // single column write and costs no GitHub budget at all. Enabling is what
+  // keeps such a PR on My PRs after the user reviews it, at which point the
+  // monitor clears `review_requested` and it would otherwise vanish.
+  //
+  // Disabling clears the flag and does NOT cancel anything else the user asked
+  // for: a queued PR keeps its queue entry and an armed watcher keeps running,
+  // because "stop showing me this" must not silently abandon a merge. The row
+  // is deleted only when nothing at all references it — merge_queue_entries
+  // cascades on it, so deleting a queued PR's row would destroy its entry AND
+  // its whole audit timeline from a one-click affordance.
+  router.post('/:id/watch', async (req, res) => {
+    const enabled = req.body?.enabled !== false;
     const db = getDbClient();
     const [row] = await db
       .select(PR_FLAG_COLUMNS)
@@ -442,21 +450,24 @@ export function pullRequestRoutes(): Router {
 
     await db
       .update(pullRequestsTable)
-      .set({ watching: false, updatedAt: new Date() })
+      .set({ watching: enabled, updatedAt: new Date() })
       .where(eq(pullRequestsTable.id, row.id));
 
-    // `mergeQueued` is the legacy mirror; the v2 entry is the source of truth,
-    // so check both before deciding the row is unreferenced.
-    const activeEntry = await getActiveEntryForPr(row.id, db).catch(() => null);
-    const unreferenced =
-      !row.authored &&
-      !row.reviewRequested &&
-      row.taskId === null &&
-      !row.mergeQueued &&
-      !row.autoKeepMergeable &&
-      !activeEntry;
-    if (unreferenced) {
-      await db.delete(pullRequestsTable).where(eq(pullRequestsTable.id, row.id));
+    let deleted = false;
+    if (!enabled) {
+      // `mergeQueued` is the legacy mirror; the v2 entry is the source of
+      // truth, so check both before deciding the row is unreferenced.
+      const activeEntry = await getActiveEntryForPr(row.id, db).catch(() => null);
+      deleted =
+        !row.authored &&
+        !row.reviewRequested &&
+        row.taskId === null &&
+        !row.mergeQueued &&
+        !row.autoKeepMergeable &&
+        !activeEntry;
+      if (deleted) {
+        await db.delete(pullRequestsTable).where(eq(pullRequestsTable.id, row.id));
+      }
     }
 
     emitPullRequestUpdated(row.workspaceId, {
@@ -468,10 +479,10 @@ export function pullRequestRoutes(): Router {
       number: row.number,
       state: row.state,
       lastSummary: (row.lastSummary as Record<string, unknown>) ?? {},
-      watching: false,
+      watching: enabled,
     });
 
-    return res.json({ success: true, data: { deleted: unreferenced } });
+    return res.json({ success: true, data: { deleted } });
   });
 
   // Single PR detail. Always returns the persisted row plus a fresh

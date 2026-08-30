@@ -212,22 +212,22 @@ export function useGitHubActions() {
   );
 
   /**
-   * Stop tracking a manually watched PR.
+   * Start or stop tracking a PR.
    *
-   * Optimistic: clearing `watching` drops the row out of My PRs' cohort right
-   * away (unless you also authored it, in which case it just loses its badge).
-   * The backend NEVER cancels a queue entry or an armed watcher here, so a
-   * queued PR keeps merging — it only stops appearing on your list.
+   * Optimistic. Enabling on Reviews is the point of the button there: once you
+   * submit a review the monitor clears `reviewRequested` and the PR leaves that
+   * list, so watching is what keeps it on My PRs. Disabling NEVER cancels a
+   * queue entry or an armed watcher — the PR just stops appearing on your list.
    */
-  const unwatchPr = useCallback(
-    async (row: PRRow) => {
-      patchRow(row.id, { watching: false });
+  const setWatching = useCallback(
+    async (row: PRRow, enabled: boolean) => {
+      patchRow(row.id, { watching: enabled });
       try {
-        await api.pullRequests.unwatch(row.id);
+        await api.pullRequests.setWatching(row.id, enabled);
       } catch (err) {
-        patchRow(row.id, { watching: true });
+        patchRow(row.id, { watching: !enabled });
         toast.error(
-          `Couldn't stop tracking ${row.owner}/${row.repo}#${row.number}`,
+          `Couldn't ${enabled ? 'track' : 'stop tracking'} ${row.owner}/${row.repo}#${row.number}`,
           err instanceof Error ? err.message : undefined
         );
       }
@@ -493,7 +493,7 @@ export function useGitHubActions() {
     mergeRow,
     setMergeQueue,
     setMergeQueueStack,
-    unwatchPr,
+    setWatching,
     createPostHogTask,
     runSkillTask,
     connect,

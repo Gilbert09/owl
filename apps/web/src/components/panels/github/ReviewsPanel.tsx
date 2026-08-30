@@ -201,7 +201,7 @@ export function ReviewsPanel() {
             onStopTask={actions.stopTask}
             onMerge={actions.mergeRow}
             onSetMergeQueue={actions.setMergeQueue}
-            onUnwatch={actions.unwatchPr}
+            onSetWatching={actions.setWatching}
             onCreatePostHogTask={actions.createPostHogTask}
             onRunSkill={actions.runSkillTask}
             taskAsk={actions.taskAsk}

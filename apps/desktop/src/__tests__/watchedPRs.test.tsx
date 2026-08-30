@@ -7,6 +7,7 @@ import { toast } from '../renderer/stores/toast';
 import { useWorkspaceStore } from '../renderer/stores/workspace';
 import { usePullRequestStore } from '../renderer/stores/pullRequests';
 import { WatchPRModal } from '../renderer/components/panels/github/WatchPRModal';
+import { PRTable } from '../renderer/components/panels/github/prTableShared';
 
 const spy = jest.spyOn.bind(jest);
 const fn = jest.fn.bind(jest);
@@ -66,6 +67,11 @@ function row(over: Partial<PRRow> = {}): PRRow {
     } as PRRow['summary'],
     ...over,
   };
+}
+
+/** PRTable needs a couple of fields the store-level `row()` factory omits. */
+function tableRow(over: Partial<PRRow> = {}): PRRow {
+  return { ...row(), summary: { ...row().summary, url: 'https://github.com/acme/app/pull/1' }, ...over };
 }
 
 /** The repo warning is marked with data-attr (the project's convention for
@@ -243,5 +249,78 @@ describe('WatchPRModal', () => {
     fireEvent.click(screen.getByRole('button', { name: /watch pr/i }));
     await waitFor(() => expect(screen.getByText(/doesn't exist/i)).toBeTruthy());
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+});
+
+describe('the watch toggle in the PR row', () => {
+  function renderRow(
+    over: Partial<PRRow>,
+    variant: 'mine' | 'review' | 'queue',
+    onSetWatching: (r: PRRow, enabled: boolean) => Promise<void> = fn(async () => {})
+  ) {
+    render(
+      <PRTable
+        rows={[tableRow(over)]}
+        variant={variant}
+        viewerLogin="octocat"
+        selectedId={null}
+        onSelect={fn()}
+        onOpenTask={fn()}
+        onMerge={fn()}
+        onSetMergeQueue={fn()}
+        onSetWatching={onSetWatching}
+        onStopTask={fn()}
+        onCreatePostHogTask={fn()}
+        taskStatusById={new Map()}
+      />
+    );
+    return onSetWatching as jest.Mock;
+  }
+
+  const watchBtn = () => document.querySelector('[data-attr="pr-row-watch"]');
+  const unwatchBtn = () => document.querySelector('[data-attr="pr-row-unwatch"]');
+
+  it('offers the watch button on Reviews', () => {
+    // The whole point: submitting a review clears `reviewRequested` and the PR
+    // leaves this list, so this is where pinning it to My PRs is worth doing.
+    renderRow({ authored: false, reviewRequested: true, watching: false }, 'review');
+    expect(watchBtn()).toBeTruthy();
+    expect(unwatchBtn()).toBeNull();
+  });
+
+  it('does not offer it on the other lists, where the flag adds nothing', () => {
+    // An authored PR is already on My PRs; a queued one is already on the queue.
+    renderRow({ authored: true, watching: false }, 'mine');
+    expect(watchBtn()).toBeNull();
+    cleanup();
+    renderRow({ mergeQueued: true, watching: false }, 'queue');
+    expect(watchBtn()).toBeNull();
+  });
+
+  it('shows the stop-tracking face wherever a watched PR renders', () => {
+    for (const variant of ['mine', 'review', 'queue'] as const) {
+      renderRow({ watching: true }, variant);
+      expect(unwatchBtn()).toBeTruthy();
+      expect(watchBtn()).toBeNull();
+      cleanup();
+    }
+  });
+
+  it('sends the opposite of the current state', async () => {
+    const on = renderRow({ reviewRequested: true, watching: false }, 'review');
+    fireEvent.click(watchBtn()!);
+    await waitFor(() => expect(on).toHaveBeenCalled());
+    expect(on.mock.calls[0][1]).toBe(true);
+    cleanup();
+
+    const off = renderRow({ watching: true }, 'review');
+    fireEvent.click(unwatchBtn()!);
+    await waitFor(() => expect(off).toHaveBeenCalled());
+    expect(off.mock.calls[0][1]).toBe(false);
+  });
+
+  it('says the queue entry survives when stopping tracking on a queued PR', () => {
+    renderRow({ watching: true, mergeQueued: true }, 'mine');
+    expect(unwatchBtn()!.getAttribute('title')).toContain('merge queue entry stays active');
   });
 });

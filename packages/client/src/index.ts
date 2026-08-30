@@ -895,11 +895,19 @@ export const pullRequests = {
       '/pull-requests/watch',
       params
     ),
-  /** Stop tracking a manually watched PR. Never cancels a queue entry or an
-   *  armed watcher — it only clears the flag (and drops the row when nothing
-   *  else references it). */
-  unwatch: (id: string) =>
-    request<{ deleted: boolean }>('DELETE', `/pull-requests/${id}/watch`),
+  /**
+   * Start or stop tracking a PR we already hold a row for — the cheap sibling
+   * of {@link watch}, which takes a URL and has to talk to GitHub. Costs no
+   * GitHub budget: the row is already there.
+   *
+   * Enabling is how a review-requested PR stays on My PRs after you review it
+   * (the monitor clears `reviewRequested` at that point, and it would
+   * otherwise vanish). Disabling never cancels a queue entry or an armed
+   * watcher — it only clears the flag, and drops the row when nothing else
+   * references it (`deleted`).
+   */
+  setWatching: (id: string, enabled: boolean) =>
+    request<{ deleted: boolean }>('POST', `/pull-requests/${id}/watch`, { enabled }),
   focus: (id: string, focused = true) =>
     request<null>('POST', `/pull-requests/${id}/focus`, { focused }),
   // Toggle the auto-keep-mergeable watcher for a PR (repeatedly fires a

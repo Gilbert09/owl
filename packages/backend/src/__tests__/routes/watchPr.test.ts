@@ -314,7 +314,7 @@ describe('POST /pull-requests/watch', () => {
   });
 });
 
-describe('DELETE /pull-requests/:id/watch', () => {
+describe('POST /pull-requests/:id/watch', () => {
   let db: Database;
   let cleanup: () => Promise<void>;
   let url: string;
@@ -363,9 +363,14 @@ describe('DELETE /pull-requests/:id/watch', () => {
     await cleanup();
   });
 
-  function unwatch(id: string) {
-    return fetch(`${url}/pull-requests/${id}/watch`, { method: 'DELETE', headers });
+  function setWatching(id: string, enabled: boolean) {
+    return fetch(`${url}/pull-requests/${id}/watch`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ enabled }),
+    });
   }
+  const unwatch = (id: string) => setWatching(id, false);
 
   it('deletes a row nothing else references', async () => {
     const id = await insertPr();
@@ -392,6 +397,41 @@ describe('DELETE /pull-requests/:id/watch', () => {
     expect(row.watching).toBe(false);
     // Un-watching must not cancel a merge the user queued.
     expect(row.mergeQueued).toBe(over.mergeQueued ?? false);
+  });
+
+  it('tracks a review-requested row without touching GitHub', async () => {
+    // The Reviews-page button. The row already exists, so this must be a pure
+    // column write — no repo resolution, no PR fetch.
+    const batch = vi.spyOn(githubGraphql, 'batchPullRequestsByNumber');
+    const id = await insertPr({ watching: false, reviewRequested: true });
+    const res = await setWatching(id, true);
+    expect(res.status).toBe(200);
+    expect((await res.json()).data.deleted).toBe(false);
+    const [row] = await db
+      .select()
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, id));
+    expect(row.watching).toBe(true);
+    // Enabling must never take the delete branch, whatever else is false.
+    expect(row.reviewRequested).toBe(true);
+    expect(batch).not.toHaveBeenCalled();
+  });
+
+  it('never deletes a row on the enable path, even with nothing else referencing it', async () => {
+    const id = await insertPr({ watching: false });
+    expect((await setWatching(id, true)).status).toBe(200);
+    expect(await db.select().from(pullRequestsTable)).toHaveLength(1);
+  });
+
+  it('treats a bodyless POST as enable', async () => {
+    const id = await insertPr({ watching: false });
+    const res = await fetch(`${url}/pull-requests/${id}/watch`, { method: 'POST', headers });
+    expect(res.status).toBe(200);
+    const [row] = await db
+      .select()
+      .from(pullRequestsTable)
+      .where(eq(pullRequestsTable.id, id));
+    expect(row.watching).toBe(true);
   });
 
   it('404s an unknown row', async () => {
