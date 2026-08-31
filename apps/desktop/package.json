@@ -169,6 +169,7 @@
   "build": {
     "productName": "Talyn",
     "appId": "com.fastowl.app",
+    "afterPack": ".erb/scripts/mac-asset-catalog.js",
     "asar": true,
     "asarUnpack": "**\\*.{node,dll}",
     "publish": {

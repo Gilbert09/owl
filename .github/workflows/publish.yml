@@ -199,6 +199,20 @@ jobs:
           npx --yes @posthog/cli@latest sourcemap upload \
             --directory apps/desktop/release/app/dist/renderer --delete-after
 
+      - name: Select Xcode 26 for actool
+        # The afterPack hook (.erb/scripts/mac-asset-catalog.js) compiles
+        # assets/icon.icon into an Assets.car so macOS 26 renders the Liquid
+        # Glass icon (default/dark/clear/tinted). That needs actool 26+; the
+        # hook hard-fails in CI without it, so fail here with a clearer error
+        # if the runner image carries no Xcode 26.
+        run: |
+          XCODE=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XCODE" ]; then
+            echo "No Xcode 26 on this runner image — the Liquid Glass icon needs actool 26+."
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE"
+
       - name: Publish releases
         env:
           # Code-signing + notarization. The app must be signed with a
