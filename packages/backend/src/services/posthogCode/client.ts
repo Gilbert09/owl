@@ -143,40 +143,47 @@ export class PostHogCodeClient {
   }
 
   /**
-   * Fetch a run's parsed JSONL log entries from durable storage (S3).
-   * Used as the backfill source for tasks whose live Redis stream is gone
-   * (completed runs reopened later, or runs that finished while the
-   * backend was down). `after` is an ISO timestamp to fetch only newer
-   * entries. Returns the entries in order.
+   * One page of a run's durable (S3) log, resume chain included, oldest first.
+   * Pages are capped by bytes as well as `limit` (max 5000), so `hasMore` is
+   * the only end-of-log signal; page with `offset`, not `after`.
    */
   async getSessionLogs(
     taskId: string,
     runId: string,
-    opts: { after?: string; limit?: number } = {},
-  ): Promise<AcpLogEntry[]> {
+    opts: { after?: string; limit?: number; offset?: number } = {},
+  ): Promise<SessionLogsPage> {
     const qs = new URLSearchParams();
     if (opts.after) qs.set('after', opts.after);
     if (opts.limit) qs.set('limit', String(opts.limit));
+    if (opts.offset) qs.set('offset', String(opts.offset));
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
-    const data = await this.request<unknown>(
+    const { data, headers } = await this.requestWithHeaders<unknown>(
       'GET',
       `/tasks/${taskId}/runs/${runId}/session_logs/${suffix}`,
     );
-    return Array.isArray(data) ? (data as AcpLogEntry[]) : [];
+    const matching = Number(headers.get('x-matching-count'));
+    return {
+      entries: Array.isArray(data) ? (data as AcpLogEntry[]) : [],
+      hasMore: headers.get('x-has-more') === 'true',
+      matchingCount: headers.has('x-matching-count') && Number.isFinite(matching) ? matching : null,
+    };
   }
 
   /**
    * Open the live SSE stream for a run. Returns the raw `fetch` Response
    * whose body is the `text/event-stream`; the caller parses frames.
-   * `lastEventId` resumes from a prior position (Redis stream id); omit
-   * it to replay the run from the beginning, then tail live.
+   * `lastEventId` resumes from a Redis stream id; without it the server
+   * replays only the newest 5,000 entries. `startLatest` skips that replay
+   * for a caller that seeded from `getSessionLogs`, and is ignored once a
+   * `lastEventId` exists, since "latest" would skip what arrived meanwhile.
    */
   async openRunStream(
     taskId: string,
     runId: string,
-    opts: { lastEventId?: string; signal?: AbortSignal } = {},
+    opts: { lastEventId?: string; startLatest?: boolean; signal?: AbortSignal } = {},
   ): Promise<Response> {
-    const url = `${this.baseUrl}/tasks/${taskId}/runs/${runId}/stream/`;
+    const start = opts.startLatest && !opts.lastEventId ? '?start=latest' : '';
+    const url = `${this.baseUrl}/tasks/${taskId}/runs/${runId}/stream/${start}`;
     // The stream authenticates once, at connect: an access token expiring
     // mid-body doesn't drop the connection, and the streamer's own reconnect
     // (Last-Event-ID) picks up a fresh token here.
@@ -220,13 +227,18 @@ export class PostHogCodeClient {
     await this.request<unknown>('GET', `/tasks/?limit=1`);
   }
 
-  private async request<T>(
+  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const { data } = await this.requestWithHeaders<T>(method, path, body);
+    return data;
+  }
+
+  private async requestWithHeaders<T>(
     method: string,
     path: string,
     body?: unknown,
     /** Internal: set on the one retry after a 401, so it can't loop. */
     forceRefresh = false,
-  ): Promise<T> {
+  ): Promise<{ data: T; headers: Headers }> {
     const url = `${this.baseUrl}${path}`;
     const startedAt = Date.now();
     let res: TimedFetchResponse;
@@ -270,7 +282,7 @@ export class PostHogCodeClient {
     // refresh and retry; if that 401s too, it's a real auth failure and the
     // error below is what the caller (and the reconnect UI) needs to see.
     if (res.status === 401 && this.canRefresh && !forceRefresh) {
-      return this.request<T>(method, path, body, true);
+      return this.requestWithHeaders<T>(method, path, body, true);
     }
     if (!res.ok) {
       throw new PostHogCodeApiError(
@@ -279,13 +291,19 @@ export class PostHogCodeClient {
         `PostHog Code ${method} ${path} failed (${res.status}): ${text.slice(0, 500)}`,
       );
     }
-    return (text ? JSON.parse(text) : undefined) as T;
+    return { data: (text ? JSON.parse(text) : undefined) as T, headers: res.headers };
   }
 
   private get baseUrl(): string {
     const host = this.host.replace(/\/+$/, '');
     return `${host}/api/projects/${this.projectId}`;
   }
+}
+
+export interface SessionLogsPage {
+  entries: AcpLogEntry[];
+  hasMore: boolean;
+  matchingCount: number | null;
 }
 
 /**
