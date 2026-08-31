@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 109 — A staged update that applies itself once you walk away (2026-08-31)
+
+Nobody had to press a button to update already: `autoDownload` fetches the release and `autoInstallOnAppQuit` installs it. But it only fires on QUIT, and Talyn is a dashboard people leave open on a second monitor for days. Measured the day after two releases: one user on the newest build, everyone else between 2 and 14 versions behind — with the update sitting staged the whole time on any machine that never quit.
+
+Two distinct causes, and only one is fixable in the client. Most of those users had not LAUNCHED the app since the release, and nothing client-side reaches an app that is not running. The rest had it open with the update already downloaded. This closes the second.
+
+**The signal is SYSTEM idle, not window blur.** Blur only means they are in another app and could come back mid-keystroke. `powerMonitor.getSystemIdleTime()` means they are away from the keyboard entirely, so the restart is something they never see. 30 minutes, long enough that it cannot fire while someone is reading the screen — the threshold is a product decision and has a test asserting it stays generous, because dropping it to a couple of minutes starts restarting the app under people who went for a coffee.
+
+What makes this safe here specifically: the desktop app is a VIEWER. The backend owns every piece of durable state, so a restart loses nothing in flight — only local UI state (filter chips, scroll position, an open detail sheet). On an app that held unsaved work this would be the wrong trade.
+
+`quitAndInstall(isSilent: true, isForceRunAfter: true)`, which differs from the renderer's `updater:quit-and-install` on purpose: silent so Windows does not raise an installer window at an unattended machine, and force-run so the user returns to a RUNNING app instead of finding Talyn closed itself. The sidebar's UpdateNotice tooltip now says the restart will happen on its own, so it reads as intended rather than as a crash.
+
+The decision is a pure exported predicate (`shouldApplyUpdateWhileIdle`) so the policy is testable without an Electron main process — same shape as `authStorage`'s injected backend. Arming is idempotent, since `update-downloaded` fires again when a second release lands during a long session and re-arming would stack timers. An unavailable idle signal (some Linux sessions) stops the poll and leaves the install to quit, the pre-existing behaviour.
+
+Not addressed: users who never open the app. That is a cadence question — a release a night, with the median user several versions behind, means most releases reach nobody before being superseded.
+
 ## Session 108 — Liquid Glass app icon for macOS 26 (2026-08-30)
 
 The desktop icon now ships as an Icon Composer document (`apps/desktop/assets/icon.icon`: `icon.json` + a glyph PNG), so macOS 26 renders all four appearance modes natively. Default keeps the orange gradient with the cream owl, dark is the cream owl on a near-black tile (declared via `fill-specializations`, matching how GitHub/Figma style their dark icons rather than merely darkening the brand orange), and clear/tinted are system-derived from the glyph layer. The old baked-in squircle, border, halo and glow were dropped from the artwork: the system's glass material replaces them. `assets/icon-glyph.svg` is the vector master for the glyph (the owl rescaled from the old inset-squircle coordinates to the full icon face); `assets/icon.svg` remains the master for the legacy look.

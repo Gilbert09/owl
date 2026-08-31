@@ -11,7 +11,7 @@
  * macOS: builds are signed + notarized (package.json build.mac), so
  * Squirrel.Mac applies updates end-to-end — verified working.
  */
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import log from 'electron-log';
 import type { UpdaterEvent, UpdaterCheckResult, UpdateChannel } from './updaterEvents';
@@ -23,7 +23,88 @@ const CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4h
 // Small delay after window-ready so we don't compete with first paint.
 const INITIAL_CHECK_DELAY_MS = 10 * 1000;
 
+/**
+ * How long the MACHINE must sit idle before a downloaded update is applied
+ * without anyone asking for it.
+ *
+ * `autoInstallOnAppQuit` already means nobody has to press a button — but it
+ * only fires on QUIT, and Talyn is a dashboard people leave open on a second
+ * monitor for days. Measured against real installs, the median user was several
+ * releases behind while the update sat staged the whole time.
+ *
+ * The signal is deliberately SYSTEM idle (`powerMonitor.getSystemIdleTime()`),
+ * not window blur. Blur only means they are in another app and could come back
+ * mid-keystroke; system idle means they are away from the keyboard entirely, so
+ * the restart is something they never see. 30 minutes is long enough that it
+ * cannot fire while someone is reading the screen.
+ *
+ * What a restart costs is close to nothing here, which is what makes this safe:
+ * the desktop app is a viewer and the backend owns every piece of durable
+ * state, so nothing in flight is lost. Local UI state (filter chips, scroll
+ * position, an open detail sheet) does reset.
+ */
+export const IDLE_RESTART_AFTER_MS = 30 * 60 * 1000;
+/** How often to look, once an update is actually staged. Cheap either way. */
+const IDLE_POLL_INTERVAL_MS = 60 * 1000;
+
 let checkTimer: ReturnType<typeof setInterval> | null = null;
+let idleTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Pure decision behind the idle restart — exported so the policy can be tested
+ * without an Electron main process.
+ *
+ * `stagedVersion` is null until `update-downloaded` has fired: an update that
+ * has not finished downloading must never trigger a quit, or the user comes
+ * back to a closed app and no new version.
+ */
+export function shouldApplyUpdateWhileIdle(state: {
+  stagedVersion: string | null;
+  systemIdleMs: number;
+  idleThresholdMs?: number;
+}): boolean {
+  if (state.stagedVersion === null) return false;
+  const threshold = state.idleThresholdMs ?? IDLE_RESTART_AFTER_MS;
+  return state.systemIdleMs >= threshold;
+}
+
+/**
+ * Poll for the machine going idle with an update staged, then apply it.
+ *
+ * Idempotent: `update-downloaded` can fire again (a second release landing
+ * while the app stays open), and re-arming would otherwise stack timers.
+ *
+ * `quitAndInstall(isSilent: true, isForceRunAfter: true)` — silent so Windows
+ * does not raise an installer window at an unattended machine, and force-run so
+ * the user returns to a RUNNING app rather than finding Talyn closed itself.
+ * That differs from the renderer's `updater:quit-and-install`, where the user
+ * asked for the restart and is watching it happen.
+ */
+function armIdleRestart(version: string): void {
+  if (idleTimer) return;
+  log.info(
+    `[updater] ${version} staged — applying after ${IDLE_RESTART_AFTER_MS / 60000}m idle`,
+  );
+  idleTimer = setInterval(() => {
+    let systemIdleMs: number;
+    try {
+      systemIdleMs = powerMonitor.getSystemIdleTime() * 1000;
+    } catch (err) {
+      // No idle signal available (some Linux sessions) — fall back to the
+      // pre-existing behaviour and let it install on quit.
+      log.warn('[updater] system idle time unavailable:', err);
+      if (idleTimer) clearInterval(idleTimer);
+      idleTimer = null;
+      return;
+    }
+    if (!shouldApplyUpdateWhileIdle({ stagedVersion: version, systemIdleMs })) return;
+    log.info(`[updater] applying ${version} after ${Math.round(systemIdleMs / 60000)}m idle`);
+    if (idleTimer) clearInterval(idleTimer);
+    idleTimer = null;
+    if (checkTimer) clearInterval(checkTimer);
+    autoUpdater.quitAndInstall(true, true);
+  }, IDLE_POLL_INTERVAL_MS);
+}
 
 /**
  * A 404 on `latest-*.yml` means a GitHub release with a newer tag exists but its
@@ -118,9 +199,12 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null) {
   autoUpdater.on('download-progress', (progress) =>
     send({ kind: 'progress', percent: Math.round(progress.percent) }),
   );
-  autoUpdater.on('update-downloaded', (info) =>
-    send({ kind: 'downloaded', version: info.version }),
-  );
+  autoUpdater.on('update-downloaded', (info) => {
+    send({ kind: 'downloaded', version: info.version });
+    // The sidebar's UpdateNotice offers "restart now" from here; this is the
+    // fallback for everyone who ignores it and never quits.
+    armIdleRestart(info.version);
+  });
   autoUpdater.on('error', (err) => {
     // A release whose artifacts aren't uploaded yet isn't an update we can offer
     // and isn't a failure — show "no updates" instead of an error.
@@ -175,5 +259,6 @@ export function initAutoUpdater(getWindow: () => BrowserWindow | null) {
 
   app.on('before-quit', () => {
     if (checkTimer) clearInterval(checkTimer);
+    if (idleTimer) clearInterval(idleTimer);
   });
 }
