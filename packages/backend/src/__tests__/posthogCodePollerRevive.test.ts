@@ -98,7 +98,7 @@ describe('postHogCodePoller revival of idle-finalized tasks', () => {
     db = ctx.db;
     cleanup = ctx.cleanup;
     mockClient.getTask.mockReset();
-    mockClient.getSessionLogs.mockReset().mockResolvedValue([]);
+    mockClient.getSessionLogs.mockReset().mockResolvedValue({ entries: [], hasMore: false, matchingCount: 0 });
     mockStreamer.ensure.mockReset();
     mockStreamer.stop.mockReset();
     mockStreamer.isActive.mockReset().mockReturnValue(false);

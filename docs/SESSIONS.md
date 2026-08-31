@@ -2,6 +2,18 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 107 — PostHog Code run logs read the API that exists today (2026-08-30)
+
+Opening a PostHog Code task showed a transcript that stopped partway through a run, or started partway through one. The Talyn side had not changed; the PostHog tasks API had, in three places, and the streamer (`services/posthogCode/streamer.ts`) was still written against the old behaviour.
+
+- **`session_logs` pages are capped by bytes as well as by `limit`** (posthog #67068). A 5,000-entry page that would pass 16MB stops early and sets `X-Has-More: true`. The streamer ended paging on `batch.length < 5000`, so a run with big tool outputs was read up to the first short page and called complete. It also paged with `after=<timestamp>`, which drops entries sharing the boundary timestamp. `getSessionLogs` now returns `{ entries, hasMore, matchingCount }` and the streamer pages by `offset` until `hasMore` is false, the way PostHog's own desktop client does.
+- **The live Redis stream keeps only the newest 5,000 entries** (posthog #71302, down from 20k). The streamer assumed "connecting with no `Last-Event-ID` replays the run from the start, so the SSE is its own backfill". A long run opened mid-way started at an arbitrary point, and because the durable backfill only ran for an EMPTY transcript, the head was never recovered. A live attach now seeds from `session_logs` first and opens the stream with `?start=latest`; an empty durable log (the run has barely started) still replays from the beginning.
+- **The SSE is a blocking tail with explicit lifecycle frames** (posthog #63120): keepalives every 20s, `event: end` + `{"type":"rotated"}` at the 15-minute connection cap, `event: stream-end` when the run's stream is complete, and "Stream not available" as an in-body error after a 120s wait rather than a 404 at open. The streamer fed the control payloads to the ACP converter, treated a rotation like a quiet close (which counts toward the four-strikes idle cutoff, so a run quiet for an hour lost its tail) and reconnected four more times after completion. Rotation now resumes at once from `Last-Event-ID`; `stream-end` ends the tail and rebuilds the transcript from the durable log, provided the log has caught up with the newest non-chunk entry the stream showed (the sandbox flushes it asynchronously).
+
+A rebuilt transcript restarts at seq 0, and the desktop merges `task:event`s by seq, skipping ones it already has. So a rebuild persists first, then announces `task:update { transcript: [] }` before re-sending its events; the persist-before-reset order is what stops a concurrent `GET /tasks/:id` re-merging the old events on top. Known gap: the seed-to-`latest` handoff can miss the chunks of a message that was mid-stream at attach time; the rebuild at `stream-end` recovers it for the persisted transcript.
+
+Tests: `posthogCodeStreamer.test.ts` (offset paging, `start=latest`, `stream-end`, rotation, the persist-then-reset order).
+
 ## Session 106 — Onboarding stops asking you to name a workspace (2026-08-30)
 
 The wizard opened by asking a new user to name their first workspace. That is a question nobody can answer well at that moment: a workspace groups repos, and they have connected none yet — so the honest answers are a placeholder or a guess. The backend now mints one (`services/workspaceBootstrap.ts`, name `DEFAULT_WORKSPACE_NAME` = "My workspace") and onboarding opens on connecting GitHub instead. Renaming lives in Settings, and `CreateWorkspaceModal` still makes more.

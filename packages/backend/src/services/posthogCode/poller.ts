@@ -302,10 +302,11 @@ class PostHogCodePoller {
 
     let entries: AcpLogEntry[];
     try {
-      entries = await client.getSessionLogs(task.posthogTaskId, runId, {
+      const page = await client.getSessionLogs(task.posthogTaskId, runId, {
         after: new Date(updatedAtMs - IDLE_TAIL_WINDOW_MS).toISOString(),
         limit: 5000,
       });
+      entries = page.entries;
     } catch {
       return; // can't confirm → leave it; we'll retry next window.
     }
