@@ -621,7 +621,16 @@ function PRTableRow({
                     'inline-flex items-center gap-1 rounded px-1 py-0.5 text-[10px] uppercase',
                     taskFailed
                       ? 'bg-red-200 text-red-800 hover:bg-red-300 dark:bg-red-900 dark:text-red-200 dark:hover:bg-red-800'
-                      : 'bg-blue-200 text-blue-800 hover:bg-blue-300 dark:bg-blue-900 dark:text-blue-200 dark:hover:bg-blue-800'
+                      : // Neutral, not blue. Every other chip on this row is a
+                        // STATE (queued, watching, blocked, failed) and earns a
+                        // colour; a running task is transient activity, and the
+                        // spinner already says so. Blue-200 sat one hue from the
+                        // queue's indigo-200, which made "has a task running"
+                        // and "is in the merge queue" read as the same kind of
+                        // thing at a glance — the two facts people most need to
+                        // tell apart. Receding it leaves the coloured chips
+                        // meaning state.
+                        'bg-slate-200 text-slate-700 hover:bg-slate-300 dark:bg-slate-700 dark:text-slate-200 dark:hover:bg-slate-600'
                   )}
                   title={
                     taskRunning
