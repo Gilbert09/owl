@@ -298,10 +298,15 @@ export function queueBlocked(pr: PrSnapshot): boolean {
  * never be reached and each base advance buys another paid cloud run.
  *
  * Everything `prNeedsFollowup` covers still counts under a gate — conflicts,
- * requested changes, unresolved threads and failing REQUIRED checks are real
- * work no matter who performs the merge, and the provider will hold the PR at
- * "not ready" forever until they're fixed. Pending CI and a missing required
- * review are handled upstream (R7/R7b) and never reach here.
+ * requested changes, unresolved BOT threads and failing REQUIRED checks are
+ * real work no matter who performs the merge, and the provider will hold the
+ * PR at "not ready" forever until they're fixed. Pending CI and a missing
+ * required review are handled upstream (R7/R7b) and never reach here.
+ *
+ * Unresolved HUMAN threads deliberately do NOT count, here or anywhere else
+ * `prNeedsFollowup` is asked: queueing a PR is a request to merge it, not a
+ * request to have an agent answer the reviewers. The manual "Get PR mergeable"
+ * button still covers that when the user actually wants it.
  */
 function queueBlockedFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
   if (prNeedsFollowup(pr.summary)) return true;

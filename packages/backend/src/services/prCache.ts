@@ -194,6 +194,8 @@ export async function linkTaskToPullRequest(opts: {
     blockingReason: 'unknown' as const,
     checks: { total: 0, passed: 0, failed: 0, inProgress: 0, skipped: 0 },
     unresolvedReviewThreads: 0,
+    unresolvedHumanReviewThreads: 0,
+    unresolvedBotReviewThreads: 0,
   };
   const existing = await readRow(db, opts.workspaceId, opts.repositoryId, opts.number);
   if (existing) {
@@ -829,6 +831,10 @@ function summaryToJsonb(s: PRSummary): Record<string, unknown> {
     blockingReason: s.blockingReason,
     checks: s.checks,
     unresolvedReviewThreads: s.unresolvedReviewThreads,
+    // Persisted because prNeedsFollowup reads it off the cached row on every
+    // watcher tick, not just at fetch time.
+    unresolvedHumanReviewThreads: s.unresolvedHumanReviewThreads,
+    unresolvedBotReviewThreads: s.unresolvedBotReviewThreads,
     reviewRequestVia: s.reviewRequestVia ?? null,
     // Merge-queue auto-merge hybrid: the PR node id (mutation handle) and who
     // (if anyone) has GitHub native auto-merge armed.
@@ -880,6 +886,13 @@ function rowToSummary(row: PullRequestRow, owner: string, repo: string): PRSumma
       skipped: 0,
     },
     unresolvedReviewThreads: (meta.unresolvedReviewThreads as number) ?? 0,
+    // Deliberately NOT defaulted to 0: a row cached before the split shipped
+    // has neither field, and `0 bot threads` would read as "nothing for an
+    // agent to do" on a PR that may well have some. Undefined means "we don't
+    // know", which prNeedsFollowup treats as don't-fire until the next poll
+    // fills it in.
+    unresolvedHumanReviewThreads: meta.unresolvedHumanReviewThreads as number | undefined,
+    unresolvedBotReviewThreads: meta.unresolvedBotReviewThreads as number | undefined,
     reviewRequestVia: meta.reviewRequestVia as PRSummary['reviewRequestVia'],
     // Left undefined (not '') on rows cached before it shipped: the merge
     // queue reads absent as "unknown", and '' would claim "nothing failing".

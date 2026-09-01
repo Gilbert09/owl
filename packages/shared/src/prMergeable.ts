@@ -45,6 +45,13 @@ export interface PRMergeableSummary {
   blockingReason: PRBlockingReason;
   checks: { total: number; failed: number; inProgress?: number };
   unresolvedReviewThreads?: number;
+  /**
+   * The {@link unresolvedReviewThreads} split by who OPENED each thread. Both
+   * optional: a summary cached before the split shipped has neither, and every
+   * reader must treat absence as "we don't know", never as zero.
+   */
+  unresolvedHumanReviewThreads?: number;
+  unresolvedBotReviewThreads?: number;
   /** GitHub can't merge a draft PR — the merge queue must never enter the merge
    *  path for one (it 405s). Persisted in the summary; also reflected as
    *  `mergeStateStatus === 'DRAFT'`. */
@@ -90,7 +97,20 @@ export function prNeedsFollowup(s: PRMergeableSummary): boolean {
     s.blockingReason === 'checks_failed' ||
     s.mergeable === 'CONFLICTING' ||
     s.reviewDecision === 'CHANGES_REQUESTED' ||
-    (s.unresolvedReviewThreads ?? 0) > 0
+    // Unresolved BOT threads only, and only when we actually know the split.
+    //
+    // An unattended run must never be started merely because people are talking
+    // on the PR. A human's review thread is a conversation, and an agent that
+    // wades in to answer it is the behaviour reviewers on PostHog/posthog asked
+    // us to stop. Bot threads are the opposite case — nobody wants to triage a
+    // linter's nits by hand — so those still earn a run.
+    //
+    // The count is absent on any summary cached before the split shipped, and
+    // absence means "we don't know who wrote them", which must not fire. Those
+    // rows re-poll within a tick and gain the field, so this self-heals.
+    // `prHasFixableIssues` still counts every unresolved thread, so the manual
+    // "Get PR mergeable" button stays available for exactly this case.
+    (s.unresolvedBotReviewThreads ?? 0) > 0
   );
 }
 
@@ -103,7 +123,14 @@ export function prNeedsFollowup(s: PRMergeableSummary): boolean {
  * wants investigated — so the button stays live and the choice is theirs.
  */
 export function prHasFixableIssues(s: PRMergeableSummary): boolean {
-  return prNeedsFollowup(s) || s.checks.failed > 0;
+  return (
+    prNeedsFollowup(s) ||
+    s.checks.failed > 0 ||
+    // Every unresolved thread, human included. Starting a run for a human's
+    // comments is a choice the user is entitled to make deliberately — it is
+    // only doing it UNATTENDED that is wrong (see prNeedsFollowup).
+    (s.unresolvedReviewThreads ?? 0) > 0
+  );
 }
 
 /**
@@ -158,7 +185,17 @@ export function buildIssuesSummary(
     lines.push('- Merge conflicts with the base branch');
   }
   if ((s.unresolvedReviewThreads ?? 0) > 0) {
-    lines.push(`- Unresolved review threads: ${s.unresolvedReviewThreads}`);
+    // Name the split when we have it. "3 unresolved threads" tells the agent
+    // nothing about which ones are its business; "2 from bots, 1 from a human"
+    // does — and it stops the agent inferring the breakdown from author names
+    // it has to go and fetch first.
+    const bots = s.unresolvedBotReviewThreads;
+    const humans = s.unresolvedHumanReviewThreads;
+    const split =
+      bots === undefined || humans === undefined
+        ? ''
+        : ` (${bots} from bots, ${humans} from humans)`;
+    lines.push(`- Unresolved review threads: ${s.unresolvedReviewThreads}${split}`);
   }
   if (s.reviewDecision === 'CHANGES_REQUESTED') {
     lines.push('- A reviewer has requested changes');
@@ -272,6 +309,12 @@ export interface MergeablePromptInput {
    */
   queueFailure?: { provider: string; evidence: string; failedChecks?: string[] };
   /**
+   * The workspace's "reply to human review comments" setting. Absent means
+   * unset, i.e. today's behaviour; only an explicit `false` makes the agent
+   * leave human threads alone. See {@link humanCommentRule}.
+   */
+  respondToHumanComments?: boolean;
+  /**
    * The PR was just retargeted onto its real base by the merge stack, because
    * the PR it was stacked on merged.
    *
@@ -294,6 +337,34 @@ export interface MergeablePromptInput {
  * unmergeable. The queue tested a merge commit that does not exist on the
  * branch, so reproducing it means merging trunk in locally.
  */
+/**
+ * The rule injected when a workspace turns OFF replying to human review
+ * comments.
+ *
+ * Requested by reviewers on PostHog/posthog: an agent replying on their review
+ * threads is noise on a conversation between people, and resolving one closes a
+ * thread its author had not finished with. Bot threads are unaffected — they are
+ * the ones nobody wants to triage by hand.
+ *
+ * Deliberately "leave alone" rather than "act but stay silent". Pushing a change
+ * for a human's comment while never replying and leaving the thread open reads,
+ * to the reviewer, as an unexplained edit — worse than either doing the whole
+ * job or none of it. So human threads become read-only context: the agent may
+ * use them to understand the PR, and does nothing else with them.
+ */
+export function humanCommentRule(): string {
+  return `   - THIS WORKSPACE HAS TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS. For any
+     thread opened by a human reviewer: do NOT reply to it, do NOT resolve it,
+     and do NOT push code for it. Read it for context if it helps you understand
+     the PR, then leave it exactly as you found it — it is a conversation between
+     people and the PR author will handle it.
+     This overrides the human-reviewer guidance above wherever the two conflict.
+     Bot and automated-reviewer threads are UNAFFECTED: keep handling those
+     exactly as described. If human threads are the only thing left unresolved,
+     that is a finished run — say so and stop, rather than treating the PR as
+     still blocked.`;
+}
+
 export function queueFailureRule(input: {
   provider: string;
   evidence: string;
@@ -451,6 +522,10 @@ export function mergeablePromptVariables(
     queueFailureRule: input.queueFailure
       ? queueFailureRule({ ...input.queueFailure, baseBranch: s.baseBranch })
       : '',
+    // Absent (undefined) means the workspace has never set it — today's
+    // behaviour, where human feedback takes priority. Only an explicit `false`
+    // injects the rule.
+    humanCommentRule: input.respondToHumanComments === false ? humanCommentRule() : '',
     loopRules: claude ? claudeCodeLoopRules(ref) : postHogCodeLoopRules(ref),
   };
 }

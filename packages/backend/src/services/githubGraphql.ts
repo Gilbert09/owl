@@ -113,6 +113,14 @@ export interface PRSummary {
   /** Count of unresolved review threads (capped at the first 100 threads). */
   unresolvedReviewThreads: number;
   /**
+   * {@link unresolvedReviewThreads} split by who opened each thread. Optional:
+   * a live fetch always sets both, but a summary read back from a row cached
+   * before the split shipped has neither — and absence must read as "we don't
+   * know", never as zero.
+   */
+  unresolvedHumanReviewThreads?: number;
+  unresolvedBotReviewThreads?: number;
+  /**
    * Currently-requested reviewers, split into users and teams. Transient
    * (not persisted) — the monitor uses it to derive `reviewRequestVia`
    * against the viewer's identity + teams before storing.
@@ -1044,7 +1052,15 @@ function prFieldsSelection(numberExpr: string | null): string {
     }
   }
   unresolvedThreads: reviewThreads(first: 100) {
-    nodes { isResolved }
+    nodes {
+      isResolved
+      # The thread's OPENING comment names who started it. Deliberately paid
+      # for on every poll: without it an unresolved thread is just a count, and
+      # a bot's nit and a human reviewer's question are indistinguishable — so
+      # the watcher could not tell a PR that needs an agent from a conversation
+      # between people. See prNeedsFollowup.
+      comments(first: 1) { nodes { author { login __typename } } }
+    }
   }
   comments(last: 5) {
     nodes { id author { login __typename } createdAt url bodyText }
@@ -1207,7 +1223,12 @@ interface RawPullRequest {
     }>;
   };
   unresolvedThreads: {
-    nodes: Array<{ isResolved: boolean }>;
+    nodes: Array<{
+      isResolved: boolean;
+      comments?: {
+        nodes: Array<{ author: { login: string; __typename?: string } | null }>;
+      };
+    }>;
   };
   comments: {
     nodes: Array<{
@@ -1322,9 +1343,22 @@ function rawToSummary(raw: RawPullRequest, owner: string, repo: string): PRSumma
     requiredFailing,
     requiredDataAvailable,
   });
-  const unresolvedReviewThreads = (raw.unresolvedThreads?.nodes ?? []).filter(
-    (t) => !t.isResolved
-  ).length;
+  // Split by who OPENED the thread. The distinction is load-bearing, not
+  // decorative: a bot's nit is work an agent should pick up unattended, while a
+  // human reviewer's question is a conversation an agent should not be starting
+  // a paid run over. `prNeedsFollowup` acts on the bot count alone.
+  //
+  // An author we cannot read (a deleted account, or a thread whose opening
+  // comment did not come back) counts as HUMAN. That is the conservative
+  // direction: the failure mode is a thread the agent leaves alone, not one it
+  // wades into uninvited.
+  const unresolved = (raw.unresolvedThreads?.nodes ?? []).filter((t) => !t.isResolved);
+  const unresolvedReviewThreads = unresolved.length;
+  const unresolvedBotReviewThreads = unresolved.filter((t) => {
+    const author = t.comments?.nodes?.[0]?.author;
+    return author ? isBotActor(author) : false;
+  }).length;
+  const unresolvedHumanReviewThreads = unresolvedReviewThreads - unresolvedBotReviewThreads;
   const reviewRequests = {
     users: [] as string[],
     teams: [] as Array<{ slug: string; name: string; combinedSlug: string }>,
@@ -1383,6 +1417,8 @@ function rawToSummary(raw: RawPullRequest, owner: string, repo: string): PRSumma
     blockingReason,
     checks,
     unresolvedReviewThreads,
+    unresolvedHumanReviewThreads,
+    unresolvedBotReviewThreads,
     reviewRequests,
     checkContexts: normalizedContexts,
     checkDigest: computeCheckDigest(raw.headRefOid, normalizedContexts),

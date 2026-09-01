@@ -1211,11 +1211,31 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       ['merge conflicts', { mergeable: 'CONFLICTING' as const, blockingReason: 'merge_conflicts' as const }],
       ['requested changes', { reviewDecision: 'CHANGES_REQUESTED' as const }],
       ['a failing required check', { blockingReason: 'checks_failed' as const, checks: { total: 3, failed: 1, inProgress: 0 } }],
-      ['unresolved review threads', { unresolvedReviewThreads: 2 }],
+      [
+        'unresolved bot review threads',
+        { unresolvedReviewThreads: 2, unresolvedBotReviewThreads: 2, unresolvedHumanReviewThreads: 0 },
+      ],
     ])('still fixes %s under a gate — real work, whoever performs the merge', (_label, over) => {
       const d = decide(entry(), gateBlockedPr(over), ctx({ externalGate: 'confirmed' }));
       expect(kinds(d)).toContain('fire_fix_run');
       expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    // Queueing a PR is a request to MERGE it, not a request to have an agent
+    // answer its reviewers. Reviewers on PostHog/posthog asked us to stop doing
+    // the latter, and the queue is the loudest place it happened — the PR is
+    // gate-BLOCKED, so without this it looked like remediable work forever.
+    it('does not fire a fix run for unresolved HUMAN threads under a gate', () => {
+      const d = decide(
+        entry(),
+        gateBlockedPr({
+          unresolvedReviewThreads: 2,
+          unresolvedHumanReviewThreads: 2,
+          unresolvedBotReviewThreads: 0,
+        }),
+        ctx({ externalGate: 'confirmed' })
+      );
+      expect(kinds(d)).not.toContain('fire_fix_run');
     });
 
     // The 2026-08-18 runaway. Under a gate the external queue rebases and
