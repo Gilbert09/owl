@@ -2,6 +2,28 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 111 — Three runs at one PR, and the column that let it happen (2026-09-01)
+
+A user reported three things that turned out to be one: a manually watched PR that "gets stuck and doesn't push anything", everything "feeling super slow… an hour to just resolve bot comments", and "multiple tasks getting started for the same PR, which is then causing the pay wall to appear".
+
+**The logs settled it.** Five distinct task ids for two PRs inside five minutes — three at `PostHog/posthog#92090`, two at `#92089` — and none carrying the `(merge queue)` suffix the queue puts in its titles, so every one came from the auto-keep watcher. Then the consequence, once per tick for six minutes: `[autoKeep] #91948: fix run deferred — Free plan is limited to 3 active tasks (3 in use)`. The paywall was never misfiring; three duplicate runs held the cap and starved a real fix run.
+
+**The cause was the DIRECTION of the task↔PR link.** `pull_requests.task_id` is one-to-one and `attachTaskToPullRequestRow` overwrites it on every dispatch from any source, so "is anything already working this PR?" could only ever be answered for the last writer. A PR accumulates many tasks over its life; the reference had to go the other way. `tasks.pull_request_id` (migration `0048`) is now a real indexed FK, written by `createCloudTask` **with the row itself** rather than by the best-effort attach call whose failure is swallowed — a null there is exactly what lets a duplicate through. Both dispatch paths guard on `activePrTaskId`, which asks tasks-by-PR. `ON DELETE SET NULL`, not cascade: un-watching a PR deletes its row, and a task record is the history of work that actually ran.
+
+Matching tasks by title was proposed and rejected — it stops working the moment anyone edits a title.
+
+**Two hypotheses died on the way**, both worth recording so they are not re-tread. The watcher's guard reads `row.taskId`, which looked like it would be null for poller-discovered PRs and so a no-op — it isn't, `createCloudTask` overwrites it on every dispatch. And the watcher stands down on the legacy `mergeQueued` mirror, which `routes/pullRequests.ts` calls "the legacy mirror" — but `mergeQueue/executor.ts` does keep it in sync, so queue and watcher cannot both fire.
+
+**Watched PRs now push.** `prCache` armed auto-keep only for a PR the viewer AUTHORED, so a manually watched one was silently inert — which is what "stuck, doesn't push anything" was. It now arms on `authored || explicitWatch`: pasting a URL is an ask for that specific PR and pushing to it is most of the point. `reviewRequested` stays excluded — those arrive unbidden and in bulk, and pushing to a stranger's branch because they asked for a review would be a genuine surprise. Whether the push SUCCEEDS is the provider's business: a same-repo branch usually takes one, a fork only with "allow edits by maintainers". A refused push is a failed run, which beats the silence of never trying.
+
+**The v1 merge-queue engine is deleted** (~3,080 lines). v2 had driven the queue for six weeks and 722 merges with the flag untouched, and keeping v1 had a cost: it still guarded on `pull_requests.task_id`, so a rollback would have reintroduced the bug above.
+
+**Migration `0049` PINS the engine flag to `"v2"` rather than deleting the row, and that is the whole point of it.** Migrations run at boot and every deploy overlaps old and new instances. The old instance still contains v1 and reads an ABSENT row as v1, standing down only on an explicit `=== 'v2'` — so deleting the row would have woken its processor on the 10s tick and had it drive the queue alongside the new instance's v2, on *different* advisory locks (`mergeQueue:tick` vs `mergeQueueV2:reconcile`), with nothing excluding them from merging the same PR at once. Delete the row in a later migration, once no instance that understands `'v1'` can still be running.
+
+**A test was passing by accident.** `mergeQueueDraftReady` asserted `refreshPr` was not called for a non-draft PR; removing the v1 call changed the microtask ordering and it started failing. Not a regression — the route only calls `refreshPr` inside its draft branch, and the call now seen is the v2 executor's during the evaluation the enqueue triggers. Its sibling assertion was racy in the other direction. Both now match on the route's own call signature (it is the only caller passing `repositoryId`).
+
+**Still open**: a cloud run that never reaches a terminal state holds a plan slot indefinitely — the duplicates were one way the cap filled, a stuck run is another. `posthogCode/poller.ts`'s idle finaliser cannot rescue it, because confirming a stuck run means reading the session log, which is the thing coming back empty. Also deferred: `pull_requests.merge_queue_state` (v1's blob) is still written by routes and read by the MCP surface, so retiring it is its own change — roughly 100 sites across both UI forks.
+
 ## Session 110 — "What's new", written by the commits (2026-08-31)
 
 Session 109 got the update to APPLY itself; this tells the user what it applied. Talyn cuts a stable release every night with an empty release body — no `releaseNotes`/`releaseInfo` anywhere in electron-builder's config, no product changelog in the repo (root `CHANGELOG.md` is the inherited electron-react-boilerplate one) — so an update landed silently and nothing anywhere said what had changed.
