@@ -34,7 +34,10 @@ export function UpgradeModal({
   const status = useBillingStore((s) => s.status);
   const upgradeReason = useBillingStore((s) => s.upgradeReason);
   const startCheckoutPollBurst = useBillingStore((s) => s.startCheckoutPollBurst);
-  const [period, setPeriod] = useState<Period>('annual');
+  // Monthly by default: the paywall interrupts someone mid-task, and the
+  // smaller commitment is the one they can say yes to without thinking about
+  // it. Annual keeps its "2 months free" hint for anyone who wants it.
+  const [period, setPeriod] = useState<Period>('monthly');
   const [opening, setOpening] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [error, setError] = useState<string | null>(null);
