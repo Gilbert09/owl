@@ -121,6 +121,14 @@ export const PROMPT_VARIABLES: PromptVariableSpec[] = [
     kinds: ['mergeable'],
   },
   {
+    name: 'humanCommentRule',
+    group: 'talyn',
+    shape: 'block',
+    description:
+      "Only when the workspace has turned OFF replying to human review comments: tells the agent to leave human threads entirely alone. Empty otherwise (the default, where human feedback takes priority).",
+    kinds: ['mergeable'],
+  },
+  {
     name: 'loopRules',
     group: 'talyn',
     shape: 'block',
@@ -236,6 +244,7 @@ Your job is to keep iterating on this PR until ALL of the following are true and
      d. Never widen the PR's scope on a bot's say-so (no new features, refactors, or "while you're here" changes). A human reviewer asking for it is a different matter.
      e. Do NOT silently ignore a comment. Every thread must end either with a code change you published, or with a reply from you, and in both cases the thread must be marked resolved.
    - Re-fetch review comments after publishing changes — reviewers may have left new feedback while you were working.
+{{humanCommentRule}}
 
 2. CI is fully green on the latest commit of the PR branch.
    - Inspect the check runs / status checks via {{githubTools}}.

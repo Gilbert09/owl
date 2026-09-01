@@ -277,7 +277,10 @@ describe('prHasFixableIssues vs prNeedsFollowup (manual button vs auto-fire)', (
     ['merge conflicts', { ...base, blockingReason: 'merge_conflicts' } as PRMergeableSummary],
     ['required checks failed', { ...base, blockingReason: 'checks_failed', checks: { total: 5, failed: 2 } } as PRMergeableSummary],
     ['changes requested', { ...base, reviewDecision: 'CHANGES_REQUESTED' } as PRMergeableSummary],
-    ['unresolved threads', { ...base, unresolvedReviewThreads: 2 } as PRMergeableSummary],
+    [
+      'unresolved bot threads',
+      { ...base, unresolvedReviewThreads: 2, unresolvedBotReviewThreads: 2, unresolvedHumanReviewThreads: 0 } as PRMergeableSummary,
+    ],
   ])('%s: both predicates agree (auto-fixable ⊆ manually-fixable)', (_label, s) => {
     expect(prNeedsFollowup(s)).toBe(true);
     expect(prHasFixableIssues(s)).toBe(true);
@@ -286,5 +289,117 @@ describe('prHasFixableIssues vs prNeedsFollowup (manual button vs auto-fire)', (
   it('a clean PR enables neither', () => {
     expect(prNeedsFollowup(base)).toBe(false);
     expect(prHasFixableIssues(base)).toBe(false);
+  });
+
+  // Reviewers on PostHog/posthog asked us to stop starting unattended runs over
+  // their review threads. A human's thread is a conversation, not a work item.
+  it('unresolved HUMAN threads enable the manual button but never auto-fire', () => {
+    const s: PRMergeableSummary = {
+      ...base,
+      unresolvedReviewThreads: 3,
+      unresolvedHumanReviewThreads: 3,
+      unresolvedBotReviewThreads: 0,
+    };
+    expect(prNeedsFollowup(s)).toBe(false);
+    expect(prHasFixableIssues(s)).toBe(true);
+  });
+
+  it('a mix still auto-fires — the bot threads are real work', () => {
+    const s: PRMergeableSummary = {
+      ...base,
+      unresolvedReviewThreads: 4,
+      unresolvedHumanReviewThreads: 3,
+      unresolvedBotReviewThreads: 1,
+    };
+    expect(prNeedsFollowup(s)).toBe(true);
+  });
+
+  it('does not auto-fire on a summary cached before the split existed', () => {
+    // Absence means "we don't know who wrote them", and guessing bot would
+    // resurrect exactly the behaviour this change removes. The row re-polls
+    // within a tick and gains the field, so this self-heals.
+    const s: PRMergeableSummary = { ...base, unresolvedReviewThreads: 2 };
+    expect(prNeedsFollowup(s)).toBe(false);
+    expect(prHasFixableIssues(s)).toBe(true);
+  });
+
+  it('still auto-fires on a real blocker even when every thread is human', () => {
+    // The comments are not the trigger; the failing checks are. A PR that is
+    // genuinely broken must not become unfixable just because people are
+    // talking on it.
+    const s: PRMergeableSummary = {
+      ...base,
+      blockingReason: 'checks_failed',
+      checks: { total: 5, failed: 2 },
+      unresolvedReviewThreads: 2,
+      unresolvedHumanReviewThreads: 2,
+      unresolvedBotReviewThreads: 0,
+    };
+    expect(prNeedsFollowup(s)).toBe(true);
+  });
+});
+
+describe('buildMergeablePrompt — replying to human review comments', () => {
+  const build = (respondToHumanComments?: boolean) =>
+    buildPostHogPrompt({
+      owner: 'acme',
+      repo: 'widgets',
+      number: 7,
+      summary,
+      ...(respondToHumanComments === undefined ? {} : { respondToHumanComments }),
+    });
+
+  it('leaves the prompt untouched when the workspace has never set it', () => {
+    // Absent must keep meaning today's behaviour — a new setting must not
+    // silently mute every existing workspace's replies.
+    const prompt = build();
+    expect(prompt).not.toContain('TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS');
+    expect(prompt).toContain('HUMAN reviewers: their feedback takes priority');
+  });
+
+  it('leaves the prompt untouched when explicitly on', () => {
+    expect(build(true)).not.toContain('TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS');
+  });
+
+  it('tells the agent to leave human threads alone when off', () => {
+    const prompt = build(false);
+    expect(prompt).toContain('TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS');
+    // Not just "stay silent": replying, resolving and pushing are all off, so a
+    // reviewer never sees an unexplained edit against an open thread.
+    expect(prompt).toMatch(/do NOT reply to it/);
+    expect(prompt).toMatch(/do NOT resolve it/);
+    expect(prompt).toMatch(/do NOT push code for it/);
+  });
+
+  it('says it overrides the human-priority guidance it contradicts', () => {
+    // Both sentences are in the prompt at once, so the rule has to name which
+    // one wins or the agent is left to guess.
+    const prompt = build(false);
+    expect(prompt).toContain('HUMAN reviewers: their feedback takes priority');
+    expect(prompt).toContain('overrides the human-reviewer guidance above');
+  });
+
+  it('leaves bot threads to be handled as usual', () => {
+    const prompt = build(false);
+    expect(prompt).toContain('Bot and automated-reviewer threads are UNAFFECTED');
+    expect(prompt).toContain('BOTS and automated reviewers');
+  });
+
+  it('tells the agent that human-only leftovers are a finished run', () => {
+    // Otherwise it loops: the threads it is forbidden to touch keep reading as
+    // unfinished work, and the run burns its cycles going nowhere.
+    expect(build(false)).toContain('that is a finished run');
+  });
+
+  it('applies to Claude Code runs too, not just PostHog Code', () => {
+    const prompt = buildMergeablePrompt({
+      owner: 'acme',
+      repo: 'widgets',
+      number: 7,
+      summary,
+      provider: 'claude_code' as CloudProviderType,
+      respondToHumanComments: false,
+    });
+    expect(prompt).toContain('TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS');
   });
 });

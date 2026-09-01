@@ -24,7 +24,10 @@ import { emitPullRequestUpdated } from './websocket.js';
 import { debugBus } from './debugBus.js';
 import { TickGuard } from './tickGuard.js';
 import { activePrTaskId, resolveCloudEnv } from './prCloudFix.js';
-import { workspacePromptTemplate } from './promptTemplates.js';
+import {
+  workspacePromptTemplate,
+  workspaceRespondToHumanComments,
+} from './promptTemplates.js';
 
 const POLL_INTERVAL_MS = 60_000;
 /** Re-poll a watched PR if its cached summary is older than this. */
@@ -399,6 +402,7 @@ class PRAutoMergeWatcher {
     const ref = `${row.owner}/${row.repo}#${row.number}`;
     const prTitle = (row.lastSummary as { title?: string } | null)?.title ?? '';
     const template = await workspacePromptTemplate(row.workspaceId, 'mergeable');
+    const respondToHumanComments = await workspaceRespondToHumanComments(row.workspaceId);
     const failingChecks = await readFailingChecks(
       row.workspaceId,
       row.owner,
@@ -421,6 +425,7 @@ class PRAutoMergeWatcher {
           provider,
           failingChecks,
           template,
+          respondToHumanComments,
         }),
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,

@@ -21,7 +21,10 @@ import { readFailingChecks } from './failingChecks.js';
 import { getCloudProvider } from './cloudProviders/registry.js';
 import { fleetRefusalReason, workspaceMayUseFleet } from './cloudProviders/fleetAccess.js';
 import { createCloudTask } from './taskCreate.js';
-import { workspacePromptTemplate } from './promptTemplates.js';
+import {
+  workspacePromptTemplate,
+  workspaceRespondToHumanComments,
+} from './promptTemplates.js';
 
 /** Task statuses that mean a run is still working the PR. */
 export const ACTIVE_STATUSES = new Set(['pending', 'queued', 'in_progress']);
@@ -227,6 +230,7 @@ export async function startPrMergeableRun(
   );
   const prTitle = summary.title ?? '';
   const template = await workspacePromptTemplate(row.workspaceId, 'mergeable');
+  const respondToHumanComments = await workspaceRespondToHumanComments(row.workspaceId);
 
   const task = await createCloudTask({
     workspaceId: row.workspaceId,
@@ -242,6 +246,7 @@ export async function startPrMergeableRun(
       provider,
       failingChecks,
       template,
+      respondToHumanComments,
     }),
     repositoryId: row.repositoryId,
     assignedEnvironmentId: envId,

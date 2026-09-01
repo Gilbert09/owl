@@ -618,6 +618,7 @@ function WorkspaceSettings() {
           </Card>
 
           <AutoKeepMergeableDefaultToggle />
+<RespondToHumanCommentsToggle />
 
           <Card className="p-4 border-destructive/30">
             <h4 className="font-medium mb-1">Delete workspace</h4>
@@ -1165,6 +1166,77 @@ function AutoKeepMergeableDefaultToggle() {
         </div>
       </label>
       <AutoKeepMergeableLabelsField />
+    </Card>
+  );
+}
+
+/**
+ * Workspace-wide: may a fix run reply to, resolve, or push code for review
+ * threads a HUMAN opened?
+ *
+ * Asked for by reviewers on PostHog/posthog — an agent replying on their review
+ * threads is noise on a conversation between people, and resolving one closes a
+ * thread its author had not finished with. Bot threads are unaffected either
+ * way; they are the ones nobody wants to triage by hand.
+ *
+ * Absent means on, so existing workspaces keep today's behaviour rather than
+ * being silently muted. Applies to every fix run — auto-keep, the merge queue,
+ * and the manual "Get PR mergeable" button.
+ */
+function RespondToHumanCommentsToggle() {
+  const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const setWorkspaces = useWorkspaceStore((s) => s.setWorkspaces);
+  const [saving, setSaving] = useState(false);
+
+  const workspace = workspaces.find((w) => w.id === currentWorkspaceId);
+  const enabled = workspace?.settings?.respondToHumanComments !== false;
+
+  const onToggle = async (next: boolean) => {
+    if (!currentWorkspaceId) return;
+    setSaving(true);
+    try {
+      const settings = { respondToHumanComments: next } as Workspace['settings'];
+      await api.workspaces.update(currentWorkspaceId, { settings });
+      setWorkspaces(
+        workspaces.map((w) =>
+          w.id === currentWorkspaceId
+            ? { ...w, settings: { ...w.settings, ...settings } as Workspace['settings'] }
+            : w,
+        ),
+      );
+    } catch (err) {
+      toast.error(
+        'Could not change the review-comment setting',
+        err instanceof Error ? err.message : undefined,
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card className="p-4">
+      <label className="flex items-start gap-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={saving || !currentWorkspaceId}
+          onChange={(e) => void onToggle(e.target.checked)}
+          className="mt-1"
+          data-attr="settings-respond-to-human-comments"
+        />
+        <div className="flex-1">
+          <div className="font-medium text-sm">Reply to human review comments</div>
+          <p className="text-xs text-muted-foreground mt-1">
+            When on, a fix run treats a human reviewer&rsquo;s comments like a bot&rsquo;s: it
+            implements them, replies on the thread, and resolves it. Turn it off and human threads
+            are left completely alone — read for context, never replied to, resolved, or acted on —
+            so the conversation stays between people. Comments from bots and automated reviewers
+            are handled either way.
+          </p>
+        </div>
+      </label>
     </Card>
   );
 }

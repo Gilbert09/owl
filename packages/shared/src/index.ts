@@ -282,6 +282,19 @@ export interface WorkspaceSettings {
   /** GitHub labels the watcher adds (never removes) to every open PR it watches. Empty = off. */
   autoKeepMergeableLabels?: string[];
   /**
+   * Whether a fix run may reply to, resolve, or push code for review threads
+   * opened by HUMAN reviewers. Absent or `true` is today's behaviour, where
+   * human feedback takes priority over a bot's.
+   *
+   * Set `false` and human threads become read-only context: the agent may read
+   * them to understand the PR and does nothing else with them. Asked for by
+   * reviewers on PostHog/posthog — an agent replying on their review threads is
+   * noise on a conversation between people, and resolving one closes a thread
+   * its author had not finished with. Bot threads are unaffected either way;
+   * they are the ones nobody wants to triage by hand.
+   */
+  respondToHumanComments?: boolean;
+  /**
    * How the merge queue drains a (repo, base) group:
    * - `'ordered'` (default): FIFO — one merge in flight per group, each PR
    *   waits its turn. Conservative: same-base merges invalidate the CI of the

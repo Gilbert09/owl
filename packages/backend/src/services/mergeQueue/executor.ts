@@ -52,7 +52,10 @@ import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
 import { ACTIVE_STATUSES, activePrTaskId, linkedTaskStatus, resolveCloudEnv } from '../prCloudFix.js';
-import { workspacePromptTemplate } from '../promptTemplates.js';
+import {
+  workspacePromptTemplate,
+  workspaceRespondToHumanComments,
+} from '../promptTemplates.js';
 import { emitPullRequestUpdated, emitMergeQueueBlocked } from '../websocket.js';
 import { broadcastMergeQueuePositions, QUEUE_RESET_COLUMNS } from '../mergeQueueBroadcast.js';
 import {
@@ -1365,6 +1368,7 @@ async function fireFixRun(
             }
           : {}),
         template: await workspacePromptTemplate(ctx.pr.workspaceId, 'mergeable'),
+        respondToHumanComments: await workspaceRespondToHumanComments(ctx.pr.workspaceId),
       }),
       repositoryId: ctx.pr.repositoryId,
       assignedEnvironmentId: resolved.envId,
