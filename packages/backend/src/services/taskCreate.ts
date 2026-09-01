@@ -1,9 +1,10 @@
 import { v4 as uuid } from 'uuid';
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { TaskPriority, TaskType, TaskSkillInfo, PostHogCodeRuntimeAdapter } from '@talyn/shared';
 import { getDbClient } from '../db/client.js';
 import {
   tasks as tasksTable,
+  environments as environmentsTable,
   pullRequests as pullRequestsTable,
   workspaces as workspacesTable,
 } from '../db/schema.js';
@@ -11,7 +12,7 @@ import { withTaskLimitGate } from './billing/entitlements.js';
 import { attachTaskToPullRequestRow } from './prCache.js';
 import { bumpSkillUsage } from './skills.js';
 import { rowToTask } from './taskSerialize.js';
-import { emitTaskCreated } from './websocket.js';
+import { emitTaskCreated, emitTaskUpdate } from './websocket.js';
 
 export interface CreateCloudTaskInput {
   workspaceId: string;
@@ -62,23 +63,109 @@ export async function createCloudTask(
     throw new Error(`createCloudTask: workspace ${input.workspaceId} not found`);
   }
 
-  return withTaskLimitGate(ownerId, {}, () => insertCloudTask(input));
+  return withTaskLimitGate(ownerId, {}, async () => {
+    const reusable = await findReusableTask(input);
+    return reusable ? redispatchCloudTask(reusable, input) : insertCloudTask(input);
+  });
 }
 
-async function insertCloudTask(
-  input: CreateCloudTaskInput
-): Promise<typeof tasksTable.$inferSelect> {
-  const db = getDbClient();
-  const id = uuid();
-  const now = new Date();
+/**
+ * Statuses a task must have settled into before it can be reused. Anything
+ * still active is left strictly alone — rewriting a running task's prompt
+ * would redirect a run already in flight.
+ */
+const REUSABLE_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
+/**
+ * The most recent finished task for this exact PR and task type, if any.
+ *
+ * Reuse is keyed on (workspace, PR, type) rather than on the title, which is
+ * edited freely, and rather than on the PR alone — a `pr_review` and a
+ * `pr_response` on one PR are different pieces of work and must not land in
+ * each other's remote session. Reads `tasks.pull_request_id` (indexed), the
+ * authoritative link.
+ *
+ * Note the projection: `tasks.transcript` is the big jsonb column on this
+ * table, and this runs on every dispatch. Only the two columns the reuse
+ * decision needs are selected.
+ */
+async function findReusableTask(
+  input: CreateCloudTaskInput
+): Promise<{ id: string; metadata: unknown } | null> {
+  if (!input.pullRequestId) return null;
+  const rows = await getDbClient()
+    .select({ id: tasksTable.id, metadata: tasksTable.metadata })
+    .from(tasksTable)
+    .where(
+      and(
+        eq(tasksTable.workspaceId, input.workspaceId),
+        eq(tasksTable.pullRequestId, input.pullRequestId),
+        eq(tasksTable.type, input.type),
+        inArray(tasksTable.status, [...REUSABLE_STATUSES])
+      )
+    )
+    .orderBy(desc(tasksTable.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+/** The cloud provider a task is being dispatched to, from its env marker. */
+async function providerTypeFor(envId: string | null | undefined): Promise<string | null> {
+  if (!envId) return null;
+  const rows = await getDbClient()
+    .select({ type: environmentsTable.type })
+    .from(environmentsTable)
+    .where(eq(environmentsTable.id, envId))
+    .limit(1);
+  return rows[0]?.type ?? null;
+}
+
+/**
+ * Carry the remote handle from the run being reused onto the new one, so the
+ * provider starts another run on the SAME remote task instead of creating a
+ * duplicate. What is deliberately NOT carried matters more than what is:
+ *
+ *  - **the run fields** (`posthogRunId` and friends). The executor treats
+ *    "has a task id AND a run id" as "already dispatched" and returns early,
+ *    so carrying the run id would wedge the task in `queued` forever.
+ *  - **`cloudTask`**. Only PostHog exposes "start another run on this task"
+ *    (`POST /tasks/{id}/run/`); Claude and the self-hosted fleet have no such
+ *    primitive, and their dispatch guards read `readCloudTaskMeta`, which
+ *    falls back to the legacy `posthog*` fields. Handing either of them a
+ *    remote id they cannot re-run makes their dispatch a permanent no-op —
+ *    which is also why the handle is dropped when the workspace has switched
+ *    providers since the last run.
+ */
+function carryRemoteHandle(
+  previous: unknown,
+  next: Record<string, unknown>,
+  providerType: string | null
+): Record<string, unknown> {
+  if (providerType !== 'posthog_code') return next;
+  const prev = (previous ?? {}) as Record<string, unknown>;
+  const remoteTaskId = prev.posthogTaskId;
+  if (typeof remoteTaskId !== 'string' || !remoteTaskId) return next;
+  return {
+    ...next,
+    posthogTaskId: remoteTaskId,
+    ...(prev.posthogProjectId === undefined ? {} : { posthogProjectId: prev.posthogProjectId }),
+    ...(prev.posthogHost === undefined ? {} : { posthogHost: prev.posthogHost }),
+  };
+}
+
+/** The metadata a freshly dispatched task carries, shared by both paths. */
+async function buildTaskMetadata(
+  input: CreateCloudTaskInput,
+  now: Date
+): Promise<Record<string, unknown>> {
+  const db = getDbClient();
   // Stash cloud overrides (model / runtime adapter) on metadata — the
   // provider reads them at dispatch.
-  const initialMetadata: Record<string, unknown> = {};
-  if (input.runtimeAdapter) initialMetadata.runtimeAdapter = input.runtimeAdapter;
-  if (input.model) initialMetadata.model = input.model;
+  const metadata: Record<string, unknown> = {};
+  if (input.runtimeAdapter) metadata.runtimeAdapter = input.runtimeAdapter;
+  if (input.model) metadata.model = input.model;
   if (input.skill) {
-    initialMetadata.skill = input.skill;
+    metadata.skill = input.skill;
     // Best-effort usage bump for the picker's "frequently used" ordering —
     // never blocks or fails task creation.
     void bumpSkillUsage(input.workspaceId, input.skill.key).catch((err) => {
@@ -96,7 +183,7 @@ async function insertCloudTask(
       .limit(1);
     const prRow = prRows[0];
     if (prRow && prRow.workspaceId === input.workspaceId) {
-      initialMetadata.pullRequest = {
+      metadata.pullRequest = {
         id: prRow.id,
         number: prRow.number,
         url: (prRow.lastSummary as { url?: string } | null)?.url ?? '',
@@ -104,6 +191,114 @@ async function insertCloudTask(
       };
     }
   }
+  return metadata;
+}
+
+/**
+ * Re-arm a finished task for another run at the same PR, instead of inserting
+ * a new one. Keeps ONE task per (PR, type) in Talyn and — via the carried
+ * remote handle — one session per PR at the provider, with the repeat runs
+ * hanging off it rather than cluttering the list as separate sessions.
+ *
+ * The row is reset to what a brand-new task looks like: the new prompt, back
+ * to `queued`, and the previous run's output cleared. The transcript goes with
+ * it — it is this table's large jsonb column, so accumulating every run's
+ * would grow one row without bound, and the provider keeps the older runs.
+ */
+async function redispatchCloudTask(
+  existing: { id: string; metadata: unknown },
+  input: CreateCloudTaskInput
+): Promise<typeof tasksTable.$inferSelect> {
+  const db = getDbClient();
+  const now = new Date();
+  const providerType = await providerTypeFor(input.assignedEnvironmentId);
+  const metadata = carryRemoteHandle(
+    existing.metadata,
+    await buildTaskMetadata(input, now),
+    providerType
+  );
+
+  await db
+    .update(tasksTable)
+    .set({
+      status: 'queued',
+      priority: input.priority || 'medium',
+      title: input.title,
+      description: input.description,
+      prompt: input.prompt ?? null,
+      repositoryId: input.repositoryId,
+      assignedEnvironmentId: input.assignedEnvironmentId ?? null,
+      metadata,
+      transcript: null,
+      result: null,
+      branch: null,
+      completedAt: null,
+      // Bumped, not preserved. The task list is ordered by `created_at DESC`
+      // (it is also the keyset cursor), so a reused row would sit wherever its
+      // FIRST run landed — start a fix run on a week-old PR task and it would
+      // appear a week down the list. The row now stands for the run it is
+      // currently carrying, so this is when that run was queued.
+      createdAt: now,
+      updatedAt: now,
+    })
+    .where(eq(tasksTable.id, existing.id));
+
+  // Same reverse link the insert path writes — the previous run may have been
+  // superseded on the PR row by a task at another PR.
+  if (input.pullRequestId) {
+    await attachTaskToPullRequestRow({
+      workspaceId: input.workspaceId,
+      pullRequestId: input.pullRequestId,
+      taskId: existing.id,
+    }).catch((err) => {
+      console.error('[taskCreate] failed to link task to PR:', err);
+    });
+  }
+
+  const rows = await db
+    .select()
+    .from(tasksTable)
+    .where(eq(tasksTable.id, existing.id))
+    .limit(1);
+  const task = rowToTask(rows[0]);
+
+  // BOTH events, and in this order. `task:created` is what puts the task in
+  // front of a client that never had it (or has pruned it), but the desktop
+  // store's addTask is idempotent by id and SKIPS a task it already holds —
+  // so on its own it would leave an existing client showing the finished
+  // previous run. The update is what refreshes those, `transcript: []`
+  // included, so the old run's log is dropped rather than shown under the
+  // new one.
+  emitTaskCreated(input.workspaceId, task);
+  emitTaskUpdate(input.workspaceId, existing.id, {
+    ...task,
+    transcript: [],
+    // Explicit nulls, because the stores DEEP-MERGE `metadata` on a task
+    // update (a partial poller patch must not drop the provider marker). A
+    // key we simply left out would therefore be kept from the previous run,
+    // so the task screen would go on offering a "view run" link pointing at
+    // the run that already finished. Only the scalars can be cleared this
+    // way; a stale `cloudTask` survives its own sub-merge until the dispatch
+    // writes the new remote ids over it moments later.
+    metadata: {
+      ...(task.metadata ?? {}),
+      posthogRunId: null,
+      posthogStatus: null,
+      posthogLogUrl: null,
+      posthogPrUrl: null,
+    },
+  });
+
+  return rows[0];
+}
+
+async function insertCloudTask(
+  input: CreateCloudTaskInput
+): Promise<typeof tasksTable.$inferSelect> {
+  const db = getDbClient();
+  const id = uuid();
+  const now = new Date();
+  const initialMetadata = await buildTaskMetadata(input, now);
 
   await db.insert(tasksTable).values({
     id,

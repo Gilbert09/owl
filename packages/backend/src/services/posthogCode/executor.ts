@@ -10,7 +10,7 @@ import {
 import { patchTaskMetadata } from '../taskMetadataMutex.js';
 import { emitTaskStatus } from '../websocket.js';
 import { getPostHogCodeClient, getPostHogCodeCredentials } from './credentials.js';
-import { DEFAULT_POSTHOG_CODE_MODEL } from './client.js';
+import { DEFAULT_POSTHOG_CODE_MODEL, PostHogCodeApiError } from './client.js';
 
 const DEFAULT_RUNTIME_ADAPTER: PostHogCodeRuntimeAdapter = 'claude';
 
@@ -83,9 +83,33 @@ export async function dispatchTaskToPostHogCode(
   const description = task.prompt?.trim() || task.description?.trim() || task.title;
 
   try {
-    // Reuse a remote task from a prior attempt that failed before starting a
-    // run (idempotent: avoids orphaning a fresh empty task each retry).
+    // Reuse the remote task when we already have one. Two callers land here:
+    // a prior attempt that created the task but failed before starting a run,
+    // and a REDISPATCH of a task being reused for another run at the same PR
+    // (see taskCreate's reuse path). Both want the same thing — one PostHog
+    // task carrying N runs, rather than a fresh task per run.
+    //
+    // The prompt has to be pushed first. `run/` takes no prompt; PostHog reads
+    // the task's current `description` when it starts the run, so a reused
+    // task would otherwise repeat the prompt it was created with.
     let remoteTaskId = existingTaskId;
+    if (remoteTaskId) {
+      try {
+        await client.updateTask(remoteTaskId, { title: task.title, description });
+      } catch (err) {
+        // Gone remotely (deleted, or the workspace was repointed at another
+        // project) — fall back to creating a fresh one rather than failing the
+        // dispatch on a stale id we only kept as an optimisation.
+        if (err instanceof PostHogCodeApiError && err.status === 404) {
+          console.warn(
+            `[posthogCode] task ${task.id.slice(0, 8)}: remote task ${remoteTaskId} is gone — creating a new one`,
+          );
+          remoteTaskId = undefined;
+        } else {
+          throw err;
+        }
+      }
+    }
     if (!remoteTaskId) {
       const remoteTask = await client.createTask({
         title: task.title,

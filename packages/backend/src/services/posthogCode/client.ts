@@ -98,6 +98,26 @@ export class PostHogCodeClient {
   }
 
   /**
+   * Rewrite a task's prompt in place.
+   *
+   * `startRun` carries no prompt of its own — PostHog's `run` action reads the
+   * task's CURRENT `description` (its serializer calls that field "the prompt
+   * passed to the agent"). So this is the call that makes a SECOND run on an
+   * existing task do the new work rather than repeat the first run's. Without
+   * it, reusing a task would re-run a stale prompt, which for a "get this PR
+   * mergeable" run means acting on failures that have since changed.
+   */
+  async updateTask(
+    taskId: string,
+    input: { title?: string; description?: string },
+  ): Promise<PostHogTask> {
+    return this.request<PostHogTask>('PATCH', `/tasks/${taskId}/`, {
+      ...(input.title === undefined ? {} : { title: input.title }),
+      ...(input.description === undefined ? {} : { description: input.description }),
+    });
+  }
+
+  /**
    * Kick off a background run for a task. The endpoint returns the parent
    * *task* (not the run) — the new run is on `task.latest_run`, and its
    * `latest_run.id` is the run id used by the logs/stream endpoints.
