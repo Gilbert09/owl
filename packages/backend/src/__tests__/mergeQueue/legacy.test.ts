@@ -1,13 +1,14 @@
-// The two shapes a merge-queue entry leaves the backend as: the rich v2
-// payload richer clients render, and the four-status blob v1-era desktop
-// builds understand. Both are emitted on every broadcast, so a status added to
-// the engine must land correctly in each — a build that doesn't know
-// `awaiting_stack` has to read it as "waiting", not fall through to something
-// that looks like a failure.
+// The payload a merge-queue entry leaves the backend as.
+//
+// This file used to cover a second shape too — the four-status blob emitted
+// for desktop builds predating the v2 payload. That shim was retired on
+// 2026-09-01; the rollup its status mapping performed now lives in
+// @talyn/shared as `coarseQueueStatus`, for badges with room for one word, and
+// is covered in externalMergeQueue.test.ts.
 
 import { describe, it, expect } from 'vitest';
-import { toLegacyStatus, toPublicMergeQueue } from '../../services/mergeQueue/legacy.js';
-import type { EntrySnapshot, EntryStatus } from '../../services/mergeQueue/types.js';
+import { toPublicMergeQueue } from '../../services/mergeQueue/legacy.js';
+import type { EntrySnapshot } from '../../services/mergeQueue/types.js';
 
 function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
   return {
@@ -38,36 +39,6 @@ function entry(o: Partial<EntrySnapshot> = {}): EntrySnapshot {
 }
 
 /** Every status the engine can persist. */
-const ALL_STATUSES: EntryStatus[] = [
-  'queued',
-  'awaiting_ci',
-  'awaiting_review',
-  'automerge_armed',
-  'awaiting_external',
-  'awaiting_stack',
-  'fixing',
-  'merging',
-  'blocked',
-  'blocked_manual',
-  'merged',
-  'removed',
-];
-
-describe('toLegacyStatus', () => {
-  it('maps every engine status to one of the four a v1 desktop knows', () => {
-    // Enumerated rather than spot-checked so a new status can't quietly fall
-    // through to a value old builds render as something else.
-    for (const status of ALL_STATUSES) {
-      expect(['waiting', 'fixing', 'merging', 'blocked']).toContain(toLegacyStatus(status));
-    }
-  });
-
-  it('reads a parked stack member as waiting, not blocked', () => {
-    // It self-heals and needs no user action, so a blocked badge on an old
-    // build would be actively misleading.
-    expect(toLegacyStatus('awaiting_stack')).toBe('waiting');
-  });
-});
 
 describe('toPublicMergeQueue', () => {
   it('carries the stack parent while parked', () => {

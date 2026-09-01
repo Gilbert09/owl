@@ -76,8 +76,7 @@ function makeRow(id: string, number: number, head: string, base: string, queued 
     repositoryId: 'r1',
     state: 'open',
     mergeQueued: queued,
-    mergeQueueState: queued ? { status: 'waiting', attempts: 0, position: 1 } : null,
-    mergeQueue: null,
+    mergeQueue: queued ? ({ status: 'queued', position: 1 } as never) : null,
     summary: {
       title: `PR ${number}`,
       url: `https://github.com/acme/w/pull/${number}`,
@@ -190,7 +189,7 @@ describe('setMergeQueueStack — dequeue', () => {
 
     expect(patchRow.mock.calls.map((c) => c[0])).toEqual(['a', 'b', 'c']);
     for (const call of patchRow.mock.calls) {
-      expect(call[1]).toMatchObject({ mergeQueued: false, mergeQueueState: null });
+      expect(call[1]).toMatchObject({ mergeQueued: false, mergeQueue: null });
     }
   });
 
@@ -211,12 +210,12 @@ describe('setMergeQueueStack — failure', () => {
     const rollbacks = patchRow.mock.calls.slice(3);
     expect(rollbacks.map((c) => c[0])).toEqual(['a', 'b', 'c']);
     for (const call of rollbacks) {
-      expect(call[1]).toMatchObject({ mergeQueued: false, mergeQueueState: null });
+      expect(call[1]).toMatchObject({ mergeQueued: false, mergeQueue: null });
     }
   });
 
   it('restores the PREVIOUS state, not a blank one', async () => {
-    state.rows = [{ ...A(), mergeQueued: true, mergeQueueState: { status: 'waiting', attempts: 0, position: 4 } } as PRRow, B(), C()];
+    state.rows = [{ ...A(), mergeQueued: true, mergeQueue: { status: 'queued', position: 4 } } as PRRow, B(), C()];
     setMergeQueueStack.mockRejectedValue(new Error('boom'));
 
     await actions().setMergeQueueStack((state.rows as PRRow[])[2]!, true);
@@ -224,7 +223,7 @@ describe('setMergeQueueStack — failure', () => {
     const restoreA = patchRow.mock.calls.slice(3).find((c) => c[0] === 'a');
     expect(restoreA?.[1]).toMatchObject({
       mergeQueued: true,
-      mergeQueueState: { position: 4 },
+      mergeQueue: { position: 4 },
     });
   });
 

@@ -1,59 +1,14 @@
-// Merge queue v2 — legacy WS/REST shape mapping.
+// Merge queue v2 — the public WS/REST payload.
 //
-// Old desktop builds (stores/pullRequests.ts) know exactly four queue
-// statuses; the v2 pipeline keeps emitting that shape (and mirroring it into
-// pull_requests.mergeQueueState for the REST list) alongside the richer
-// `mergeQueue` payload, so no desktop build ever breaks during the rollout.
-// Deleted with the blob columns in the cleanup push.
+// This file used to carry a second job: mapping every entry down to the
+// four-status shape v1 emitted, and mirroring it into
+// pull_requests.merge_queue_state, so desktop builds predating the v2 payload
+// kept a working queue badge through the rollout. That shim was removed on
+// 2026-09-01 — the v2 desktop surface shipped with the cutover, and 44 releases
+// of a nightly auto-updating app have gone out since. `merge_queue_entries` is
+// now the only source of queue state.
 
-import type { EntrySnapshot, EntryStatus } from './types.js';
-
-export type LegacyQueueStatus = 'waiting' | 'fixing' | 'merging' | 'blocked';
-
-export function toLegacyStatus(status: EntryStatus): LegacyQueueStatus {
-  switch (status) {
-    case 'fixing':
-      return 'fixing';
-    case 'merging':
-      return 'merging';
-    case 'blocked':
-    case 'blocked_manual':
-      return 'blocked';
-    default:
-      // queued / awaiting_ci / awaiting_review / automerge_armed /
-      // awaiting_external / awaiting_stack — all "waiting" to a v1-era
-      // desktop, which is correct for every one of them.
-      return 'waiting';
-  }
-}
-
-/** The WS badge shape v1 emitted (status/attempts/position/reason). */
-export function toLegacyPublicState(
-  entry: EntrySnapshot,
-  position: number
-): { status: LegacyQueueStatus; attempts: number; position: number; reason?: string } {
-  const status = toLegacyStatus(entry.status);
-  return {
-    status,
-    attempts: entry.fixAttempts,
-    position,
-    ...(status === 'blocked' && entry.blockedReason ? { reason: entry.blockedReason } : {}),
-  };
-}
-
-/**
- * The blob stored on pull_requests.mergeQueueState during the v2 window —
- * enough for the REST list's badge derivation and any v1-era reader.
- */
-export function toLegacyStateBlob(entry: EntrySnapshot): Record<string, unknown> {
-  return {
-    status: toLegacyStatus(entry.status),
-    attempts: entry.fixAttempts,
-    accounted: entry.fixTaskAccounted,
-    ...(entry.fixTaskId ? { lastFixTaskId: entry.fixTaskId } : {}),
-    ...(entry.blockedReason ? { blockReason: entry.blockedReason } : {}),
-  };
-}
+import type { EntrySnapshot } from './types.js';
 
 /** The v2 payload richer clients render (new badges, budgets, head scope). */
 export function toPublicMergeQueue(

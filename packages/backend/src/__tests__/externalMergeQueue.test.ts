@@ -19,6 +19,7 @@ import {
   externalQueuePushWouldEject,
   isExternalQueueSubmitLabel,
   TRUNK_SUBMIT_LABELS,
+  coarseQueueStatus,
 } from '@talyn/shared';
 import { githubService } from '../services/github.js';
 import {
@@ -818,5 +819,57 @@ describe('submitToExternalQueue', () => {
     const result = await submitToExternalQueue(base);
     expect(result.kind).toBe('no_mechanism');
     expect(result).toMatchObject({ message: expect.stringContaining('instruction comment') });
+  });
+});
+
+describe('coarseQueueStatus', () => {
+  // The rollup the compact badges use — the Merge Queue page renders the full
+  // vocabulary, everywhere else has room for one word beside a PR title.
+  //
+  // Enumerated rather than spot-checked so a status added to the engine cannot
+  // quietly fall through to a value that renders as something it isn't. This
+  // was previously asserted against the v1 compatibility mapping; the shim is
+  // gone, the property still matters.
+  const ALL_STATUSES = [
+    'queued',
+    'awaiting_ci',
+    'awaiting_review',
+    'automerge_armed',
+    'awaiting_external',
+    'awaiting_stack',
+    'fixing',
+    'merging',
+    'blocked',
+    'blocked_manual',
+    'merged',
+    'removed',
+  ] as const;
+
+  it('maps every engine status to one of the four a badge can show', () => {
+    for (const status of ALL_STATUSES) {
+      expect(['waiting', 'fixing', 'merging', 'blocked']).toContain(coarseQueueStatus(status));
+    }
+  });
+
+  it('reads a parked stack member as waiting, not blocked', () => {
+    // It self-heals when the parent lands and needs no user action, so a
+    // blocked badge would be actively misleading.
+    expect(coarseQueueStatus('awaiting_stack')).toBe('waiting');
+  });
+
+  it('reads a PR handed to an external queue as waiting', () => {
+    // trunk owns the merge from there. Nothing for the reader to do.
+    expect(coarseQueueStatus('awaiting_external')).toBe('waiting');
+  });
+
+  it('reads both blocked flavours as blocked', () => {
+    expect(coarseQueueStatus('blocked')).toBe('blocked');
+    expect(coarseQueueStatus('blocked_manual')).toBe('blocked');
+  });
+
+  it('falls back to waiting for a status it has never seen', () => {
+    // Forward compatibility: a client on an older build must not render a
+    // future status as a failure.
+    expect(coarseQueueStatus('some_future_status')).toBe('waiting');
   });
 });

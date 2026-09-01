@@ -81,7 +81,7 @@ describe('sweepClosedViaRest', () => {
     expect(row?.mergeQueued).toBe(false); // queue bookkeeping cleared in the same write
     expect(emitSpy).toHaveBeenCalledWith(
       'ws1',
-      expect.objectContaining({ number: 7, state: 'merged', mergeQueued: false, mergeQueueState: null })
+      expect.objectContaining({ number: 7, state: 'merged', mergeQueued: false })
     );
   });
 

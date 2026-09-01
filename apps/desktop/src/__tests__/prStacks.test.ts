@@ -46,7 +46,7 @@ function makeRow(opts: {
     autoMergeState: null,
     mergeQueued: false,
     mergeMethod: 'squash',
-    mergeQueueState: null,
+    mergeQueue: null,
     createdAt,
     updatedAt: createdAt,
   };

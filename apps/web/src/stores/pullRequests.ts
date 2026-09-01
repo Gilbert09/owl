@@ -27,13 +27,7 @@ export interface PullRequestUpdatePayload {
   autoKeepMergeable?: boolean;
   autoMergeState?: { attempts: number; paused: boolean } | null;
   mergeQueued?: boolean;
-  mergeQueueState?: {
-    status: 'waiting' | 'fixing' | 'merging' | 'blocked';
-    attempts: number;
-    position: number;
-    reason?: string;
-  } | null;
-  /** v2 payload — rides along with mergeQueueState on v2-era echoes. */
+  /** The merge queue's payload. Null when the PR is not queued. */
   mergeQueue?: MergeQueuePublic | null;
 }
 
@@ -133,8 +127,6 @@ export const usePullRequestStore = create<PullRequestState>((set, get) => ({
         p.autoMergeState !== undefined ? p.autoMergeState : next[idx].autoMergeState,
       // Merge-queue state only rides along when it changed; otherwise keep ours.
       mergeQueued: p.mergeQueued ?? next[idx].mergeQueued,
-      mergeQueueState:
-        p.mergeQueueState !== undefined ? p.mergeQueueState : next[idx].mergeQueueState,
       mergeQueue: p.mergeQueue !== undefined ? p.mergeQueue : next[idx].mergeQueue,
     };
     set({ rows: next });

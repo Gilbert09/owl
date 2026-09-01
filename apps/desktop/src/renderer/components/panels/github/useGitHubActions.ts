@@ -185,12 +185,12 @@ export function useGitHubActions() {
   // state (incl. queue position) over WS. Rolls back on error.
   const setMergeQueue = useCallback(
     async (row: PRRow, enabled: boolean) => {
-      patchRow(row.id, {
-        mergeQueued: enabled,
-        mergeQueueState: enabled
-          ? { status: 'waiting', attempts: 0, position: row.mergeQueueState?.position ?? 0 }
-          : null,
-      });
+      // Flip the membership flag only. Never fabricate a `mergeQueue` payload:
+      // the table renders it whenever present, so an invented status/position
+      // would show and stick until the echo lands. Without one the badge reads
+      // "Queued" with no number for the moment before the server answers,
+      // which is true.
+      patchRow(row.id, { mergeQueued: enabled, ...(enabled ? {} : { mergeQueue: null }) });
       try {
         await api.pullRequests.setMergeQueue(row.id, enabled);
         trackEvent('merge_queue_toggled', {
@@ -260,18 +260,12 @@ export function useGitHubActions() {
       const before = affected.map((r) => ({
         id: r.id,
         mergeQueued: r.mergeQueued,
-        mergeQueueState: r.mergeQueueState ?? null,
+        mergeQueue: r.mergeQueue ?? null,
       }));
       for (const r of affected) {
-        // Only the legacy fields. Never fabricate a `mergeQueue` v2 payload:
-        // the table prefers it whenever present, so an invented status/position
-        // would render and stick until the echo lands.
-        patchRow(r.id, {
-          mergeQueued: enabled,
-          mergeQueueState: enabled
-            ? { status: 'waiting', attempts: 0, position: r.mergeQueueState?.position ?? 0 }
-            : null,
-        });
+        // Membership only — see the single-PR toggle above for why no payload
+        // is invented here.
+        patchRow(r.id, { mergeQueued: enabled, ...(enabled ? {} : { mergeQueue: null }) });
       }
       try {
         const result = await api.pullRequests.setMergeQueueStack(row.id, enabled, {
@@ -294,7 +288,7 @@ export function useGitHubActions() {
         for (const snap of before) {
           patchRow(snap.id, {
             mergeQueued: snap.mergeQueued,
-            mergeQueueState: snap.mergeQueueState,
+            mergeQueue: snap.mergeQueue,
           });
         }
         // Free-plan queue cap → upgrade modal instead of a raw error toast. A

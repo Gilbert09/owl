@@ -997,7 +997,6 @@ class PRMonitorService extends EventEmitter {
       state: nextState,
       lastSummary: summary,
       mergeQueued: false,
-      mergeQueueState: null,
     });
     // Merge-queue v2 trigger. A PR going terminal is the group-advance signal
     // (a same-base sibling merged → promote the next head) and, for a stack,

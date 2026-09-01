@@ -37,6 +37,7 @@ import {
   externalQueueStateLabel,
   externalQueueStatusFromLabels,
   prHasFixableIssues,
+  coarseQueueStatus,
 } from '@talyn/shared';
 import { SkillPickerModal } from './SkillPickerModal';
 import { ProviderIcon } from '../../../lib/providerMeta';
@@ -695,9 +696,11 @@ function PRTableRow({
               {variant !== 'queue' &&
                 row.mergeQueued &&
                 (() => {
-                  const qs = row.mergeQueueState?.status ?? 'waiting';
-                  const pos = row.mergeQueueState?.position ?? 0;
-                  const reason = row.mergeQueueState?.reason;
+                  // The full vocabulary belongs on the Merge Queue page; this
+                  // badge has room for one word beside a PR title.
+                  const qs = coarseQueueStatus(row.mergeQueue?.status ?? 'queued');
+                  const pos = row.mergeQueue?.position ?? 0;
+                  const reason = row.mergeQueue?.reason;
                   return (
                     <span className="inline-flex items-center gap-1">
                       <span
@@ -1114,8 +1117,7 @@ function PRTableRow({
 /**
  * The Merge Queue page's second column: position + status + reason. Renders
  * the v2 payload's full vocabulary (auto-merge armed, awaiting CI/review,
- * per-head budgets) and falls back to the legacy 4-status shape for rows the
- * v2 echo hasn't reached yet.
+ * per-head budgets). A row with no queue payload is not queued.
  */
 function QueueCell({
   row,
@@ -1125,8 +1127,7 @@ function QueueCell({
   parentStatus?: NonNullable<PRRow['mergeQueue']>['status'];
 }) {
   const v2 = row.mergeQueue;
-  const legacy = row.mergeQueueState;
-  const pos = v2?.position ?? legacy?.position ?? 0;
+  const pos = v2?.position ?? 0;
   const chip = (() => {
     if (v2) {
       const budgets = v2.budgets;
@@ -1297,32 +1298,6 @@ function QueueCell({
           return <span className="text-muted-foreground">Waiting</span>;
       }
     }
-    // Legacy fallback (pre-v2 echo).
-    const qs = legacy?.status ?? 'waiting';
-    if (qs === 'merging')
-      return (
-        <span className="inline-flex items-center gap-1 text-blue-700 dark:text-blue-400">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          Merging
-        </span>
-      );
-    if (qs === 'blocked')
-      return (
-        <span
-          className="inline-flex items-center gap-1 text-amber-700 dark:text-amber-400"
-          title={legacy?.reason ?? 'Blocked — needs attention'}
-        >
-          <AlertTriangle className="h-3 w-3" />
-          Blocked
-        </span>
-      );
-    if (qs === 'fixing')
-      return (
-        <span className="inline-flex items-center gap-1 text-violet-700 dark:text-violet-400">
-          <Loader2 className="h-3 w-3 animate-spin" />
-          Fixing
-        </span>
-      );
     return <span className="text-muted-foreground">Waiting</span>;
   })();
   return (

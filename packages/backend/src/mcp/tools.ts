@@ -35,7 +35,7 @@ function flagsOf(pr: PublicPr): string {
   const flags: string[] = [];
   if (pr.summary.draft) flags.push('draft');
   if (pr.autoKeepMergeable) flags.push('auto-keep');
-  if (pr.mergeQueued) flags.push(`merge-queued${pr.mergeQueueState ? `:${pr.mergeQueueState.status}` : ''}`);
+  if (pr.mergeQueued) flags.push(`merge-queued${pr.mergeQueue ? `:${pr.mergeQueue.status}` : ''}`);
   return flags.length ? `  [${flags.join(', ')}]` : '';
 }
 
@@ -150,7 +150,7 @@ export const TOOLS: McpToolDefinition[] = [
         `mergeable: ${s.mergeable} (${s.blockingReason})   review: ${s.effectiveReviewDecision ?? s.reviewDecision ?? 'none'}`,
         `checks: ${c.passed} passed / ${c.failed} failed / ${c.inProgress} in-progress / ${c.skipped} skipped / ${c.total} total`,
         `unresolved review threads: ${s.unresolvedReviewThreads}`,
-        `auto-keep-mergeable: ${row.autoKeepMergeable}   merge-queued: ${row.mergeQueued}${row.mergeQueueState ? ` (${row.mergeQueueState.status}, position ${row.mergeQueueState.position})` : ''}   merge-method: ${row.mergeMethod}`,
+        `auto-keep-mergeable: ${row.autoKeepMergeable}   merge-queued: ${row.mergeQueued}${row.mergeQueue ? ` (${row.mergeQueue.status}, position ${row.mergeQueue.position}${row.mergeQueue.reason ? `, ${row.mergeQueue.reason}` : ''})` : ''}   merge-method: ${row.mergeMethod}`,
         row.taskId ? `linked task: ${row.taskId}` : 'no linked task',
         s.url,
       ];

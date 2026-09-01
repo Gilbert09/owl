@@ -665,17 +665,10 @@ export interface PRRow {
   mergeQueued: boolean;
   /** Merge method used when this PR's turn comes. */
   mergeMethod: 'merge' | 'squash' | 'rebase';
-  /** Queue state: coarse status + 1-based position within its (repo, base)
-   *  group. Null when the PR isn't queued. */
-  mergeQueueState?: {
-    status: 'waiting' | 'fixing' | 'merging' | 'blocked';
-    attempts: number;
-    position: number;
-    /** Why the PR is blocked (only set when status === 'blocked'). */
-    reason?: string;
-  } | null;
-  /** Merge queue v2 payload — full status vocabulary, per-head budgets,
-   *  auto-merge state. Null when not queued; absent from pre-v2 echoes. */
+  /** The merge queue's payload — full status vocabulary, per-head budgets,
+   *  auto-merge state. Null when the PR isn't queued.
+   *
+   *  Superseded a four-status `mergeQueueState` blob, retired 2026-09-01. */
   mergeQueue?: MergeQueuePublic | null;
   createdAt: string;
   updatedAt: string;

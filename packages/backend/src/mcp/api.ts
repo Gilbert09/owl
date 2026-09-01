@@ -93,5 +93,17 @@ export interface PublicPr {
   autoKeepMergeable: boolean;
   mergeQueued: boolean;
   mergeMethod: string;
-  mergeQueueState: { status: string; attempts: number; position: number; reason?: string } | null;
+  /**
+   * The merge queue's own view of this PR, straight from `merge_queue_entries`.
+   * Replaced the v1 `mergeQueueState` blob, which carried only four statuses —
+   * this one distinguishes awaiting_ci / awaiting_review / awaiting_external /
+   * awaiting_stack / automerge_armed, which is most of what a reader wants to
+   * know about a PR that is sitting in a queue and not moving.
+   */
+  mergeQueue: {
+    status: string;
+    position: number;
+    reason?: string;
+    blockedCode?: string | null;
+  } | null;
 }

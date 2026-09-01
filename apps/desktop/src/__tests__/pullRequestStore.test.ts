@@ -24,7 +24,7 @@ function makeRow(id: string, over: Partial<PRRow> = {}): PRRow {
     autoMergeState: null,
     mergeQueued: false,
     mergeMethod: 'squash',
-    mergeQueueState: null,
+    mergeQueue: null,
     createdAt: '2026-06-05T00:00:00Z',
     updatedAt: '2026-06-05T00:00:00Z',
     ...over,
@@ -69,13 +69,13 @@ describe('pull request store — applyPullRequestUpdate', () => {
         id: 'p1',
         reviewRequested: true,
         mergeQueued: true,
-        mergeQueueState: { status: 'merging', attempts: 0, position: 2 },
+        mergeQueue: { status: 'merging', position: 2 },
       })
     );
     const row = usePullRequestStore.getState().rows[0];
     expect(row.reviewRequested).toBe(true);
     expect(row.mergeQueued).toBe(true);
-    expect(row.mergeQueueState).toEqual({ status: 'merging', attempts: 0, position: 2 });
+    expect(row.mergeQueue).toEqual({ status: 'merging', position: 2 });
   });
 
   it('drops a row that left the open state (merged/closed upstream)', () => {

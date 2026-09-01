@@ -50,7 +50,6 @@ import { prMonitorService } from '../services/prMonitor.js';
 import { onQueueMembershipChanged } from '../services/mergeQueue/triggers.js';
 import type { MergeMethod } from '../services/mergeQueue/types.js';
 import {
-  computeQueuePositions,
   broadcastMergeQueuePositions,
   QUEUE_RESET_COLUMNS,
 } from '../services/mergeQueueBroadcast.js';
@@ -147,7 +146,6 @@ const LIST_COLUMNS = {
   mergeQueued: pullRequestsTable.mergeQueued,
   mergeQueuedAt: pullRequestsTable.mergeQueuedAt,
   mergeMethod: pullRequestsTable.mergeMethod,
-  mergeQueueState: pullRequestsTable.mergeQueueState,
   createdAt: pullRequestsTable.createdAt,
   updatedAt: pullRequestsTable.updatedAt,
 } as const;
@@ -243,10 +241,6 @@ export function pullRequestRoutes(): Router {
       .where(and(...conditions))
       .orderBy(desc(pullRequestsTable.lastPolledAt));
 
-    // 1-based merge-queue position per (repo, base branch) group, FIFO by
-    // `mergeQueuedAt`. Computed locally over the rows we already have.
-    const queuePositionById = computeQueuePositions(rows);
-
     // Merge queue v2 payloads for the initial paint (the WS echoes keep them
     // live afterwards): one indexed query over the workspace's active entries.
     const v2ByPrId = new Map<string, Record<string, unknown>>();
@@ -269,7 +263,7 @@ export function pullRequestRoutes(): Router {
     res.json({
       success: true,
       data: rows.map((r) => ({
-        ...rowToPublicShape(r, queuePositionById.get(r.id) ?? 0),
+        ...rowToPublicShape(r),
         mergeQueue: v2ByPrId.get(r.id) ?? null,
       })),
     } as ApiResponse<Array<ReturnType<typeof rowToPublicShape> & { mergeQueue: unknown }>>);
@@ -512,7 +506,7 @@ export function pullRequestRoutes(): Router {
       return res.json({
         success: true,
         data: {
-          row: { ...rowToPublicShape(row, queue.position), mergeQueue: queue.payload },
+          row: { ...rowToPublicShape(row), mergeQueue: queue.payload },
           fresh: null,
         },
       });
@@ -571,7 +565,7 @@ export function pullRequestRoutes(): Router {
     res.json({
       success: true,
       data: {
-        row: { ...rowToPublicShape(outRow, queue.position), mergeQueue: queue.payload },
+        row: { ...rowToPublicShape(outRow), mergeQueue: queue.payload },
         fresh,
       },
     });
@@ -683,7 +677,7 @@ export function pullRequestRoutes(): Router {
         const queue = await mergeQueueForPr(reconciled.id, db);
         return res.json({
           success: true,
-          data: { ...rowToPublicShape(reconciled, queue.position), mergeQueue: queue.payload },
+          data: { ...rowToPublicShape(reconciled), mergeQueue: queue.payload },
         });
       }
       return res
@@ -702,7 +696,7 @@ export function pullRequestRoutes(): Router {
     const queue = await mergeQueueForPr(fresh[0].id, db);
     res.json({
       success: true,
-      data: { ...rowToPublicShape(fresh[0], queue.position), mergeQueue: queue.payload },
+      data: { ...rowToPublicShape(fresh[0]), mergeQueue: queue.payload },
     });
   });
 
@@ -815,14 +809,12 @@ export function pullRequestRoutes(): Router {
     // Enabling: arm a fresh guard so the next processor tick acts immediately,
     // and preserve the queue place on a fast off/on toggle. Disabling: clear
     // all queue bookkeeping.
-    const nextState = enabled ? { status: 'waiting' as const, attempts: 0, accounted: true } : null;
     await db
       .update(pullRequestsTable)
       .set({
         mergeQueued: enabled,
         mergeQueuedAt: enabled ? (row.mergeQueuedAt ?? new Date()) : null,
         mergeMethod: method,
-        mergeQueueState: nextState,
         updatedAt: new Date(),
       })
       .where(eq(pullRequestsTable.id, row.id));
@@ -925,7 +917,6 @@ export function pullRequestRoutes(): Router {
       state: row.state,
       lastSummary: row.lastSummary as Record<string, unknown>,
       mergeQueued: false,
-      mergeQueueState: null,
     });
   }
 
@@ -1509,8 +1500,11 @@ interface PullRequestRow {
   autoMergeState: unknown;
   mergeQueued: boolean;
   mergeQueuedAt: Date | null;
-  mergeMethod: string;
+  /** v1's queue blob. Nothing reads or writes it any more — it is declared
+   *  only because this interface mirrors the DB row and the column is still
+   *  there. Delete both together in the drop migration. */
   mergeQueueState: unknown;
+  mergeMethod: string;
   lastReviewId: string | null;
   lastReviewCommentId: string | null;
   lastCommentId: string | null;
@@ -1583,7 +1577,7 @@ async function reconcileTerminalState(
       number: updated.number,
       state: updated.state,
       lastSummary: (updated.lastSummary as Record<string, unknown> | null) ?? {},
-      ...(dropFromQueue ? { mergeQueued: false, mergeQueueState: null } : {}),
+      ...(dropFromQueue ? { mergeQueued: false } : {}),
     });
   }
   return updated;
@@ -1598,34 +1592,6 @@ function publicAutoMergeState(
   return { attempts: s.attempts ?? 0, paused: !!s.pausedAt };
 }
 
-/** The compact merge-queue state the desktop renders (toggle + badge). */
-function publicMergeQueueState(
-  raw: unknown,
-  position: number
-): {
-  status: 'waiting' | 'fixing' | 'merging' | 'blocked';
-  attempts: number;
-  position: number;
-  reason?: string;
-} | null {
-  const s = raw as
-    | {
-        status?: 'waiting' | 'fixing' | 'merging' | 'blocked';
-        attempts?: number;
-        blockReason?: string;
-      }
-    | null;
-  if (!s) return null;
-  const status = s.status ?? 'waiting';
-  return {
-    status,
-    attempts: s.attempts ?? 0,
-    position,
-    // Surface the blocked reason so a PR loaded fresh (not via a live echo)
-    // still explains itself in the badge tooltip.
-    ...(status === 'blocked' && s.blockReason ? { reason: s.blockReason } : {}),
-  };
-}
 
 /**
  * Whether a freshly-fetched summary differs from the cached row in a way worth
@@ -1677,7 +1643,6 @@ type PublicShapeRow = Pick<
   | 'mergeQueued'
   | 'mergeQueuedAt'
   | 'mergeMethod'
-  | 'mergeQueueState'
   | 'createdAt'
   | 'updatedAt'
 >;
@@ -1715,7 +1680,7 @@ async function mergeQueueForPr(
   }
 }
 
-function rowToPublicShape(row: PublicShapeRow, queuePosition = 0) {
+function rowToPublicShape(row: PublicShapeRow) {
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -1735,7 +1700,6 @@ function rowToPublicShape(row: PublicShapeRow, queuePosition = 0) {
     autoMergeState: publicAutoMergeState(row.autoMergeState),
     mergeQueued: row.mergeQueued,
     mergeMethod: row.mergeMethod,
-    mergeQueueState: publicMergeQueueState(row.mergeQueueState, queuePosition),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

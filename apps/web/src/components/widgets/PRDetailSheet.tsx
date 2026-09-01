@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { coarseQueueStatus } from '@talyn/shared';
 import {
   ExternalLink,
   RefreshCw,
@@ -176,11 +177,6 @@ export function PRDetailSheet({
         autoKeepMergeable?: boolean;
         autoMergeState?: { attempts: number; paused: boolean } | null;
         mergeQueued?: boolean;
-        mergeQueueState?: {
-          status: 'waiting' | 'fixing' | 'merging' | 'blocked';
-          attempts: number;
-          position: number;
-        } | null;
         mergeQueue?: PRRow['mergeQueue'];
       };
       if (p.id !== pullRequestId) return;
@@ -198,8 +194,6 @@ export function PRDetailSheet({
             autoMergeState:
               p.autoMergeState !== undefined ? p.autoMergeState : prev.row.autoMergeState,
             mergeQueued: p.mergeQueued ?? prev.row.mergeQueued,
-            mergeQueueState:
-              p.mergeQueueState !== undefined ? p.mergeQueueState : prev.row.mergeQueueState,
             mergeQueue: p.mergeQueue !== undefined ? p.mergeQueue : prev.row.mergeQueue,
           },
         };
@@ -309,9 +303,9 @@ export function PRDetailSheet({
             row: {
               ...prev.row,
               mergeQueued: enabled,
-              mergeQueueState: enabled
-                ? { status: 'waiting', attempts: 0, position: prev.row.mergeQueueState?.position ?? 0 }
-                : null,
+              // Membership only — never invent a `mergeQueue` payload, which
+              // would render and stick until the echo lands.
+              ...(enabled ? {} : { mergeQueue: null }),
             },
           }
         : prev
@@ -547,7 +541,7 @@ export function PRDetailSheet({
                 disabled={togglingQueue}
                 title={
                   view.row.mergeQueued
-                    ? view.row.mergeQueueState?.status === 'blocked'
+                    ? coarseQueueStatus(view.row.mergeQueue?.status ?? 'queued') === 'blocked'
                       ? 'Merge queue paused after 3 attempts — click to remove'
                       : 'In the merge queue — click to remove'
                     : 'Add to the merge queue: merges automatically when clean, serialized per base branch, auto-fixing conflicts'
@@ -555,21 +549,21 @@ export function PRDetailSheet({
               >
                 {togglingQueue ? (
                   <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                ) : view.row.mergeQueued && view.row.mergeQueueState?.status === 'blocked' ? (
+                ) : view.row.mergeQueued &&
+                  coarseQueueStatus(view.row.mergeQueue?.status ?? 'queued') === 'blocked' ? (
                   <AlertTriangle className="mr-1 h-3.5 w-3.5" />
                 ) : (
                   <ListChecks className="mr-1 h-3.5 w-3.5" />
                 )}
                 {view.row.mergeQueued
-                  ? view.row.mergeQueueState?.status === 'blocked'
-                    ? 'Queue blocked'
-                    : view.row.mergeQueueState?.status === 'merging'
-                    ? 'Merging…'
-                    : view.row.mergeQueueState?.status === 'fixing'
-                    ? 'Fixing…'
-                    : view.row.mergeQueueState?.position
-                    ? `Queued #${view.row.mergeQueueState.position}`
-                    : 'Queued'
+                  ? (() => {
+                      const coarse = coarseQueueStatus(view.row.mergeQueue?.status ?? 'queued');
+                      if (coarse === 'blocked') return 'Queue blocked';
+                      if (coarse === 'merging') return 'Merging…';
+                      if (coarse === 'fixing') return 'Fixing…';
+                      const pos = view.row.mergeQueue?.position;
+                      return pos ? `Queued #${pos}` : 'Queued';
+                    })()
                   : 'Add to merge queue'}
               </Button>
             )}
@@ -871,7 +865,7 @@ function MergeQueueSection({ row }: { row: PRRow }) {
         v2.status === 'awaiting_review' && v2.stackParentNumber != null
         ? `Waiting for a required review — this PR was retargeted after #${v2.stackParentNumber} merged, which may have dismissed an earlier approval`
         : QUEUE_STATUS_LABEL[v2.status]
-    : (row.mergeQueueState?.status ?? 'waiting');
+    : 'Waiting';
   const budgets = v2?.budgets;
   const shown = events ? (showAll ? events : events.slice(0, 8)) : null;
 

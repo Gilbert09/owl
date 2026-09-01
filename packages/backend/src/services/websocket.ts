@@ -435,18 +435,10 @@ export function emitPullRequestUpdated(
     // Merge queue state, so the queue toggle + row badge update live.
     // Optional: emitters that don't change them omit them.
     mergeQueued?: boolean;
-    mergeQueueState?: {
-      status: 'waiting' | 'fixing' | 'merging' | 'blocked';
-      attempts: number;
-      position: number;
-      // Short human reason a PR is blocked, e.g. "merge conflicts with the
-      // base branch". Only set when status === 'blocked'; drives the badge
-      // tooltip.
-      reason?: string;
-    } | null;
-    // Merge queue v2 payload — the full status vocabulary, per-head budgets,
-    // and auto-merge state (services/mergeQueue/legacy.ts toPublicMergeQueue).
-    // Emitted alongside the legacy mergeQueueState so old builds keep working.
+    // The merge queue's payload — full status vocabulary, per-head budgets and
+    // auto-merge state (services/mergeQueue/legacy.ts toPublicMergeQueue). Was
+    // emitted alongside a four-status `mergeQueueState` for builds predating
+    // it; that shim was retired on 2026-09-01.
     mergeQueue?: Record<string, unknown> | null;
   }
 ): void {

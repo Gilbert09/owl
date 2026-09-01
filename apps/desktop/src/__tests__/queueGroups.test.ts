@@ -30,8 +30,10 @@ function makeRow(opts: {
     mergedAt: null,
     lastPolledAt: new Date().toISOString(),
     mergeQueued: true,
-    mergeQueueState: { status: 'waiting', attempts: 0, position: opts.position ?? 1 },
-    mergeQueue: opts.status ? ({ status: opts.status, position: opts.position ?? 1 } as never) : null,
+    mergeQueue: ({
+      status: opts.status ?? 'queued',
+      position: opts.position ?? 1,
+    } as never),
     summary: {
       url: `https://github.com/a/b/pull/${opts.number}`,
       title: `PR ${opts.number}`,

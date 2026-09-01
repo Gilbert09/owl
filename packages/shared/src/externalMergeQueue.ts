@@ -581,3 +581,60 @@ export function externalQueueStateLabel(state: ExternalQueueState): string {
 export function externalQueueProviderLabel(provider: ExternalQueueProvider): string {
   return provider === 'trunk' ? 'Trunk' : provider;
 }
+
+// ── Coarse queue status, for the compact badges ────────────────────────────
+
+/**
+ * The merge queue's own status vocabulary, as it reaches a client.
+ * Structurally the `status` of `MergeQueuePublic` in @talyn/client; declared
+ * here so this helper stays free of a dependency on that package.
+ */
+export type QueueEntryStatus =
+  | 'queued'
+  | 'awaiting_ci'
+  | 'awaiting_review'
+  | 'automerge_armed'
+  | 'awaiting_external'
+  | 'awaiting_stack'
+  | 'fixing'
+  | 'merging'
+  | 'blocked'
+  | 'blocked_manual'
+  | 'merged'
+  | 'removed';
+
+/** What a one-word badge can say about a queued PR. */
+export type CoarseQueueStatus = 'waiting' | 'fixing' | 'merging' | 'blocked';
+
+/**
+ * Roll the queue's nine live statuses down to the four a compact badge has
+ * room for.
+ *
+ * The full vocabulary is what the Merge Queue page renders — "Auto-merge
+ * armed", "Awaiting CI", "Submitted to trunk" all mean different things and a
+ * reader wants the difference. Everywhere else there is room for one word next
+ * to a PR title, and every waiting flavour reads the same there: the PR is in
+ * the queue and nobody needs to do anything.
+ *
+ * This is NOT the old v1 compatibility mapping, which existed to keep stale
+ * desktop builds working and was deleted with the shim. This is a display
+ * rollup, shared so the two front-end forks cannot disagree about what a badge
+ * says.
+ */
+export function coarseQueueStatus(status: QueueEntryStatus | string): CoarseQueueStatus {
+  switch (status) {
+    case 'fixing':
+      return 'fixing';
+    case 'merging':
+      return 'merging';
+    case 'blocked':
+    case 'blocked_manual':
+      return 'blocked';
+    default:
+      // queued / awaiting_ci / awaiting_review / awaiting_external /
+      // awaiting_stack / automerge_armed — all "waiting" to a one-word badge,
+      // which is correct for every one of them: none is a state the reader can
+      // act on from a PR row.
+      return 'waiting';
+  }
+}

@@ -118,7 +118,7 @@ export function buildQueueGroups(rows: PRRow[]): QueueGroup[] {
         repo: root.repo,
         base,
         rows: [...members].sort(
-          (a, b) => (a.mergeQueueState?.position ?? 0) - (b.mergeQueueState?.position ?? 0)
+          (a, b) => (a.mergeQueue?.position ?? 0) - (b.mergeQueue?.position ?? 0)
         ),
       });
     }

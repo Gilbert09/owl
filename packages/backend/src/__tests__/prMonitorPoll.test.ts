@@ -18,6 +18,7 @@ import {
   workspaces as workspacesTable,
   repositories as repositoriesTable,
   pullRequests as pullRequestsTable,
+  mergeQueueEntries as mergeQueueEntriesTable,
 } from '../db/schema.js';
 
 // ---------- Helpers ----------
@@ -469,7 +470,6 @@ describe('prMonitor — poll orchestration', () => {
         state: 'open',
         mergeQueued: true,
         mergeQueuedAt: new Date('2026-01-01T00:00:00Z'),
-        mergeQueueState: { status: 'merging', attempts: 0, accounted: true },
         lastPolledAt: new Date(),
         lastSummary: { headBranch: 'feature/b', baseBranch: 'main' },
         createdAt: new Date(),
@@ -486,11 +486,34 @@ describe('prMonitor — poll orchestration', () => {
         state: 'open',
         mergeQueued: true,
         mergeQueuedAt: new Date('2026-01-01T00:01:00Z'),
-        mergeQueueState: { status: 'waiting', attempts: 0, accounted: true },
         lastPolledAt: new Date(),
         lastSummary: { headBranch: 'feature/c', baseBranch: 'main' },
         createdAt: new Date(),
         updatedAt: new Date(),
+      },
+    ]);
+    // The queue entries behind those rows. `mergeQueued` is only the membership
+    // mirror — merge_queue_entries is what the position broadcast reads, and a
+    // row flagged queued with no entry is deliberately skipped as
+    // mid-transition. Enqueue order (pr-2 then pr-3) is what makes pr-3 "#2".
+    await db.insert(mergeQueueEntriesTable).values([
+      {
+        id: 'mqe-2',
+        pullRequestId: 'pr-2',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        baseBranch: 'main',
+        status: 'merging',
+        enqueuedAt: new Date('2026-01-01T00:00:00Z'),
+      },
+      {
+        id: 'mqe-3',
+        pullRequestId: 'pr-3',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        baseBranch: 'main',
+        status: 'queued',
+        enqueuedAt: new Date('2026-01-01T00:01:00Z'),
       },
     ]);
     // pr-2 merged upstream (gone from the search); pr-3 still open and seen.
@@ -526,12 +549,12 @@ describe('prMonitor — poll orchestration', () => {
     );
     expect(swept).toBeDefined();
     expect(swept?.[1].mergeQueued).toBe(false);
-    expect(swept?.[1].mergeQueueState).toBeNull();
+    expect(swept?.[1].mergeQueue).toBeUndefined();
 
     // The surviving sibling was promoted live: #2 → #1.
     const promoted = emitSpy.mock.calls
       .filter(([, payload]) => payload.id === 'pr-3')
-      .map(([, payload]) => payload.mergeQueueState as { position?: number } | null)
+      .map(([, payload]) => payload.mergeQueue as { position?: number } | null)
       .filter(Boolean)
       .pop();
     expect(promoted?.position).toBe(1);

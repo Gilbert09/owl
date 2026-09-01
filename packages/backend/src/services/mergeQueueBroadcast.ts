@@ -2,8 +2,12 @@ import { and, eq } from 'drizzle-orm';
 import { getDbClient } from '../db/client.js';
 import { pullRequests as pullRequestsTable } from '../db/schema.js';
 import { emitPullRequestUpdated } from './websocket.js';
-
-type QueueStatus = 'waiting' | 'fixing' | 'merging' | 'blocked';
+import { toPublicMergeQueue } from './mergeQueue/legacy.js';
+import {
+  computeEntryPositions,
+  loadActiveEntriesForWorkspace,
+  rowToEntrySnapshot,
+} from './mergeQueue/store.js';
 
 /**
  * Drop a PR out of the merge queue — spread into any `.set()` that flips a
@@ -82,7 +86,6 @@ const BROADCAST_COLUMNS = {
   state: pullRequestsTable.state,
   mergeQueued: pullRequestsTable.mergeQueued,
   mergeQueuedAt: pullRequestsTable.mergeQueuedAt,
-  mergeQueueState: pullRequestsTable.mergeQueueState,
   lastSummary: pullRequestsTable.lastSummary,
 } as const;
 
@@ -98,9 +101,30 @@ export async function broadcastMergeQueuePositions(workspaceId: string): Promise
         eq(pullRequestsTable.state, 'open')
       )
     );
-  const positions = computeQueuePositions(rows);
+  // Positions come from the ENTRIES, not from the pull_requests rows: the entry
+  // table is the source of queue state, and its position is per (repo, base)
+  // group — which is what the desktop renders. The rows are still needed for
+  // the emit's identity fields.
+  const entries = await loadActiveEntriesForWorkspace(workspaceId, db);
+  // Rank only over entries whose PR is still open AND still flagged queued.
+  //
+  // This sweep is usually triggered the instant a PR leaves the queue — the
+  // monitor sets state='merged' and calls straight into here. The entry for
+  // that PR is still active at this point: it is `decide` that terminates it,
+  // on the group evaluation the snapshot event triggers a moment later. Ranking
+  // over the raw entry list would leave the merged PR occupying #1 and every
+  // survivor one place too low, until that evaluation landed.
+  const liveIds = new Set(rows.map((r) => r.id));
+  const ranked = entries.filter((e) => liveIds.has(e.pullRequestId));
+  const positions = computeEntryPositions(ranked);
+  const entryByPr = new Map(ranked.map((e) => [e.pullRequestId, e]));
+
   for (const row of rows) {
-    const s = (row.mergeQueueState as { status?: QueueStatus; attempts?: number } | null) ?? null;
+    const entry = entryByPr.get(row.id);
+    // A row still flagged mergeQueued with no active entry is mid-transition —
+    // the entry closed and the flag has not been cleared yet. Emitting a
+    // position for it would put a phantom back on the queue page.
+    if (!entry) continue;
     emitPullRequestUpdated(workspaceId, {
       id: row.id,
       taskId: row.taskId,
@@ -111,11 +135,7 @@ export async function broadcastMergeQueuePositions(workspaceId: string): Promise
       state: row.state,
       lastSummary: row.lastSummary as Record<string, unknown>,
       mergeQueued: true,
-      mergeQueueState: {
-        status: s?.status ?? 'waiting',
-        attempts: s?.attempts ?? 0,
-        position: positions.get(row.id) ?? 0,
-      },
+      mergeQueue: toPublicMergeQueue(rowToEntrySnapshot(entry), positions.get(entry.id) ?? 0),
     });
   }
 }

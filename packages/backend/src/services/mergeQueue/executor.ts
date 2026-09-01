@@ -67,7 +67,7 @@ import {
 import { debugBus } from '../debugBus.js';
 import { captureWorkspaceEvent } from '../analytics.js';
 import { decide } from './decide.js';
-import { toLegacyPublicState, toLegacyStateBlob, toPublicMergeQueue } from './legacy.js';
+import { toPublicMergeQueue } from './legacy.js';
 import {
   casTransition,
   rowToEntrySnapshot,
@@ -1536,7 +1536,6 @@ async function recordMerged(entry: EntrySnapshot, pr: PrEvalRow): Promise<void> 
     state: 'merged',
     lastSummary: pr.lastSummary as Record<string, unknown>,
     mergeQueued: false,
-    mergeQueueState: null,
     mergeQueue: null,
   });
   await broadcastMergeQueuePositions(pr.workspaceId);
@@ -1557,9 +1556,15 @@ function notifyBlocked(entry: EntrySnapshot, pr: PrEvalRow): void {
 }
 
 /**
- * Mirror the entry into the legacy blob + emit the WS badge (legacy shape and
- * the v2 payload side by side). Keeps every desktop build live during the
- * rollout; deleted with the blob columns at cleanup.
+ * Keep `pull_requests.mergeQueued` in step with the entry and emit the WS
+ * badge.
+ *
+ * Until 2026-09-01 this also mirrored the entry into the legacy
+ * `merge_queue_state` blob, so desktop builds predating the v2 payload kept a
+ * queue badge through the rollout. Every such build is long superseded (the v2
+ * desktop surface shipped with the cutover; 44 releases and a nightly
+ * auto-update since), so the mirror is gone and `merge_queue_entries` is the
+ * only source of queue state.
  */
 async function mirrorToPrRow(entry: EntrySnapshot, pr: PrEvalRow, position: number): Promise<void> {
   const db = getDbClient();
@@ -1569,7 +1574,7 @@ async function mirrorToPrRow(entry: EntrySnapshot, pr: PrEvalRow, position: numb
     .set(
       terminal
         ? { ...QUEUE_RESET_COLUMNS, updatedAt: new Date() }
-        : { mergeQueueState: toLegacyStateBlob(entry), updatedAt: new Date() }
+        : { mergeQueued: true, updatedAt: new Date() }
     )
     .where(eq(pullRequestsTable.id, pr.id));
   emitPullRequestUpdated(pr.workspaceId, {
@@ -1582,7 +1587,6 @@ async function mirrorToPrRow(entry: EntrySnapshot, pr: PrEvalRow, position: numb
     state: pr.state,
     lastSummary: pr.lastSummary as Record<string, unknown>,
     mergeQueued: !terminal,
-    mergeQueueState: terminal ? null : toLegacyPublicState(entry, position),
     mergeQueue: terminal ? null : toPublicMergeQueue(entry, position),
   });
 }

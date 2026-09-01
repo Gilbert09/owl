@@ -21,7 +21,7 @@ function makeRow(summary: Partial<PRRow['summary']>): PRRow {
     autoMergeState: null,
     mergeQueued: false,
     mergeMethod: 'squash',
-    mergeQueueState: null,
+    mergeQueue: null,
     createdAt: '2026-06-05T00:00:00Z',
     updatedAt: '2026-06-05T00:00:00Z',
   };
