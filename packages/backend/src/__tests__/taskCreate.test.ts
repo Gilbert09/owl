@@ -433,6 +433,25 @@ describe('createCloudTask — reusing a task for the same PR', () => {
     expect(second.id).not.toBe(first.id);
   });
 
+  it('counts the runs, so a provider deriving its remote id gets a fresh one', async () => {
+    // The fleet builds its sandbox id from the task id, and its create is
+    // idempotent on that id — without this counter a reused task was handed
+    // back its own previous, already-finished sandbox.
+    const first = await run();
+    await finish(first.id);
+    const second = await run();
+    expect((second.metadata as Record<string, unknown>).runAttempt).toBe(1);
+
+    await finish(second.id);
+    const third = await run();
+    expect((third.metadata as Record<string, unknown>).runAttempt).toBe(2);
+  });
+
+  it('does not count a run on a freshly inserted task', async () => {
+    const first = await run();
+    expect((first.metadata as Record<string, unknown> | null)?.runAttempt).toBeUndefined();
+  });
+
   describe('the remote handle it carries over', () => {
     it('keeps the PostHog task id, so the repeat run joins the same session', async () => {
       const envId = await envFor('posthog_code');

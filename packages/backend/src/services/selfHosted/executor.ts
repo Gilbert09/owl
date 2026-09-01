@@ -77,16 +77,30 @@ const SYSTEM_PROMPT =
   'When done, state the URL of the pull request you opened.';
 
 /**
- * Derive the fleet sandbox id from the task id.
+ * Derive the fleet sandbox id from the task id and which RUN of it this is.
  *
  * Deterministic on purpose: the fleet is idempotent on the caller-chosen id
  * (fleet spec §11.5), so a redelivered webhook that re-dispatches the same
  * task cannot spawn a second microVM. A random id here would silently
  * double-spend. The name keeps "run": this is still the runId of the
  * credential-pull wire, and the id contract must not move with the merge.
+ *
+ * `attempt` is what keeps that guarantee true now a task row can be REUSED for
+ * a later run at the same PR (see taskCreate's reuse path). Keyed on the task
+ * id alone, a reused task asked the fleet for the id its PREVIOUS run already
+ * holds — and because the create is idempotent on that id, it got that run
+ * back rather than a new sandbox: an already-finished one, which the poller
+ * immediately settled, so the "new" run ended the moment it started. Attempt 0
+ * keeps the original format so nothing in flight moves.
  */
-export function fleetRunIdForTask(taskId: string): string {
-  return `talyn-${taskId}`;
+export function fleetRunIdForTask(taskId: string, attempt = 0): string {
+  return attempt > 0 ? `talyn-${taskId}-r${attempt}` : `talyn-${taskId}`;
+}
+
+/** Which run of this task row we are dispatching — 0 for its first. */
+export function fleetRunAttempt(task: { metadata?: Record<string, unknown> | null }): number {
+  const raw = (task.metadata ?? {}).runAttempt;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
 }
 
 /**
@@ -139,7 +153,7 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
   }
 
   const prompt = task.prompt?.trim() || task.description?.trim() || task.title;
-  const runId = fleetRunIdForTask(task.id);
+  const runId = fleetRunIdForTask(task.id, fleetRunAttempt(task));
 
   try {
     // The TARGET, not just a client: the run's metadata records which box took

@@ -109,6 +109,12 @@ async function findReusableTask(
   return rows[0] ?? null;
 }
 
+/** How many runs this row has already had, for the next one to count from. */
+function previousRunAttempt(metadata: unknown): number {
+  const raw = ((metadata ?? {}) as Record<string, unknown>).runAttempt;
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+}
+
 /** The cloud provider a task is being dispatched to, from its env marker. */
 async function providerTypeFor(envId: string | null | undefined): Promise<string | null> {
   if (!envId) return null;
@@ -214,7 +220,15 @@ async function redispatchCloudTask(
   const providerType = await providerTypeFor(input.assignedEnvironmentId);
   const metadata = carryRemoteHandle(
     existing.metadata,
-    await buildTaskMetadata(input, now),
+    {
+      ...(await buildTaskMetadata(input, now)),
+      // Which run of this row this is. A provider that derives its remote id
+      // from the task id needs it to tell this run from the last: the fleet
+      // does exactly that, and its create is idempotent on the id, so without
+      // a counter a reused task was handed back its PREVIOUS (already
+      // finished) sandbox and settled the instant it started.
+      runAttempt: previousRunAttempt(existing.metadata) + 1,
+    },
     providerType
   );
 
