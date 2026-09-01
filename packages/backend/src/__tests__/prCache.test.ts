@@ -535,6 +535,37 @@ describe('prCache — DB integration', () => {
       expect(f.autoMergeState).toBeNull();
     });
 
+    it('arms an explicitly WATCHED PR the viewer did not author', async () => {
+      // Pasting a PR's URL is an ask for that specific PR — pushing to it is
+      // most of the point of watching it — so it inherits the default the same
+      // way an authored PR does, even though the branch is someone else's.
+      await setDefault(true);
+      await upsertFromBatchResult({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        summary: makeSummary({ number: 12 }),
+        authored: false,
+        explicitWatch: true,
+      });
+      const f = await flags(12);
+      expect(f.autoKeepMergeable).toBe(true);
+      expect(f.autoMergeState).toEqual({ attempts: 0, accounted: true });
+    });
+
+    it('still respects a workspace default of off for an explicitly watched PR', async () => {
+      await setDefault(false);
+      await upsertFromBatchResult({
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        summary: makeSummary({ number: 13 }),
+        authored: false,
+        explicitWatch: true,
+      });
+      const f = await flags(13);
+      expect(f.autoKeepMergeable).toBe(false);
+      expect(f.autoMergeState).toBeNull();
+    });
+
     it('leaves a new authored PR off when the workspace default is off', async () => {
       await setDefault(false);
       await upsertFromBatchResult({

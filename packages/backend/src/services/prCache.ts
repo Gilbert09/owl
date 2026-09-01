@@ -5,6 +5,7 @@ import { getDbClient, type Database } from '../db/client.js';
 import {
   pullRequests as pullRequestsTable,
   repositories as repositoriesTable,
+  tasks as tasksTable,
 } from '../db/schema.js';
 import { readWorkspaceSettings } from './workspaceSettings.js';
 import { emitPullRequestUpdated } from './websocket.js';
@@ -205,6 +206,12 @@ export async function linkTaskToPullRequest(opts: {
         .set({ taskId: opts.taskId, updatedAt: now })
         .where(eq(pullRequestsTable.id, existing.id));
     }
+    // Unconditional, unlike the forward pointer above: this task DID open this
+    // PR, whether or not the row already names an earlier one.
+    await db
+      .update(tasksTable)
+      .set({ pullRequestId: existing.id, updatedAt: now })
+      .where(eq(tasksTable.id, opts.taskId));
     return existing.id;
   }
   const id = uuid();
@@ -222,6 +229,10 @@ export async function linkTaskToPullRequest(opts: {
     createdAt: now,
     updatedAt: now,
   });
+  await db
+    .update(tasksTable)
+    .set({ pullRequestId: id, updatedAt: now })
+    .where(eq(tasksTable.id, opts.taskId));
   return id;
 }
 
@@ -258,6 +269,13 @@ export async function attachTaskToPullRequestRow(opts: {
     .update(pullRequestsTable)
     .set({ taskId: opts.taskId, updatedAt: now })
     .where(eq(pullRequestsTable.id, opts.pullRequestId));
+  // The reverse link is the one the in-flight guards read. createCloudTask
+  // already writes it with the row; repeating it here keeps any other caller
+  // of this function correct, and repairs a row whose column is still null.
+  await db
+    .update(tasksTable)
+    .set({ pullRequestId: opts.pullRequestId, updatedAt: now })
+    .where(eq(tasksTable.id, opts.taskId));
 
   emitPullRequestUpdated(opts.workspaceId, {
     id: row.id,
@@ -345,6 +363,13 @@ export async function upsertFromBatchResult(opts: {
   reviewRequested?: boolean;
   authored?: boolean;
   /**
+   * The user explicitly asked to watch THIS pull request (the paste-a-URL
+   * flow), rather than the poller having discovered it. Treated the same as
+   * `authored` when deciding whether to arm auto-keep-mergeable — see
+   * {@link upsertRow}.
+   */
+  explicitWatch?: boolean;
+  /**
    * Update this known row id instead of matching by (workspace, repo, number).
    * Callers that already hold the row (e.g. the detail route persisting a fresh
    * fetch) pass it so a number mismatch can't spawn a duplicate row.
@@ -371,6 +396,7 @@ export async function upsertFromBatchResult(opts: {
     summary: opts.summary,
     reviewRequested: opts.reviewRequested,
     authored: opts.authored,
+    explicitWatch: opts.explicitWatch,
     existingId: existing?.id,
   });
   return { summary: opts.summary, delta, cacheMiss: true, rowId };
@@ -572,6 +598,7 @@ async function upsertRow(
     summary: PRSummary;
     reviewRequested?: boolean;
     authored?: boolean;
+    explicitWatch?: boolean;
     existingId?: string;
   }
 ): Promise<string> {
@@ -608,14 +635,26 @@ async function upsertRow(
   }
   const lastSummary = summaryToJsonb(summary);
   const cursors = nextCursors(summary);
-  // A newly-tracked open PR the viewer AUTHORED inherits the workspace's
-  // "auto-keep mergeable by default" setting. Scoped to authored PRs on purpose:
-  // arming it dispatches cloud fix runs that PUSH COMMITS, so it must never
-  // auto-fire on someone else's review-requested PR. Only computed on a genuine
-  // insert of an authored open PR — never on updates or non-authored rows.
+  // A newly-tracked open PR inherits the workspace's "auto-keep mergeable by
+  // default" setting when the user has, one way or another, ASKED for this
+  // specific PR: they authored it, or they pasted its URL to watch it.
+  //
+  // Arming dispatches cloud fix runs that PUSH COMMITS, so the line is drawn at
+  // intent rather than at ownership. An explicitly-watched PR is one the user
+  // named — pushing to it is most of the reason to watch it — and that is a
+  // different act from the poller sweeping up every PR you happen to be a
+  // requested reviewer on. `reviewRequested` therefore stays excluded: those
+  // arrive unbidden and in bulk, and pushing to a stranger's branch because
+  // they asked you for a review would be a genuine surprise.
+  //
+  // Whether the push SUCCEEDS is the provider's business and not ours to
+  // predict: a same-repo branch usually takes one, a fork only with "allow
+  // edits by maintainers" on. A refused push surfaces as a failed run, which
+  // is a better answer than the silence of never trying.
+  const armEligible = opts.authored === true || opts.explicitWatch === true;
   let autoKeepMergeable = false;
   let autoMergeState: { attempts: number; accounted: boolean } | null = null;
-  if (!opts.existingId && opts.authored === true && summary.state === 'open') {
+  if (!opts.existingId && armEligible && summary.state === 'open') {
     if (await workspaceDefaultAutoKeepMergeable(db, opts.workspaceId)) {
       autoKeepMergeable = true;
       autoMergeState = { attempts: 0, accounted: true };

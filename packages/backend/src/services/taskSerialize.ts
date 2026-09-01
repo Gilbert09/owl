@@ -19,6 +19,7 @@ export const taskColumnsNoTranscript = {
   prompt: tasksTable.prompt,
   assignedEnvironmentId: tasksTable.assignedEnvironmentId,
   repositoryId: tasksTable.repositoryId,
+  pullRequestId: tasksTable.pullRequestId,
   branch: tasksTable.branch,
   result: tasksTable.result,
   metadata: tasksTable.metadata,

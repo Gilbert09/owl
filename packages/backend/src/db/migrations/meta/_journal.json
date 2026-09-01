@@ -330,6 +330,27 @@
 			"when": 1784160000030,
 			"tag": "0046_pr_watching",
 			"breakpoints": true
+		},
+		{
+			"idx": 47,
+			"version": "7",
+			"when": 1784160000031,
+			"tag": "0047_release_notes",
+			"breakpoints": true
+		},
+		{
+			"idx": 48,
+			"version": "7",
+			"when": 1784160000032,
+			"tag": "0048_tasks_pull_request_id",
+			"breakpoints": true
+		},
+		{
+			"idx": 49,
+			"version": "7",
+			"when": 1784160000033,
+			"tag": "0049_drop_merge_queue_engine_flag",
+			"breakpoints": true
 		}
 	]
 }

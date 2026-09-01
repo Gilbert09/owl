@@ -23,7 +23,7 @@ import { prMonitorService } from './prMonitor.js';
 import { emitPullRequestUpdated } from './websocket.js';
 import { debugBus } from './debugBus.js';
 import { TickGuard } from './tickGuard.js';
-import { ACTIVE_STATUSES, linkedTaskStatus, resolveCloudEnv } from './prCloudFix.js';
+import { activePrTaskId, resolveCloudEnv } from './prCloudFix.js';
 import { workspacePromptTemplate } from './promptTemplates.js';
 
 const POLL_INTERVAL_MS = 60_000;
@@ -355,9 +355,14 @@ class PRAutoMergeWatcher {
 
     await this.ensureLabels(row, state, workspaceLabelsCache);
 
-    // 2. Active-task guard — if the linked task is still running, leave it.
-    const linkedStatus = await linkedTaskStatus(row.taskId);
-    if (linkedStatus && ACTIVE_STATUSES.has(linkedStatus)) return;
+    // 2. Active-task guard — if ANY task is still working this PR, leave it.
+    //
+    // Asks tasks-by-PR, not `pull_requests.task_id`. That column holds only the
+    // most recently attached task, so a run this watcher started became
+    // invisible the moment anything else attached to the row — and the watcher
+    // dispatched a second, then a third. See activePrTaskId.
+    const activeTaskId = await activePrTaskId(row.workspaceId, row.id);
+    if (activeTaskId) return;
 
     // 3. Account the last auto-run now that it's terminal.
     if (state.lastAutoTaskId && !state.accounted) {

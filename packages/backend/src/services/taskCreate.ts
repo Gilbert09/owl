@@ -117,6 +117,10 @@ async function insertCloudTask(
     prompt: input.prompt ?? null,
     priority: input.priority || 'medium',
     repositoryId: input.repositoryId,
+    // The authoritative PR link, written with the row rather than by the
+    // attach call below: that call is best-effort and its failure is swallowed,
+    // and a null here would let a second run be dispatched at the same PR.
+    pullRequestId: input.pullRequestId ?? null,
     assignedEnvironmentId: input.assignedEnvironmentId ?? null,
     metadata: Object.keys(initialMetadata).length > 0 ? initialMetadata : undefined,
     createdAt: now,

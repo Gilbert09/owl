@@ -14,6 +14,7 @@
 //   - boolean for flags. No more 0/1 int masquerading as boolean.
 
 import { sql } from 'drizzle-orm';
+import type { ReleaseHighlight } from '@talyn/shared';
 import {
   pgTable,
   text,
@@ -21,11 +22,13 @@ import {
   jsonb,
   boolean,
   integer,
+  bigint,
   bigserial,
   doublePrecision,
   uniqueIndex,
   index,
   primaryKey,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 // ---------- Users ----------
@@ -302,6 +305,27 @@ export const tasks = pgTable(
     repositoryId: text('repository_id').references(() => repositories.id, {
       onDelete: 'set null',
     }),
+    /**
+     * The pull request this task is working, when it has one.
+     *
+     * The authoritative link, and deliberately the reverse of
+     * `pull_requests.task_id`: a PR accumulates MANY tasks over its life, and
+     * that column holds only the most recent one (every dispatch overwrites
+     * it). Asking "is anything already working this PR?" through a
+     * one-to-one column can only answer for the last writer, which is how the
+     * auto-keep watcher ended up firing three concurrent runs at the same PR.
+     * Query this instead.
+     *
+     * `set null` rather than cascade: un-watching a PR deletes its row, and a
+     * task record is the history of work that actually ran — it outlives the
+     * PR being tracked.
+     */
+    // `AnyPgColumn` is required, not decorative: tasks and pull_requests now
+    // reference each other, and without an explicit annotation on the cycle
+    // TypeScript cannot infer either table's type (TS7022).
+    pullRequestId: text('pull_request_id').references((): AnyPgColumn => pullRequests.id, {
+      onDelete: 'set null',
+    }),
     branch: text('branch'),
     /**
      * JSONL event log of `AgentEvent` objects (from @talyn/shared) —
@@ -318,6 +342,9 @@ export const tasks = pgTable(
     workspaceIdx: index('idx_tasks_workspace').on(t.workspaceId),
     statusIdx: index('idx_tasks_status').on(t.status),
     repositoryIdx: index('idx_tasks_repository').on(t.repositoryId),
+    // Drives the "is a run already working this PR?" guard, which every
+    // dispatch path consults before creating a task.
+    pullRequestIdx: index('idx_tasks_pull_request').on(t.pullRequestId),
   })
 );
 
@@ -363,6 +390,37 @@ export const settings = pgTable('settings', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ---------- Release notes ("What's new") ----------
+//
+// One row per published release, written ONCE by the publish workflow after
+// electron-builder has created the GitHub release, and read by every client to
+// decide whether to open the What's new modal.
+//
+// Global content, so no owner column and no workspace column: what shipped in
+// 0.2.61 is the same fact for everybody. The read route runs pre-ownerScope
+// for that reason.
+//
+// `highlights` is empty for a nightly that carried nothing user-facing. The row
+// still exists — it is what keeps the `?since=` window honest and stops CI
+// re-summarising a version it has already looked at.
+export const releaseNotes = pgTable(
+  'release_notes',
+  {
+    /** `X.Y.Z`, the release tag without the `v`. */
+    version: text('version').primaryKey(),
+    /** `versionSortKey(version)` from @talyn/shared — the orderable form.
+     *  Stored rather than derived because `?since=` is a range scan and
+     *  `"0.2.9" > "0.2.10"` as text. */
+    sortKey: bigint('sort_key', { mode: 'number' }).notNull(),
+    publishedAt: timestamp('published_at', { withTimezone: true }).notNull(),
+    highlights: jsonb('highlights').$type<ReleaseHighlight[]>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sortKeyIdx: index('idx_release_notes_sort_key').on(t.sortKey),
+  })
+);
+
 // ---------- Pull requests (DB-as-cache) ----------
 
 /**
@@ -398,7 +456,7 @@ export const pullRequests = pgTable(
      * screen pill render off this row, and lets the user filter
      * "merged PRs from my old tasks" on the GitHub page.
      */
-    taskId: text('task_id').references(() => tasks.id, {
+    taskId: text('task_id').references((): AnyPgColumn => tasks.id, {
       onDelete: 'set null',
     }),
     owner: text('owner').notNull(),

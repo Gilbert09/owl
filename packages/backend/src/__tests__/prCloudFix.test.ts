@@ -15,6 +15,7 @@ import {
   environments as environmentsTable,
   integrations as integrationsTable,
   repositories as repositoriesTable,
+  pullRequests as pullRequestsTable,
   tasks as tasksTable,
 } from '../db/schema.js';
 import { encryptString } from '../services/tokenCrypto.js';
@@ -246,6 +247,20 @@ describe('prCloudFix helpers', () => {
       });
       await db.insert(repositoriesTable).values({
         id: 'repo1', workspaceId: 'ws1', name: 'a/b', url: 'https://github.com/a/b', defaultBranch: 'main',
+      });
+      // The row `prRow` describes. Required since tasks.pull_request_id became
+      // a real foreign key: a task claiming to work a PR with no row is
+      // meaningless, and the in-flight guard could never find it anyway.
+      await db.insert(pullRequestsTable).values({
+        id: 'pr-1',
+        workspaceId: 'ws1',
+        repositoryId: 'repo1',
+        owner: 'a',
+        repo: 'b',
+        number: 1,
+        state: 'open',
+        lastPolledAt: new Date(),
+        lastSummary: prRow.lastSummary,
       });
     });
 

@@ -140,7 +140,8 @@ async function insertTask(
   db: Database,
   id: string,
   status: string,
-  prId: string
+  /** Null for a task unrelated to any PR — the column is a real FK now. */
+  prId: string | null
 ): Promise<void> {
   await db.insert(tasksTable).values({
     id,
@@ -152,7 +153,12 @@ async function insertTask(
     description: 'd',
     repositoryId: 'repo1',
     assignedEnvironmentId: 'cloud1',
-    metadata: { pullRequest: { id: prId, number: 1, url: '', createdAt: '' } },
+    // The authoritative link the in-flight guard reads — createCloudTask
+    // writes this with the row in production.
+    pullRequestId: prId,
+    metadata: prId
+      ? { pullRequest: { id: prId, number: 1, url: '', createdAt: '' } }
+      : undefined,
   });
 }
 
@@ -525,9 +531,9 @@ describe('prAutoMergeWatcher', () => {
     async function fillOwnerSlots() {
       // Three active tasks NOT linked to any watched PR — they only occupy
       // the owner's free-plan slots.
-      await insertTask(db, 'filler-1', 'queued', 'pr-none');
-      await insertTask(db, 'filler-2', 'in_progress', 'pr-none');
-      await insertTask(db, 'filler-3', 'pending', 'pr-none');
+      await insertTask(db, 'filler-1', 'queued', null);
+      await insertTask(db, 'filler-2', 'in_progress', null);
+      await insertTask(db, 'filler-3', 'pending', null);
     }
 
     it('defers the fix run at the limit without burning an attempt', async () => {
@@ -680,6 +686,37 @@ describe('prAutoMergeWatcher', () => {
     await prAutoMergeWatcher.runOnce();
 
     expect(await countTasks(db)).toBe(1); // only the pre-existing running task
+  });
+
+  it('does not fire when an active run is not the one pull_requests.task_id names', async () => {
+    // The 2026-09-01 duplicate-dispatch bug. The guard used to read
+    // `pull_requests.task_id`, which holds only the most recently ATTACHED
+    // task — so an earlier run that was still working the PR became invisible
+    // the moment anything else attached, and the watcher dispatched again.
+    // Here `task_id` points at a task that has already completed while a
+    // different run is still in flight.
+    const prId = await insertPr(db);
+    await insertTask(db, 'still-running', 'in_progress', prId);
+    await insertTask(db, 'already-done', 'completed', prId);
+    await db
+      .update(pullRequestsTable)
+      .set({ taskId: 'already-done' })
+      .where(eq(pullRequestsTable.id, prId));
+
+    await prAutoMergeWatcher.runOnce();
+
+    expect(await countTasks(db)).toBe(2); // no third task
+  });
+
+  it('ignores an active task belonging to a different PR', async () => {
+    await insertPr(db);
+    const otherPrId = await insertPr(db, { autoKeepMergeable: false });
+    await insertTask(db, 'other-pr-run', 'in_progress', otherPrId);
+
+    await prAutoMergeWatcher.runOnce();
+
+    // The blocked PR still gets its run — the guard is per-PR, not global.
+    expect(await countTasks(db)).toBe(2);
   });
 
   it('increments attempts and pauses after 3 un-mergeable auto-runs', async () => {

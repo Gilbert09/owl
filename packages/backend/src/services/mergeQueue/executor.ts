@@ -51,7 +51,7 @@ import {
 import { prMonitorService } from '../prMonitor.js';
 import { createCloudTask } from '../taskCreate.js';
 import { TaskLimitError } from '../billing/entitlements.js';
-import { ACTIVE_STATUSES, linkedTaskStatus, resolveCloudEnv } from '../prCloudFix.js';
+import { ACTIVE_STATUSES, activePrTaskId, linkedTaskStatus, resolveCloudEnv } from '../prCloudFix.js';
 import { workspacePromptTemplate } from '../promptTemplates.js';
 import { emitPullRequestUpdated, emitMergeQueueBlocked } from '../websocket.js';
 import { broadcastMergeQueuePositions, QUEUE_RESET_COLUMNS } from '../mergeQueueBroadcast.js';
@@ -249,9 +249,10 @@ async function buildBaseContext(
   const accountKey = githubService.accountKeyFor(pr.workspaceId);
   const [ourFix, otherFix, signingRequired, cloudEnv] = await Promise.all([
     entry.fixTaskId ? linkedTaskStatus(entry.fixTaskId) : Promise.resolve(null),
-    pr.taskId && pr.taskId !== entry.fixTaskId
-      ? linkedTaskStatus(pr.taskId)
-      : Promise.resolve(null),
+    // "Is something OTHER than our own fix run working this PR?" — asked
+    // tasks-by-PR rather than through `pull_requests.task_id`, which holds only
+    // the most recently attached task and so hides any earlier active run.
+    activePrTaskId(pr.workspaceId, pr.id, entry.fixTaskId),
     // Cached (1h) branch-protection probe; a probe failure reads as null and
     // decide proceeds — the merge's 403 safety net catches a real requirement.
     requiresSignedCommits(pr.workspaceId, pr.owner, pr.repo, entry.baseBranch).catch(() => null),
@@ -349,7 +350,7 @@ async function buildBaseContext(
     groupMergeInFlight: input.groupMergeInFlight,
     fixTaskState:
       ourFix === null ? 'none' : ACTIVE_STATUSES.has(ourFix) ? 'active' : 'terminal',
-    otherLinkedTaskActive: otherFix !== null && ACTIVE_STATUSES.has(otherFix),
+    otherLinkedTaskActive: otherFix !== null,
     signingRequired,
     autoMergeCapability,
     externalGate,

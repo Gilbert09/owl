@@ -1528,6 +1528,10 @@ class PRMonitorService extends EventEmitter {
       summary,
       authored: flags.authored,
       reviewRequested: flags.reviewRequested,
+      // Pasting a PR's URL is an explicit ask for THIS PR, so it inherits the
+      // workspace's auto-keep-mergeable default exactly as an authored PR
+      // does — including on someone else's branch. See prCache's upsertRow.
+      explicitWatch: true,
     });
     await this.db
       .update(pullRequestsTable)

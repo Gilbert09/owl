@@ -5,7 +5,7 @@
 // Both need the same two lookups — which cloud env to dispatch to, and whether
 // the PR's linked task is still working — so they live here to avoid drift.
 
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray, ne } from 'drizzle-orm';
 import {
   buildMergeablePrompt,
   type CloudProviderType,
@@ -134,6 +134,42 @@ export async function resolveCloudEnvId(workspaceId: string): Promise<string | n
 }
 
 /** Current status of the PR's most-recently-linked task, or null. */
+/**
+ * The id of a task already working this pull request, or null.
+ *
+ * THIS is the in-flight guard every dispatch path should use. The obvious
+ * alternative — read `pull_requests.task_id` and check its status — cannot
+ * answer the question: a PR accumulates many tasks, that column holds only the
+ * most recently attached one, and any source overwriting it (a manual run, the
+ * merge queue, a task that opened the PR) leaves an earlier run invisible. The
+ * auto-keep watcher did exactly that on 2026-09-01 and put three concurrent
+ * runs on PostHog/posthog#92090, which then filled the free plan's task cap.
+ *
+ * Scoped to the workspace as well as the PR: `pull_requests` rows are
+ * per-workspace, so this is belt-and-braces, but it keeps the guard honest if
+ * a row is ever shared.
+ */
+export async function activePrTaskId(
+  workspaceId: string,
+  pullRequestId: string,
+  /** Ignore this task — the caller's own dispatch, which it tracks separately. */
+  excludeTaskId?: string | null
+): Promise<string | null> {
+  const rows = await getDbClient()
+    .select({ id: tasksTable.id })
+    .from(tasksTable)
+    .where(
+      and(
+        eq(tasksTable.pullRequestId, pullRequestId),
+        eq(tasksTable.workspaceId, workspaceId),
+        inArray(tasksTable.status, [...ACTIVE_STATUSES]),
+        ...(excludeTaskId ? [ne(tasksTable.id, excludeTaskId)] : [])
+      )
+    )
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
 export async function linkedTaskStatus(taskId: string | null): Promise<string | null> {
   if (!taskId) return null;
   const db = getDbClient();
