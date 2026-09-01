@@ -24,11 +24,13 @@ import { MergeQueuePanel } from '../panels/github/MergeQueuePanel';
 import { CreateWorkspaceModal } from '../modals/CreateWorkspaceModal';
 import { UpgradeModal } from '../modals/UpgradeModal';
 import { ConnectAgentModal } from '../modals/ConnectAgentModal';
+import { WhatsNewModal } from '../modals/WhatsNewModal';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useBillingStore } from '../../stores/billing';
 import { usePanelUrlSync } from '../../hooks/usePanelUrlSync';
 import { useSystemStatus } from '../../hooks/useSystemStatus';
 import { usePullRequestSync } from '../../hooks/usePullRequestSync';
+import { useWhatsNew } from '../../hooks/useWhatsNew';
 
 export function MainLayout() {
   const { activePanel, createWorkspaceOpen, setCreateWorkspaceOpen } = useWorkspaceStore();
@@ -40,6 +42,9 @@ export function MainLayout() {
   // Owns the shared open-PR fetch + WS subscription for the Sidebar badges and
   // all three GitHub pages. Mounted once here.
   usePullRequestSync();
+  // Decides whether the release highlights since the user's last-seen version
+  // are worth a modal. Mounted here so it can only run once onboarding is done.
+  useWhatsNew();
 
   return (
     <div className="flex h-screen flex-col bg-background">
@@ -66,6 +71,7 @@ export function MainLayout() {
       />
       <UpgradeModal open={upgradeModalOpen} onOpenChange={setUpgradeModalOpen} />
       <ConnectAgentModal />
+      <WhatsNewModal />
     </div>
   );
 }

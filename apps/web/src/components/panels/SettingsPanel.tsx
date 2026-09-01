@@ -33,13 +33,16 @@ import {
   CreditCard,
   Zap,
   Server,
+  Sparkles,
 } from 'lucide-react';
 import { SkillsSettings } from './SkillsSettings';
 import { InstructionsSettings } from './InstructionsSettings';
+import { highlightsForSurface } from '@talyn/shared';
 import { api, GitHubRepo, getMcpEndpoint } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { getSupabase, isSupabaseConfigured } from '../../lib/supabase';
 import { setLogoutReason } from '../../lib/logoutReason';
+import { downscaleImage } from '../../lib/imageDownscale';
 import { cn } from '../../lib/utils';
 import { maybeHandleBillingLimit } from '../../stores/billing';
 import { Button } from '../ui/button';
@@ -153,28 +156,6 @@ export function SettingsPanel() {
       </div>
     </div>
   );
-}
-
-/**
- * Load an image file, downscale it to fit within `maxDim` px (preserving
- * aspect ratio), and return a PNG data URL. Keeps inline-stored logos small.
- */
-async function downscaleImage(file: File, maxDim: number): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  try {
-    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
-    const w = Math.max(1, Math.round(bitmap.width * scale));
-    const h = Math.max(1, Math.round(bitmap.height * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('no canvas context');
-    ctx.drawImage(bitmap, 0, 0, w, h);
-    return canvas.toDataURL('image/png');
-  } finally {
-    bitmap.close();
-  }
 }
 
 function WorkspaceSettings() {
@@ -2346,6 +2327,25 @@ function openRepo() {
 }
 
 function AboutSettings() {
+  const [loadingNotes, setLoadingNotes] = useState(false);
+  const openWhatsNew = useWorkspaceStore((s) => s.openWhatsNew);
+
+  // The full changelog, not just what's new since the last visit — this is the
+  // "go and look" path, so no `since`. Desktop-only highlights are filtered
+  // out: several of them describe the packaged app's updater or its keychain,
+  // which mean nothing here.
+  const showWhatsNew = async () => {
+    setLoadingNotes(true);
+    try {
+      const entries = await api.releaseNotes.list();
+      openWhatsNew(highlightsForSurface(entries, 'web'));
+    } catch {
+      toast.error("Couldn't load release notes");
+    } finally {
+      setLoadingNotes(false);
+    }
+  };
+
   // The desktop's About section drives electron-updater: current version over
   // IPC, a stable/nightly channel picker, "check for updates", and a
   // restart-to-install button. None of it has a web analogue — the browser app
@@ -2390,6 +2390,19 @@ function AboutSettings() {
         </div>
 
         <div className="border-t border-border pt-4 flex gap-4">
+          <button
+            type="button"
+            onClick={() => void showWhatsNew()}
+            disabled={loadingNotes}
+            className="inline-flex items-center gap-1.5 text-sm underline underline-offset-2 hover:no-underline disabled:opacity-60"
+          >
+            {loadingNotes ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5" />
+            )}
+            What&rsquo;s new
+          </button>
           <button
             type="button"
             onClick={openRepo}

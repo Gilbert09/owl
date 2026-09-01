@@ -14,6 +14,7 @@ import { adminRoutes } from './admin/index.js';
 import { userRoutes } from './users.js';
 import { billingRoutes } from './billing.js';
 import { mcpTokenRoutes } from './mcpTokens.js';
+import { releaseNotesPublicRoutes, releaseNotesRoutes } from './releaseNotes.js';
 import { mcpRoutes } from '../mcp/transport.js';
 import { requireMcpToken } from '../mcp/requireMcpToken.js';
 import { requireAuth } from '../middleware/auth.js';
@@ -68,6 +69,16 @@ export function setupRoutes(app: Express): void {
   // that would mean a hosted PaaS holding an inbound path to every machine
   // running untrusted code.
   app.use(`${api}/fleet`, mount(fleetPublicRoutes()));
+
+  // The publish workflow POSTs a release's highlights here once the GitHub
+  // release exists. Same shape of caller as the fleet report above — a CI job
+  // with no Supabase session — so it mounts before requireAuth and
+  // authenticates with TALYN_RELEASE_INGEST_SECRET. Its rate limiter is
+  // attached to the POST route itself rather than to this mount: the READ
+  // routes live at the same path (below, after requireAuth), and a mount-level
+  // limiter here would spend the ingest's tight budget on ordinary launches
+  // from every client behind one NAT.
+  app.use(`${api}/release-notes`, mount(releaseNotesPublicRoutes()));
 
   // The hosted MCP endpoint authenticates with a personal MCP token (not a
   // Supabase JWT), so it mounts BEFORE requireAuth with its own gate. The
@@ -163,6 +174,12 @@ export function setupRoutes(app: Express): void {
   // would pin a pooled connection for that whole round-trip. Hard-scoped to
   // req.user.id. See routes/billing.ts.
   app.use(`${api}/billing`, mount(billingRoutes()));
+
+  // The "What's new" feed. Pre-ownerScope because the content is global —
+  // what shipped in 0.2.61 is the same fact for every user, `release_notes`
+  // has no owner column, and an owner-scoped transaction would pin a pooled
+  // connection to let RLS filter nothing. See routes/releaseNotes.ts.
+  app.use(`${api}/release-notes`, mount(releaseNotesRoutes()));
 
   // Owner-scoped DB enforcement for the data routers below: runs each request
   // inside a transaction that drops to the `authenticated` role so Postgres RLS

@@ -34,14 +34,17 @@ import {
   CreditCard,
   Zap,
   Server,
+  Sparkles,
 } from 'lucide-react';
 import { SkillsSettings } from './SkillsSettings';
 import { InstructionsSettings } from './InstructionsSettings';
 import type { UpdaterEvent } from '../../../main/updaterEvents';
+import { highlightsForSurface } from '@talyn/shared';
 import { api, GitHubRepo, getMcpEndpoint } from '../../lib/api';
 import { toast } from '../../stores/toast';
 import { getSupabase, isSupabaseConfigured } from '../../lib/supabase';
 import { setLogoutReason } from '../../lib/logoutReason';
+import { downscaleImage } from '../../lib/imageDownscale';
 import { cn } from '../../lib/utils';
 import { maybeHandleBillingLimit } from '../../stores/billing';
 import { Button } from '../ui/button';
@@ -153,28 +156,6 @@ export function SettingsPanel() {
       </div>
     </div>
   );
-}
-
-/**
- * Load an image file, downscale it to fit within `maxDim` px (preserving
- * aspect ratio), and return a PNG data URL. Keeps inline-stored logos small.
- */
-async function downscaleImage(file: File, maxDim: number): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  try {
-    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
-    const w = Math.max(1, Math.round(bitmap.width * scale));
-    const h = Math.max(1, Math.round(bitmap.height * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('no canvas context');
-    ctx.drawImage(bitmap, 0, 0, w, h);
-    return canvas.toDataURL('image/png');
-  } finally {
-    bitmap.close();
-  }
 }
 
 function WorkspaceSettings() {
@@ -2334,6 +2315,8 @@ function openRepo() {
 
 function AboutSettings() {
   const [version, setVersion] = useState<string | null>(null);
+  const [loadingNotes, setLoadingNotes] = useState(false);
+  const openWhatsNew = useWorkspaceStore((s) => s.openWhatsNew);
   const [status, setStatus] = useState<UpdaterEvent | null>(null);
   const [checking, setChecking] = useState(false);
   // Set when a check runs in dev / an unpackaged build, where auto-update
@@ -2384,6 +2367,21 @@ function AboutSettings() {
       }
     } catch {
       setChecking(false);
+    }
+  };
+
+  // The full changelog, not just what's new since last launch — this is the
+  // "go and look" path, so an empty `since` is the point. It is also the only
+  // way to see the modal on a local build, which reports its version as `dev`.
+  const showWhatsNew = async () => {
+    setLoadingNotes(true);
+    try {
+      const entries = await api.releaseNotes.list();
+      openWhatsNew(highlightsForSurface(entries, 'desktop'));
+    } catch {
+      toast.error("Couldn't load release notes");
+    } finally {
+      setLoadingNotes(false);
     }
   };
 
@@ -2493,6 +2491,19 @@ function AboutSettings() {
         </div>
 
         <div className="border-t pt-3 flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => void showWhatsNew()}
+            disabled={loadingNotes}
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground disabled:opacity-60"
+          >
+            {loadingNotes ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Sparkles className="w-4 h-4" />
+            )}
+            What&rsquo;s new
+          </button>
           <button
             type="button"
             onClick={() => void openExternal(SITE_URL)}

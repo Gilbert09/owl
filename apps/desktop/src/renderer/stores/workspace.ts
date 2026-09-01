@@ -1,5 +1,12 @@
 import { create } from 'zustand';
-import type { Workspace, Environment, Task, TaskStatus, SkillSummary } from '@talyn/shared';
+import type {
+  Workspace,
+  Environment,
+  Task,
+  TaskStatus,
+  SkillSummary,
+  ReleaseNoteEntry,
+} from '@talyn/shared';
 import type {
   GitHubStatus,
   GitHubUser,
@@ -203,6 +210,14 @@ interface WorkspaceState {
   // the intent to auto-run the moment a provider connects.
   connectAgentOpen: boolean;
   pendingCloudTask: PendingCloudTask | null;
+  // "What's new" modal — the release highlights since the version this client
+  // last showed. `whatsNewChecked` lives here rather than in the component
+  // because MainLayout remounts on every navigation in the web fork, and a
+  // component-local guard would re-run the check (and re-open the modal) on
+  // each one.
+  whatsNewOpen: boolean;
+  whatsNewEntries: ReleaseNoteEntry[];
+  whatsNewChecked: boolean;
   // Which Settings sub-section is active. Lifted out of SettingsPanel so other
   // surfaces can deep-link (e.g. clicking the sidebar provider status).
   settingsSection: SettingsSection;
@@ -227,6 +242,12 @@ interface WorkspaceState {
   closeConnectAgent: () => void;
   /** Drop just the stashed task (after it has fired). */
   clearPendingCloudTask: () => void;
+  /** Show the "What's new" modal for these releases. */
+  openWhatsNew: (entries: ReleaseNoteEntry[]) => void;
+  /** Close it. The caller persists the newly-seen version. */
+  closeWhatsNew: () => void;
+  /** Record that the launch-time check has run, so it runs at most once. */
+  markWhatsNewChecked: () => void;
   setSettingsSection: (section: SettingsSection) => void;
   /** Jump to Settings, optionally pre-selecting a sub-section. */
   openSettings: (section?: SettingsSection) => void;
@@ -284,6 +305,9 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
   cloudProviders: null,
   connectAgentOpen: false,
   pendingCloudTask: null,
+  whatsNewOpen: false,
+  whatsNewEntries: [],
+  whatsNewChecked: false,
   settingsSection: 'workspace',
 
   // Actions
@@ -325,6 +349,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set) => ({
     set({ connectAgentOpen: true, pendingCloudTask: pending }),
   closeConnectAgent: () => set({ connectAgentOpen: false, pendingCloudTask: null }),
   clearPendingCloudTask: () => set({ pendingCloudTask: null }),
+
+  openWhatsNew: (whatsNewEntries) => set({ whatsNewOpen: true, whatsNewEntries }),
+  // Entries are kept on close so reopening from Settings doesn't flash empty
+  // while it refetches.
+  closeWhatsNew: () => set({ whatsNewOpen: false }),
+  markWhatsNewChecked: () => set({ whatsNewChecked: true }),
 
   setSettingsSection: (settingsSection) => set({ settingsSection }),
 

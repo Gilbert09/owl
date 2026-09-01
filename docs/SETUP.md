@@ -686,6 +686,15 @@ POSTHOG_HOST=https://us.i.posthog.com
 # POLAR_PRODUCT_ID_ANNUAL=<uuid of the $150/yr product>
 # POLAR_SUCCESS_URL=https://www.talyn.dev/checkout-success   # optional
 
+# Release notes ("What's new" modal). The nightly publish workflow POSTs each
+# release's generated highlights to <backend>/api/v1/release-notes with this
+# value in an X-Talyn-Release-Secret header. UNSET MEANS THE INGEST ENDPOINT
+# 404s — an ingest without the secret configured is an unauthenticated write
+# into a modal every user sees on launch. Set the same value as the
+# TALYN_RELEASE_INGEST_SECRET repo secret in GitHub Actions. The read side
+# (GET /api/v1/release-notes) needs no configuration and works regardless.
+# TALYN_RELEASE_INGEST_SECRET=<a random 32+ byte string, shared with CI>
+
 # --- Browser apps (app.talyn.dev, admin.talyn.dev) -------------------------
 # All three are unset for a desktop-only deployment, which is the default.
 #

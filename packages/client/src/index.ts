@@ -26,6 +26,7 @@ import type {
   CreatePlatformSkillRequest,
   UpdatePlatformSkillRequest,
   ExternalQueueState,
+  ReleaseNoteEntry,
   AdminAccess,
   AdminAuditEntry,
   AdminFleetHost,
@@ -1387,6 +1388,20 @@ export const billing = {
     request<CheckoutSessionResponse>('POST', `/billing/orders/${orderId}/invoice`),
 };
 
+// Release notes — the "What's new" feed. Global content, not workspace-scoped:
+// `list()` without a `since` is the whole changelog (what Settings → About
+// shows), `list(version)` is only what landed after that version, and
+// `latest()` is the single newest release a first-run client records as its
+// baseline without showing anything.
+export const releaseNotes = {
+  list: (since?: string | null) =>
+    request<ReleaseNoteEntry[]>(
+      'GET',
+      since ? `/release-notes?since=${encodeURIComponent(since)}` : '/release-notes'
+    ),
+  latest: () => request<ReleaseNoteEntry | null>('GET', '/release-notes/latest'),
+};
+
 // ============================================================================
 // Admin (admin.talyn.dev — the operator console)
 // ============================================================================
@@ -1649,6 +1664,7 @@ export const api = {
   mcpTokens,
   debug,
   billing,
+  releaseNotes,
   users,
   admin,
   ws: wsClient,

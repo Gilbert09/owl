@@ -73,6 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.resolve.outputs.version }}
+      previous: ${{ steps.resolve.outputs.previous }}
     steps:
       - name: Checkout git repo
         uses: actions/checkout@v4
@@ -83,12 +84,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
+          # The tag list is read on EVERY path, not just the auto one. The
+          # `previous` output — the highest release below the one we're about
+          # to cut — is what the release-notes job compares against, and it has
+          # to be resolved HERE: by the time that job runs, electron-builder has
+          # created this release's tag, so "the latest release" is us.
+          gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[].tag_name' > /tmp/release-tags.txt || true
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           elif [ -n "$INPUT_VERSION" ]; then
             VERSION="${INPUT_VERSION#v}"
           else
-            gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[].tag_name' > /tmp/release-tags.txt || true
             VERSION=$(node -e "
               const fs = require('fs');
               const parse = (s) => {
@@ -107,8 +113,28 @@ jobs:
             echo "Version must be X.Y.Z, got: $VERSION" >&2
             exit 1
           fi
-          echo "Releasing $VERSION"
+          # Highest existing release STRICTLY below the one being cut. Empty on
+          # a first-ever release, and empty on a re-run of an existing version
+          # (a tag equal to VERSION is excluded either way) — both of which the
+          # release-notes job treats as "nothing to compare, skip".
+          PREVIOUS=$(VERSION="$VERSION" node -e "
+            const fs = require('fs');
+            const parse = (s) => {
+              const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(s.trim());
+              return m && { key: [Number(m[1]), Number(m[2]), Number(m[3])], tag: s.trim() };
+            };
+            const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            const target = parse(process.env.VERSION).key;
+            const tags = fs.existsSync('/tmp/release-tags.txt')
+              ? fs.readFileSync('/tmp/release-tags.txt', 'utf8').split('\n')
+              : [];
+            const below = tags.map(parse).filter(Boolean).filter((t) => cmp(t.key, target) < 0);
+            below.sort((a, b) => cmp(a.key, b.key));
+            console.log(below.length > 0 ? below[below.length - 1].tag : '');
+          ")
+          echo "Releasing $VERSION (previous: ${PREVIOUS:-none})"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "previous=$PREVIOUS" >> "$GITHUB_OUTPUT"
 
   publish:
     # macOS goes FIRST and alone: it's the leg that creates the GitHub Release
@@ -234,6 +260,60 @@ jobs:
           ELECTRON_VERSION=$(node -p "require('electron/package.json').version")
           npm exec electron-builder -- --publish always \
             -c.electronVersion="$ELECTRON_VERSION"
+
+  release-notes:
+    # Generates this release's "What's new" highlights from its commits and
+    # posts them to the backend, which is where both front ends read them.
+    #
+    # `needs: publish` is the whole safety story: the macOS leg is what creates
+    # the GitHub release, so waiting on it means a version that failed to build
+    # is never announced to users. It deliberately does NOT wait on
+    # publish-others — a Windows or Linux upload hiccup has nothing to do with
+    # whether the notes are correct, and the release exists either way.
+    #
+    # Skipped on a first-ever release: with no previous tag there is no range
+    # to summarise.
+    #
+    # `continue-on-error` and a script that exits 0 on every soft failure:
+    # release notes are auxiliary. A GitHub blip, an Anthropic 529, or a backend
+    # deploy in flight must never turn a shipped release into a red run.
+    needs: [version, publish]
+    if: needs.version.outputs.previous != ''
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout git repo
+        uses: actions/checkout@v4
+
+      - name: Install Node and NPM
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build workspace packages
+        # The generator imports the commit filter and the version helpers from
+        # @talyn/shared rather than carrying its own copy — the same code the
+        # backend and both front ends use, and the code the tests pin.
+        run: npm run build -w @talyn/shared
+
+      - name: Generate and publish release notes
+        # Guarded inside the script rather than with `if:` — the `secrets`
+        # context is not allowed in `if` conditions, same as the PostHog
+        # sourcemap step above. Missing either secret is a logged skip.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS_TAG: ${{ needs.version.outputs.previous }}
+          HEAD_SHA: ${{ github.sha }}
+          RELEASE_VERSION: ${{ needs.version.outputs.version }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TALYN_API_URL: https://prod.talyn.dev
+          TALYN_RELEASE_INGEST_SECRET: ${{ secrets.TALYN_RELEASE_INGEST_SECRET }}
+        run: node scripts/release-notes/generate.mjs
 
   publish-others:
     # Windows (NSIS) + Linux (AppImage). Targets were already declared in

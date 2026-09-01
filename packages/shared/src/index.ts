@@ -22,6 +22,10 @@ export * from './promptTemplates.js';
 // shared so the desktop and web forks can't disagree about what a filter shows.
 export * from './prFilters.js';
 
+// Release notes — the "What's new" feed: version ordering, the commit filter
+// the CI generator runs, and the one rule for whether the modal opens.
+export * from './releaseNotes.js';
+
 // The operator console's contract (admin.talyn.dev ⇄ /api/v1/admin).
 export * from './admin.js';
 export * from './transcript.js';
