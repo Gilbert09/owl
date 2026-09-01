@@ -2,6 +2,22 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 113 — One task per PR, not one per run (2026-09-01)
+
+PostHog's session list had become unreadable: "Get PostHog/posthog#90517 mergeable" a dozen times over, one entry per fix run, across days. Every repeat run at a PR created a new Talyn task, and every new task created a new REMOTE task.
+
+**Reuse is keyed on `(workspace, pull_request_id, type)`** — the PR id rather than the title, which anyone is free to edit, and the type as well, so a `pr_review` never lands in a `pr_response`'s session. It reads `tasks.pull_request_id`, the indexed link Session 111 added for exactly this kind of question. `createCloudTask` re-arms the most recent FINISHED task instead of inserting: new prompt, back to `queued`, previous run's transcript / result / branch cleared. **An active task is never touched** — rewriting a live task's prompt would redirect a run already in flight — so the existing `activePrTaskId` guard keeps its meaning.
+
+**The remote half needed a PATCH.** `POST /tasks/{id}/run/` carries no prompt; PostHog's `run_task` reads the task's CURRENT `description` (its serializer calls that field "the prompt passed to the agent"). So a reused task would repeat the prompt it was created with — for a "get mergeable" run, acting on failures that have since changed. New `client.updateTask` pushes the prompt first, and a 404 falls back to creating a fresh remote task rather than failing the dispatch on a stale id we only kept as an optimisation. The executor already reused `posthogTaskId` for the retry-after-failed-start case, so this rides the same branch.
+
+**What is deliberately NOT carried over is the load-bearing part.** The run fields (`posthogRunId` and friends) are dropped: the executor reads "has a task id AND a run id" as already dispatched and returns early, so carrying the run id would wedge the reused task in `queued` forever. The generic `cloudTask` handle is dropped, and the PostHog one too when the workspace has switched provider since the last run — only PostHog exposes "start another run on this task", and Claude / the self-hosted fleet guard on `readCloudTaskMeta`, which **falls back to the legacy `posthog*` fields**, so handing either of them a remote id they cannot re-run would make their dispatch a permanent no-op.
+
+**Two consequences of reusing a row rather than inserting one**, both easy to miss until a user hits them. `created_at` is bumped, because the task list is ordered by it (and it is the keyset cursor) — a reused row would otherwise sit wherever its FIRST run landed, so starting a run on a week-old PR task would show nothing at the top. And the update event sends explicit `null`s for the run keys, because both stores DEEP-MERGE `metadata` on `task:update` (a partial poller patch must not drop the provider marker) — a key merely left out is kept, so the task screen would go on offering a "view run" link to the run that already finished.
+
+Both events fire, in order: `task:created` puts the task in front of a client that never had it or has pruned it, but `addTask` is idempotent by id and SKIPS one it already holds, so `task:update` is what refreshes the clients that were showing the finished previous run — `transcript: []` included, so the old log is dropped rather than shown under the new run.
+
+The transcript is reset per run rather than accumulated: it is this table's large jsonb column, and the provider keeps the older runs, so the history is not lost — it moves to where the runs already live.
+
 ## Session 112 — The watch route deadlocking against its own transaction (2026-09-01)
 
 Watching a PR by URL hung on the modal's spinner for two minutes, then failed with `DrizzleQueryError: Failed query: update "pull_requests" set "watching" = $1 …`. The cause was under it: `PostgresError 57014, canceling statement due to statement timeout`, with the context that named the whole bug — **`where: 'while updating tuple (14423,5) in relation "pull_requests"'`**. That is a row-lock wait, not a bad statement.
