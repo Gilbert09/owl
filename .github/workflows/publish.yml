@@ -275,8 +275,8 @@ jobs:
     # to summarise.
     #
     # `continue-on-error` and a script that exits 0 on every soft failure:
-    # release notes are auxiliary. A GitHub blip, an Anthropic 529, or a backend
-    # deploy in flight must never turn a shipped release into a red run.
+    # release notes are auxiliary. A GitHub blip, Claude being unreachable, or a
+    # backend deploy in flight must never turn a shipped release into a red run.
     needs: [version, publish]
     if: needs.version.outputs.previous != ''
     runs-on: ubuntu-latest
@@ -301,6 +301,13 @@ jobs:
         # backend and both front ends use, and the code the tests pin.
         run: npm run build -w @talyn/shared
 
+      - name: Install the Claude Code CLI
+        # The generator runs on a Claude SUBSCRIPTION rather than a metered API
+        # key, and the CLI is what can authenticate that way — it takes the
+        # long-lived token `claude setup-token` issues, which the Messages API
+        # does not accept.
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Generate and publish release notes
         # Guarded inside the script rather than with `if:` — the `secrets`
         # context is not allowed in `if` conditions, same as the PostHog
@@ -310,7 +317,7 @@ jobs:
           PREVIOUS_TAG: ${{ needs.version.outputs.previous }}
           HEAD_SHA: ${{ github.sha }}
           RELEASE_VERSION: ${{ needs.version.outputs.version }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           TALYN_API_URL: https://prod.talyn.dev
           TALYN_RELEASE_INGEST_SECRET: ${{ secrets.TALYN_RELEASE_INGEST_SECRET }}
         run: node scripts/release-notes/generate.mjs

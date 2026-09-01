@@ -32,12 +32,17 @@
  *   PREVIOUS_TAG                 the release before this one, e.g. v0.2.60
  *   HEAD_SHA                     the commit being released
  *   RELEASE_VERSION              X.Y.Z (no leading v)
- *   ANTHROPIC_API_KEY            omit to skip generation entirely
+ *   CLAUDE_CODE_OAUTH_TOKEN      omit to skip generation entirely. A Claude
+ *                                subscription token from `claude setup-token`,
+ *                                NOT a console API key — see callClaude.
  *   TALYN_API_URL                backend root, e.g. https://prod.talyn.dev
  *   TALYN_RELEASE_INGEST_SECRET  omit to skip the POST
  */
-import Anthropic from '@anthropic-ai/sdk';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { filterReleaseCommits, surfacesForScope, kindForCommitType } from '@talyn/shared';
+
+const execFileAsync = promisify(execFile);
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -53,7 +58,7 @@ const {
   PREVIOUS_TAG,
   HEAD_SHA,
   RELEASE_VERSION,
-  ANTHROPIC_API_KEY,
+  CLAUDE_CODE_OAUTH_TOKEN,
   TALYN_API_URL,
   TALYN_RELEASE_INGEST_SECRET,
 } = process.env;
@@ -62,7 +67,7 @@ if (!RELEASE_VERSION) skip('RELEASE_VERSION is not set');
 if (!GITHUB_REPOSITORY) skip('GITHUB_REPOSITORY is not set');
 if (!PREVIOUS_TAG) skip('no previous release to compare against');
 if (!HEAD_SHA) skip('HEAD_SHA is not set');
-if (!ANTHROPIC_API_KEY) skip('ANTHROPIC_API_KEY is not set');
+if (!CLAUDE_CODE_OAUTH_TOKEN) skip('CLAUDE_CODE_OAUTH_TOKEN is not set');
 if (!DRY_RUN && !TALYN_RELEASE_INGEST_SECRET) skip('TALYN_RELEASE_INGEST_SECRET is not set');
 if (!DRY_RUN && !TALYN_API_URL) skip('TALYN_API_URL is not set');
 
@@ -116,31 +121,6 @@ async function fetchCommitSubjects() {
 // 2. Turn the survivors into highlights
 // ---------------------------------------------------------------------------
 
-const HIGHLIGHTS_SCHEMA = {
-  type: 'object',
-  properties: {
-    highlights: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          title: { type: 'string' },
-          description: { type: 'string' },
-          kind: { type: 'string', enum: ['feature', 'fix', 'improvement'] },
-          surfaces: {
-            type: 'array',
-            items: { type: 'string', enum: ['desktop', 'web'] },
-          },
-        },
-        required: ['title', 'description', 'kind', 'surfaces'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['highlights'],
-  additionalProperties: false,
-};
-
 const SYSTEM_PROMPT = `You write the "What's new" notes for Talyn, a desktop and web app for managing GitHub pull requests with cloud coding agents.
 
 You are given the commits from one release. Turn them into the short list a Talyn user would want to read after an update.
@@ -159,46 +139,124 @@ For each highlight:
 - kind: "feature" for something new, "fix" for something repaired, "improvement" for something that got faster or better without being new.
 - surfaces: which clients it applies to. A commit scoped (desktop) is desktop only, (web) is web only, everything else is both. Backend changes are almost always both.`;
 
-async function generateHighlights(commits) {
-  const client = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+/**
+ * The JSON contract, spelled out in the prompt.
+ *
+ * It used to be a `json_schema` on the API's `output_config`, which validated
+ * the reply and made the model retry its own mismatch. Running on a Claude
+ * SUBSCRIPTION means going through the Claude Code CLI instead of the Messages
+ * API, and the CLI has no equivalent — so the shape is stated here, checked on
+ * the way back, and asked for once more if it comes back wrong. `normalize`
+ * still drops anything malformed, which is what actually protects the POST.
+ */
+const OUTPUT_CONTRACT = `Reply with a single JSON object and nothing else. No prose before or after it, no markdown code fences.
 
+{"highlights": [{"title": string, "description": string, "kind": "feature" | "fix" | "improvement", "surfaces": ("desktop" | "web")[]}]}
+
+When nothing in the release is worth telling a user about, reply {"highlights": []}.`;
+
+/**
+ * Ask Claude, through the Claude Code CLI.
+ *
+ * The CLI rather than `@anthropic-ai/sdk` because this runs on Tom's Claude
+ * subscription: the Messages API only takes a console API key, whereas the CLI
+ * authenticates with the long-lived token from `claude setup-token`, which is
+ * what a Pro/Max subscription can issue. Nothing about the job is worth a
+ * metered API key — it is a handful of commit subjects, once a night.
+ *
+ * Flags that matter:
+ *   --system-prompt   REPLACES Claude Code's default prompt rather than adding
+ *                     to it. That is the point: the default carries the coding
+ *                     agent's scaffolding and this repo's CLAUDE.md, tens of
+ *                     thousands of tokens of instructions for a job that is
+ *                     "read these commit subjects and write three sentences".
+ *   --max-turns 1     One answer. There is nothing here to iterate on, and a
+ *                     tool call would just burn the turn.
+ *   --output-format   Gives the envelope below instead of bare text, so a
+ *                     failure can be told apart from a short answer.
+ *
+ * The prompt goes in as an argv element via execFile — no shell — so a commit
+ * subject full of quotes and backticks is data, not syntax.
+ */
+async function callClaude(userMessage) {
+  const { stdout } = await execFileAsync(
+    'claude',
+    [
+      '-p',
+      userMessage,
+      '--system-prompt',
+      `${SYSTEM_PROMPT}\n\n${OUTPUT_CONTRACT}`,
+      '--model',
+      'claude-opus-5',
+      '--max-turns',
+      '1',
+      '--output-format',
+      'json',
+    ],
+    {
+      env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN },
+      // The reply is a few hundred tokens; the envelope around it carries usage
+      // detail. Generous, but bounded — an unbounded pipe is how a CI job hangs.
+      maxBuffer: 32 * 1024 * 1024,
+      timeout: 5 * 60_000,
+    }
+  );
+
+  const envelope = JSON.parse(stdout);
+  if (envelope.is_error || envelope.subtype !== 'success') {
+    throw new Error(
+      `claude CLI failed (${envelope.subtype ?? 'no subtype'}): ${envelope.result ?? 'no result'}`
+    );
+  }
+  if (envelope.permission_denials?.length) {
+    // Not fatal — say it out loud, because it means the turn was partly spent
+    // reaching for a tool instead of answering.
+    console.warn(
+      `release-notes: the model was denied ${envelope.permission_denials.length} tool call(s); ` +
+        'the reply may be short.'
+    );
+  }
+  return String(envelope.result ?? '');
+}
+
+/**
+ * Pull the JSON object out of a reply.
+ *
+ * Tolerant of the two things a model does even when told not to: wrapping the
+ * object in a ```json fence, and adding a sentence either side of it.
+ */
+function extractJson(text) {
+  const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
+  const candidate = (fenced ? fenced[1] : text).trim();
+  const start = candidate.indexOf('{');
+  const end = candidate.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error(`no JSON object in reply: ${candidate.slice(0, 200)}`);
+  }
+  return JSON.parse(candidate.slice(start, end + 1));
+}
+
+async function generateHighlights(commits) {
   const lines = commits.map((c) => {
     const scope = c.scope ? `(${c.scope})` : '';
     const surfaces = surfacesForScope(c.scope).join('+');
     return `- ${c.type}${scope}: ${c.subject}  [kind hint: ${kindForCommitType(c.type)}; surfaces: ${surfaces}]`;
   });
+  const ask = `Release ${RELEASE_VERSION} contains these commits:\n\n${lines.join('\n')}`;
 
-  // No `effort` override: the default (high) is the documented setting for
-  // intelligence-sensitive non-coding work, and this is the one place in the
-  // pipeline where judgement actually happens. It is the first knob to turn if
-  // the notes ever read as over- or under-selective.
-  const response = await client.messages.create({
-    model: 'claude-opus-5',
-    max_tokens: 16000,
-    system: SYSTEM_PROMPT,
-    output_config: { format: { type: 'json_schema', schema: HIGHLIGHTS_SCHEMA } },
-    messages: [
-      {
-        role: 'user',
-        content: `Release ${RELEASE_VERSION} contains these commits:\n\n${lines.join('\n')}`,
-      },
-    ],
-  });
-
-  // Check the stop reason before touching content: a refusal returns HTTP 200
-  // with empty or partial content, and indexing into it would throw.
-  if (response.stop_reason === 'refusal') {
-    console.warn(
-      `release-notes: the model declined this request (${response.stop_details?.category ?? 'no category'}) — ` +
-        `posting an empty release instead. Worth looking at: a list of commit subjects should never trip this.`
-    );
-    return [];
+  // One retry, and only for a malformed REPLY — the schema used to buy this for
+  // free. A transport failure is not retried here: the job is already
+  // continue-on-error, and a second attempt at a down API just costs a minute.
+  let text = await callClaude(ask);
+  try {
+    return normalize(extractJson(text).highlights ?? []);
+  } catch (err) {
+    console.warn(`release-notes: unparseable reply (${err.message}) — asking once more`);
   }
-
-  const text = response.content.find((b) => b.type === 'text')?.text ?? '';
-  if (!text.trim()) throw new Error('model returned no text block');
-  const parsed = JSON.parse(text);
-  return normalize(parsed.highlights ?? []);
+  text = await callClaude(
+    `${ask}\n\nYour previous reply could not be parsed as JSON. Reply with ONLY the JSON object, starting with { and ending with }.`
+  );
+  return normalize(extractJson(text).highlights ?? []);
 }
 
 /**
@@ -266,7 +324,7 @@ async function main() {
 
 main().catch((err) => {
   // Soft failure on purpose. Release notes are auxiliary; a GitHub blip, an
-  // Anthropic 529, or a backend deploy in flight must not turn into a red
+  // Claude being unreachable, or a backend deploy in flight must not turn into a red
   // publish run for a release that already shipped.
   console.error('release-notes: failed —', err?.message ?? err);
   process.exit(0);

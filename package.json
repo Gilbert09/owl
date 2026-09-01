@@ -36,7 +36,6 @@
     ]
   },
   "devDependencies": {
-    "@anthropic-ai/sdk": "^0.122.0",
     "concurrently": "^9.1.2",
     "husky": "^9.1.7",
     "lint-staged": "^16.4.0",
