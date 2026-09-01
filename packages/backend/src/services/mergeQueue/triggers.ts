@@ -30,7 +30,7 @@ import {
   hasActiveEntries,
   headBranchOfPr,
 } from './store.js';
-import { mergeQueueV2Active, scheduleGroupEvaluation } from './evaluator.js';
+import { scheduleGroupEvaluation } from './evaluator.js';
 
 const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
@@ -64,7 +64,6 @@ function swallow(source: string) {
 }
 
 async function handlePrSnapshot(evt: DomainPrSnapshotEvent): Promise<void> {
-  if (!(await mergeQueueV2Active())) return;
   const entry = await getActiveEntryForPr(evt.prId);
   if (entry) {
     scheduleGroupEvaluation(entry.repositoryId, entry.baseBranch, evt.trigger);
@@ -98,7 +97,6 @@ async function handlePrSnapshot(evt: DomainPrSnapshotEvent): Promise<void> {
 }
 
 async function handlePrChecks(evt: DomainPrChecksEvent): Promise<void> {
-  if (!(await mergeQueueV2Active())) return;
   const entries = await getActiveEntriesForPrs(evt.prs.map((p) => p.prId));
   const seen = new Set<string>();
   for (const entry of entries) {
@@ -111,7 +109,6 @@ async function handlePrChecks(evt: DomainPrChecksEvent): Promise<void> {
 
 async function handleTaskStatus(evt: DomainTaskStatusEvent): Promise<void> {
   if (!TERMINAL_TASK_STATUSES.has(evt.status)) return;
-  if (!(await mergeQueueV2Active())) return;
   // The queue's own fix run finished → account it (decide R8). NOTE: a freed
   // task slot also un-defers TaskLimit-held entries in this workspace — the
   // reconciler's 2-minute staleness sweep covers those; wiring an owner-level
@@ -127,7 +124,6 @@ async function handleTaskStatus(evt: DomainTaskStatusEvent): Promise<void> {
  *  inherit the request's transaction handle. */
 export async function onQueueMembershipChanged(prId: string, trigger: string): Promise<void> {
   await runWithoutScope(async () => {
-    if (!(await mergeQueueV2Active())) return;
     const entry = await getActiveEntryForPr(prId);
     if (entry) scheduleGroupEvaluation(entry.repositoryId, entry.baseBranch, trigger);
   });

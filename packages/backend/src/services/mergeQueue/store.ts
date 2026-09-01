@@ -13,7 +13,6 @@ import {
   mergeQueueEntries,
   mergeQueueEvents,
   pullRequests as pullRequestsTable,
-  settings as settingsTable,
   workspaces as workspacesTable,
 } from '../../db/schema.js';
 import type { ExternalQueueState, MergeQueueMode } from '@talyn/shared';
@@ -109,25 +108,6 @@ export function rowToEntrySnapshot(row: EntryRow): EntrySnapshot {
     stackParentNumber: row.stackParentNumber,
     retargetAttempts: row.retargetAttempts,
   };
-}
-
-// ── Engine flag ──
-
-export type MergeQueueEngine = 'v1' | 'v2';
-
-/**
- * Which engine drives the queue. 'v1' = the poll processor; 'v2' = the
- * event-driven pipeline. Seeded by migration 0031, flipped by 0032. Read
- * per-tick / per-trigger (a single-row PK lookup) so the old deploy stops
- * driving within one tick of the cutover migration committing.
- */
-export async function getMergeQueueEngine(db: Db = getDbClient()): Promise<MergeQueueEngine> {
-  const rows = await db
-    .select({ value: settingsTable.value })
-    .from(settingsTable)
-    .where(eq(settingsTable.key, 'merge_queue_engine'))
-    .limit(1);
-  return rows[0]?.value === 'v2' ? 'v2' : 'v1';
 }
 
 /**

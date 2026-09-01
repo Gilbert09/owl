@@ -7,7 +7,6 @@ import { pullRequestRoutes } from '../../routes/pullRequests.js';
 import { apiErrorHandler } from '../../routes/index.js';
 import { wrapAsyncRoutes } from '../../middleware/asyncHandler.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
-import { mergeQueueProcessor } from '../../services/mergeQueueProcessor.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
 import type { Database } from '../../db/client.js';
 import {
@@ -15,7 +14,6 @@ import {
   repositories as repositoriesTable,
   users as usersTable,
   workspaces as workspacesTable,
-  settings as settingsTable,
 } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 
@@ -111,13 +109,6 @@ describe('free-plan merge-queue limit at the route surface', () => {
   beforeEach(async () => {
     ({ db, cleanup } = await createTestDb());
     process.env.POLAR_ACCESS_TOKEN = 'polar-test-token';
-    // Pin the legacy engine: this suite's subject is the billing gate, and the
-    // v2 triggers firing background evaluations against the torn-down test DB
-    // would only add noise.
-    await db
-      .update(settingsTable)
-      .set({ value: 'v1' })
-      .where(eq(settingsTable.key, 'merge_queue_engine'));
     await seedUser(db);
     await db.insert(workspacesTable).values({
       id: 'ws1',
@@ -133,7 +124,6 @@ describe('free-plan merge-queue limit at the route surface', () => {
       defaultBranch: 'main',
     });
     // The route kicks a processor tick after enqueueing — irrelevant here.
-    vi.spyOn(mergeQueueProcessor, 'runOnce').mockResolvedValue(undefined);
     const s = await makeServer();
     url = s.url;
     close = s.close;

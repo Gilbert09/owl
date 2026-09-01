@@ -20,7 +20,7 @@ import {
   pruneTerminalEntries,
   TERMINAL_STATUSES,
 } from './store.js';
-import { mergeQueueV2Active, scheduleGroupEvaluation } from './evaluator.js';
+import { scheduleGroupEvaluation } from './evaluator.js';
 
 const RECONCILE_INTERVAL_MS = 60_000;
 /** A `merging` marker older than this is a crashed attempt — re-evaluate. */
@@ -67,10 +67,6 @@ class MergeQueueReconciler {
     let tickError: string | undefined;
     let skipRecord = false;
     try {
-      if (!(await mergeQueueV2Active())) {
-        summaryText = 'merge_queue_reconcile tick skipped — v1 engine active (dormant)';
-        return;
-      }
       // The lock transaction covers ONLY the cheap DB work — the pending
       // disarms make GitHub calls and run AFTER it, so no pool connection is
       // ever pinned across network I/O (the eager-mode pool-starvation

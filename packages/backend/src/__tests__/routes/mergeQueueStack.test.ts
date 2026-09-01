@@ -7,7 +7,6 @@ import { pullRequestRoutes } from '../../routes/pullRequests.js';
 import { apiErrorHandler } from '../../routes/index.js';
 import { wrapAsyncRoutes } from '../../middleware/asyncHandler.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
-import { mergeQueueProcessor } from '../../services/mergeQueueProcessor.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
 import type { Database } from '../../db/client.js';
 import {
@@ -16,7 +15,6 @@ import {
   repositories as repositoriesTable,
   users as usersTable,
   workspaces as workspacesTable,
-  settings as settingsTable,
 } from '../../db/schema.js';
 import { eq, inArray } from 'drizzle-orm';
 
@@ -118,12 +116,6 @@ describe('merge-queue stack enqueue', () => {
   beforeEach(async () => {
     ({ db, cleanup } = await createTestDb());
     process.env.POLAR_ACCESS_TOKEN = 'polar-test-token';
-    // Pin the legacy engine: the subject here is the route, and v2 triggers
-    // firing background evaluations against the torn-down test DB is noise.
-    await db
-      .update(settingsTable)
-      .set({ value: 'v1' })
-      .where(eq(settingsTable.key, 'merge_queue_engine'));
     await seedUser(db);
     await db.insert(workspacesTable).values({
       id: 'ws1',
@@ -138,7 +130,6 @@ describe('merge-queue stack enqueue', () => {
       url: 'https://github.com/a/b',
       defaultBranch: 'main',
     });
-    vi.spyOn(mergeQueueProcessor, 'runOnce').mockResolvedValue(undefined);
     prSeq = 0;
     const s = await makeServer();
     url = s.url;

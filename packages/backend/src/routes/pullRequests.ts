@@ -28,7 +28,6 @@ import { withMergeQueueLimitGate } from '../services/billing/entitlements.js';
 import { emitPullRequestUpdated } from '../services/websocket.js';
 import { noteHeadSha } from '../services/webhookHeadIndex.js';
 import { refreshWebhookIndex } from '../services/webhookIndex.js';
-import { mergeQueueProcessor } from '../services/mergeQueueProcessor.js';
 import {
   closeActiveEntry,
   computeEntryPositions,
@@ -981,14 +980,12 @@ export function pullRequestRoutes(): Router {
     // position and every sibling shifts to match — not just after a refresh.
     await broadcastMergeQueuePositions(row.workspaceId);
 
-    // Kick a tick so an already-clean PR merges without waiting for the poll.
-    // Both engines: the v1 runOnce no-ops when the flag reads 'v2', and the
-    // v2 trigger no-ops while v1 drives. Scope-escaped — fire-and-forget work
-    // must never inherit this request's transaction handle (it is dead by the
-    // time the kick runs; see runWithoutScope).
+    // Kick an evaluation so an already-clean PR merges without waiting for the
+    // reconciler. Scope-escaped — fire-and-forget work must never inherit this
+    // request's transaction handle (it is dead by the time the kick runs; see
+    // runWithoutScope).
     if (enabled) {
       runWithoutScope(() => {
-        void mergeQueueProcessor.runOnce();
         void onQueueMembershipChanged(row.id, 'user:enqueue');
       });
     }
@@ -1140,7 +1137,6 @@ export function pullRequestRoutes(): Router {
     await broadcastMergeQueuePositions(anchor.workspaceId);
     if (enabled) {
       runWithoutScope(() => {
-        void mergeQueueProcessor.runOnce();
         // The evaluator coalesces these into one walk per group.
         for (const member of members) {
           void onQueueMembershipChanged(member.id, 'user:enqueue-stack');

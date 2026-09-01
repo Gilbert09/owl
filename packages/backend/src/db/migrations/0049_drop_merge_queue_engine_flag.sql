@@ -1,0 +1,31 @@
+-- Retire the merge-queue engine flag.
+--
+-- The v1 poll processor (`services/mergeQueueProcessor.ts`) is deleted. It had
+-- been dormant since the cutover in migration 0032 on 2026-07-16 — six weeks
+-- and 722 merges ago, with the flag untouched since — and kept only as a
+-- rollback target. Keeping it had a cost: it was a second engine that still
+-- guarded on `pull_requests.task_id`, the one-to-one column whose overwriting
+-- caused the 2026-09-01 duplicate-dispatch incident, so a rollback would have
+-- reintroduced a bug the live engine no longer has.
+--
+-- PINNED TO '"v2"', NOT DELETED, AND THAT IS THE WHOLE POINT OF THIS MIGRATION.
+--
+-- Migrations run at boot, and every deploy briefly overlaps old and new
+-- instances. The OLD instance still contains the v1 processor, and the code it
+-- is running reads an ABSENT row as v1:
+--
+--     return rows[0]?.value === 'v2' ? 'v2' : 'v1';
+--
+-- and stands down only on an explicit `=== 'v2'`. So deleting the row here
+-- would wake the old instance's v1 processor — on its 10s tick — and have it
+-- drive the queue alongside the new instance's v2. The two engines take
+-- DIFFERENT advisory locks (`mergeQueue:tick` vs `mergeQueueV2:reconcile`), so
+-- nothing would exclude them from merging the same PR at the same moment.
+--
+-- Setting it to '"v2"' keeps the old instance dormant for the overlap window
+-- and is a no-op for the new one, which no longer reads the flag at all. The
+-- row is now vestigial: delete it in a later migration, once no instance that
+-- understands 'v1' can still be running.
+UPDATE "settings"
+  SET "value" = '"v2"'::jsonb, "updated_at" = now()
+  WHERE "key" = 'merge_queue_engine';

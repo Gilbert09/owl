@@ -32,7 +32,6 @@ import { claudeCodeProvider } from './services/cloudProviders/claude/provider.js
 import { selfHostedProvider } from './services/cloudProviders/selfhosted/provider.js';
 import { cloudTaskPoller } from './services/cloudProviders/poller.js';
 import { prAutoMergeWatcher } from './services/prAutoMergeWatcher.js';
-import { mergeQueueProcessor } from './services/mergeQueueProcessor.js';
 import { initMergeQueueTriggers } from './services/mergeQueue/triggers.js';
 import { mergeQueueReconciler } from './services/mergeQueue/reconciler.js';
 import { loadExternalQueueSubmitRoutes } from './services/externalQueueSubmitRoute.js';
@@ -112,10 +111,8 @@ async function main() {
   await prMonitorService.init();
   cloudTaskPoller.init();
   prAutoMergeWatcher.init();
-  mergeQueueProcessor.init();
-  // Merge queue v2 (event-driven pipeline) — ships dormant: the triggers and
-  // reconciler no-op until the merge_queue_engine flag reads 'v2' (cutover
-  // migration), at which point the v1 processor above stands down per tick.
+  // The merge queue: an event-driven pipeline (triggers) with a 60s reconciler
+  // as the backstop for anything no event reached.
   initMergeQueueTriggers();
   mergeQueueReconciler.init();
   // Restore the external merge queue's submit command per repo. This is the
@@ -301,7 +298,6 @@ async function main() {
     dbWatchdog.shutdown();
     cloudTaskPoller.shutdown();
     prAutoMergeWatcher.shutdown();
-    mergeQueueProcessor.shutdown();
     mergeQueueReconciler.shutdown();
     postHogCodeStreamer.shutdownAll();
     prMonitorService.shutdown();

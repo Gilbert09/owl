@@ -6,7 +6,6 @@ import { pullRequestRoutes } from '../../routes/pullRequests.js';
 import { apiErrorHandler } from '../../routes/index.js';
 import { wrapAsyncRoutes } from '../../middleware/asyncHandler.js';
 import { requireAuth, internalProxyHeaders } from '../../middleware/auth.js';
-import { mergeQueueProcessor } from '../../services/mergeQueueProcessor.js';
 import { markReadyForReview } from '../../services/githubAutoMerge.js';
 import { prMonitorService } from '../../services/prMonitor.js';
 import { createTestDb, seedUser, TEST_USER_ID } from '../helpers/testDb.js';
@@ -15,7 +14,6 @@ import {
   pullRequests as pullRequestsTable,
   repositories as repositoriesTable,
   workspaces as workspacesTable,
-  settings as settingsTable,
 } from '../../db/schema.js';
 import { eq } from 'drizzle-orm';
 
@@ -64,6 +62,22 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
   let prSeq = 0;
   let refreshSpy: ReturnType<typeof vi.spyOn>;
 
+/**
+ * How many times the ROUTE refreshed the PR — i.e. the post-mark-ready refresh
+ * this file is about.
+ *
+ * Counting bare `refreshPr` calls is not enough: enqueuing also triggers a
+ * merge-queue evaluation, and the executor refreshes the PR itself during the
+ * group walk. Those two were racing, and which one the assertion saw depended
+ * on microtask ordering. The route is the only caller that passes
+ * `repositoryId` in its options, so match on that.
+ */
+function routeRefreshCalls(): number {
+  return refreshSpy.mock.calls.filter(
+    (args) => (args[4] as { repositoryId?: string } | undefined)?.repositoryId !== undefined
+  ).length;
+}
+
   async function insertPr(summary: Record<string, unknown>): Promise<string> {
     const id = `pr-${++prSeq}`;
     await db.insert(pullRequestsTable).values({
@@ -93,10 +107,6 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
 
   beforeEach(async () => {
     ({ db, cleanup } = await createTestDb());
-    await db
-      .update(settingsTable)
-      .set({ value: 'v1' })
-      .where(eq(settingsTable.key, 'merge_queue_engine'));
     await seedUser(db);
     await db.insert(workspacesTable).values({
       id: 'ws1',
@@ -111,7 +121,6 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
       url: 'https://github.com/a/b',
       defaultBranch: 'main',
     });
-    vi.spyOn(mergeQueueProcessor, 'runOnce').mockResolvedValue(undefined);
     refreshSpy = vi.spyOn(prMonitorService, 'refreshPr').mockResolvedValue(undefined);
     vi.mocked(markReadyForReview).mockClear().mockResolvedValue(true);
     const s = await makeServer();
@@ -134,7 +143,7 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
       owner: 'a',
       repo: 'b',
     });
-    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(routeRefreshCalls()).toBe(1);
     // Still queued.
     const rows = await db
       .select({ q: pullRequestsTable.mergeQueued })
@@ -153,7 +162,7 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
     const pr = await insertPr({ draft: false, mergeStateStatus: 'CLEAN', nodeId: 'PR_node_3' });
     expect((await enqueue(pr)).status).toBe(200);
     expect(markReadyForReview).not.toHaveBeenCalled();
-    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(routeRefreshCalls()).toBe(0);
   });
 
   it('skips the mutation when the draft has no node id to mutate', async () => {
@@ -167,7 +176,7 @@ describe('merge-queue enqueue — draft PRs get marked ready for review', () => 
     const pr = await insertPr({ draft: true, nodeId: 'PR_node_4' });
     expect((await enqueue(pr)).status).toBe(200);
     expect(markReadyForReview).toHaveBeenCalledTimes(1);
-    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(routeRefreshCalls()).toBe(0);
     const rows = await db
       .select({ q: pullRequestsTable.mergeQueued })
       .from(pullRequestsTable)

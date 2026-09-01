@@ -24,7 +24,6 @@ import { debugBus } from '../debugBus.js';
 import {
   closeActiveEntry,
   computeEntryPositions,
-  getMergeQueueEngine,
   getMergeQueueMode,
   loadActiveGroup,
   touchEvaluated,
@@ -48,25 +47,6 @@ const groups = new Map<string, GroupState>();
 
 /** Engine flag cache — triggers fire on every PR refresh, so don't pay a
  *  settings read per event. 5s TTL keeps cutover latency negligible. */
-let engineCache: { value: 'v1' | 'v2'; at: number } | null = null;
-const ENGINE_CACHE_MS = 5_000;
-
-export async function mergeQueueV2Active(): Promise<boolean> {
-  const now = Date.now();
-  if (engineCache && now - engineCache.at < ENGINE_CACHE_MS) return engineCache.value === 'v2';
-  try {
-    const value = await getMergeQueueEngine();
-    engineCache = { value, at: now };
-    return value === 'v2';
-  } catch {
-    return false; // no DB yet (boot) — treat as dormant
-  }
-}
-
-/** Test hook — drop the engine cache so a flag flip is seen immediately. */
-export function _resetEngineCache(): void {
-  engineCache = null;
-}
 
 /**
  * Schedule an evaluation of one (repo, base) group. Coalescing: triggers for
@@ -139,7 +119,6 @@ async function evaluateGroupOnce(
   baseBranch: string,
   trigger: string
 ): Promise<void> {
-  if (!(await mergeQueueV2Active())) return;
   // NO advisory lock here — deliberately. The per-group lock this originally
   // held was a POOL TRANSACTION spanning the entire walk, which in eager mode
   // includes GitHub merge PUTs, signing/capability probes, and cloud-task

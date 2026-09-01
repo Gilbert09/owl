@@ -23,7 +23,6 @@ import {
   repositories as repositoriesTable,
   pullRequests as pullRequestsTable,
   tasks as tasksTable,
-  settings as settingsTable,
   mergeQueueEntries,
   mergeQueueEvents,
 } from '../../db/schema.js';
@@ -45,7 +44,6 @@ import {
 import { TaskLimitError } from '../../services/billing/entitlements.js';
 import { ensureActiveEntry, getActiveEntryForPr } from '../../services/mergeQueue/store.js';
 import {
-  _resetEngineCache,
   evaluateGroupNow,
 } from '../../services/mergeQueue/evaluator.js';
 import { initMergeQueueTriggers } from '../../services/mergeQueue/triggers.js';
@@ -194,13 +192,6 @@ async function seedBase(db: Database): Promise<void> {
   });
 }
 
-async function setEngine(db: Database, engine: 'v1' | 'v2'): Promise<void> {
-  await db
-    .insert(settingsTable)
-    .values({ key: 'merge_queue_engine', value: engine })
-    .onConflictDoUpdate({ target: settingsTable.key, set: { value: engine } });
-  _resetEngineCache();
-}
 
 let prCounter = 0;
 
@@ -314,7 +305,6 @@ describe('mergeQueue v2 pipeline', () => {
     _resetQueueHealth();
     _resetSubmitRoutes();
     await seedBase(db);
-    await setEngine(db, 'v2');
     mergeSpy = vi
       .spyOn(githubService, 'mergePullRequest')
       .mockResolvedValue({ sha: 'merged-sha', merged: true, message: 'ok' });
@@ -352,7 +342,6 @@ describe('mergeQueue v2 pipeline', () => {
     await cleanup();
     vi.restoreAllMocks();
     githubRateGate._reset();
-    _resetEngineCache();
   });
 
   it('merges a clean head end-to-end: entry terminal, PR row terminal, timeline written', async () => {
@@ -403,15 +392,6 @@ describe('mergeQueue v2 pipeline', () => {
       'pr_merged',
       expect.anything()
     );
-  });
-
-  it('does nothing while the v1 engine drives (dormant)', async () => {
-    await setEngine(db, 'v1');
-    await insertQueuedPr(db);
-
-    await evaluateGroupNow('repo1', 'main', 'test');
-
-    expect(mergeSpy).not.toHaveBeenCalled();
   });
 
   it('serializes same-base entries — one merge per evaluation, FIFO', async () => {
@@ -1560,14 +1540,6 @@ describe('mergeQueue v2 pipeline', () => {
       await vi.waitFor(() => expect(mergeSpy).toHaveBeenCalledTimes(1));
     });
 
-    it('is dormant on the v1 engine', async () => {
-      await setEngine(db, 'v1');
-      await insertQueuedPr(db, { entry: { lastEvaluatedAt: null } });
-
-      await mergeQueueReconciler.runOnce();
-
-      expect(mergeSpy).not.toHaveBeenCalled();
-    });
   });
 
   // The entry's base_branch is a denormalized group key. It used to be written

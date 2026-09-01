@@ -23,7 +23,6 @@ import {
   computeEntryPositions,
   ensureActiveEntry,
   getActiveEntryForPr,
-  getMergeQueueEngine,
   loadActiveGroup,
 } from '../../services/mergeQueue/store.js';
 import { resolveStackParents } from '../../services/mergeQueue/stack.js';
@@ -128,20 +127,6 @@ describe('mergeQueue store', () => {
 
   afterEach(async () => {
     await cleanup();
-  });
-
-  describe('engine flag', () => {
-    it('reads v2 after the cutover migration (0032 flips the 0031 seed)', async () => {
-      expect(await getMergeQueueEngine(db)).toBe('v2');
-    });
-
-    it('reads v1 when rolled back', async () => {
-      await db
-        .update(settingsTable)
-        .set({ value: 'v1' })
-        .where(eq(settingsTable.key, 'merge_queue_engine'));
-      expect(await getMergeQueueEngine(db)).toBe('v1');
-    });
   });
 
   describe('membership', () => {
@@ -448,7 +433,6 @@ describe('mergeQueue store', () => {
         fixAttempts: 3,
       });
       expect(byPr.get(missingPr)).toMatchObject({ status: 'fixing', fixAttempts: 1 });
-      expect(await getMergeQueueEngine(db)).toBe('v2');
     });
 
     it('is idempotent — a second run converges to the same state', async () => {
