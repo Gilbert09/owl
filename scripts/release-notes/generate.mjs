@@ -39,10 +39,27 @@
  *   TALYN_RELEASE_INGEST_SECRET  omit to skip the POST
  */
 import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { filterReleaseCommits, surfacesForScope, kindForCommitType } from '@talyn/shared';
 
-const execFileAsync = promisify(execFile);
+/**
+ * Run the CLI and hand back what it said, without throwing.
+ *
+ * Two deliberate departures from `promisify(execFile)`. It leaves the child's
+ * stdin an open pipe, and the CLI waits on it — "no stdin data received in 3s"
+ * — on every run where stdin is not a terminal, which in CI is every run; the
+ * prompt is an argument, there is nothing to pipe. And its error message is the
+ * whole command line, which here is the entire system prompt: the one line
+ * anybody reads in a failed CI job would be a wall of prompt with the actual
+ * cause buried in it. The caller reads the exit code and the output instead.
+ */
+function run(file, args, options) {
+  return new Promise((resolve) => {
+    const child = execFile(file, args, options, (err, stdout, stderr) => {
+      resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), err: err ?? null });
+    });
+    child.stdin?.end();
+  });
+}
 
 const DRY_RUN = process.argv.includes('--dry-run');
 
@@ -179,7 +196,7 @@ When nothing in the release is worth telling a user about, reply {"highlights": 
  * subject full of quotes and backticks is data, not syntax.
  */
 async function callClaude(userMessage) {
-  const { stdout } = await execFileAsync(
+  const { stdout, stderr, err } = await run(
     'claude',
     [
       '-p',
@@ -202,11 +219,31 @@ async function callClaude(userMessage) {
     }
   );
 
-  const envelope = JSON.parse(stdout);
-  if (envelope.is_error || envelope.subtype !== 'success') {
+  // The CLI reports a bad token BOTH ways depending on how it fails: sometimes
+  // a non-zero exit, sometimes exit 0 with the reason inside the envelope. Read
+  // the envelope first either way — it carries the message worth printing.
+  let envelope = null;
+  try {
+    envelope = JSON.parse(stdout);
+  } catch {
+    /* fall through to the exit-code report below */
+  }
+  if (!envelope) {
     throw new Error(
-      `claude CLI failed (${envelope.subtype ?? 'no subtype'}): ${envelope.result ?? 'no result'}`
+      `claude CLI produced no JSON (${err ? `exit ${err.code ?? '?'}` : 'exit 0'}): ` +
+        `${(stderr || stdout).trim().slice(0, 500) || 'no output'}`
     );
+  }
+  // Lead with `is_error`, NOT `subtype`. An expired or wrong token comes back
+  // as `subtype: "success"` with `is_error: true` and the message in `result`
+  // ("Failed to authenticate. API Error: 401 OAuth access token is invalid"),
+  // so a check on subtype alone would read a failed auth as an empty release
+  // and post it — silently replacing the notes with nothing.
+  if (envelope.is_error || envelope.subtype !== 'success') {
+    const detail = envelope.api_error_status
+      ? `HTTP ${envelope.api_error_status}`
+      : (envelope.subtype ?? 'no subtype');
+    throw new Error(`claude CLI failed (${detail}): ${envelope.result ?? 'no result'}`);
   }
   if (envelope.permission_denials?.length) {
     // Not fatal — say it out loud, because it means the turn was partly spent
@@ -323,9 +360,9 @@ async function main() {
 }
 
 main().catch((err) => {
-  // Soft failure on purpose. Release notes are auxiliary; a GitHub blip, an
-  // Claude being unreachable, or a backend deploy in flight must not turn into a red
-  // publish run for a release that already shipped.
+  // Soft failure on purpose. Release notes are auxiliary; a GitHub blip, Claude
+  // being unreachable, or a backend deploy in flight must not turn a release
+  // that already shipped into a red publish run.
   console.error('release-notes: failed —', err?.message ?? err);
   process.exit(0);
 });
