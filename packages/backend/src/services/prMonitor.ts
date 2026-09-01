@@ -1530,12 +1530,19 @@ class PRMonitorService extends EventEmitter {
       // Pasting a PR's URL is an explicit ask for THIS PR, so it inherits the
       // workspace's auto-keep-mergeable default exactly as an authored PR
       // does — including on someone else's branch. See prCache's upsertRow.
+      // Also what sets `watching` on the row — deliberately inside this one
+      // statement rather than as a follow-up update. The follow-up used the
+      // service's `this.db` (the pool, correct for the background poll) while
+      // the upsert runs on the request's owner-scoped transaction, so the two
+      // fought over this row: on the already-tracked path the pool statement
+      // waited for a lock only the request transaction could release, while
+      // that transaction waited for the statement to return — a deadlock
+      // Postgres cannot detect (one side is an application await), which hung
+      // for the full 2min `statement_timeout` and died with 57014. On the
+      // insert path it failed silently instead, the uncommitted row being
+      // invisible to the pool, so `watching` was simply never set.
       explicitWatch: true,
     });
-    await this.db
-      .update(pullRequestsTable)
-      .set({ watching: true, updatedAt: new Date() })
-      .where(eq(pullRequestsTable.id, rowId));
 
     emitPullRequestUpdated(workspaceId, {
       id: rowId,

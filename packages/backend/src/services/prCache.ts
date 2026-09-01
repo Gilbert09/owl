@@ -701,6 +701,14 @@ async function upsertRow(
           ? {}
           : { reviewRequested: opts.reviewRequested }),
         ...(opts.authored === undefined ? {} : { authored: opts.authored }),
+        // Written HERE, in the caller's transaction, rather than by the watch
+        // route in a follow-up statement — that update used the monitor's pool
+        // handle while this one runs on the request's owner-scoped tx, and the
+        // two deadlocked on this row with no detector to break it. A CONDITIONAL
+        // spread, never a plain `watching: …`: the poller leaves this column
+        // alone (it never passes explicitWatch), and writing `false` here would
+        // un-watch a PR one tick after the user watched it.
+        ...(opts.explicitWatch === true ? { watching: true } : {}),
         updatedAt: now,
       })
       .where(eq(pullRequestsTable.id, opts.existingId));
@@ -716,6 +724,7 @@ async function upsertRow(
       state: opts.summary.state,
       reviewRequested: opts.reviewRequested ?? false,
       authored: opts.authored ?? false,
+      watching: opts.explicitWatch === true,
       mergedAt: opts.summary.mergedAt ? new Date(opts.summary.mergedAt) : null,
       lastPolledAt: now,
       lastSummary,

@@ -996,3 +996,96 @@ describe('prCache.getOrFetchPRSummary — TTL', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * `watching` is written by the upsert itself, off `explicitWatch`.
+ *
+ * It used to be a follow-up `UPDATE` issued by the watch route through the PR
+ * monitor's `this.db` — the POOL handle, which is right for the background poll
+ * and wrong inside a request. The upsert runs on the request's owner-scoped
+ * transaction, so the two statements raced the same row on two connections: an
+ * already-tracked PR deadlocked undetectably (the pool waited on a row lock only
+ * the request transaction could release; that transaction waited on the pool
+ * statement to return) and died at the 2min `statement_timeout` with 57014,
+ * while a brand-new PR failed silently, its uncommitted row being invisible to
+ * the pool so the update matched nothing.
+ *
+ * Folding it into the upsert removes the second handle. The invariant that
+ * replaces it, and the reason these tests exist: only `explicitWatch` may write
+ * this column. The poller must never touch it — writing `false` on a refresh
+ * would un-watch a PR one tick after the user watched it.
+ */
+describe('prCache — the watching column', () => {
+  let db: Database;
+  let cleanup: () => Promise<void>;
+
+  beforeEach(async () => {
+    const testDb = await createTestDb();
+    db = testDb.db;
+    cleanup = testDb.cleanup;
+    await seedUser(db, { id: TEST_USER_ID });
+    await db.insert(workspacesTable).values({
+      id: 'ws1',
+      ownerId: TEST_USER_ID,
+      name: 'ws',
+      settings: {},
+    });
+    await db.insert(repositoriesTable).values({
+      id: 'repo1',
+      workspaceId: 'ws1',
+      name: 'acme/widgets',
+      url: 'https://github.com/acme/widgets',
+      defaultBranch: 'main',
+    });
+  });
+
+  afterEach(async () => {
+    await cleanup();
+    vi.restoreAllMocks();
+  });
+
+  const upsert = (over: Record<string, unknown> = {}) =>
+    upsertFromBatchResult({
+      workspaceId: 'ws1',
+      repositoryId: 'repo1',
+      summary: makeSummary(),
+      ...over,
+    });
+
+  async function watching(): Promise<boolean | null> {
+    const rows = await db
+      .select({ watching: pullRequestsTable.watching })
+      .from(pullRequestsTable);
+    return rows[0]?.watching ?? null;
+  }
+
+  it('sets watching on a PR the user explicitly watched — the INSERT path', async () => {
+    // The silent half of the old bug: the row was created and `watching` was
+    // never set, so the PR was added but behaved as if it had not been.
+    await upsert({ explicitWatch: true });
+    expect(await watching()).toBe(true);
+  });
+
+  it('sets watching on a PR the poller had ALREADY tracked — the UPDATE path', async () => {
+    // The half that hung: this row is committed and visible, so the follow-up
+    // update blocked on it rather than no-oping.
+    await upsert();
+    expect(await watching()).toBe(false);
+
+    await upsert({ explicitWatch: true });
+    expect(await watching()).toBe(true);
+  });
+
+  it('leaves watching alone on an ordinary poll — never writes false', async () => {
+    // The invariant guarding the fix. A poll passes no `explicitWatch`, so it
+    // must not clear a watch the user just set.
+    await upsert({ explicitWatch: true });
+    await upsert({ summary: makeSummary({ title: 'Changed upstream' }) });
+    expect(await watching()).toBe(true);
+  });
+
+  it('does not watch a PR the poller merely discovered', async () => {
+    await upsert({ authored: true });
+    expect(await watching()).toBe(false);
+  });
+});
