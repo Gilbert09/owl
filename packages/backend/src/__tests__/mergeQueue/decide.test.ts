@@ -1201,20 +1201,27 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       expect(kinds(d)).not.toContain('fire_fix_run');
     });
 
-    it('keeps firing fix runs for the same state when there is NO gate (unchanged)', () => {
+    // Used to fire a run here. It must not: with no gate and no gate to blame,
+    // a MERGEABLE PR that GitHub merely reports as BLOCKED is one whose blocker
+    // we cannot NAME — and that status is also what GitHub reports while it is
+    // still recomputing, which is the state every PR is in for the first
+    // seconds after it is queued. Three PRs the list showed as "Ready" each
+    // started a run within three seconds of being queued that way; one was
+    // CLEAN with every check green by the time anyone looked. R7/R7b already
+    // cover the two bare-BLOCKED causes we CAN name (CI running, review
+    // missing), so what reaches here waits for a settled snapshot instead.
+    it('waits instead of firing a run at a BLOCKED state it cannot explain', () => {
       const d = decide(entry(), gateBlockedPr(), ctx());
-      expect(kinds(d)).toContain('fire_fix_run');
+      expect(kinds(d)).not.toContain('fire_fix_run');
       expect(kinds(d)).not.toContain('submit_external');
+      // Advances, so a PR we cannot classify never stalls its siblings.
+      expect(d.verdict).toBe('advance');
     });
 
     it.each([
       ['merge conflicts', { mergeable: 'CONFLICTING' as const, blockingReason: 'merge_conflicts' as const }],
       ['requested changes', { reviewDecision: 'CHANGES_REQUESTED' as const }],
       ['a failing required check', { blockingReason: 'checks_failed' as const, checks: { total: 3, failed: 1, inProgress: 0 } }],
-      [
-        'unresolved bot review threads',
-        { unresolvedReviewThreads: 2, unresolvedBotReviewThreads: 2, unresolvedHumanReviewThreads: 0 },
-      ],
     ])('still fixes %s under a gate — real work, whoever performs the merge', (_label, over) => {
       const d = decide(entry(), gateBlockedPr(over), ctx({ externalGate: 'confirmed' }));
       expect(kinds(d)).toContain('fire_fix_run');
@@ -1225,14 +1232,17 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
     // answer its reviewers. Reviewers on PostHog/posthog asked us to stop doing
     // the latter, and the queue is the loudest place it happened — the PR is
     // gate-BLOCKED, so without this it looked like remediable work forever.
-    it('does not fire a fix run for unresolved HUMAN threads under a gate', () => {
+    it.each([
+      ['HUMAN', { unresolvedHumanReviewThreads: 2, unresolvedBotReviewThreads: 0 }],
+      // Bot threads used to fire here. The queue no longer distinguishes: it
+      // asks `prBlocksMerge`, which counts no threads at all. The auto-keep
+      // watcher still fires for bot threads — "keep this PR green" IS a
+      // standing request to do that work; queueing is a request to merge.
+      ['BOT', { unresolvedHumanReviewThreads: 0, unresolvedBotReviewThreads: 2 }],
+    ])('does not fire a fix run for unresolved %s threads under a gate', (_label, over) => {
       const d = decide(
         entry(),
-        gateBlockedPr({
-          unresolvedReviewThreads: 2,
-          unresolvedHumanReviewThreads: 2,
-          unresolvedBotReviewThreads: 0,
-        }),
+        gateBlockedPr({ unresolvedReviewThreads: 2, ...over }),
         ctx({ externalGate: 'confirmed' })
       );
       expect(kinds(d)).not.toContain('fire_fix_run');

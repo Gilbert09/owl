@@ -13,7 +13,7 @@
 // round's verdict is the group-walk verdict.
 
 import {
-  prNeedsFollowup,
+  prBlocksMerge,
   mergeBlockerReason,
   externalQueueProviderLabel,
   externalQueueReason,
@@ -260,7 +260,7 @@ export function isDraft(pr: PrSnapshot): boolean {
 }
 
 /**
- * Behind / blocked-by-out-of-date is a queue blocker that `prNeedsFollowup`
+ * Behind / blocked-by-out-of-date is a queue blocker that `prBlocksMerge`
  * misses — it's exactly the state every sibling PR lands in after one merges
  * to the shared base.
  */
@@ -270,7 +270,7 @@ export function needsUpdate(pr: PrSnapshot): boolean {
 }
 
 export function queueBlocked(pr: PrSnapshot): boolean {
-  return prNeedsFollowup(pr.summary) || needsUpdate(pr);
+  return prBlocksMerge(pr.summary) || needsUpdate(pr);
 }
 
 /**
@@ -297,19 +297,20 @@ export function queueBlocked(pr: PrSnapshot): boolean {
  * the resulting new head resets its budgets via R2 — so the fix-run cap can
  * never be reached and each base advance buys another paid cloud run.
  *
- * Everything `prNeedsFollowup` covers still counts under a gate — conflicts,
- * requested changes, unresolved BOT threads and failing REQUIRED checks are
- * real work no matter who performs the merge, and the provider will hold the
- * PR at "not ready" forever until they're fixed. Pending CI and a missing
- * required review are handled upstream (R7/R7b) and never reach here.
+ * Everything `prBlocksMerge` covers still counts under a gate — conflicts,
+ * requested changes and failing REQUIRED checks are real work no matter who
+ * performs the merge, and the provider will hold the PR at "not ready" forever
+ * until they're fixed. Pending CI and a missing required review are handled
+ * upstream (R7/R7b) and never reach here.
  *
- * Unresolved HUMAN threads deliberately do NOT count, here or anywhere else
- * `prNeedsFollowup` is asked: queueing a PR is a request to merge it, not a
- * request to have an agent answer the reviewers. The manual "Get PR mergeable"
+ * Unresolved threads deliberately do NOT count, of EITHER authorship — that is
+ * the whole reason the queue asks `prBlocksMerge` rather than the watcher's
+ * `prNeedsFollowup`. Queueing a PR is a request to merge it, not a request to
+ * have an agent answer the comments on it first. The manual "Get PR mergeable"
  * button still covers that when the user actually wants it.
  */
 function queueBlockedFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
-  if (prNeedsFollowup(pr.summary)) return true;
+  if (prBlocksMerge(pr.summary)) return true;
   if (ctx.externalGate !== null) return false;
   return needsUpdate(pr);
 }
@@ -327,7 +328,7 @@ export function ciInFlight(pr: PrSnapshot): boolean {
 /**
  * A *settled* reason the PR can't merge — one a remediation should act on now,
  * even if other checks are still running: conflicts, changes requested,
- * unresolved threads, or a failed REQUIRED check (all via `prNeedsFollowup`),
+ * or a failed REQUIRED check (all via `prBlocksMerge`),
  * or BEHIND the base. Deliberately excludes a bare `BLOCKED`, which is what
  * GitHub reports while required checks are merely pending — that case must
  * wait for CI, not be treated as blocked.
@@ -340,7 +341,7 @@ export function ciInFlight(pr: PrSnapshot): boolean {
  * into remediation the moment master moved.
  */
 function hasSettledBlockerFor(pr: PrSnapshot, ctx: DecisionContext): boolean {
-  if (prNeedsFollowup(pr.summary)) return true;
+  if (prBlocksMerge(pr.summary)) return true;
   return mergeStateOf(pr) === 'BEHIND' && ctx.externalGate === null;
 }
 
@@ -458,7 +459,7 @@ export function awaitingRequiredReview(pr: PrSnapshot, ctx: DecisionContext): bo
  * doesn't see, so it's special-cased here.
  */
 export function blockerReason(pr: PrSnapshot): string {
-  if (prNeedsFollowup(pr.summary)) return mergeBlockerReason(pr.summary);
+  if (prBlocksMerge(pr.summary)) return mergeBlockerReason(pr.summary);
   if (needsUpdate(pr)) return 'the branch is behind its base';
   return 'needs attention';
 }
@@ -1217,7 +1218,7 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
   if (
     ctx.updateBranchAvailable &&
     mergeStateOf(pr) === 'BEHIND' &&
-    !prNeedsFollowup(pr.summary)
+    !prBlocksMerge(pr.summary)
   ) {
     if (ctx.updateBranchOutcome === undefined) {
       d.act({ kind: 'update_branch' });
@@ -1234,6 +1235,27 @@ export function decide(entry: EntrySnapshot, pr: PrSnapshot, ctx: DecisionContex
       return d.done('advance');
     }
     // conflict/error → the update can't do it; fall through to the fix run.
+  }
+
+  // A blocker we cannot NAME is not worth a paid cloud run.
+  //
+  // `queueBlockedFor` counts a bare BLOCKED (through `needsUpdate`), but
+  // `hasSettledBlockerFor` deliberately does not — BLOCKED is also what GitHub
+  // reports while it is still recomputing mergeability, which is exactly the
+  // state a PR is in for the first seconds after it is queued. Reaching here on
+  // one means firing a run at a PR whose only "problem" is that GitHub has not
+  // answered yet. That is how three PRs the list showed as "Ready" each started
+  // a run within three seconds of being queued (PostHog/hogland#442/#444/#445);
+  // #444 was CLEAN with 16/16 checks green by the time anyone looked.
+  //
+  // R7/R7b already catch the two bare-BLOCKED causes we can identify (CI still
+  // running, a required review missing). Anything left is unexplained, so hold
+  // the entry as queued and let the next evaluation see a settled snapshot.
+  // ADVANCE rather than hold the group: a PR we cannot classify must not stop
+  // its siblings from draining.
+  if (!hasSettledBlockerFor(pr, ctx)) {
+    d.ensure('queued');
+    return d.done('advance');
   }
 
   // Fire the shared "get this PR mergeable" cloud run. A genuine blocker

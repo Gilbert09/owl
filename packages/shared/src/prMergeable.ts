@@ -87,6 +87,28 @@ export interface PRMergeableSummary {
  * queue); the manual fix button uses the broader {@link prHasFixableIssues}.
  */
 export function prNeedsFollowup(s: PRMergeableSummary): boolean {
+  // Unresolved BOT threads only, and only when we actually know the split —
+  // see the note below. Everything else is in the merge-queue variant.
+  return prBlocksMerge(s) || (s.unresolvedBotReviewThreads ?? 0) > 0;
+}
+
+/**
+ * {@link prNeedsFollowup} without the unresolved-thread clause — what the MERGE
+ * QUEUE asks, and the reason it is a separate function.
+ *
+ * Queueing a PR is a request to MERGE it. It is not a request to have an agent
+ * go and answer the comments on it first, and a user who queues three PRs the
+ * list calls "Ready" and watches three cloud runs start has been surprised by
+ * their own tool (PostHog/hogland#442/#444/#445). A thread is also not a thing
+ * GitHub refuses a merge over unless the repo requires conversation
+ * resolution — in which case the merge attempt itself says so, which is a
+ * better signal than guessing beforehand and paying for a run.
+ *
+ * The auto-keep-mergeable watcher deliberately keeps the broader
+ * {@link prNeedsFollowup}: "keep this PR green" IS a standing request to do the
+ * work, and a linter's nits are exactly what nobody wants to triage by hand.
+ */
+export function prBlocksMerge(s: PRMergeableSummary): boolean {
   return (
     s.blockingReason === 'merge_conflicts' ||
     s.blockingReason === 'changes_requested' ||
@@ -96,21 +118,7 @@ export function prNeedsFollowup(s: PRMergeableSummary): boolean {
     // non-required failing check is not worth an unattended paid run.
     s.blockingReason === 'checks_failed' ||
     s.mergeable === 'CONFLICTING' ||
-    s.reviewDecision === 'CHANGES_REQUESTED' ||
-    // Unresolved BOT threads only, and only when we actually know the split.
-    //
-    // An unattended run must never be started merely because people are talking
-    // on the PR. A human's review thread is a conversation, and an agent that
-    // wades in to answer it is the behaviour reviewers on PostHog/posthog asked
-    // us to stop. Bot threads are the opposite case — nobody wants to triage a
-    // linter's nits by hand — so those still earn a run.
-    //
-    // The count is absent on any summary cached before the split shipped, and
-    // absence means "we don't know who wrote them", which must not fire. Those
-    // rows re-poll within a tick and gain the field, so this self-heals.
-    // `prHasFixableIssues` still counts every unresolved thread, so the manual
-    // "Get PR mergeable" button stays available for exactly this case.
-    (s.unresolvedBotReviewThreads ?? 0) > 0
+    s.reviewDecision === 'CHANGES_REQUESTED'
   );
 }
 

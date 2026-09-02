@@ -68,7 +68,7 @@ interface PRTableProps {
   onOpenTask: (taskId: string) => void;
   /** Stop the row's linked task while it is queued or running. Rejects with
    *  the backend's reason so the row can toast it. */
-  onStopTask: (taskId: string) => Promise<void>;
+  onStopTask: (taskId: string, row?: PRRow) => Promise<void>;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
@@ -254,7 +254,7 @@ function PRTableRow({
   isSelected: boolean;
   onSelect: () => void;
   onOpenTask: (taskId: string) => void;
-  onStopTask: (taskId: string) => Promise<void>;
+  onStopTask: (taskId: string, row?: PRRow) => Promise<void>;
   onMerge: (row: PRRow) => Promise<void>;
   onSetMergeQueue: (row: PRRow, enabled: boolean) => Promise<void>;
   /** Queue/dequeue a stack of dependent PRs. Enabling takes everything `row` is
@@ -494,7 +494,7 @@ function PRTableRow({
     setBusy('stop');
     setRowError(null);
     try {
-      await onStopTask(row.taskId);
+      await onStopTask(row.taskId, row);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not stop the task';
       setRowError(message);

@@ -125,11 +125,31 @@ export function useGitHubActions() {
 
   // Stop a row's linked task from the row itself. The store update flips the
   // badge and brings the start button back; the row toasts a failure.
+  // Stop the run on a PR — and, when that PR is in the merge queue, take it OUT
+  // of the queue in the same gesture.
+  //
+  // Order matters and is the whole fix. Stopping alone lands the task in
+  // `cancelled`, which is a terminal task status, which is a trigger the queue
+  // reacts to by evaluating the group again — finds no active run, and fires
+  // the NEXT run at the same PR. So the Stop button read as "start another
+  // one". Dequeuing FIRST means the terminal-task trigger looks the entry up by
+  // fix task and finds nothing to evaluate.
+  //
+  // The dequeue is best-effort: failing to leave the queue must not stop us
+  // stopping the run, which is the part the user actually pressed.
   const stopTask = useCallback(
-    async (taskId: string) => {
+    async (taskId: string, row?: PRRow) => {
+      if (row?.mergeQueued) {
+        patchRow(row.id, { mergeQueued: false, mergeQueue: null });
+        try {
+          await api.pullRequests.setMergeQueue(row.id, false);
+        } catch {
+          patchRow(row.id, { mergeQueued: true });
+        }
+      }
       await stopTaskRequest(taskId);
     },
-    [stopTaskRequest]
+    [stopTaskRequest, patchRow]
   );
 
   // Squash-merge a PR straight from its row. Throws (with GitHub's reason) if
