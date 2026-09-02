@@ -74,16 +74,40 @@ describe('useWhatsNew — deciding whether to interrupt', () => {
     delete process.env.TALYN_APP_VERSION;
   });
 
-  it('shows nothing on a first run and records the latest release as the baseline', async () => {
+  // A missing key does NOT mean "new install". It also means "first run of a
+  // build that has this feature" — which was every user Talyn already had, and
+  // baselining them silently is why the first release's notes reached nobody.
+  it('catches an existing user up on the release they just updated into', async () => {
     seed(null);
-    latest.mockResolvedValue(entry('0.2.62'));
+    list.mockResolvedValue([entry(APP_VERSION), entry('0.2.61')]);
 
     render(<Harness />);
 
-    await waitFor(() => expect(stored()).toBe('0.2.62'));
-    expect(latest).toHaveBeenCalled();
-    // A brand-new user gets the app, not a changelog of everything that shipped.
-    expect(list).not.toHaveBeenCalled();
+    await waitFor(() => expect(modalOpen()).toBe(true));
+    expect(stored()).toBe(APP_VERSION);
+  });
+
+  it('catches them up on that ONE release, not the whole table', async () => {
+    // Replaying months of releases at someone who was using the app the whole
+    // time is not "what's new", and that modal would grow without bound.
+    seed(null);
+    list.mockResolvedValue([entry(APP_VERSION), entry('0.2.61'), entry('0.2.60')]);
+
+    render(<Harness />);
+
+    await waitFor(() => expect(modalOpen()).toBe(true));
+    expect(useWorkspaceStore.getState().whatsNewEntries.map((e) => e.version)).toEqual([
+      APP_VERSION,
+    ]);
+  });
+
+  it('still shows nothing when that release had nothing worth reading', async () => {
+    seed(null);
+    list.mockResolvedValue([entry(APP_VERSION, [])]);
+
+    render(<Harness />);
+
+    await waitFor(() => expect(stored()).toBe(APP_VERSION));
     expect(modalOpen()).toBe(false);
   });
 
@@ -155,14 +179,18 @@ describe('useWhatsNew — deciding whether to interrupt', () => {
     expect(stored()).toBe('0.2.60');
   });
 
-  it('does not fire for a user who just finished onboarding', async () => {
+  it('baselines a user who just finished onboarding, and shows them nothing', async () => {
+    // They installed minutes ago; nothing in the feed is new to them. They are
+    // also the reason the catch-up above can be unconditional — a genuinely
+    // new user is baselined HERE and so never reaches it.
     seed(null, { justOnboarded: true });
+    latest.mockResolvedValue(entry('0.2.62'));
 
     render(<Harness />);
 
-    await waitFor(() => expect(useWorkspaceStore.getState().whatsNewChecked).toBe(false));
-    expect(latest).not.toHaveBeenCalled();
+    await waitFor(() => expect(stored()).toBe('0.2.62'));
     expect(list).not.toHaveBeenCalled();
+    expect(modalOpen()).toBe(false);
   });
 
   it('checks once, however many times the layout remounts', async () => {

@@ -52,7 +52,7 @@ export function useWhatsNew(): void {
     // `whatsNewChecked` is store state rather than a ref because MainLayout is
     // rendered per route here — a component-local guard would re-run this on
     // every navigation.
-    if (checked || justOnboarded) return;
+    if (checked) return;
     markChecked();
 
     void (async () => {
@@ -60,8 +60,36 @@ export function useWhatsNew(): void {
         const lastSeenVersion = readLastSeenVersion();
 
         if (!lastSeenVersion) {
-          const latest = await api.releaseNotes.latest();
-          writeLastSeenVersion(latest?.version ?? null);
+          // A brand-new user gets a baseline and no changelog — they signed up
+          // minutes ago and nothing in the feed is "new" to them.
+          if (justOnboarded) {
+            const latest = await api.releaseNotes.latest();
+            writeLastSeenVersion(latest?.version ?? null);
+            return;
+          }
+
+          // But an EXISTING user reaches here too, and that is the case this
+          // branch exists for. A missing key does not mean "new install"; it
+          // also means "first load after this feature shipped", which is every
+          // user Talyn already had. Baselining them silently is why the 0.2.64
+          // notes were invisible to everyone who was already using it.
+          //
+          // Scoped deliberately to the ONE newest release rather than the whole
+          // table — which is what this client is running, since app.talyn.dev
+          // deploys on every push and is always at or ahead of the newest cut.
+          const all = await api.releaseNotes.list();
+          const newest = all[0];
+          writeLastSeenVersion(newest?.version ?? null);
+          if (!newest) return;
+          const toShow = shouldShowWhatsNew({
+            // Floor, not a real version: the window is already narrowed to the
+            // single entry above, so this just means "no lower bound".
+            lastSeenVersion: '0.0.0',
+            currentVersion: null,
+            entries: [newest],
+            surface: 'web' as const,
+          });
+          if (toShow.length > 0) openWhatsNew(toShow);
           return;
         }
 

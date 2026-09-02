@@ -76,16 +76,36 @@ describe('useWhatsNew — deciding whether to interrupt', () => {
     vi.restoreAllMocks();
   });
 
-  it('shows nothing on a first run and records the latest release as the baseline', async () => {
+  // A missing key does NOT mean "new install". It also means "first load after
+  // this feature shipped" — which was every user Talyn already had, and
+  // baselining them silently is why the first release's notes reached nobody.
+  it('catches an existing user up on the newest release', async () => {
     seed(null);
-    latest.mockResolvedValue(entry('0.2.62'));
+    list.mockResolvedValue([entry('0.2.62'), entry('0.2.61')]);
+
+    render(<Harness />);
+
+    await waitFor(() => expect(modalOpen()).toBe(true));
+    expect(stored()).toBe('0.2.62');
+  });
+
+  it('catches them up on that ONE release, not the whole table', async () => {
+    seed(null);
+    list.mockResolvedValue([entry('0.2.62'), entry('0.2.61'), entry('0.2.60')]);
+
+    render(<Harness />);
+
+    await waitFor(() => expect(modalOpen()).toBe(true));
+    expect(useWorkspaceStore.getState().whatsNewEntries.map((e) => e.version)).toEqual(['0.2.62']);
+  });
+
+  it('still shows nothing when that release had nothing worth reading', async () => {
+    seed(null);
+    list.mockResolvedValue([entry('0.2.62', [])]);
 
     render(<Harness />);
 
     await waitFor(() => expect(stored()).toBe('0.2.62'));
-    expect(latest).toHaveBeenCalled();
-    // A brand-new user gets the app, not a changelog of everything that shipped.
-    expect(list).not.toHaveBeenCalled();
     expect(modalOpen()).toBe(false);
   });
 
@@ -137,14 +157,18 @@ describe('useWhatsNew — deciding whether to interrupt', () => {
     expect(stored()).toBe('0.2.63');
   });
 
-  it('does not fire for a user who just finished onboarding', async () => {
+  it('baselines a user who just finished onboarding, and shows them nothing', async () => {
+    // They signed up minutes ago; nothing in the feed is new to them. They are
+    // also the reason the catch-up above can be unconditional — a genuinely
+    // new user is baselined HERE and so never reaches it.
     seed(null, { justOnboarded: true });
+    latest.mockResolvedValue(entry('0.2.62'));
 
     render(<Harness />);
 
-    await waitFor(() => expect(useWorkspaceStore.getState().whatsNewChecked).toBe(false));
-    expect(latest).not.toHaveBeenCalled();
+    await waitFor(() => expect(stored()).toBe('0.2.62'));
     expect(list).not.toHaveBeenCalled();
+    expect(modalOpen()).toBe(false);
   });
 
   it('checks once, however many times the layout remounts', async () => {

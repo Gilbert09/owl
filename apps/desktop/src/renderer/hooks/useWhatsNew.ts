@@ -71,7 +71,7 @@ export function useWhatsNew(): void {
   const justOnboarded = useWorkspaceStore((s) => s.justOnboarded);
 
   useEffect(() => {
-    if (checked || justOnboarded) return;
+    if (checked) return;
     markChecked();
 
     // See the docblock: an unversioned build cannot answer "do I have this
@@ -84,8 +84,36 @@ export function useWhatsNew(): void {
         const lastSeenVersion = readLastSeenVersion();
 
         if (!lastSeenVersion) {
-          const latest = await api.releaseNotes.latest();
-          writeLastSeenVersion(latest?.version ?? null);
+          // A brand-new user gets a baseline and no changelog — they installed
+          // the app minutes ago and nothing in the feed is "new" to them.
+          if (justOnboarded) {
+            const latest = await api.releaseNotes.latest();
+            writeLastSeenVersion(latest?.version ?? currentVersion);
+            return;
+          }
+
+          // But an EXISTING user reaches here too, and that is the case this
+          // branch exists for. A missing key does not mean "new install"; it
+          // also means "first run of a build that has this feature", which is
+          // every user Talyn already had. Baselining them silently is why the
+          // 0.2.64 notes were invisible to everyone who was already using it.
+          //
+          // Scoped deliberately to the ONE release they are running. "Here is
+          // what changed in the update you just got" is the honest claim;
+          // replaying months of releases at someone who was using the app the
+          // whole time is not, and the size of that modal would grow with the
+          // table forever.
+          const all = await api.releaseNotes.list();
+          writeLastSeenVersion(currentVersion);
+          const toShow = shouldShowWhatsNew({
+            // Floor, not a real version: the window is already narrowed to the
+            // single entry below, so this just means "no lower bound".
+            lastSeenVersion: '0.0.0',
+            currentVersion,
+            entries: all.filter((e) => e.version === currentVersion),
+            surface: 'desktop' as const,
+          });
+          if (toShow.length > 0) openWhatsNew(toShow);
           return;
         }
 
