@@ -366,6 +366,8 @@ export interface DecisionContext {
   groupMergeInFlight: boolean;
   /** State of the queue's own fix run (`entry.fixTaskId`). */
   fixTaskState: 'active' | 'terminal' | 'none';
+  /** When the linked fix run was created; null when there is none. */
+  fixTaskStartedAt: string | null;
   /**
    * Another run is linked to the PR (`pull_requests.taskId` differs from our
    * fixTaskId and is active) — a manual task or the keep-mergeable watcher.

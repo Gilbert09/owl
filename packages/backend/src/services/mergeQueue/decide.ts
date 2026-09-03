@@ -1444,6 +1444,8 @@ function decideCleanButWaitingOnCi(
   if (ctx.externalGate) {
     const signing = signingGateFor(d, pr, ctx, runActive);
     if (signing === 'clear') {
+      const heldForRun = submitHeldForRun(d, ctx, runActive);
+      if (heldForRun) return heldForRun;
       const backoff = queueBackoff(d, ctx);
       if (backoff) return backoff;
       d.act({ kind: 'submit_external' });
@@ -2105,6 +2107,56 @@ function dispatchResign(d: DecisionBuilder, ctx: DecisionContext, runActive: boo
  * at once, and one notification per PR would be the noise the feature exists to
  * remove — the blocked reason carries it in the UI instead.
  */
+/**
+ * How long submission waits for an in-flight fix run before going anyway.
+ *
+ * The wait itself is the point (see {@link submitHeldForRun}); this bounds it,
+ * because a run that never reaches a terminal state would otherwise hold the PR
+ * out of the queue forever — and that is not hypothetical, we have runs that sat
+ * `in_progress` for a day. Observed on PostHog/posthog#93148, both fix runs
+ * pushed within minutes of being dispatched (6m34s and 2m39s), so 30 minutes is
+ * several times the window in which the ejection risk is real.
+ *
+ * The trade is deliberate and worth stating: a run still alive at 30 minutes can
+ * push afterwards and still earn an ejection. One possible wasted test cycle is
+ * the better side of that trade against a PR stranded out of the queue forever.
+ */
+export const SUBMIT_HOLD_FOR_RUN_MS = 30 * 60_000;
+
+/**
+ * Don't hand a PR to the external queue while our OWN fix run is working it.
+ *
+ * trunk tests a submitted PR and ejects it the moment anything pushes —
+ * `🚫 removed from the merge queue because it was pushed to`. A fix run exists
+ * to push. Submitting while one is in flight therefore buys a test cycle we
+ * have already guaranteed we will waste, and PostHog/posthog#93148 is what that
+ * looks like: `fix_run_fired` at 11:05:19, `external_submitted` thirteen
+ * seconds later, the run's push at 11:11:53, ejected at 11:15:32.
+ *
+ * This is Session 87's hazard arriving through a door R5d does not cover. R5d
+ * stands down while the provider is OBSERVED holding the PR; here trunk had
+ * just FAILED it, so nothing was holding it when we both dispatched a run and
+ * resubmitted.
+ *
+ * Called beside {@link queueBackoff} at the submit sites that can be reached
+ * with a run in flight. The two in `decideMergeAftermath` are downstream of a
+ * merge attempt, which only happens on the clean path, so they inherit this.
+ */
+function submitHeldForRun(
+  d: DecisionBuilder,
+  ctx: DecisionContext,
+  runActive: boolean
+): Decision | null {
+  if (!runActive) return null;
+  const startedAt = ctx.fixTaskStartedAt ? Date.parse(ctx.fixTaskStartedAt) : NaN;
+  const heldFor = Number.isNaN(startedAt) ? 0 : Date.parse(ctx.nowIso) - startedAt;
+  // Unparseable or missing start time reads as "just started" — fail toward
+  // waiting, which costs latency, rather than toward the ejection.
+  if (heldFor > SUBMIT_HOLD_FOR_RUN_MS) return null;
+  d.ensure('fixing');
+  return d.done('advance');
+}
+
 function queueBackoff(d: DecisionBuilder, ctx: DecisionContext): Decision | null {
   if (!ctx.queueHealth || ctx.queueHealth.state !== 'degraded') return null;
   if (d.entry.status === 'blocked' && d.entry.blockedCode === 'external_queue_unhealthy') {
@@ -2157,6 +2209,8 @@ function decideCleanPath(
   // submit action falls back to the direct merge when the gate is only
   // suspected and GitHub says the PR could merge right now.
   if (ctx.externalGate) {
+    const heldForRun = submitHeldForRun(d, ctx, runActive);
+    if (heldForRun) return heldForRun;
     const backoff = queueBackoff(d, ctx);
     if (backoff) return backoff;
     d.act({ kind: 'submit_external' });

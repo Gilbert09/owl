@@ -101,6 +101,7 @@ function ctx(o: Partial<DecisionContext> = {}): DecisionContext {
     isHead: true,
     groupMergeInFlight: false,
     fixTaskState: 'none',
+    fixTaskStartedAt: null,
     otherLinkedTaskActive: false,
     signingRequired: false,
     autoMergeCapability: 'unavailable',
@@ -1184,6 +1185,60 @@ describe('decide — external merge queue (trunk.io / GitHub native)', () => {
       const d = decide(entry(), draftPr(), ctx({ externalGate: 'confirmed' }));
       expect(kinds(d)).not.toContain('submit_external');
       expect(lastTransition(d)!.blockedCode).toBe('draft');
+    });
+  });
+
+  /**
+   * PostHog/posthog#93148, 2026-09-02. trunk failed the PR, so a fix run was
+   * dispatched at 11:05:19 — and the very next evaluation submitted it to
+   * trunk, thirteen seconds later. A fix run exists to PUSH, and trunk ejects
+   * anything pushed to while it is testing it, so the ejection at 11:15:32 was
+   * guaranteed from the moment we submitted. One wasted trunk test cycle, then
+   * a resubmit, per run.
+   *
+   * Session 87 stands down while trunk is OBSERVED holding the PR (R5d). That
+   * did not cover this, because trunk had just FAILED the PR — nothing was
+   * holding it when we dispatched a run and submitted in the same breath.
+   */
+  describe('submitting while our own fix run is in flight', () => {
+    const readyForSubmit = () =>
+      pr({ mergeStateStatus: 'BLOCKED' }, { blockingReason: 'blocked', reviewDecision: 'APPROVED' });
+    const running = (startedAt: string) =>
+      ctx({ externalGate: 'confirmed', fixTaskState: 'active', fixTaskStartedAt: startedAt });
+
+    it('waits instead of submitting a PR its own run is about to push to', () => {
+      const d = decide(entry(), readyForSubmit(), running('2026-07-16T11:59:47.000Z'));
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('submits as usual once no run is in flight', () => {
+      const d = decide(entry(), readyForSubmit(), ctx({ externalGate: 'confirmed' }));
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('advances, so waiting on one PR never stalls its siblings', () => {
+      const d = decide(entry(), readyForSubmit(), running('2026-07-16T11:59:47.000Z'));
+      expect(d.verdict).toBe('advance');
+    });
+
+    // The bound. A run that never terminalises would otherwise hold the PR out
+    // of the queue forever, and we have runs that sat in_progress for a day.
+    it('gives up waiting on a run that has been going far too long', () => {
+      // 31 minutes — past SUBMIT_HOLD_FOR_RUN_MS.
+      const d = decide(entry(), readyForSubmit(), running('2026-07-16T11:29:00.000Z'));
+      expect(kinds(d)).toContain('submit_external');
+    });
+
+    it('is still waiting just inside the bound', () => {
+      const d = decide(entry(), readyForSubmit(), running('2026-07-16T11:31:00.000Z'));
+      expect(kinds(d)).not.toContain('submit_external');
+    });
+
+    it('waits when the run has no readable start time', () => {
+      // Fail toward waiting: that costs latency, the other way costs a trunk
+      // test cycle and an ejection.
+      const d = decide(entry(), readyForSubmit(), running('not-a-date'));
+      expect(kinds(d)).not.toContain('submit_external');
     });
   });
 

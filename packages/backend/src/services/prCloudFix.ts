@@ -184,6 +184,24 @@ export async function linkedTaskStatus(taskId: string | null): Promise<string | 
   return rows[0]?.status ?? null;
 }
 
+/**
+ * The linked run's status AND when it started — the merge queue needs both.
+ * Separate from {@link linkedTaskStatus} so its callers keep their shape; this
+ * is one query either way.
+ */
+export async function linkedTaskRun(
+  taskId: string | null
+): Promise<{ status: string; startedAt: Date } | null> {
+  if (!taskId) return null;
+  const rows = await getDbClient()
+    .select({ status: tasksTable.status, createdAt: tasksTable.createdAt })
+    .from(tasksTable)
+    .where(eq(tasksTable.id, taskId))
+    .limit(1);
+  const row = rows[0];
+  return row ? { status: row.status, startedAt: row.createdAt } : null;
+}
+
 /** Minimal PR shape needed to fire a "get mergeable" run. */
 export interface PrFixRow {
   id: string;
