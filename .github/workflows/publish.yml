@@ -1,9 +1,9 @@
 name: Publish
 
 # Three ways to cut a stable release:
-#   1. The nightly schedule, 03:00 UTC. Skipped when main has not moved since
-#      the latest stable release. This is the normal path: a build ships
-#      every night without anyone dispatching it.
+#   1. The schedule, every six hours. Skipped when main has not moved since
+#      the latest stable release. This is the normal path: a build ships a
+#      few hours after a change lands without anyone dispatching it.
 #   2. Actions → Publish → "Run workflow" — version optional (empty = next
 #      patch above the highest existing release). Fully CI, no local git.
 #   3. Push a vX.Y.Z tag (the original path) — still works identically.
@@ -12,7 +12,7 @@ name: Publish
 # feed and the website's download button follow.
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 */6 * * *'
   push:
     tags:
       - 'v*'
@@ -32,8 +32,8 @@ concurrency:
 jobs:
   check:
     # Only the scheduled run can be pointless. It compares main against the
-    # latest stable release rather than a 24h window so a night the cron
-    # misses is caught up the next night instead of waiting for a new commit.
+    # latest stable release rather than a fixed window so a run the cron
+    # misses is caught up by the next one instead of waiting for a new commit.
     if: github.event_name != 'schedule' || github.repository == 'Gilbert09/talyn'
     runs-on: ubuntu-latest
     outputs:
