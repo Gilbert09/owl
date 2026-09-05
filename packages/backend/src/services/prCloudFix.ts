@@ -55,9 +55,21 @@ async function envIdForType(
   return rows[0]?.envId ?? null;
 }
 
-/** Deterministic fallback order when no specific default is pinned (or it isn't
- *  connected): PostHog Code first for back-compat, then Claude Code. */
-const CLOUD_PROVIDER_ORDER: CloudProviderType[] = ['posthog_code', 'claude_code'];
+/**
+ * Deterministic fallback order when no specific default is pinned (or it isn't
+ * connected): TALYN FLEET FIRST, then PostHog Code.
+ *
+ * The fleet leads because it is the better place for the work — a real microVM,
+ * the workspace's own agent subscription rather than metered credits, and a
+ * credential proxy that keeps every token out of the guest. PostHog Code stays
+ * second rather than being removed: it is what a workspace that is not on the
+ * fleet allow-list runs on, and it is what a fleet at capacity falls back to.
+ *
+ * The `selfhosted` link is DROPPED from the chain for a workspace that may not
+ * use the fleet (see `workspaceMayUseFleet`), so a non-allow-listed workspace
+ * gets exactly today's behaviour: the chain heads at PostHog Code.
+ */
+const CLOUD_PROVIDER_ORDER: CloudProviderType[] = ['selfhosted', 'posthog_code'];
 
 async function defaultCloudProvider(
   workspaceId: string
@@ -101,11 +113,11 @@ export async function resolveCloudEnv(workspaceId: string): Promise<ResolvedClou
  * property that lets the self-hosted fleet be smaller than peak demand — a full
  * box degrades to a hosted provider instead of to an error.
  *
- * `selfhosted` is reachable only by being pinned as the workspace's
- * `defaultCloudProvider`, never from the standard order, and it is dropped from
- * the chain entirely when the workspace is not on the fleet allow-list. Falling
- * through is deliberate: a workspace that pinned the fleet and is not allowed
- * to use it should get its task run somewhere, not fail.
+ * `selfhosted` now HEADS the standard order rather than being reachable only by
+ * being pinned. It is still dropped from the chain entirely when the workspace
+ * is not on the fleet allow-list, and falling through is deliberate: a
+ * workspace that cannot use the fleet should get its task run somewhere, not
+ * fail.
  */
 export async function resolveCloudEnvChain(workspaceId: string): Promise<ResolvedCloudEnv[]> {
   const pinned = await defaultCloudProvider(workspaceId);

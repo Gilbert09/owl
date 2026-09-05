@@ -25,7 +25,6 @@ import {
   Bug,
   Info,
   Download,
-  Bot,
   Plug,
   Copy,
   KeyRound,
@@ -54,7 +53,6 @@ import { WorkspaceLogo } from '../widgets/WorkspaceLogo';
 import {
   GetKeyLink,
   POSTHOG_API_KEYS_URL,
-  ANTHROPIC_API_KEYS_URL,
   CLAUDE_SETUP_TOKEN_URL,
   POSTHOG_KEY_SCOPE_NOTE,
 } from '../widgets/GetKeyLink';
@@ -71,7 +69,7 @@ import type {
   McpToken,
   BillingOrder,
 } from '@talyn/shared';
-import { DEFAULT_FLEET_MODEL_ID, FLEET_MODELS, CLAUDE_MODELS, DEFAULT_CLAUDE_MODEL_ID, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID, parseAutoKeepMergeableLabels } from '@talyn/shared';
+import { DEFAULT_FLEET_MODEL_ID, FLEET_MODELS, POSTHOG_CODE_MODELS, DEFAULT_POSTHOG_CODE_MODEL_ID, parseAutoKeepMergeableLabels } from '@talyn/shared';
 import { useWorkspaceStore, type Theme } from '../../stores/workspace';
 import { useBillingStore } from '../../stores/billing';
 import {
@@ -914,12 +912,12 @@ function WorkspaceModelSelector({
   defaultId,
   settingKey,
 }: {
-  providerType: 'claude_code' | 'posthog_code' | 'selfhosted';
+  providerType: 'posthog_code' | 'selfhosted';
   title: string;
   description: string;
   models: ReadonlyArray<{ id: string; label: string }>;
   defaultId: string;
-  settingKey: 'claudeModel' | 'posthogCodeModel' | 'fleetModel';
+  settingKey: 'posthogCodeModel' | 'fleetModel';
 }) {
   const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -985,30 +983,6 @@ export function ProviderConnectCards() {
       {/* PostHog Code (cloud tasks) */}
       <PostHogCodeCard />
 
-      {/* Claude Code (Managed Agents). Generic card driven by the
-          /cloud-providers routes — the template additional providers reuse. */}
-      <CloudProviderCard
-        type="claude_code"
-        displayName="Claude Code"
-        icon={Bot}
-        blurb="Add an Anthropic API key to run tasks on Claude’s cloud sandbox (Managed Agents). GitHub access reuses this workspace’s GitHub connection."
-        connectedBlurb="Cloud tasks run on Claude Managed Agents and open PRs via your GitHub connection."
-        fields={[
-          { key: 'anthropicApiKey', label: 'Anthropic API key', type: 'password', placeholder: 'sk-ant-...' },
-        ]}
-        keyHelp={{ url: ANTHROPIC_API_KEYS_URL }}
-        connectedExtras={
-          <WorkspaceModelSelector
-            providerType="claude_code"
-            title="Model"
-            description="Which model Claude Code tasks run on. Sonnet handles PR fixes well; Opus is more capable but costs more."
-            models={CLAUDE_MODELS}
-            defaultId={DEFAULT_CLAUDE_MODEL_ID}
-            settingKey="claudeModel"
-          />
-        }
-      />
-
       {/* Talyn Fleet (Firecracker). Rendered ONLY when the backend
           listed it for this workspace: /cloud-providers filters it out for
           anyone not on FLEET_ALLOWED_EMAILS, so showing the card
@@ -1019,41 +993,21 @@ export function ProviderConnectCards() {
 }
 
 /**
- * What a workspace has to supply to use Talyn Fleet: its Claude credential, and
- * literally nothing else.
+ * The Talyn Fleet card — one provider, TWO independently connectable agents.
  *
- * Two fields used to sit here and neither was the workspace's to give. The
- * fleet API bearer authenticates the BACKEND to a host — one service to
- * another, identical for every workspace — so asking a user for it made them
- * custodian of a secret they neither own nor can rotate. The endpoint answered
- * WHICH host, which nobody using the product is in a position to answer: they
- * cannot see which box is least loaded, which is draining, or which stopped
- * reporting four minutes ago. The registry can, from reports seconds old, and a
- * stale pinned endpoint silently routed every task to a dead machine.
- *
- * Both are deployment config now — `FLEET_API_TOKEN` and, for the debugging
- * case, `FLEET_PINNED_ENDPOINT`.
- *
- * Exported for the card tests, whose entire point is that this list has exactly
- * one entry and does not re-grow the other two.
- */
-export const SELFHOSTED_FIELDS: CloudProviderField[] = [
-  {
-    key: 'claudeToken',
-    label: 'Claude OAuth token',
-    type: 'password',
-    placeholder: 'sk-ant-oat…',
-  },
-];
-
-/**
- * The Talyn Fleet card.
+ * Bespoke, like `PostHogCodeCard`. There used to be a generic descriptor-driven
+ * `CloudProviderCard` and both of these outgrew it — one field list behind one
+ * Connect/Disconnect pair cannot express two credentials that are connected,
+ * rotated and dropped independently, and squeezing the fleet into it would mean
+ * disconnecting Claude to reconnect Codex. With no descriptor-driven card left,
+ * the generic one was deleted rather than kept as a template for a provider
+ * that may never need it.
  *
  * Gated on the provider appearing in the workspace's provider list rather than
- * rendered unconditionally like the other two. The fleet runs on hardware we
- * own and the backend only offers it to allow-listed workspaces; a card that
- * appeared for everyone would be a form that always 403s on save, which reads
- * as a broken integration rather than one you do not have.
+ * rendered unconditionally. The fleet runs on hardware we own and the backend
+ * only offers it to allow-listed workspaces; a card that appeared for everyone
+ * would be a form that always 403s on save, which reads as a broken integration
+ * rather than one you do not have.
  *
  * Absence is not "still loading" — `cloudProviders === null` is. Both mean
  * "render nothing", but conflating them is how a card flashes in and out on
@@ -1061,39 +1015,268 @@ export const SELFHOSTED_FIELDS: CloudProviderField[] = [
  */
 function SelfHostedFleetCard() {
   const cloudProviders = useWorkspaceStore((s) => s.cloudProviders);
+  const entry = (cloudProviders ?? []).find((p) => p.type === 'selfhosted');
   if (!cloudProviderOffered(cloudProviders, 'selfhosted')) return null;
 
+  const agents = entry?.connectedAgents ?? [];
+  const reauth = entry?.reauthAgents ?? [];
+  const connected = agents.length > 0;
+
   return (
-    <CloudProviderCard
-      type="selfhosted"
-      displayName="Talyn Fleet"
-      icon={Server}
-      blurb="Run tasks on Talyn's own Firecracker fleet. Each task gets its own microVM; the GitHub token is injected host-side and never enters the VM."
-      connectedBlurb="Cloud tasks run in microVMs on Talyn's hardware and open PRs via this workspace's GitHub connection."
-      fields={SELFHOSTED_FIELDS}
-      keyHelp={{
-        url: CLAUDE_SETUP_TOKEN_URL,
-        label: 'How to get a token',
-        note: 'run `claude setup-token` for an OAuth token off your Claude subscription, or paste a Console API key (sk-ant-api\u2026) to be billed per token.',
-      }}
-      connectedExtras={
-        <WorkspaceModelSelector
-          providerType="selfhosted"
-          title="Model"
-          description="Which model fleet runs use. Sonnet 5 handles the mechanical work — rebases, conflicts, re-running CI — at a fraction of Opus's cost; switch to Opus 5 for harder investigative runs."
-          models={FLEET_MODELS}
-          defaultId={DEFAULT_FLEET_MODEL_ID}
-          settingKey="fleetModel"
+    <Card className="p-4">
+      <div className="flex items-start gap-4">
+        <div
+          className={cn(
+            'w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0',
+            connected ? 'bg-green-500/10' : 'bg-secondary'
+          )}
+        >
+          <Server className={cn('w-5 h-5', connected && 'text-green-500')} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h4 className="font-medium">Talyn Fleet</h4>
+            {connected ? (
+              <Badge variant="default" className="bg-green-600">
+                <Check className="w-3 h-3 mr-1" />
+                Connected
+              </Badge>
+            ) : (
+              <Badge variant="secondary">Not Connected</Badge>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground mt-1">
+            {connected
+              ? 'Cloud tasks run in microVMs on Talyn’s hardware, on your own agent subscription, and open PRs via this workspace’s GitHub connection.'
+              : 'Run tasks on Talyn’s own Firecracker fleet, on your own Claude or Codex subscription. Each task gets its own microVM; your credentials are injected host-side and never enter the VM.'}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-3 border-t pt-4">
+        <FleetAgentRow agent="claude" connected={agents.includes('claude')} needsReauth={false} />
+        <FleetAgentRow
+          agent="codex"
+          connected={agents.includes('codex')}
+          needsReauth={reauth.includes('codex')}
         />
-      }
-    />
+      </div>
+
+      {connected && (
+        <div className="mt-4 border-t pt-4">
+          <WorkspaceModelSelector
+            providerType="selfhosted"
+            title="Model"
+            description="Which model fleet runs use, and therefore which agent runs them — the model carries its vendor. Sonnet 5 handles the mechanical work (rebases, conflicts, re-running CI) at a fraction of Opus's cost."
+            models={FLEET_MODELS}
+            defaultId={DEFAULT_FLEET_MODEL_ID}
+            settingKey="fleetModel"
+          />
+        </div>
+      )}
+    </Card>
   );
 }
 
+/**
+ * One agent inside the fleet card: connect it, reconnect it, or drop it.
+ *
+ * Every save goes through the SAME provider route as before
+ * (`PUT /cloud-providers/selfhosted/config`) — the backend merges the one
+ * vendor named in the body and leaves the other alone, which is what makes
+ * these two rows independent without a second endpoint.
+ */
+function FleetAgentRow({
+  agent,
+  connected,
+  needsReauth,
+}: {
+  agent: 'claude' | 'codex';
+  connected: boolean;
+  needsReauth: boolean;
+}) {
+  const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
+  const setCloudProviders = useWorkspaceStore((s) => s.setCloudProviders);
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [claudeToken, setClaudeToken] = useState('');
+  const [pasted, setPasted] = useState('');
+
+  const label = agent === 'claude' ? 'Claude subscription' : 'Codex (ChatGPT) subscription';
+
+  /**
+   * Refresh from the server rather than patching the store optimistically.
+   *
+   * The card renders off `connectedAgents`, which only the backend can compute
+   * — it reads which credential fields the integration row actually holds. A
+   * local guess would show "Connected" for a save that was refused.
+   */
+  const refresh = useCallback(async () => {
+    if (!currentWorkspaceId) return;
+    try {
+      setCloudProviders(await api.cloudProviders.list(currentWorkspaceId));
+    } catch {
+      // Leave the last-known list in place; the next focus refresh retries.
+    }
+  }, [currentWorkspaceId, setCloudProviders]);
+
+  const save = useCallback(
+    async (config: Record<string, string>) => {
+      if (!currentWorkspaceId) return;
+      setBusy(true);
+      setError(null);
+      try {
+        await api.cloudProviders.saveConfig('selfhosted', currentWorkspaceId, config);
+        trackEvent('cloud_provider_connected', { provider: 'selfhosted', agent });
+        setClaudeToken('');
+        setPasted('');
+        setEditing(false);
+        await refresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to save credentials');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [agent, currentWorkspaceId, refresh]
+  );
+
+  const disconnect = useCallback(async () => {
+    // A per-VENDOR disconnect, not the provider-level DELETE — that one drops
+    // the whole integration row and would take the other agent with it.
+    await save(agent === 'claude' ? { clearClaude: 'true' } : { clearCodex: 'true' });
+  }, [agent, save]);
+
+  /**
+   * The paste path, and the ONLY path on the web app.
+   *
+   * `codex login` writes `~/.codex/auth.json`; its `tokens` object carries the
+   * pair. Accepting the whole JSON blob rather than two separate fields is
+   * deliberate — it is one copy instead of two, and two fields are two chances
+   * to swap them.
+   */
+  const savePasted = useCallback(async () => {
+    let parsed: { tokens?: { access_token?: string; refresh_token?: string; account_id?: string } };
+    try {
+      parsed = JSON.parse(pasted);
+    } catch {
+      setError('That is not valid JSON. Paste the whole contents of ~/.codex/auth.json.');
+      return;
+    }
+    const tokens = parsed.tokens ?? (parsed as unknown as { access_token?: string; refresh_token?: string; account_id?: string });
+    if (!tokens.access_token || !tokens.refresh_token) {
+      setError('That JSON has no access_token / refresh_token pair. Run `codex login` first.');
+      return;
+    }
+    await save({
+      codexAccessToken: tokens.access_token,
+      codexRefreshToken: tokens.refresh_token,
+      ...(tokens.account_id ? { codexAccountId: tokens.account_id } : {}),
+    });
+  }, [pasted, save]);
+
+  const showForm = editing || !connected;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-sm font-medium">{label}</span>
+          {needsReauth ? (
+            <Badge variant="destructive">Reconnect needed</Badge>
+          ) : connected ? (
+            <Badge variant="secondary">
+              <Check className="w-3 h-3 mr-1" />
+              Connected
+            </Badge>
+          ) : null}
+        </div>
+        {connected && !showForm && (
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setEditing(true)} disabled={busy}>
+              <Pencil className="w-4 h-4 mr-1" />
+              {needsReauth ? 'Reconnect' : 'Edit'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={disconnect} disabled={busy}>
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlink className="w-4 h-4" />}
+            </Button>
+          </div>
+        )}
+      </div>
+
+      {showForm && (
+        <div className="mt-2 space-y-2">
+          {agent === 'claude' ? (
+            <>
+              <Input
+                label="Claude OAuth token"
+                type="password"
+                placeholder="sk-ant-oat…"
+                value={claudeToken}
+                onChange={(e) => setClaudeToken(e.target.value)}
+                disabled={busy}
+              />
+              <GetKeyLink
+                url={CLAUDE_SETUP_TOKEN_URL}
+                label="How to get a token"
+                note={'run `claude setup-token` for an OAuth token off your Claude subscription, or paste a Console API key (sk-ant-api…) to be billed per token.'}
+              />
+              <Button
+                size="sm"
+                onClick={() => save({ claudeToken })}
+                disabled={busy || !claudeToken.trim()}
+              >
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save & verify'}
+              </Button>
+            </>
+          ) : (
+            <><div className="space-y-2">
+              <p className="text-xs text-muted-foreground">
+                Run <code>codex login</code> on your machine, then paste the contents of{' '}
+                <code>~/.codex/auth.json</code>. (The desktop app can do this in one click — a
+                browser cannot, because OpenAI’s sign-in redirects to a local address.)
+              </p>
+              <textarea
+                className="w-full h-24 rounded-md border bg-background p-2 font-mono text-xs"
+                placeholder='{"tokens": {"access_token": "…", "refresh_token": "…"}}'
+                value={pasted}
+                onChange={(e) => setPasted(e.target.value)}
+                disabled={busy}
+              />
+              <Button size="sm" onClick={savePasted} disabled={busy || !pasted.trim()}>
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save & verify'}
+              </Button>
+            </div></>
+          )}
+          {error && (
+            <div className="text-sm text-destructive flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>{error}</span>
+            </div>
+          )}
+          {connected && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setEditing(false);
+                setError(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Lets the workspace pick which cloud provider new tasks dispatch to — Auto
- * (prefer PostHog Code, else Claude), a specific connected provider, or "Ask
+ * (prefer Talyn Fleet, else PostHog Code), a specific connected provider, or "Ask
  * every time" (the desktop shows a per-task picker; backend auto-fixes fall
  * back to Auto). Always shown so the default is discoverable even with one (or
  * zero) providers connected. Persists to `workspace.settings.defaultCloudProvider`.
@@ -1352,7 +1535,7 @@ function CloudProviderDefaultSelector() {
           disabled={saving}
           onChange={(e) => onChange(e.target.value)}
         >
-          <option value="">Auto (prefer PostHog Code)</option>
+          <option value="">Auto (prefer Talyn Fleet, else PostHog Code)</option>
           {connected.map((p) => (
             <option key={p.type} value={p.type}>
               {p.displayName}
@@ -1365,51 +1548,6 @@ function CloudProviderDefaultSelector() {
   );
 }
 
-interface CloudProviderField {
-  key: string;
-  label: string;
-  type?: 'text' | 'password';
-  placeholder?: string;
-  /**
-   * A field the provider will accept without. Without it the form refuses to
-   * submit a configuration the backend would have accepted.
-   *
-   * No descriptor currently sets it: Talyn Fleet was the only user and its
-   * optional field turned out not to belong in the UI at all. Kept because the
-   * rule it encodes is generic and `cloudProviderFormComplete` implements it —
-   * a provider with a genuinely optional credential should set this rather than
-   * rediscover why every field being required is wrong.
-   */
-  optional?: boolean;
-}
-
-
-/**
- * The fields a provider's config request must carry, from what the user typed.
- *
- * Blank OPTIONAL fields are omitted rather than sent as "": a provider that
- * stores what it is given would persist an empty credential and then fail
- * authenticating with it, which reads as a bad key rather than no key. Exported
- * so the rule is testable without rendering the card.
- */
-export function cloudProviderConfigFromValues(
-  fields: CloudProviderField[],
-  values: Record<string, string>,
-): Record<string, string> {
-  return Object.fromEntries(
-    fields
-      .map((f) => [f.key, (values[f.key] ?? '').trim()] as const)
-      .filter(([, v]) => v !== ''),
-  );
-}
-
-/** Whether every REQUIRED field has a value. Optional ones may stay blank. */
-export function cloudProviderFormComplete(
-  fields: CloudProviderField[],
-  values: Record<string, string>,
-): boolean {
-  return fields.every((f) => f.optional || Boolean(values[f.key]?.trim()));
-}
 
 /**
  * Whether the backend offered this provider to the current workspace.
@@ -1423,199 +1561,6 @@ export function cloudProviderOffered(
   type: string,
 ): boolean {
   return Boolean(cloudProviders?.some((p) => p.type === type));
-}
-
-/**
- * Generic Settings card for a cloud task provider, driven entirely by the
- * provider-agnostic `/cloud-providers` routes (list / config / disconnect).
- * A new provider needs only a descriptor here — no bespoke API client or
- * store wiring. (PostHogCodeCard predates this and keeps its richer
- * project/host display; it can migrate to this card later.)
- */
-function CloudProviderCard({
-  type,
-  displayName,
-  icon: Icon,
-  blurb,
-  connectedBlurb,
-  fields,
-  keyHelp,
-  connectedExtras,
-}: {
-  type: string;
-  displayName: string;
-  icon: React.ComponentType<{ className?: string }>;
-  blurb: string;
-  connectedBlurb: string;
-  fields: CloudProviderField[];
-  /** Optional "Get a key ↗" link (+ scope note) shown under the form. */
-  keyHelp?: { url: string; label?: string; note?: string };
-  /** Extra per-provider settings (e.g. the model row) rendered inside the
-   *  card, under a divider, only while connected. */
-  connectedExtras?: React.ReactNode;
-}) {
-  const currentWorkspaceId = useWorkspaceStore((s) => s.currentWorkspaceId);
-  // Connection status comes from the shared store (preloaded + kept fresh by
-  // useSystemStatus on focus / WS / reconnect), so leaving and returning to this
-  // tab can't show a stale "Not Connected", and there's no flash on restart.
-  const cloudProviders = useWorkspaceStore((s) => s.cloudProviders);
-  const setCloudProviders = useWorkspaceStore((s) => s.setCloudProviders);
-  const [editing, setEditing] = useState(false);
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const loaded = cloudProviders !== null;
-  const connected = Boolean(cloudProviders?.find((p) => p.type === type)?.connected);
-
-  // Reflect a connect/disconnect into the shared list so this badge, the sidebar
-  // status row, and the default selector all update together (and persist across
-  // tab switches) without waiting for the next focus refetch.
-  const setConnectedInStore = useCallback(
-    (isConnected: boolean) => {
-      const list = useWorkspaceStore.getState().cloudProviders ?? [];
-      const existing = list.find((p) => p.type === type);
-      const next = existing
-        ? list.map((p) => (p.type === type ? { ...p, connected: isConnected } : p))
-        : [...list, { type, displayName, connected: isConnected }];
-      setCloudProviders(next);
-    },
-    [type, displayName, setCloudProviders]
-  );
-
-  const handleSave = async () => {
-    if (!currentWorkspaceId) return;
-    if (!cloudProviderFormComplete(fields, values)) return;
-    setIsSaving(true);
-    setError(null);
-    try {
-      const config = cloudProviderConfigFromValues(fields, values);
-      await api.cloudProviders.saveConfig(type, currentWorkspaceId, config);
-      trackEvent('cloud_provider_connected', { provider: type });
-      setConnectedInStore(true);
-      setValues({});
-      setEditing(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to save credentials');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleDisconnect = async () => {
-    if (!currentWorkspaceId) return;
-    setIsSaving(true);
-    try {
-      await api.cloudProviders.disconnect(type, currentWorkspaceId);
-      setConnectedInStore(false);
-      setValues({});
-      setEditing(false);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to disconnect');
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  // Don't offer the form until we actually know the state — avoids flashing the
-  // connect form (then the connected card) on first load / tab return.
-  const showForm = editing || (loaded && !connected);
-  const canSave = cloudProviderFormComplete(fields, values);
-
-  return (
-    <Card className="p-4">
-      <div className="flex items-start gap-4">
-        <div
-          className={cn(
-            'w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0',
-            connected ? 'bg-green-500/10' : 'bg-secondary'
-          )}
-        >
-          <Icon className={cn('w-5 h-5', connected && 'text-green-500')} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <h4 className="font-medium">{displayName}</h4>
-            {!loaded ? (
-              <Badge variant="secondary">Checking…</Badge>
-            ) : connected ? (
-              <Badge variant="default" className="bg-green-600">
-                <Check className="w-3 h-3 mr-1" />
-                Connected
-              </Badge>
-            ) : (
-              <Badge variant="secondary">Not Connected</Badge>
-            )}
-          </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            {connected ? connectedBlurb : blurb}
-          </p>
-
-          {showForm && (
-            <div className="mt-3 space-y-3">
-              {fields.map((f) => (
-                <Input
-                  key={f.key}
-                  label={f.label}
-                  type={f.type ?? 'text'}
-                  placeholder={f.placeholder}
-                  value={values[f.key] ?? ''}
-                  onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
-                  disabled={isSaving}
-                />
-              ))}
-              {keyHelp && <GetKeyLink url={keyHelp.url} label={keyHelp.label} note={keyHelp.note} />}
-              {error && (
-                <div className="text-sm text-destructive flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                  <span>{error}</span>
-                </div>
-              )}
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  onClick={handleSave}
-                  disabled={isSaving || !canSave || !currentWorkspaceId}
-                >
-                  {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save & verify'}
-                </Button>
-                {connected && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      setEditing(false);
-                      setValues({});
-                      setError(null);
-                    }}
-                    disabled={isSaving}
-                  >
-                    Cancel
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {connected && !showForm && (
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setEditing(true)} disabled={isSaving}>
-              <Pencil className="w-4 h-4 mr-1" />
-              Edit
-            </Button>
-            <Button variant="outline" size="sm" onClick={handleDisconnect} disabled={isSaving}>
-              {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Unlink className="w-4 h-4" />}
-            </Button>
-          </div>
-        )}
-      </div>
-
-      {connected && connectedExtras && (
-        <div className="mt-4 border-t pt-4">{connectedExtras}</div>
-      )}
-    </Card>
-  );
 }
 
 /**
@@ -1918,7 +1863,7 @@ function PostHogCodeCard() {
       </div>
 
       {/* Per-provider model choice lives with its provider, mirroring the
-          generic CloudProviderCard's connectedExtras slot. */}
+          card's connected extras. */}
       {connected && (
         <div className="mt-4 border-t pt-4">
           <WorkspaceModelSelector

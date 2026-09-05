@@ -88,7 +88,7 @@ interface PRTableProps {
    *  created (false when nothing's connected / the user dismissed the picker),
    *  so the button only flashes its confirmation on a real start. An explicit
    *  `providerType` is passed from the per-task dropdown. */
-  onCreatePostHogTask: (row: PRRow, providerType?: string) => Promise<boolean>;
+  onCreatePostHogTask: (row: PRRow, providerType?: string, model?: string) => Promise<boolean>;
   /** Run an agent skill on the row as a cloud task (see useGitHubActions.runSkillTask).
    *  Presence enables the per-row skill button + picker modal. */
   onRunSkill?: (
@@ -100,7 +100,9 @@ interface PRTableProps {
    *  opens a provider dropdown instead of dispatching to the default. */
   taskAsk?: boolean;
   /** Connected providers offered in the "ask" dropdown. */
-  taskProviders?: { type: string; displayName: string }[];
+  /** One entry per AGENT the workspace can run a task on — Talyn Fleet
+   *  contributes one per connected subscription, each carrying its model. */
+  taskProviders?: { type: string; displayName: string; model?: string }[];
   /** Navigate to Settings → Integrations (the dropdown's "Set default" item). */
   onOpenIntegrations?: () => void;
   /** Live status of each linked task, keyed by task id. */
@@ -270,11 +272,13 @@ function PRTableRow({
    *  flag adds something — a reviewed PR leaves that list, and watching keeps
    *  it on My PRs. */
   onSetWatching?: (row: PRRow, enabled: boolean) => Promise<void>;
-  onCreatePostHogTask: (row: PRRow, providerType?: string) => Promise<boolean>;
+  onCreatePostHogTask: (row: PRRow, providerType?: string, model?: string) => Promise<boolean>;
   /** Open the table-level skill picker for this row (absent → no skill button). */
   onOpenSkillPicker?: () => void;
   taskAsk?: boolean;
-  taskProviders?: { type: string; displayName: string }[];
+  /** One entry per AGENT the workspace can run a task on — Talyn Fleet
+   *  contributes one per connected subscription, each carrying its model. */
+  taskProviders?: { type: string; displayName: string; model?: string }[];
   onOpenIntegrations?: () => void;
   /** Live status of the row's linked task, if any is loaded. */
   taskStatus?: TaskStatus;
@@ -470,11 +474,11 @@ function PRTableRow({
   // Dispatch the task. Only flash the confirmation tick when a task was actually
   // created — `onCreatePostHogTask` resolves false if nothing's connected or the
   // user backed out, so closing the picker no longer leaves a stuck tick.
-  async function startTask(providerType?: string) {
+  async function startTask(providerType?: string, model?: string) {
     setBusy('posthog');
     setRowError(null);
     try {
-      const created = await onCreatePostHogTask(row, providerType);
+      const created = await onCreatePostHogTask(row, providerType, model);
       if (created) {
         setPosthogStarted(true);
         setTimeout(() => setPosthogStarted(false), 2000);
@@ -1033,11 +1037,11 @@ function PRTableRow({
                     <div className="px-2 py-1 text-xs text-muted-foreground">Run task with…</div>
                     {taskProviders?.map((p) => (
                       <button
-                        key={p.type}
+                        key={`${p.type}:${p.model ?? ''}`}
                         type="button"
                         onClick={() => {
                           setTaskMenuOpen(false);
-                          void startTask(p.type);
+                          void startTask(p.type, p.model);
                         }}
                         className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
                       >

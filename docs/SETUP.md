@@ -247,6 +247,8 @@ A workspace is allowed when its **owner's** email is on the list (comma-separate
 
 A task dispatched by a workspace that is not allowed is failed with the reason attached rather than left silently queued.
 
+**The gate still matters now the fleet is the DEFAULT provider.** `selfhosted` heads `CLOUD_PROVIDER_ORDER` (`services/prCloudFix.ts`), but `resolveCloudEnvChain` drops that link entirely for a workspace that may not use the fleet — so a non-allow-listed workspace gets exactly the behaviour it had before: the chain heads at PostHog Code, no fleet card is offered, and a credential write is 403'd. The fleet is one box; widen the list as capacity allows rather than removing it.
+
 ### Connecting the backend to a self-hosted fleet (Tailscale)
 
 A fleet host binds loopback and is never exposed publicly (fleet spec §16.4), so
@@ -357,11 +359,33 @@ they neither own nor can rotate, and asking them got it wrong in the obvious way
 to store fleet credentials at all and says so, rather than accepting a Claude
 token against a fleet it cannot talk to.
 
-The Talyn Fleet card asks for exactly one thing: the workspace's **Claude OAuth
-token** (`claude setup-token`, or a Console API key). Nothing else on it was the
-workspace's to give — *which host* a run lands on is answered by the registry
-from reports seconds old, and nobody using the product can see which box is
-least loaded or which stopped reporting four minutes ago.
+The Talyn Fleet card asks for one thing per AGENT, and nothing else. Nothing
+else on it was the workspace's to give — *which host* a run lands on is answered
+by the registry from reports seconds old, and nobody using the product can see
+which box is least loaded or which stopped reporting four minutes ago.
+
+- **Claude subscription** — an OAuth token from `claude setup-token`
+  (`sk-ant-oat…`), or a Console API key (`sk-ant-api…`) to be billed per token.
+- **Codex (ChatGPT) subscription** — on the desktop, one "Sign in with ChatGPT"
+  button; the whole OAuth flow runs in the app's main process because OpenAI's
+  Codex client redirects to `http://localhost:1455/auth/callback`, which only a
+  process on the user's own machine can answer. On `app.talyn.dev` there is no
+  loopback and no filesystem, so it takes a paste of `~/.codex/auth.json` after
+  `codex login`. Either way the backend stores the access AND refresh token and
+  renews them itself — a subscription access token is short-lived and a fleet
+  run outlives it.
+
+**Either agent alone is enough.** A workspace with only Codex connected is fully
+configured, and its runs default to `gpt-5.1-codex` rather than to a Claude
+model it would then be refused for. Which agent runs a given task is decided by
+the MODEL — `Settings → Talyn Fleet → Model` for the workspace default, or the
+per-task agent menu (right-click the robot on any PR row).
+
+**A dispatch never falls back to the gateway's own credentials.** The gateway
+fills an absent or blank `anthropicKey`/`openaiKey` from its tenant's sealed
+custody, so Talyn always sends the workspace's own key for the vendor being run
+and suppresses the other with `policy.credentials`. No credential for that
+vendor is a refusal naming the fix, never a blank field.
 
 #### Dispatching through the sandbox gateway
 

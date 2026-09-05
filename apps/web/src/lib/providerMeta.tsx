@@ -3,7 +3,6 @@ import { readCloudTaskProvider, type AnyCloudProviderType, type CloudProviderTyp
 import { cn } from './utils';
 import {
   POSTHOG_LOGO,
-  CLAUDE_LOGO,
   CODEX_LOGO,
   SELFHOSTED_LOGO,
   GENERIC_PROVIDER_LOGO,
@@ -44,7 +43,6 @@ interface ProviderMeta {
  */
 export const PROVIDER_META: Record<CloudProviderType, ProviderMeta> = {
   posthog_code: { label: 'PostHog Code', src: POSTHOG_LOGO },
-  claude_code: { label: 'Claude Code', src: CLAUDE_LOGO },
   codex_cloud: { label: 'Codex Cloud', src: CODEX_LOGO },
   // The wire/DB value stays 'selfhosted' — it is persisted in environments.type
   // and integrations.type. Only the label is the product's name for it.

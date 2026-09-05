@@ -48,7 +48,7 @@ const FIXTURES: Array<{ id: string; label: string; metadata: Record<string, unkn
     label: 'a modern envelope with no extras (a non-fleet provider)',
     metadata: {
       cloudTask: {
-        provider: 'claude_code',
+        provider: 'selfhosted',
         remoteTaskId: 'ct-9',
         status: 'completed',
       },

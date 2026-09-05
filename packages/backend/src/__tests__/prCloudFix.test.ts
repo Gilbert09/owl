@@ -21,11 +21,12 @@ import {
 import { encryptString } from '../services/tokenCrypto.js';
 import { registerCloudProvider } from '../services/cloudProviders/registry.js';
 import { postHogCodeProvider } from '../services/cloudProviders/posthog/provider.js';
-import { claudeCodeProvider } from '../services/cloudProviders/claude/provider.js';
+import { selfHostedProvider } from '../services/cloudProviders/selfhosted/provider.js';
+import { resetFleetAccessCache } from '../services/cloudProviders/fleetAccess.js';
 
 // resolveCloudEnvId resolves through the registry's hasCredentials check.
 registerCloudProvider(postHogCodeProvider);
-registerCloudProvider(claudeCodeProvider);
+registerCloudProvider(selfHostedProvider);
 
 describe('prCloudFix helpers', () => {
   let db: Database;
@@ -107,14 +108,24 @@ describe('prCloudFix helpers', () => {
 
   describe('resolveCloudEnvId', () => {
     let priorKey: string | undefined;
+    let priorAllow: string | undefined;
     beforeAll(() => {
-      // Seeding a Claude credential needs the token-encryption key.
+      // Seeding an encrypted credential needs the token-encryption key.
       priorKey = process.env.TALYN_TOKEN_KEY;
       process.env.TALYN_TOKEN_KEY = randomBytes(32).toString('base64');
+      // The fleet gate fails closed and is keyed on the workspace OWNER's
+      // email, so without this every selfhosted link is dropped from the chain
+      // and these cases would pass for the wrong reason.
+      priorAllow = process.env.FLEET_ALLOWED_EMAILS;
+      process.env.FLEET_ALLOWED_EMAILS = `${TEST_USER_ID}@example.test`;
+      resetFleetAccessCache();
     });
     afterAll(() => {
       if (priorKey === undefined) delete process.env.TALYN_TOKEN_KEY;
       else process.env.TALYN_TOKEN_KEY = priorKey;
+      if (priorAllow === undefined) delete process.env.FLEET_ALLOWED_EMAILS;
+      else process.env.FLEET_ALLOWED_EMAILS = priorAllow;
+      resetFleetAccessCache();
     });
 
     async function connectPostHog() {
@@ -126,42 +137,66 @@ describe('prCloudFix helpers', () => {
         config: { apiKeyEnc: encryptString('k'), projectId: '1' },
       });
     }
-    async function connectClaude() {
+    async function connectFleet() {
       await db.insert(environmentsTable).values({
-        id: 'env-cl', ownerId: TEST_USER_ID, name: 'Claude Code', type: 'claude_code', config: {},
+        id: 'env-fl', ownerId: TEST_USER_ID, name: 'Talyn Fleet', type: 'selfhosted', config: {},
       });
       await db.insert(integrationsTable).values({
-        id: 'int-cl', workspaceId: 'ws1', type: 'claude_code', enabled: true,
-        config: { anthropicKeyEnc: encryptString('sk-ant-test') },
+        id: 'int-fl', workspaceId: 'ws1', type: 'selfhosted', enabled: true,
+        config: { anthropicKeyEnc: encryptString('sk-ant-oat01-test') },
       });
     }
     const setDefault = (v: string) =>
       db.update(workspacesTable).set({ settings: { defaultCloudProvider: v } }).where(eq(workspacesTable.id, 'ws1'));
 
-    it('prefers PostHog Code when both are connected and no default is set', async () => {
+    // The fleet leads the standard order: it is the better place for the work —
+    // a real microVM on the workspace's own agent subscription rather than
+    // metered credits. PostHog Code stays as what a non-allow-listed workspace
+    // runs on, and as what a full fleet falls back to.
+    it('prefers Talyn Fleet when both are connected and no default is set', async () => {
       await connectPostHog();
-      await connectClaude();
-      expect(await resolveCloudEnvId('ws1')).toBe('env-ph');
+      await connectFleet();
+      expect(await resolveCloudEnvId('ws1')).toBe('env-fl');
     });
 
-    it('honours a pinned default of claude_code', async () => {
+    it('honours a pinned default of selfhosted', async () => {
       await connectPostHog();
-      await connectClaude();
-      await setDefault('claude_code');
-      expect(await resolveCloudEnvId('ws1')).toBe('env-cl');
+      await connectFleet();
+      await setDefault('selfhosted');
+      expect(await resolveCloudEnvId('ws1')).toBe('env-fl');
     });
 
-    it("'ask' falls back to the deterministic order (PostHog) for backend tasks", async () => {
+    it("'ask' falls back to the deterministic order for backend tasks", async () => {
+      // A backend-initiated run (auto-keep watcher, merge queue) has nobody to
+      // ask, so 'ask' has to resolve to the standard order rather than fail.
       await connectPostHog();
-      await connectClaude();
+      await connectFleet();
       await setDefault('ask');
-      expect(await resolveCloudEnvId('ws1')).toBe('env-ph');
+      expect(await resolveCloudEnvId('ws1')).toBe('env-fl');
     });
 
     it('falls back past a pinned provider that isn’t connected', async () => {
-      await connectClaude(); // only Claude connected
-      await setDefault('posthog_code');
-      expect(await resolveCloudEnvId('ws1')).toBe('env-cl');
+      await connectPostHog(); // only PostHog connected
+      await setDefault('selfhosted');
+      expect(await resolveCloudEnvId('ws1')).toBe('env-ph');
+    });
+
+    // The fall-through the fleet gate depends on: a workspace that pinned the
+    // fleet and is not on the allow-list should get its task run SOMEWHERE, not
+    // fail. Asserted here rather than trusted, because the gate is what decides
+    // whether making the fleet the default is safe for everyone else.
+    it('drops the fleet for a workspace that is not allow-listed, and runs on PostHog', async () => {
+      await connectPostHog();
+      await connectFleet();
+      await setDefault('selfhosted');
+      process.env.FLEET_ALLOWED_EMAILS = 'someone-else@example.test';
+      resetFleetAccessCache();
+      try {
+        expect(await resolveCloudEnvId('ws1')).toBe('env-ph');
+      } finally {
+        process.env.FLEET_ALLOWED_EMAILS = `${TEST_USER_ID}@example.test`;
+        resetFleetAccessCache();
+      }
     });
 
     it('skips a provider whose env exists but has no credentials', async () => {

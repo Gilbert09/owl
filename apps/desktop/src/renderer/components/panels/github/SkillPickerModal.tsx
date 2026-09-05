@@ -39,11 +39,11 @@ interface SkillPickerModalProps {
   onLaunch: (
     row: PRRow,
     skill: SkillSummary,
-    opts: { providerType?: string; localContent?: string }
+    opts: { providerType?: string; model?: string; localContent?: string }
   ) => Promise<boolean>;
-  /** "Ask every time" → show the provider step after picking a skill. */
+  /** "Ask every time" → show the AGENT step after picking a skill. */
   taskAsk?: boolean;
-  taskProviders?: { type: string; displayName: string }[];
+  taskProviders?: { type: string; displayName: string; model?: string }[];
   onOpenIntegrations?: () => void;
 }
 
@@ -95,7 +95,7 @@ export function SkillPickerModal({
 
   useEffect(() => setHighlighted(0), [query, navOrder.length]);
 
-  async function launch(skill: SkillSummary, providerType?: string) {
+  async function launch(skill: SkillSummary, providerType?: string, model?: string) {
     if (launching || isSkillTooLarge(skill)) return;
     if (taskAsk && !providerType) {
       setPendingSkill(skill);
@@ -107,7 +107,7 @@ export function SkillPickerModal({
         skill.source === 'local'
           ? localFiles.find((f) => f.path === skill.localPath)?.content ?? undefined
           : undefined;
-      const created = await onLaunch(row, skill, { providerType, localContent });
+      const created = await onLaunch(row, skill, { providerType, model, localContent });
       if (created) {
         toast.success(
           `Running "${skill.name}"`,
@@ -218,10 +218,10 @@ export function SkillPickerModal({
           <div className="space-y-1">
             {taskProviders?.map((p) => (
               <button
-                key={p.type}
+                key={`${p.type}:${p.model ?? ''}`}
                 type="button"
                 disabled={launching}
-                onClick={() => void launch(pendingSkill, p.type)}
+                onClick={() => void launch(pendingSkill, p.type, p.model)}
                 className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-muted"
               >
                 {launching ? (

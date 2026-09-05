@@ -5,11 +5,13 @@ import { Button } from '../ui/button';
 import { useWorkspaceStore } from '../../stores/workspace';
 import { useGithubConnection } from '../../hooks/useGithubConnection';
 import { trackEvent } from '../../lib/analytics';
+import { ConnectAgentStep } from './steps/ConnectAgentStep';
 import { ConnectGitHubStep } from './steps/ConnectGitHubStep';
 import { WatchReposStep } from './steps/WatchReposStep';
 
 const STEPS = [
   { title: 'Connect GitHub', optional: false },
+  { title: 'Connect an agent', optional: true },
   { title: 'Watch repositories', optional: true },
 ] as const;
 
@@ -25,18 +27,29 @@ const STEPS = [
  * renders; if it somehow is not, the repo step waits rather than offering to
  * create one.
  *
- * A cloud agent is NOT part of setup — task buttons render regardless, and the
- * first time the user dispatches one the ConnectAgentModal prompts them to
- * connect a provider (then auto-runs the task). Shown by App in place of
- * MainLayout until `onboardingComplete` flips true.
+ * Connecting an agent IS part of setup, and it did not used to be. The old
+ * reasoning — task buttons render regardless, and the first dispatch opens
+ * ConnectAgentModal — held while the agent was metered credits somebody else
+ * billed. Talyn Fleet is the default compute now and runs on the user's OWN
+ * Claude or Codex subscription, so asking up front is what makes the first task
+ * run on their key instead of dead-ending at a modal.
+ *
+ * The step is OPTIONAL, and deliberately so: a workspace that is not on the
+ * fleet allow-list is served no fleet card, and gating Next would strand it on
+ * a step it cannot complete. ConnectAgentModal remains the fallback for anyone
+ * who skips. Shown by App in place of MainLayout until `onboardingComplete`
+ * flips true.
  */
 export function OnboardingWizard() {
-  const { currentWorkspaceId, repositories, setOnboardingComplete, setJustOnboarded } =
+  const { currentWorkspaceId, repositories, cloudProviders, setOnboardingComplete, setJustOnboarded } =
     useWorkspaceStore();
   const { status, user } = useGithubConnection(currentWorkspaceId);
   const [step, setStep] = useState(0);
 
   const githubConnected = Boolean(status?.connected);
+  // Reported on completion, never gated on — see the note above on why the
+  // agent step is skippable.
+  const agentConnected = (cloudProviders ?? []).some((p) => p.connected);
 
   // Required steps gate the Next button; optional steps are always advanceable.
   const canAdvance = step === 0 ? githubConnected : true;
@@ -48,6 +61,7 @@ export function OnboardingWizard() {
       trackEvent('onboarding_completed', {
         github_connected: githubConnected,
         repos_watched: repositories.length,
+        agent_connected: agentConnected,
       });
       // Tell the PR sync to force a real poll on first entry (the repos were
       // only just watched, so the cache is empty) — see usePullRequestSync.
@@ -103,7 +117,8 @@ export function OnboardingWizard() {
           {step === 0 && (
             <ConnectGitHubStep workspaceId={currentWorkspaceId} status={status} user={user} />
           )}
-          {step === 1 && currentWorkspaceId && (
+          {step === 1 && <ConnectAgentStep />}
+          {step === 2 && currentWorkspaceId && (
             <WatchReposStep workspaceId={currentWorkspaceId} />
           )}
         </div>

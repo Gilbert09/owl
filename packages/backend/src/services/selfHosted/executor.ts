@@ -1,5 +1,6 @@
 import { eq, sql } from 'drizzle-orm';
 import {
+  DEFAULT_FLEET_CODEX_MODEL_ID,
   DEFAULT_FLEET_MODEL_ID,
   fleetProviderForModel,
   isStoredFleetModelId,
@@ -97,6 +98,31 @@ export function fleetRunIdForTask(taskId: string, attempt = 0): string {
   return attempt > 0 ? `talyn-${taskId}-r${attempt}` : `talyn-${taskId}`;
 }
 
+/**
+ * Why a dispatch was refused for want of a credential, said so the reader knows
+ * which of the two things to do about it.
+ *
+ * Two fixes are always available and the message names both, because the
+ * cheaper one is usually the one the user wants: connect the vendor this model
+ * needs, or run the task on the vendor already connected. A bare "no credential"
+ * sends people to the settings screen when switching models would have done.
+ */
+function missingCredentialError(
+  provider: 'anthropic' | 'openai',
+  model: string,
+  creds: { claudeToken?: string; openaiKey?: string },
+): string {
+  const needed = provider === 'openai' ? 'Codex (ChatGPT) subscription' : 'Claude subscription';
+  const other = provider === 'openai' ? 'Claude' : 'Codex';
+  const otherConnected = provider === 'openai' ? Boolean(creds.claudeToken) : Boolean(creds.openaiKey);
+  return (
+    `Talyn Fleet needs your ${needed} to run ${model}, and this workspace has not connected one. ` +
+    (otherConnected
+      ? `Connect it in Settings → Talyn Fleet, or run this task on ${other} instead.`
+      : 'Connect it in Settings → Talyn Fleet.')
+  );
+}
+
 /** Which run of this task row we are dispatching — 0 for its first. */
 export function fleetRunAttempt(task: { metadata?: Record<string, unknown> | null }): number {
   const raw = (task.metadata ?? {}).runAttempt;
@@ -169,11 +195,17 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     // then the environment's, then the default. Explicit rather than letting
     // the SDK decide: an unset model was served by Opus 5 on every turn, which
     // is how fleet runs came to cost ~$15.85 each.
+    // The last rung is CREDENTIAL-AWARE. A Codex-only workspace that has never
+    // picked a model would otherwise land on Sonnet and be refused below for a
+    // Claude key it was never asked for — a dead end reached by doing nothing
+    // wrong. An EXPLICIT choice is never rewritten this way: if the model says
+    // Claude and there is no Claude token, that is a refusal naming the vendor,
+    // not a silent swap onto a model the user did not pick.
     const model =
       modelFromTask(task) ??
       (await workspaceFleetModel(task.workspaceId)) ??
       modelFromEnv(env) ??
-      DEFAULT_FLEET_MODEL_ID;
+      (creds.claudeToken ? DEFAULT_FLEET_MODEL_ID : DEFAULT_FLEET_CODEX_MODEL_ID);
 
     // The model decides the provider, and the provider decides what the microVM
     // can reach: the host builds the sandbox's egress route table from it, so a
@@ -181,6 +213,26 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
     // Sent explicitly rather than left to the host's default — the route table
     // should be the one this dispatch chose.
     const provider = fleetProviderForModel(model);
+
+    // THE KEY FOR THIS DISPATCH'S VENDOR, OR NOTHING HAPPENS.
+    //
+    // This used to send `creds.openaiKey ?? ''`, and the empty string is the
+    // whole problem. The sandbox gateway fills an ABSENT OR BLANK credential
+    // from its own tenant's sealed custody — so a workspace with no Codex
+    // credential would not fail, it would quietly run on whatever key the
+    // Talyn tenant holds, billing one account's subscription for another's
+    // work. (Custody is only ever populated for GitHub-born tenants and ours is
+    // operator-minted, so there is nothing behind that door today. The fix is
+    // not about today: it is one settings change away from being live, and the
+    // failure is silent when it arrives.)
+    //
+    // Refusing is also the more useful answer. "Connect Codex" is something the
+    // user can act on; a run that silently spends somebody else's subscription
+    // is something nobody finds out about.
+    const agentKey = provider === 'openai' ? creds.openaiKey : creds.claudeToken;
+    if (!agentKey) {
+      return { ok: false, error: missingCredentialError(provider, model, creds) };
+    }
 
     const { sandbox, host } = await createSandboxRetryingUncertain(client, {
       id: runId,
@@ -197,14 +249,22 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
         repo: { slug: repo.slug, baseBranch: repo.defaultBranch },
       },
       githubToken,
-      // The credential for this dispatch's provider, and only that one. Always
-      // sent, never optional: the workspace's own key is the only one in play,
-      // and the fleet has no house key to fall back on — it refuses a dispatch
-      // that arrives without one rather than booting a guest that cannot call
-      // out.
-      ...(provider === 'openai'
-        ? { openaiKey: creds.openaiKey ?? '' }
-        : { anthropicKey: creds.claudeToken }),
+      // The credential for this dispatch's vendor, and only that one.
+      ...(provider === 'openai' ? { openaiKey: agentKey } : { anthropicKey: agentKey }),
+      // SUPPRESS THE OTHER VENDOR, which is what makes the custody door
+      // structurally shut rather than shut by our remembering to fill a field.
+      //
+      // The fleet applies `policy.credentials` at EVERY door a credential can
+      // enter a run's proxy — the create body, the /credentials push, the
+      // refresh hook, and the adoption re-pull (`internal/fleet/policy.go`
+      // `filterCredentials`) — so a suppressed vendor cannot be filled from
+      // custody on any of them, including the one that runs when nobody is
+      // looking (a fleetd restart).
+      //
+      // ONE vendor, never both, and never `github`: suppressing everything
+      // nulls the refresh hook outright (`allCredentialsSuppressed`), which
+      // would strip the key we just sent.
+      policy: { credentials: provider === 'openai' ? { anthropic: 'none' } : { openai: 'none' } },
     });
 
     // WHICH BOX IS RUNNING THIS, from whichever party actually knows.
@@ -236,7 +296,19 @@ export async function dispatchTaskToFleet(task: Task, env: Environment): Promise
       remoteTaskId: sandbox.id,
       remoteRunId: sandbox.id,
       status: cloudStatusForSandbox(sandbox),
-      extra: { repo: repo.slug, endpoint: target.endpoint, ...(fleetHost ? { host: fleetHost } : {}) },
+      extra: {
+        repo: repo.slug,
+        endpoint: target.endpoint,
+        // WHICH VENDOR THIS RUN IS SPENDING. Recorded because two other paths
+        // have to agree with the choice made here: the poller re-supplies an
+        // adopted sandbox's credentials, and `resolveRunCredentials` answers a
+        // host that asks for them back after a restart. Both used to send the
+        // Claude key unconditionally, which is a run that authenticates against
+        // the wrong vendor for the rest of its deadline.
+        llm: provider,
+        model,
+        ...(fleetHost ? { host: fleetHost } : {}),
+      },
     };
     await patchTaskMetadata(task.id, (existing) => ({ ...existing, cloudTask }));
 

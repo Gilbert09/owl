@@ -41,7 +41,7 @@ describe('ProviderIcon colouring', () => {
 
   it('leaves vendor logos as plain images', () => {
     // Their colours are the vendor's, not ours — theming them would be wrong.
-    for (const p of ['posthog_code', 'claude_code', 'codex_cloud']) {
+    for (const p of ['posthog_code', 'codex_cloud']) {
       const { container } = render(<ProviderIcon provider={p} />);
       expect(container.querySelector('img')).not.toBeNull();
       expect(container.querySelector('[role="img"]')).toBeNull();

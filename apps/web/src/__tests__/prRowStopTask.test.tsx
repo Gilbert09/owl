@@ -112,7 +112,11 @@ describe('PR row task slot', () => {
   it('stops the linked task on click', async () => {
     const { onStopTask } = renderRow('in_progress', vi.fn(async () => {}));
     fireEvent.click(stopButton()!);
-    await waitFor(() => expect(onStopTask).toHaveBeenCalledWith('t1'));
+    // The ROW rides along with the task id: stopping from a PR row also has to
+    // reconcile that row, and the handler cannot re-find it from the id alone.
+    await waitFor(() =>
+      expect(onStopTask).toHaveBeenCalledWith('t1', expect.objectContaining({ id: 'pr1' })),
+    );
     expect(toast.error).not.toHaveBeenCalled();
   });
 

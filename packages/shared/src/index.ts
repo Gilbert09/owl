@@ -98,28 +98,6 @@ export interface PostHogIntegration {
 }
 
 /**
- * Claude models a workspace can run Claude Code tasks on, cheapest-capable
- * first in cost. Sonnet is the default — PR fix/respond/review work doesn't
- * warrant Opus pricing. Ids are the Anthropic model ids passed to the
- * Managed Agents API.
- */
-export const CLAUDE_MODELS = [
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', blurb: 'Balanced capability and cost — the default.' },
-  { id: 'claude-opus-4-8', label: 'Opus 4.8', blurb: 'Most capable, most expensive.' },
-  { id: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', blurb: 'Fastest and cheapest.' },
-] as const;
-
-export type ClaudeModelId = (typeof CLAUDE_MODELS)[number]['id'];
-
-/** Default Claude model for Claude Code tasks when the workspace hasn't picked one. */
-export const DEFAULT_CLAUDE_MODEL_ID: ClaudeModelId = 'claude-sonnet-4-6';
-
-/** Type guard for a stored/incoming value being a known Claude model id. */
-export function isClaudeModelId(value: unknown): value is ClaudeModelId {
-  return typeof value === 'string' && CLAUDE_MODELS.some((m) => m.id === value);
-}
-
-/**
  * Models a workspace can run PostHog Code tasks on — the ONE list, imported by
  * the Settings picker, the per-task composer, and the backend's fallback. It
  * used to be three hand-maintained copies, which is exactly how the composer
@@ -174,17 +152,46 @@ export type StoredPostHogCodeModelId = PostHogCodeModelId | LegacyPostHogCodeMod
 export const DEFAULT_POSTHOG_CODE_MODEL_ID: PostHogCodeModelId = 'claude-opus-5';
 
 /**
- * Models a Talyn Fleet run may use.
+ * Which LLM API a fleet model belongs to.
  *
- * The same current-generation list as PostHog Code, because it is the same id
- * space: a fleet run is the Claude Agent SDK inside a microVM, so it takes the
- * Claude 5 ids rather than CLAUDE_MODELS' 4.x set.
+ * The fleet builds a run's egress route table from this, and a run reaches
+ * exactly one provider — a run dispatched at an OpenAI model has no route to
+ * api.anthropic.com at all. So this is not a label: it decides what the microVM
+ * can talk to, and getting it wrong is a run that cannot make a single call.
  */
-export const FLEET_MODELS = POSTHOG_CODE_MODELS;
-export type FleetModelId = PostHogCodeModelId;
+export type FleetProvider = 'anthropic' | 'openai';
 
 /**
- * Default model for a fleet run.
+ * Models a Talyn Fleet run may use, and which vendor each belongs to.
+ *
+ * NO LONGER AN ALIAS OF `POSTHOG_CODE_MODELS`, and the split is load-bearing.
+ * PostHog's tasks runtime is handed `runtime_adapter: 'claude'` and 400s on a
+ * `gpt-*` id, so the two catalogues stopped being the same set the moment the
+ * fleet could run Codex. Sharing one list would have offered every PostHog Code
+ * user a model their dispatch cannot accept.
+ *
+ * The Claude half is the same current-generation id space as PostHog Code. The
+ * Codex half is what the guest's harness actually knows (`gpt-5-mini` and
+ * `gpt-5-nano` are in its table too but are not offered — they are not worth
+ * pointing at a PR).
+ *
+ * Most capable first within each vendor.
+ */
+export const FLEET_MODELS = [
+  { id: 'claude-opus-5', label: 'Opus 5', provider: 'anthropic', blurb: 'Newest Opus, 1M context.' },
+  { id: 'claude-fable-5', label: 'Fable 5', provider: 'anthropic', blurb: 'Newest of the Claude 5 line.' },
+  { id: 'claude-sonnet-5', label: 'Sonnet 5', provider: 'anthropic', blurb: 'Strong and fast — the default.' },
+  { id: 'claude-opus-4-8', label: 'Opus 4.8', provider: 'anthropic', blurb: 'The previous Opus flagship.' },
+  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6', provider: 'anthropic', blurb: 'Cheapest of the Claude set.' },
+  { id: 'gpt-5.1-codex', label: 'GPT-5.1 Codex', provider: 'openai', blurb: 'Newest Codex — the Codex default.' },
+  { id: 'gpt-5-codex', label: 'GPT-5 Codex', provider: 'openai', blurb: 'The previous Codex release.' },
+  { id: 'gpt-5.1', label: 'GPT-5.1', provider: 'openai', blurb: 'General-purpose, not Codex-tuned.' },
+] as const satisfies readonly { id: string; label: string; provider: FleetProvider; blurb: string }[];
+
+export type FleetModelId = (typeof FLEET_MODELS)[number]['id'];
+
+/**
+ * Default model for a fleet run on a CLAUDE credential.
  *
  * SONNET, not Opus, and the difference is not small. Fleet runs were served by
  * Opus 5 on every turn and cost $348 in 18.5 hours — about $15.85 a run — on
@@ -196,24 +203,49 @@ export type FleetModelId = PostHogCodeModelId;
 export const DEFAULT_FLEET_MODEL_ID: FleetModelId = 'claude-sonnet-5';
 
 /**
- * Which LLM API a fleet model belongs to.
+ * Default model for a fleet run on a CODEX credential.
  *
- * The fleet builds a run's egress route table from this, and a run reaches
- * exactly one provider — a run dispatched at an OpenAI model has no route to
- * api.anthropic.com at all. So this is not a label: it decides what the microVM
- * can talk to, and getting it wrong is a run that cannot make a single call.
- *
- * Every model in FLEET_MODELS is Anthropic's today, so this returns 'anthropic'
- * for all of them. It exists as the seam: adding a Codex model means adding it
- * to the catalogue and to the map below, not editing the dispatch path.
+ * A workspace that connected only Codex has no Claude token, so the Claude
+ * default above would be refused at dispatch for a credential it was never
+ * asked for. The dispatch ladder picks between the two by which credential the
+ * workspace actually holds.
  */
-export type FleetProvider = 'anthropic' | 'openai';
+export const DEFAULT_FLEET_CODEX_MODEL_ID: FleetModelId = 'gpt-5.1-codex';
 
-const FLEET_MODEL_PROVIDERS: Record<string, FleetProvider> = {};
+/**
+ * Derived from the catalogue rather than hand-maintained beside it. The two
+ * used to be separate and the map was empty, so every model — including one
+ * added as OpenAI's — answered 'anthropic' and would have been dispatched with
+ * no route to its own API.
+ */
+const FLEET_MODEL_PROVIDERS: Record<string, FleetProvider> = Object.fromEntries(
+  FLEET_MODELS.map((m) => [m.id, m.provider]),
+);
 
+/**
+ * Which vendor a fleet model belongs to.
+ *
+ * An unknown id answers 'anthropic'. That is the back-compat answer, not a
+ * guess: every model that existed before this field did was Anthropic's, and a
+ * workspace may still have one of them pinned. Guessing 'openai' would turn a
+ * stale pin into a 400 at dispatch.
+ */
 export function fleetProviderForModel(modelId: string | undefined): FleetProvider {
   if (!modelId) return 'anthropic';
   return FLEET_MODEL_PROVIDERS[modelId] ?? 'anthropic';
+}
+
+/** Which agent vendor a workspace connected, as the UI and the wire name it. */
+export type FleetAgent = 'claude' | 'codex';
+
+/** The vendor label a fleet model runs under, for a per-task agent picker. */
+export function fleetAgentForModel(modelId: string | undefined): FleetAgent {
+  return fleetProviderForModel(modelId) === 'openai' ? 'codex' : 'claude';
+}
+
+/** That agent's default model — what a per-task "run this on Codex" picks. */
+export function defaultFleetModelForAgent(agent: FleetAgent): FleetModelId {
+  return agent === 'codex' ? DEFAULT_FLEET_CODEX_MODEL_ID : DEFAULT_FLEET_MODEL_ID;
 }
 
 /** Type guard for a value being a model the pickers currently OFFER. */
@@ -237,30 +269,49 @@ export function isStoredPostHogCodeModelId(
 }
 
 /**
- * Type guard for a stored fleet model setting. Same id space as PostHog Code,
- * including the legacy ids, so a workspace that pinned an older model keeps it
- * rather than being silently moved to the default.
+ * Type guard for a stored fleet model setting.
+ *
+ * WIDER than the PostHog guard in both directions, and it has to be. It accepts
+ * the Codex ids, which PostHog's `claude` runtime adapter would 400 on — and it
+ * still accepts the LEGACY Claude ids, because a stored value that fails
+ * validation falls back to the DEFAULT, so narrowing it would silently move a
+ * workspace that pinned Opus 4.5 (deliberately, for cost) onto a dearer model.
+ *
+ * The two guards must not be collapsed into one: `isStoredPostHogCodeModelId`
+ * staying Claude-only is what stops a `gpt-*` fleet setting leaking into a
+ * PostHog Code dispatch.
  */
-export function isStoredFleetModelId(value: unknown): value is StoredPostHogCodeModelId {
-  return isStoredPostHogCodeModelId(value);
+export type StoredFleetModelId = FleetModelId | LegacyPostHogCodeModelId;
+
+export function isStoredFleetModelId(value: unknown): value is StoredFleetModelId {
+  return (
+    (typeof value === 'string' && FLEET_MODELS.some((m) => m.id === value)) ||
+    isStoredPostHogCodeModelId(value)
+  );
 }
 
 export interface WorkspaceSettings {
   continuousBuild?: ContinuousBuildSettings;
   /**
-   * Which model Talyn Fleet runs use. Unset means DEFAULT_FLEET_MODEL_ID
-   * (Sonnet 5) — see the note there on why it is not Opus.
+   * Which model Talyn Fleet runs use.
+   *
+   * Unset means the default for whichever agent the workspace connected —
+   * Sonnet 5 on Claude, GPT-5.1 Codex on Codex — resolved at dispatch, because
+   * only the dispatch knows which credential is actually there. See the note on
+   * DEFAULT_FLEET_MODEL_ID for why the Claude default is not Opus.
+   *
+   * The MODEL carries the vendor: `fleetProviderForModel` reads it, and the
+   * fleet builds the microVM's egress route table from that. So this one
+   * setting picks both which agent runs and what it can reach.
    */
-  fleetModel?: StoredPostHogCodeModelId;
+  fleetModel?: StoredFleetModelId;
   /**
    * Which cloud provider new tasks dispatch to when more than one is connected.
    * A specific provider pins it; `'ask'` makes the desktop prompt per task (and
    * backend auto-fixes fall back to a deterministic order); unset = auto
-   * (prefer PostHog Code, else Claude Code).
+   * (prefer Talyn Fleet, else PostHog Code — see CLOUD_PROVIDER_ORDER).
    */
   defaultCloudProvider?: CloudProviderType | 'ask';
-  /** Which Claude model Claude Code tasks run on. Unset = {@link DEFAULT_CLAUDE_MODEL_ID}. */
-  claudeModel?: ClaudeModelId;
   /** Which model PostHog Code runs use. Unset = {@link DEFAULT_POSTHOG_CODE_MODEL_ID}. */
   posthogCodeModel?: PostHogCodeModelId;
   /**
@@ -384,7 +435,7 @@ export interface ContinuousBuildSettings {
  * `integrations` row, not on the env.
  *
  * STALE UNION: rows are actually created with `CloudProviderType` values
- * (see services/cloudProviders/environment.ts — `claude_code` exists in
+ * (see services/cloudProviders/environment.ts — `selfhosted` exists in
  * the DB but not here), and `local`/`remote` are dead daemon-era members
  * nothing creates anymore. Cleanup candidate: collapse this onto
  * `CloudProviderType`.
@@ -1150,10 +1201,15 @@ export interface PostHogCodeTaskMetadata {
 /**
  * Cloud task providers FastOwl can delegate a task to. A provider runs the
  * whole agent loop on its own sandbox and opens a PR; FastOwl kicks off the
- * run and reconciles status/transcript back. `posthog_code` is live today;
- * the other two are planned drop-ins (see docs/CLOUD_PROVIDERS.md).
+ * run and reconciles status/transcript back. `selfhosted` (Talyn Fleet) and
+ * `posthog_code` are live; `codex_cloud` is deferred — OpenAI exposes no
+ * server-to-server cloud-task API (see docs/CLOUD_PROVIDERS.md).
+ *
+ * `claude_code` (Anthropic Managed Agents) was removed: it billed metered API
+ * credits with no subscription option, which is the opposite of what the fleet
+ * offers, and every workspace on it is better served by the fleet's own Claude.
  */
-export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'claude_code' | 'selfhosted';
+export type CloudProviderType = 'posthog_code' | 'codex_cloud' | 'selfhosted';
 
 /**
  * A provider id as it may actually arrive at runtime — including one this build

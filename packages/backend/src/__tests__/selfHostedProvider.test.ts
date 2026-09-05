@@ -61,7 +61,7 @@ describe('selfHostedProvider — CloudTaskProvider conformance', () => {
   ])('rejects %s (no DB/network hit)', async (_label, input) => {
     expect(await selfHostedProvider.validateCredentials('ws1', input)).toEqual({
       ok: false,
-      error: 'A Claude OAuth token is required.',
+      error: 'Connect a Claude or Codex subscription, or disconnect one.',
     });
   });
 

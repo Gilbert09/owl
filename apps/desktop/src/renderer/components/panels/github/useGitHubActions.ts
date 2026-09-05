@@ -3,8 +3,10 @@ import { api, type PRRow } from '../../../lib/api';
 import {
   buildMergeablePrompt,
   buildSkillPrompt,
+  defaultFleetModelForAgent,
   promptTemplateFor,
   type CloudProviderType,
+  type FleetAgent,
   type SkillSummary,
 } from '@talyn/shared';
 import { useWorkspaceStore } from '../../../stores/workspace';
@@ -57,18 +59,40 @@ export function useGitHubActions() {
   // actual choice (>1 connected).
   const workspaceSettings = workspaces.find((w) => w.id === currentWorkspaceId)?.settings;
   const defaultCloudProvider = workspaceSettings?.defaultCloudProvider;
-  const taskAsk = defaultCloudProvider === 'ask' && connectedProviders.length > 1;
+  // The menu lists AGENTS, not providers. Talyn Fleet runs on the workspace's
+  // own Claude subscription or its own Codex subscription, and "Talyn Fleet"
+  // alone cannot say which — so a fleet with both connected contributes two
+  // entries, and one with neither contributes none. An agent the workspace has
+  // not connected is never offered: picking it would produce a task the backend
+  // refuses at dispatch, which is a worse answer than not offering it.
+  //
+  // A fleet entry carries a MODEL, because the model is what carries the
+  // vendor: `fleetProviderForModel` reads it and the fleet builds the microVM's
+  // egress route table from that. Sending an agent name as well would be a
+  // second source of truth that can disagree with the first.
   const taskProviders = useMemo(
-    () => connectedProviders.map((p) => ({ type: p.type, displayName: p.displayName })),
+    () =>
+      connectedProviders.flatMap((p) => {
+        if (p.type !== 'selfhosted') return [{ type: p.type, displayName: p.displayName }];
+        const agents = (p.connectedAgents ?? []) as FleetAgent[];
+        return agents.map((agent) => ({
+          type: p.type,
+          displayName: `${p.displayName} · ${agent === 'codex' ? 'Codex' : 'Claude'}`,
+          model: defaultFleetModelForAgent(agent),
+        }));
+      }),
     [connectedProviders]
   );
+  const taskAsk = defaultCloudProvider === 'ask' && taskProviders.length > 1;
   const openIntegrations = useCallback(() => openSettings('integrations'), [openSettings]);
 
-  // Auto fallback env: prefer PostHog Code for back-compat, else Claude Code.
+  // Auto fallback env, in the same order the backend's resolveCloudEnvChain
+  // uses — the two must agree or a task started from the UI lands somewhere the
+  // backend's own auto-fix would not have sent it.
   // (Named `posthogEnvId`/`posthogEnabled` to avoid churning consumers.)
   const posthogEnvId = useMemo(() => {
     const envFor = (type: string) => environments.find((e) => e.type === type)?.id ?? null;
-    for (const type of ['posthog_code', 'claude_code']) {
+    for (const type of ['selfhosted', 'posthog_code']) {
       if (connectedProviders.some((p) => p.type === type)) {
         const id = envFor(type);
         if (id) return id;
@@ -328,13 +352,13 @@ export function useGitHubActions() {
   // picker when set to "ask"); the run happens entirely in the cloud, so we stay
   // on the current page — the row's task badge is the user's signal it started.
   const createPostHogTask = useCallback(
-    async (row: PRRow, providerType?: string): Promise<boolean> => {
+    async (row: PRRow, providerType?: string, model?: string): Promise<boolean> => {
       if (!currentWorkspaceId) return false;
       const envId = resolveTaskEnvId(providerType);
       if (!envId) {
         // No provider connected/resolvable. Prompt the user to connect one and
         // stash this fix so it auto-runs the moment they do.
-        openConnectAgent({ kind: 'fix', row, providerType });
+        openConnectAgent({ kind: 'fix', row, providerType, model });
         return false;
       }
       // Build the prompt for the provider actually behind the resolved env — the
@@ -358,6 +382,10 @@ export function useGitHubActions() {
         repositoryId: row.repositoryId,
         assignedEnvironmentId: envId,
         pullRequestId: row.id,
+        // Only set when the user picked an agent from the menu. Absent lets the
+        // backend resolve the workspace's own model, then the default for
+        // whichever credential it actually holds.
+        ...(model ? { model } : {}),
       });
       trackEvent('pr_fix_task_started', {
         repo: `${row.owner}/${row.repo}`,
@@ -380,7 +408,7 @@ export function useGitHubActions() {
     async (
       row: PRRow,
       skill: SkillSummary,
-      opts: { providerType?: string; localContent?: string } = {}
+      opts: { providerType?: string; model?: string; localContent?: string } = {}
     ): Promise<boolean> => {
       if (!currentWorkspaceId) return false;
       const envId = resolveTaskEnvId(opts.providerType);
@@ -391,6 +419,7 @@ export function useGitHubActions() {
           skill,
           localContent: opts.localContent,
           providerType: opts.providerType,
+          model: opts.model,
         });
         return false;
       }
@@ -452,6 +481,7 @@ export function useGitHubActions() {
           repositoryId: skill.repositoryId,
           platformSkillId: skill.id,
         },
+        ...(opts.model ? { model: opts.model } : {}),
       });
       trackEvent('pr_skill_task_started', {
         repo: `${row.owner}/${row.repo}`,

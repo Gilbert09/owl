@@ -17,10 +17,10 @@ describe('workspace store — connect-agent modal state', () => {
   });
 
   it('openConnectAgent opens the modal and stashes a fix intent', () => {
-    useWorkspaceStore.getState().openConnectAgent({ kind: 'fix', row, providerType: 'claude_code' });
+    useWorkspaceStore.getState().openConnectAgent({ kind: 'fix', row, providerType: 'selfhosted' });
     const s = useWorkspaceStore.getState();
     expect(s.connectAgentOpen).toBe(true);
-    expect(s.pendingCloudTask).toEqual({ kind: 'fix', row, providerType: 'claude_code' });
+    expect(s.pendingCloudTask).toEqual({ kind: 'fix', row, providerType: 'selfhosted' });
   });
 
   it('openConnectAgent stashes a skill intent with its content', () => {

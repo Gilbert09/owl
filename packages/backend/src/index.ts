@@ -28,7 +28,6 @@ import { prMonitorService } from './services/prMonitor.js';
 import { postHogCodeStreamer } from './services/posthogCode/streamer.js';
 import { registerCloudProvider } from './services/cloudProviders/registry.js';
 import { postHogCodeProvider } from './services/cloudProviders/posthog/provider.js';
-import { claudeCodeProvider } from './services/cloudProviders/claude/provider.js';
 import { selfHostedProvider } from './services/cloudProviders/selfhosted/provider.js';
 import { cloudTaskPoller } from './services/cloudProviders/poller.js';
 import { prAutoMergeWatcher } from './services/prAutoMergeWatcher.js';
@@ -75,10 +74,9 @@ async function main() {
   await initDatabase();
 
   // Register cloud task providers before any service that dispatches or
-  // polls them. PostHog Code + Claude Code (Managed Agents) today; Codex
+  // polls them. PostHog Code and the self-hosted fleet today; Codex Cloud
   // slots in here with no other changes (see docs/CLOUD_PROVIDERS.md).
   registerCloudProvider(postHogCodeProvider);
-  registerCloudProvider(claudeCodeProvider);
 
   // The self-hosted Firecracker fleet, off unless FLEET_ENABLED is set.
   //

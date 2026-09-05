@@ -15,9 +15,9 @@ import { getSelfHostedClient, getSelfHostedCredentials } from './credentials.js'
 import { FleetRunNotFoundError } from './client.js';
 import type { FleetClient, FleetEvent, FleetSandbox, FleetSandboxTask } from './client.js';
 
-// Re-exported, not redeclared. This module and claudeCode/poller.ts each had a
-// byte-identical copy of the predicate and the two constants behind it; a
-// second definition of one rule is how they drift.
+// Re-exported, not redeclared. This module and the other providers' pollers
+// each had a byte-identical copy of the predicate and the two constants behind
+// it; a second definition of one rule is how they drift.
 export { shouldPersistTranscript } from '../cloudProviders/transcriptStore.js';
 
 /**
@@ -311,15 +311,38 @@ class SelfHostedPoller {
         // failing every LLM call and nothing said why.
         console.warn(
           `[selfhosted] cannot re-supply credentials to ${runId}: ` +
-            `${!githubToken ? 'no GitHub token' : 'no Anthropic credential'} for workspace ${row.workspaceId}`,
+            `${!githubToken ? 'no GitHub token' : 'no agent credential'} for workspace ${row.workspaceId}`,
         );
         return;
       }
-      const repo = (readCloudTaskMeta({ metadata: row.metadata })?.extra as { repo?: string })?.repo;
+      const extra = (readCloudTaskMeta({ metadata: row.metadata })?.extra ?? {}) as {
+        repo?: string;
+        llm?: string;
+      };
+      // THE VENDOR THIS RUN WAS DISPATCHED ON, not whatever the workspace has.
+      //
+      // This used to send `anthropicKey` unconditionally, which re-credentialed
+      // a Codex run with a Claude key: the guest's route table points at
+      // chatgpt.com and has no route to Anthropic at all, so the run would
+      // authenticate against a host it cannot reach for the rest of its
+      // deadline — reported later as "the guest did not reconnect".
+      //
+      // A row with no `llm` predates the field. Those are all Anthropic runs
+      // (nothing could dispatch an OpenAI model before it existed), so that is
+      // a fact rather than a default.
+      const openai = extra.llm === 'openai';
+      const agentKey = openai ? creds.openaiKey : creds.claudeToken;
+      if (!agentKey) {
+        console.warn(
+          `[selfhosted] cannot re-supply credentials to ${runId}: workspace ${row.workspaceId} ` +
+            `no longer holds a ${openai ? 'Codex' : 'Claude'} credential`,
+        );
+        return;
+      }
       await client.setSandboxCredentials(runId, {
         githubToken,
-        anthropicKey: creds.claudeToken,
-        ...(repo ? { repo } : {}),
+        ...(openai ? { openaiKey: agentKey } : { anthropicKey: agentKey }),
+        ...(extra.repo ? { repo: extra.repo } : {}),
       });
       // Marked only on success, so a failed attempt is retried next tick.
       this.recredentialed.set(row.id, key);

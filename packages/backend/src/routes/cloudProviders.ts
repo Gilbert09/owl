@@ -1,15 +1,35 @@
 import { Router } from 'express';
-import type { CloudProviderType, ApiResponse } from '@talyn/shared';
+import type { CloudProviderType, ApiResponse, FleetAgent } from '@talyn/shared';
 import { assertUser, handleAccessError, requireWorkspaceAccess } from '../middleware/auth.js';
 import { getCloudProvider, listCloudProviders } from '../services/cloudProviders/registry.js';
 import { ensureCloudEnvironment } from '../services/cloudProviders/environment.js';
 import { fleetRefusalReason, workspaceMayUseFleet } from '../services/cloudProviders/fleetAccess.js';
+import { fleetAgentStatus } from '../services/selfHosted/credentials.js';
 
 interface CloudProviderInfo {
   type: CloudProviderType;
   displayName: string;
   capabilities?: { model?: boolean; runtimeAdapter?: boolean };
   connected: boolean;
+  /**
+   * Which agent vendors are connected behind this provider.
+   *
+   * Only Talyn Fleet has more than one — it runs the workspace's own Claude
+   * subscription or its own Codex subscription, and `connected` alone cannot
+   * say which. The per-task picker needs to know: offering "Talyn Fleet · Codex"
+   * to a workspace that never connected Codex produces a task that is refused at
+   * dispatch, which is a worse answer than not offering it.
+   *
+   * Presence only, never values.
+   */
+  connectedAgents?: FleetAgent[];
+  /**
+   * Agents whose stored sign-in was REJECTED and cannot be refreshed — the user
+   * has to reconnect. Still listed in `connectedAgents`, deliberately: the card
+   * has to render the agent to offer "Reconnect", and hiding it would read as
+   * "you never set this up".
+   */
+  reauthAgents?: FleetAgent[];
 }
 
 /**
@@ -45,6 +65,7 @@ export function cloudProviderRoutes(): Router {
           displayName: p.displayName,
           capabilities: p.capabilities,
           connected: await p.hasCredentials(workspaceId),
+          ...(p.type === 'selfhosted' ? await fleetAgentStatus(workspaceId) : {}),
         })),
     );
     res.json({ success: true, data: providers } as ApiResponse<CloudProviderInfo[]>);

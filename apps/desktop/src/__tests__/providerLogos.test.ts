@@ -2,7 +2,6 @@ import {
   GENERIC_PROVIDER_LOGO,
   SELFHOSTED_LOGO,
   POSTHOG_LOGO,
-  CLAUDE_LOGO,
   CODEX_LOGO,
 } from '../renderer/assets/providers/logos';
 
@@ -84,7 +83,6 @@ describe('inline SVG provider marks', () => {
 describe('raster provider marks', () => {
   it.each([
     ['PostHog', POSTHOG_LOGO],
-    ['Claude', CLAUDE_LOGO],
     ['Codex', CODEX_LOGO],
   ])('%s is a non-empty inline PNG', (_name, uri) => {
     expect(uri.startsWith('data:image/png;base64,')).toBe(true);
@@ -96,7 +94,7 @@ describe('raster provider marks', () => {
 
 describe('every mark is distinct', () => {
   it('no two providers share an image', () => {
-    const all = [POSTHOG_LOGO, CLAUDE_LOGO, CODEX_LOGO, SELFHOSTED_LOGO, GENERIC_PROVIDER_LOGO];
+    const all = [POSTHOG_LOGO, CODEX_LOGO, SELFHOSTED_LOGO, GENERIC_PROVIDER_LOGO];
     // A copy-paste that points two providers at one mark makes the badge lie
     // about which agent ran a task, which is worse than having no badge.
     expect(new Set(all).size).toBe(all.length);

@@ -2,6 +2,90 @@
 
 Chronological notes from development sessions. Most recent first. See [`CLAUDE.md`](../CLAUDE.md) for the project context and [`ROADMAP.md`](./ROADMAP.md) for the phased TODO.
 
+## Session 114 — Talyn Fleet becomes the default, on the user's own subscription (2026-09-05)
+
+Three providers became two, and the survivor changed what it spends. **Talyn
+Fleet now heads `CLOUD_PROVIDER_ORDER`** ahead of PostHog Code, **Claude Code
+(Anthropic Managed Agents) is deleted**, and the fleet runs on the workspace's
+own **Claude or Codex subscription** — connected during onboarding, and
+switchable per task.
+
+**Claude Code went because of what it billed.** Managed Agents has no
+subscription option: every run was metered API credits, which is the opposite of
+the thing the fleet exists to offer. Six modules, four test files and a whole
+prompt dialect went with it (migration `0050` fails its in-flight tasks first —
+the poller skips a task whose provider is not registered, so those rows do not
+fail, they sit `in_progress` forever holding a plan slot).
+
+**Removing it exposed a bug it had been hiding.** `mergeablePromptVariables`
+branched on `provider === 'claude_code'`, so `selfhosted` fell into the PostHog
+branch and every fleet run was instructed to publish with `git_signed_commit` /
+`git_signed_merge` / `git_signed_rewrite` — PostHog sandbox tools that do not
+exist in a microVM, whose actual mechanism is `fleet-publish`. The fleet has its
+own dialect now (`fleetGitRules` / `fleetBaseUpdateFlow` / `fleetResignRule`),
+written from the executor's `SYSTEM_PROMPT` so the two cannot say different
+things to the same agent.
+
+**The credential hole was one settings change from being live.** The dispatch
+sent `openaiKey: creds.openaiKey ?? ''`, and the sandbox gateway fills an
+*absent or blank* key from its own tenant's sealed custody — so a workspace with
+no Codex credential would not have failed, it would have run on Talyn's key and
+billed one account's subscription for another's work. Nothing is behind that
+door today (custody is only populated for GitHub-born tenants and ours is
+operator-minted), which is a fact about one environment variable and not a
+property of the code. Now: **the key for the model's vendor or a refusal**,
+never a blank, plus `policy.credentials` suppressing the OTHER vendor — the
+fleet applies that filter at every door a credential can enter the proxy,
+including the adoption re-pull that runs when nobody is watching. Exactly one
+entry, never `github` and never both: `allCredentialsSuppressed` nulls the whole
+refresh hook, which would strip the key we just sent.
+
+**Three paths had to agree on which vendor a run is spending**, and two of them
+did not. `poller.ts` `recredential` re-supplied `anthropicKey` unconditionally,
+and `resolveRunCredentials` served both keys on the argument that the host's
+route table decides which is spent — true of the spending, and wrong about the
+rest, since a Codex run re-credentialed with a Claude key authenticates against
+a host it has no route to for the remainder of its deadline. `cloudTask.extra.llm`
+is now the record; a row without it predates the field and is an Anthropic run.
+
+**Codex could not be an OAuth button on the backend.** OpenAI publishes no
+third-party OAuth for ChatGPT-subscription inference, and the only client the
+Codex backend accepts redirects to `http://localhost:1455/auth/callback` — a
+loopback address, which `prod.talyn.dev` can never be. So the authorize leg runs
+in the desktop's main process (`main/codexAuth.ts`, `originator=talyn`) and
+`apps/web` pastes `~/.codex/auth.json`. The backend owns refresh only, mirroring
+`posthogCode/oauth.ts` exactly — in-process promise map plus blocking advisory
+lock, because OpenAI rotates on every use and two concurrent refreshes mean one
+replays a spent token. **Stated as a risk rather than buried:** that flow reuses
+OpenAI's first-party client id, which is what every other third-party coding
+tool does and is still not a documented integration point.
+
+**Nothing on the fleet side changed.** yas already classified both vendors'
+credentials by shape (`sk-ant-oat…` → OAuth Bearer, a ChatGPT JWT →
+`chatgpt.com/backend-api/codex/responses` with the account id) and its guest
+harness already knew the `gpt-5.1-codex` ids. The whole gap was on ours:
+`FLEET_MODELS` was an ALIAS of `POSTHOG_CODE_MODELS`, which had to break — Talyn
+sends PostHog's tasks API `runtime_adapter: 'claude'`, and it 400s on a `gpt-*`
+id, so a shared list would have offered every PostHog Code user a model their own
+dispatch refuses.
+
+**The allow-list stays.** `selfhosted` heads the order but is still dropped from
+the chain for a workspace that may not use the fleet, so a non-allow-listed
+workspace gets precisely today's behaviour: PostHog Code at the head, no fleet
+card, a 403 on credential write. The fleet is one box.
+
+**Onboarding gained a step, reversing its own stated reasoning.** The wizard's
+header comment argued that a cloud agent is deliberately not part of setup
+because `ConnectAgentModal` prompts on first dispatch. That held while the agent
+was credits somebody else billed; it does not now the credential is the user's
+own subscription. The step is skippable — a non-allow-listed workspace is served
+no fleet card, and gating Next would strand it on a step it cannot complete.
+
+Also deleted: the generic descriptor-driven `CloudProviderCard`. Both remaining
+cards are bespoke (each has more than one way to connect), so it had no callers
+— and a template kept for a provider that may never need it is a template that
+rots.
+
 ## Session 113 — One task per PR, not one per run (2026-09-01)
 
 PostHog's session list had become unreadable: "Get PostHog/posthog#90517 mergeable" a dozen times over, one entry per fix run, across days. Every repeat run at a PR created a new Talyn task, and every new task created a new REMOTE task.

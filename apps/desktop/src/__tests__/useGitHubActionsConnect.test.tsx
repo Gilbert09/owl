@@ -96,8 +96,8 @@ describe('useGitHubActions — connect-agent gating', () => {
   it('createPostHogTask with a connected provider dispatches the task instead of prompting', async () => {
     createTask.mockResolvedValue({ id: 't1' });
     setStore({
-      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
-      environments: [{ id: 'env1', type: 'claude_code' }],
+      cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
+      environments: [{ id: 'env1', type: 'posthog_code' }],
     });
     const { result } = renderHook(() => useGitHubActions());
     const created = await result.current.createPostHogTask(row);
@@ -114,8 +114,8 @@ describe('useGitHubActions — connect-agent gating', () => {
   it('createPostHogTask renders the shipped default when nothing is customized', async () => {
     createTask.mockResolvedValue({ id: 't1' });
     setStore({
-      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
-      environments: [{ id: 'env1', type: 'claude_code' }],
+      cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
+      environments: [{ id: 'env1', type: 'posthog_code' }],
     });
     const { result } = renderHook(() => useGitHubActions());
     await result.current.createPostHogTask(row);
@@ -137,14 +137,14 @@ describe('useGitHubActions — connect-agent gating', () => {
           },
         },
       ],
-      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
-      environments: [{ id: 'env1', type: 'claude_code' }],
+      cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
+      environments: [{ id: 'env1', type: 'posthog_code' }],
     });
     const { result } = renderHook(() => useGitHubActions());
     await result.current.createPostHogTask(row);
     const prompt = createTask.mock.calls[0][0].prompt as string;
     expect(prompt.startsWith('Mine acme/w#7')).toBe(true);
-    expect(prompt).toContain('`github` MCP server');
+    expect(prompt).toContain('git_signed_commit');
     expect(prompt).not.toContain('Every reviewer comment');
   });
 
@@ -165,8 +165,8 @@ describe('useGitHubActions — connect-agent gating', () => {
           },
         },
       ],
-      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
-      environments: [{ id: 'env1', type: 'claude_code' }],
+      cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
+      environments: [{ id: 'env1', type: 'posthog_code' }],
     });
     const { result } = renderHook(() => useGitHubActions());
     const localSkill: SkillSummary = { ...skill, key: 'local:pr-review', source: 'local' };
@@ -183,8 +183,8 @@ describe('useGitHubActions — connect-agent gating', () => {
     expect(none.current.providerReady).toBe(false);
 
     setStore({
-      cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
-      environments: [{ id: 'env1', type: 'claude_code' }],
+      cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
+      environments: [{ id: 'env1', type: 'posthog_code' }],
     });
     const { result: ready } = renderHook(() => useGitHubActions());
     expect(ready.current.providerReady).toBe(true);

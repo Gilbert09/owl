@@ -510,8 +510,8 @@ describe('createCloudTask — reusing a task for the same PR', () => {
         .where(eq(tasksTable.id, first.id));
       await finish(first.id);
 
-      const claudeEnv = await envFor('claude_code');
-      const meta = (await run({ assignedEnvironmentId: claudeEnv })).metadata as Record<
+      const fleetEnv = await envFor('selfhosted');
+      const meta = (await run({ assignedEnvironmentId: fleetEnv })).metadata as Record<
         string,
         unknown
       > | null;
@@ -520,15 +520,15 @@ describe('createCloudTask — reusing a task for the same PR', () => {
     });
 
     it('drops a cloudTask handle — no other provider can re-run one', async () => {
-      const claudeEnv = await envFor('claude_code');
-      const first = await run({ assignedEnvironmentId: claudeEnv });
+      const fleetEnv = await envFor('selfhosted');
+      const first = await run({ assignedEnvironmentId: fleetEnv });
       await db
         .update(tasksTable)
-        .set({ metadata: { cloudTask: { provider: 'claude_code', remoteTaskId: 'sess-1' } } })
+        .set({ metadata: { cloudTask: { provider: 'selfhosted', remoteTaskId: 'sess-1' } } })
         .where(eq(tasksTable.id, first.id));
       await finish(first.id);
 
-      const meta = (await run({ assignedEnvironmentId: claudeEnv })).metadata as Record<
+      const meta = (await run({ assignedEnvironmentId: fleetEnv })).metadata as Record<
         string,
         unknown
       > | null;

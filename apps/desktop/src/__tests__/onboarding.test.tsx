@@ -40,8 +40,21 @@ describe('OnboardingWizard', () => {
     expect(screen.getByText('Connect GitHub')).toBeTruthy();
     expect(body).not.toContain('Name your workspace');
     expect(body).not.toContain('Workspace name');
-    // Two steps now, not three.
-    expect(screen.queryByText('3')).toBeNull();
+    // Three steps: GitHub, then the agent, then repos. The agent step is new —
+    // it did not used to be part of setup, and is now because the fleet runs on
+    // the user's OWN Claude or Codex subscription, so asking up front is what
+    // makes the first task run on their key.
+    expect(screen.getByTitle('Connect an agent')).toBeTruthy();
+    expect(screen.queryByText('4')).toBeNull();
+  });
+
+  // Optional on purpose: a workspace that is not on the fleet allow-list is
+  // served no fleet card, and gating Next would strand it on a step it cannot
+  // complete. ConnectAgentModal remains the fallback for anyone who skips.
+  it('does not gate progress on connecting an agent', () => {
+    const { container } = render(<OnboardingWizard />);
+    expect(container.querySelector('[title="Connect an agent"]')).toBeTruthy();
+    expect(container.textContent).toContain('Connect GitHub');
   });
 
   it('gates progress on the GitHub connection', () => {

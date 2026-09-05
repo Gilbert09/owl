@@ -1,4 +1,60 @@
-# Cloud Task Providers — Pluggable Delegation (PostHog Code, Codex Cloud, Claude Routines)
+# Cloud Task Providers — Pluggable Delegation
+
+> ## Current state (September 2026)
+>
+> | Provider | Wire value | Status |
+> |---|---|---|
+> | **Talyn Fleet** | `selfhosted` | **Live, and the DEFAULT.** Firecracker microVMs on hardware we own, dispatched through the sandbox gateway. Runs on the workspace's OWN Claude or Codex subscription. |
+> | PostHog Code | `posthog_code` | Live. The fall-back: what a workspace not on the fleet allow-list runs on, and where a full fleet fails over to. |
+> | Codex Cloud | `codex_cloud` | Deferred — OpenAI exposes no server-to-server cloud-task API. Note this is a different thing from running **Codex on the fleet**, which works today. |
+> | ~~Claude Code~~ | ~~`claude_code`~~ | **Removed** (migration `0050`). Anthropic Managed Agents billed metered API credits with no subscription option — the opposite of what the fleet offers — and the fleet runs Claude on the user's own subscription instead. |
+>
+> ### The fleet's two agents
+>
+> One provider, two independently connectable credentials, and the **model
+> carries the vendor**: `fleetProviderForModel` reads the model id and the fleet
+> builds the microVM's egress route table from it, so a run dispatched at a
+> Codex model has no route to `api.anthropic.com` at all. Picking an agent per
+> task is therefore picking a model — there is no second field, because a second
+> field is a second source of truth that can disagree with the first.
+>
+> - **Claude** — `claude setup-token` yields a long-lived `sk-ant-oat…`, or a
+>   Console key for metered billing. Pasted.
+> - **Codex** — a ChatGPT-subscription token pair. The authorize leg **cannot**
+>   run on the backend: OpenAI publishes no third-party OAuth for
+>   subscription inference, and the only client the Codex backend accepts
+>   redirects to `http://localhost:1455/auth/callback`. So the desktop runs the
+>   loopback PKCE flow in its main process (`main/codexAuth.ts`, `originator=talyn`,
+>   the same shape OpenCode uses) and `apps/web` pastes `~/.codex/auth.json`.
+>   The backend owns REFRESH only (`services/selfHosted/codexOauth.ts`, mirroring
+>   `posthogCode/oauth.ts`: in-process promise map + blocking advisory lock,
+>   `invalid_grant` terminal).
+>
+>   **Known risk, stated plainly:** that flow reuses OpenAI's first-party Codex
+>   client id. It is established practice among third-party coding tools, but it
+>   is not a documented integration point — OpenAI can revoke the client or
+>   refuse unfamiliar originators, and that breaks every connected workspace at
+>   once. The fallback is to drop server-side refresh and prompt "Reconnect
+>   Codex" on the first `invalid_grant`; measure the real access-token lifetime
+>   before choosing it.
+>
+> ### The credential rule, which is not negotiable
+>
+> **A dispatch always carries the workspace's own key for the vendor it is
+> running, and suppresses the other with `policy.credentials`.** The sandbox
+> gateway fills an *absent or blank* `anthropicKey`/`openaiKey` from its own
+> tenant's sealed custody, so `openaiKey: creds.openaiKey ?? ''` was a silent
+> route to spending somebody else's subscription. Nothing sits behind that door
+> today (custody is only populated for GitHub-born tenants and ours is
+> operator-minted) — which is a fact about one environment variable, not a
+> property of the code. No credential for the model's vendor is a **refusal**,
+> never a blank. Pinned by `fleetCredentialCustody.test.ts`.
+>
+> Three paths must agree on which vendor a run is spending, and
+> `cloudTask.extra.llm` is how: `executor.ts` records it, `poller.ts`
+> `recredential` re-supplies it after a fleetd restart, and
+> `runCredentials.ts` serves it back to a host that asks. A row with no `llm`
+> predates the field and is an Anthropic run.
 
 > Status: **Phases 1–2 shipped** (June 2026, the cloud-only refactor). Goal: turn the
 > one-off PostHog Code integration into a pluggable "cloud task provider" abstraction,

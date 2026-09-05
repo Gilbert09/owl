@@ -99,16 +99,16 @@ describe('SkillPickerModal', () => {
         taskAsk
         taskProviders={[
           { type: 'posthog_code', displayName: 'PostHog Code' },
-          { type: 'claude_code', displayName: 'Claude Code' },
+          { type: 'selfhosted', displayName: 'Talyn Fleet' },
         ]}
       />
     );
     fireEvent.click(screen.getByText('lint-check'));
     expect(onLaunch).not.toHaveBeenCalled();
     expect(screen.getByText('Run "lint-check" with…')).toBeInTheDocument();
-    fireEvent.click(screen.getByText('Claude Code'));
+    fireEvent.click(screen.getByText('Talyn Fleet'));
     await waitFor(() => expect(onLaunch).toHaveBeenCalledTimes(1));
-    expect(onLaunch.mock.calls[0][2].providerType).toBe('claude_code');
+    expect(onLaunch.mock.calls[0][2].providerType).toBe('selfhosted');
   });
 
   it('disables oversized skills with a badge', () => {

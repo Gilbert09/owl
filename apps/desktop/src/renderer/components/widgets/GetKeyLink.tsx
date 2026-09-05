@@ -2,8 +2,6 @@ import { openExternal } from '../../lib/openExternal';
 
 export const POSTHOG_API_KEYS_URL =
   'https://app.posthog.com/settings/user-api-keys';
-export const ANTHROPIC_API_KEYS_URL =
-  'https://console.anthropic.com/settings/keys';
 // Talyn Fleet takes an OAuth token minted from a Claude subscription rather
 // than a Console key, and there is no web page that hands one out — it comes
 // from `claude setup-token` on the CLI. This points at the docs for that.

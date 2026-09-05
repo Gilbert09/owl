@@ -106,26 +106,41 @@ describe('buildMergeablePrompt — provider dispatch', () => {
   });
 });
 
-describe('buildMergeablePrompt — claude_code variant (GitHub MCP, no signed-git/gh)', () => {
+describe('buildMergeablePrompt — selfhosted variant (Talyn Fleet: fleet-publish, no push)', () => {
   const prompt = buildMergeablePrompt({
     owner: 'acme',
     repo: 'widgets',
     number: 7,
     summary,
-    provider: 'claude_code',
+    provider: 'selfhosted',
   });
 
-  it('drops the PostHog-only signed-git tools and the gh CLI', () => {
+  // The bug this pins: the fleet used to fall into the PostHog branch and was
+  // told to call tools that do not exist inside the microVM.
+  it('drops the PostHog-only signed-git tools', () => {
     expect(prompt).not.toContain('git_signed_commit');
     expect(prompt).not.toContain('git_signed_merge');
     expect(prompt).not.toContain('git_signed_rewrite');
-    expect(prompt).not.toContain('gh pr ');
   });
 
-  it('publishes through the github MCP server', () => {
-    expect(prompt).toContain('`github` MCP server');
-    expect(prompt.toLowerCase()).toContain('no');
-    expect(prompt).toMatch(/no .*`git push`/i);
+  it('publishes through fleet-publish and says a push will be rejected', () => {
+    expect(prompt).toContain('fleet-publish');
+    expect(prompt).toMatch(/NO outbound `git push`/);
+    expect(prompt).toMatch(/signs it server-side|GitHub signs server-side|signed server-side/i);
+  });
+
+  it('gives the three-rung base-update ladder, in order', () => {
+    // Scoped to the base-update section: `--move-branch` also appears up in the
+    // git rules as one of the two publishing verbs, which is correct and much
+    // earlier in the prompt.
+    const ladder = prompt.slice(prompt.indexOf('/update-branch'));
+    expect(prompt).toContain('/update-branch');
+    expect(ladder.indexOf('/merges')).toBeGreaterThan(-1);
+    expect(ladder.indexOf('--move-branch')).toBeGreaterThan(ladder.indexOf('/merges'));
+  });
+
+  it('keeps `gh` — the fleet golden ships a shim for it', () => {
+    expect(prompt).toContain('gh pr view 7');
   });
 
   it('keeps the same goals and base-leak guard, threading the real base branch', () => {
@@ -136,14 +151,6 @@ describe('buildMergeablePrompt — claude_code variant (GitHub MCP, no signed-gi
     expect(prompt.toLowerCase()).toContain('leak');
     expect(prompt).toContain('git diff --name-only origin/main...HEAD');
     expect(prompt).toContain('git merge-base --is-ancestor origin/main HEAD');
-  });
-
-  it('bounds the run for efficiency — no idling on CI, capped cycles, give up + comment', () => {
-    expect(prompt).toContain('Efficiency');
-    expect(prompt.toLowerCase()).toContain("don't babysit ci");
-    expect(prompt).toMatch(/bound your effort/i);
-    // It must NOT tell the agent to loop forever until everything is green.
-    expect(prompt).not.toContain('do not hand control back until ALL conditions');
   });
 
   it('still permits local rebase for conflicts but never a single-parent base imitation', () => {
@@ -160,7 +167,7 @@ describe('buildMergeablePrompt — Talyn comment tagline', () => {
     expect(TALYN_COMMENT_TAGLINE).toContain('<sub>'); // renders small on GitHub
   });
 
-  it.each<CloudProviderType>(['posthog_code', 'claude_code', 'codex_cloud'])(
+  it.each<CloudProviderType>(['posthog_code', 'selfhosted', 'codex_cloud'])(
     'instructs every provider to append the exact tagline to comments (%s)',
     (provider) => {
       const prompt = buildMergeablePrompt({ owner: 'acme', repo: 'widgets', number: 7, summary, provider });
@@ -174,7 +181,7 @@ describe('buildMergeablePrompt — Talyn comment tagline', () => {
 
 describe('buildMergeablePrompt — re-sign section (signed-commits repos)', () => {
   it('is absent by default (no behaviour change for the common case)', () => {
-    for (const provider of ['posthog_code', 'claude_code'] as CloudProviderType[]) {
+    for (const provider of ['posthog_code', 'selfhosted'] as CloudProviderType[]) {
       const prompt = buildMergeablePrompt({ owner: 'acme', repo: 'widgets', number: 7, summary, provider });
       expect(prompt).not.toContain('COMMIT SIGNING');
       expect(prompt).not.toMatch(/require signed commits/i);
@@ -195,13 +202,14 @@ describe('buildMergeablePrompt — re-sign section (signed-commits repos)', () =
     expect(prompt.toLowerCase()).toContain('unsigned');
   });
 
-  it('Claude Code: re-sign via the github MCP (no signed-git tools)', () => {
+  it('Talyn Fleet: re-sign by republishing through fleet-publish (no signed-git tools)', () => {
     const prompt = buildMergeablePrompt({
-      owner: 'acme', repo: 'widgets', number: 7, summary, provider: 'claude_code',
+      owner: 'acme', repo: 'widgets', number: 7, summary, provider: 'selfhosted',
       resignCommits: true,
     });
     expect(prompt).toContain('COMMIT SIGNING');
-    expect(prompt).toContain('`github` MCP server');
+    expect(prompt).toContain('fleet-publish');
+    expect(prompt).toContain('--move-branch');
     expect(prompt).not.toContain('git_signed_rewrite');
     expect(prompt.toLowerCase()).toContain('unsigned');
   });
@@ -216,7 +224,7 @@ describe('buildMergeablePrompt — re-sign section (signed-commits repos)', () =
  */
 describe('buildMergeablePrompt — retargeted stack member', () => {
   it('is absent by default', () => {
-    for (const provider of ['posthog_code', 'claude_code'] as CloudProviderType[]) {
+    for (const provider of ['posthog_code', 'selfhosted'] as CloudProviderType[]) {
       const prompt = buildMergeablePrompt({
         owner: 'acme', repo: 'widgets', number: 7, summary, provider,
       });
@@ -225,7 +233,7 @@ describe('buildMergeablePrompt — retargeted stack member', () => {
   });
 
   it('names the parent, the new base, and prefers a rebase over a base merge', () => {
-    for (const provider of ['posthog_code', 'claude_code'] as CloudProviderType[]) {
+    for (const provider of ['posthog_code', 'selfhosted'] as CloudProviderType[]) {
       const prompt = buildMergeablePrompt({
         owner: 'acme', repo: 'widgets', number: 7, provider,
         summary: { ...summary, baseBranch: 'develop' } as PRMergeableSummary,
@@ -397,7 +405,7 @@ describe('buildMergeablePrompt — replying to human review comments', () => {
       repo: 'widgets',
       number: 7,
       summary,
-      provider: 'claude_code' as CloudProviderType,
+      provider: 'selfhosted' as CloudProviderType,
       respondToHumanComments: false,
     });
     expect(prompt).toContain('TURNED OFF REPLYING TO HUMAN REVIEW COMMENTS');

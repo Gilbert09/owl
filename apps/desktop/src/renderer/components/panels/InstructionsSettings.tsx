@@ -41,9 +41,12 @@ const GROUP_LABEL: Record<PromptVariableGroup, string> = {
   talyn: 'Talyn blocks',
 };
 
+// Every provider whose PUBLISHING DIALECT differs, so the preview shows what a
+// run on that provider would actually be told. Codex Cloud is deferred and
+// renders the PostHog dialect, so listing it would add an identical option.
 const PREVIEW_PROVIDERS: { value: CloudProviderType; label: string }[] = [
+  { value: 'selfhosted', label: 'Talyn Fleet' },
   { value: 'posthog_code', label: 'PostHog Code' },
-  { value: 'claude_code', label: 'Claude Code' },
 ];
 
 const SAMPLE_PR = {

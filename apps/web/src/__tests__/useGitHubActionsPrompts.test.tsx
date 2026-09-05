@@ -50,8 +50,8 @@ function setStore(settings: Record<string, unknown>) {
   state.store = {
     currentWorkspaceId: 'ws1',
     workspaces: [{ id: 'ws1', settings }],
-    environments: [{ id: 'env1', type: 'claude_code' }],
-    cloudProviders: [{ type: 'claude_code', connected: true, displayName: 'Claude Code' }],
+    environments: [{ id: 'env1', type: 'posthog_code' }],
+    cloudProviders: [{ type: 'posthog_code', connected: true, displayName: 'PostHog Code' }],
     selectTask: vi.fn(),
     tasks: [],
     addTask: vi.fn(),
@@ -83,7 +83,7 @@ describe('useGitHubActions prompt templates', () => {
     await result.current.createPostHogTask(row);
     const prompt = createTask.mock.calls[0][0].prompt as string;
     expect(prompt.startsWith('Mine acme/w#7')).toBe(true);
-    expect(prompt).toContain('`github` MCP server');
+    expect(prompt).toContain('git_signed_commit');
     expect(prompt).not.toContain('Every reviewer comment');
   });
 

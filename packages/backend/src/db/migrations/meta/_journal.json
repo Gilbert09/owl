@@ -351,6 +351,13 @@
 			"when": 1784160000033,
 			"tag": "0049_drop_merge_queue_engine_flag",
 			"breakpoints": true
+		},
+		{
+			"idx": 50,
+			"version": "7",
+			"when": 1784160000034,
+			"tag": "0050_drop_claude_code",
+			"breakpoints": true
 		}
 	]
 }

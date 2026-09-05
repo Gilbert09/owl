@@ -63,9 +63,20 @@ describe('unknown cloud providers degrade rather than disappear', () => {
     expect(meta.src.length).toBeGreaterThan(0);
   });
 
+  // `claude_code` was a real provider until it was removed, so a task or an env
+  // row naming it still exists in the database and still arrives at this client.
+  // It is the concrete case UNKNOWN stands in for, and it must degrade the same
+  // way rather than render as a blank badge.
+  it('degrades a REMOVED provider the same way as an unknown one', () => {
+    expect(providerLabel('claude_code')).toBe('Claude Code');
+    expect(providerMeta('claude_code').src).toMatch(/^data:image\//);
+    expect(readCloudTaskProvider({ metadata: { cloudTask: { provider: 'claude_code', remoteTaskId: 'r1' } } })).toBe(
+      'claude_code',
+    );
+  });
+
   it('keeps the branding of providers it does know', () => {
     expect(providerLabel('posthog_code')).toBe('PostHog Code');
-    expect(providerLabel('claude_code')).toBe('Claude Code');
     expect(providerLabel('codex_cloud')).toBe('Codex Cloud');
     // Every known provider must carry both, or its badge renders half-empty.
     for (const meta of Object.values(PROVIDER_META)) {
@@ -89,7 +100,7 @@ describe('taskCloudProvider', () => {
   });
 
   it('resolves a known environment type', () => {
-    expect(taskCloudProvider(task, [{ id: 'env1', type: 'claude_code' }])).toBe('claude_code');
+    expect(taskCloudProvider(task, [{ id: 'env1', type: 'selfhosted' }])).toBe('selfhosted');
   });
 
   it('does not treat local or remote environments as cloud providers', () => {

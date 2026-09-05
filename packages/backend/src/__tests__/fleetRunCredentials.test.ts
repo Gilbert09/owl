@@ -42,9 +42,12 @@ function fleetTask(over: {
   runId?: string;
   host?: string | null;
   provider?: string;
+  /** `undefined` writes no `llm` at all — a row from before the field existed. */
+  llm?: 'anthropic' | 'openai';
 }) {
   const extra: Record<string, unknown> = { repo: 'PostHog/posthog' };
   if (over.host !== null) extra.host = over.host ?? 'hetzner-64';
+  if (over.llm) extra.llm = over.llm;
   return {
     id: over.id,
     workspaceId: 'ws-1',
@@ -71,7 +74,9 @@ beforeEach(async () => {
     .insert(workspacesTable)
     .values({ id: 'ws-1', ownerId: TEST_USER_ID, name: 'ws', settings: {} });
   await db.insert(tasksTable).values([
-    fleetTask({ id: 'live', status: 'in_progress' }),
+    fleetTask({ id: 'live', status: 'in_progress', llm: 'anthropic' }),
+    fleetTask({ id: 'openai', status: 'in_progress', llm: 'openai' }),
+    fleetTask({ id: 'legacy', status: 'in_progress' }),
     fleetTask({ id: 'queued', status: 'queued' }),
     fleetTask({ id: 'done', status: 'completed' }),
     fleetTask({ id: 'failedrun', status: 'failed' }),
@@ -178,15 +183,31 @@ describe('resolveRunCredentials', () => {
 /**
  * An adopted run's provider decides which key it needs, and the host cannot ask
  * for one by name — it authenticates with a token that says nothing about the
- * run. So the answer carries whichever LLM keys the workspace has, and the host
- * spends the one its route table has an upstream for.
+ * run. What bounds the answer is the RUN, not the caller: it must be a run this
+ * backend dispatched, to this host, that is still live.
  *
- * Deriving the provider here instead would mean this endpoint re-deriving from
- * task metadata something the host already knows; getting it wrong leaves an
- * adopted run unable to authenticate, with nothing saying why.
+ * The answer carries the key for the vendor the RUN was dispatched on, and only
+ * that one. It used to carry both, on the argument that the host's route table
+ * decides which is spent — true of the spending, and wrong about the rest: a
+ * host holding a credential its guest has no route to use is a wider answer to
+ * the same question, on a pull authorized by a deployment-wide token.
  */
-describe('run credentials carry every LLM key the workspace has', () => {
-  it('includes the OpenAI key when the workspace has one', async () => {
+describe('run credentials serve the vendor the run was dispatched on', () => {
+  it('serves the OpenAI key, and NOT the Claude one, for a Codex run', async () => {
+    const { getSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
+    vi.mocked(getSelfHostedCredentials).mockResolvedValueOnce({
+      claudeToken: CLAUDE_TOKEN,
+      openaiKey: OPENAI_KEY,
+    });
+
+    const res = await resolveRunCredentials('hetzner-64', 'talyn-openai');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.credentials.openaiKey).toBe(OPENAI_KEY);
+    expect(res.credentials).not.toHaveProperty('anthropicKey');
+  });
+
+  it('serves the Claude key, and NOT the OpenAI one, for an Anthropic run', async () => {
     const { getSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
     vi.mocked(getSelfHostedCredentials).mockResolvedValueOnce({
       claudeToken: CLAUDE_TOKEN,
@@ -197,16 +218,30 @@ describe('run credentials carry every LLM key the workspace has', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.credentials.anthropicKey).toBe(CLAUDE_TOKEN);
-    expect(res.credentials.openaiKey).toBe(OPENAI_KEY);
+    expect(res.credentials).not.toHaveProperty('openaiKey');
   });
 
-  // A workspace with no OpenAI key — every workspace today — must not get the
-  // field at all. An empty string would be a credential as far as the fleet's
-  // dispatch check is concerned, and it would pass a run that cannot call out.
-  it('omits the OpenAI key when the workspace has none', async () => {
-    const res = await resolveRunCredentials('hetzner-64', 'talyn-live');
+  // A row written before `extra.llm` existed is an Anthropic run — nothing could
+  // dispatch an OpenAI model then — so answering with the Claude key is the
+  // fact, not a default.
+  it('reads a row with no recorded vendor as Anthropic', async () => {
+    const res = await resolveRunCredentials('hetzner-64', 'talyn-legacy');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.credentials.anthropicKey).toBe(CLAUDE_TOKEN);
+    expect(res.credentials).not.toHaveProperty('openaiKey');
+  });
+
+  // An empty string would be a credential as far as the fleet's dispatch check
+  // is concerned, and would pass a run that cannot call out. Omit the field.
+  it('omits the key entirely when the workspace no longer holds that vendor', async () => {
+    const { getSelfHostedCredentials } = await import('../services/selfHosted/credentials.js');
+    vi.mocked(getSelfHostedCredentials).mockResolvedValueOnce({ claudeToken: CLAUDE_TOKEN });
+
+    const res = await resolveRunCredentials('hetzner-64', 'talyn-openai');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(res.credentials).not.toHaveProperty('openaiKey');
+    expect(res.credentials).not.toHaveProperty('anthropicKey');
   });
 });

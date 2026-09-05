@@ -3,7 +3,7 @@ import {
   buildSkillPrompt,
   parseSkillFrontmatter,
   postHogCodeGitRules,
-  claudeCodeGitRules,
+  fleetGitRules,
   buildMergeablePrompt,
   TALYN_COMMENT_TAGLINE,
   type SkillPromptInput,
@@ -82,7 +82,7 @@ describe('parseSkillFrontmatter', () => {
 });
 
 describe('buildSkillPrompt', () => {
-  it.each<CloudProviderType>(['posthog_code', 'claude_code'])(
+  it.each<CloudProviderType>(['posthog_code', 'selfhosted'])(
     'includes the PR context and skill content (%s)',
     (provider) => {
       const prompt = buildSkillPrompt(input({ provider }));
@@ -102,9 +102,9 @@ describe('buildSkillPrompt', () => {
     expect(prompt).not.toContain('NO `gh` CLI');
   });
 
-  it('embeds the Claude github-MCP rules verbatim for claude_code', () => {
-    const prompt = buildSkillPrompt(input({ provider: 'claude_code' }));
-    expect(prompt).toContain(claudeCodeGitRules('main'));
+  it('embeds the fleet publishing rules verbatim for selfhosted', () => {
+    const prompt = buildSkillPrompt(input({ provider: 'selfhosted' }));
+    expect(prompt).toContain(fleetGitRules('main'));
     expect(prompt).not.toContain('git_signed_commit');
   });
 
@@ -158,7 +158,7 @@ describe('buildSkillPrompt', () => {
     expect(buildSkillPrompt(input())).not.toContain('also lives in your checkout');
   });
 
-  it.each<CloudProviderType>(['posthog_code', 'claude_code'])(
+  it.each<CloudProviderType>(['posthog_code', 'selfhosted'])(
     'appends the shared Talyn comment tagline (%s)',
     (provider) => {
       const prompt = buildSkillPrompt(input({ provider }));

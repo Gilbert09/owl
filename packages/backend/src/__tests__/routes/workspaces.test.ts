@@ -325,7 +325,7 @@ describe('routes/workspaces', () => {
           ownerId: TEST_USER_ID,
           name: 'Alpha',
           settings: {
-            defaultCloudProvider: 'claude_code',
+            defaultCloudProvider: 'selfhosted',
             prompts: { skill: { template: 'Run {{pr.url}} {{gitRules}} {{skill.content}}', basedOnHash: 'aaaaaaaa', updatedAt: 'then' } },
           },
         });
@@ -335,7 +335,7 @@ describe('routes/workspaces', () => {
         const res = await patchPrompts({ mergeable: { template: validTemplate, basedOnHash: hash } });
         expect(res.status).toBe(200);
         const body = await res.json();
-        expect(body.data.settings.defaultCloudProvider).toBe('claude_code');
+        expect(body.data.settings.defaultCloudProvider).toBe('selfhosted');
         expect(body.data.settings.prompts.mergeable).toMatchObject({ template: validTemplate, basedOnHash: hash });
         expect(typeof body.data.settings.prompts.mergeable.updatedAt).toBe('string');
         expect(body.data.settings.prompts.skill.basedOnHash).toBe('aaaaaaaa');

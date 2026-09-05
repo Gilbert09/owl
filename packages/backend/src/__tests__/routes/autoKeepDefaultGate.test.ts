@@ -149,7 +149,7 @@ describe('workspace default auto-keep-mergeable is an Unlimited feature', () => 
     const res = await fetch(`${url}/workspaces/ws1`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ settings: { defaultCloudProvider: 'claude_code' } }),
+      body: JSON.stringify({ settings: { defaultCloudProvider: 'selfhosted' } }),
     });
     expect(res.status).toBe(200);
   });

@@ -21,6 +21,7 @@ import MenuBuilder from './menu';
 import { resolveHtmlPath } from './util';
 import { AuthStorage, type EncryptionBackend } from './authStorage';
 import { initAutoUpdater } from './updater';
+import { signInToCodex } from './codexAuth';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -157,6 +158,17 @@ ipcMain.handle('auth:storage:set', async (_event, key: string, value: string) =>
 });
 ipcMain.handle('auth:storage:remove', async (_event, key: string) => {
   await authStorage.removeItem(key);
+});
+
+// Connect a ChatGPT subscription for Talyn Fleet.
+//
+// The whole flow runs here because OpenAI's Codex client redirects to a
+// LOOPBACK address, which only a process on the user's machine can answer —
+// see main/codexAuth.ts. The renderer gets the finished token pair back and
+// forwards it to the backend through the normal cloud-providers route, so
+// there is still exactly one place that knows how to talk to the backend.
+ipcMain.handle('codex:sign-in', async () => {
+  return signInToCodex((url) => openExternalGuarded(url));
 });
 
 // Current app version, for display in Settings → About.

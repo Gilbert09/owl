@@ -247,17 +247,28 @@ export function postHogCodeGitRules(baseBranch: string): string {
 }
 
 /**
- * The Claude Code (Managed Agents) sandbox's non-negotiable publishing rules
- * (`github` MCP server only; no `gh` CLI, no raw push). Shared verbatim by the
- * mergeable prompt and the skill-run prompt so the two can never drift.
+ * The Talyn Fleet microVM's non-negotiable publishing rules.
+ *
+ * The guest holds no credential of any kind — the host-side credential proxy
+ * injects them — and it holds no signing key either, so a raw `git push` is
+ * refused by any base that requires verified signatures. `fleet-publish` is the
+ * way through: it asks the proxy to create the commit through GitHub's API,
+ * which signs it server-side.
+ *
+ * Shared verbatim by the mergeable prompt and the skill-run prompt so the two
+ * can never drift, and deliberately consistent with the executor's own
+ * SYSTEM_PROMPT — an agent told two different mechanisms treats the first
+ * refusal it meets as something to route around.
  */
-export function claudeCodeGitRules(baseBranch: string): string {
+export function fleetGitRules(baseBranch: string): string {
   return `NON-NEGOTIABLE PUBLISHING RULES — read these first, they apply to EVERYTHING below:
-  - The repository is mounted in your sandbox, but you have NO \`gh\` CLI and NO outbound \`git push\`. Every change that must reach GitHub — commits to the PR branch, updating the branch from its base, PR comments, resolving review threads — goes through the connected \`github\` MCP server's tools. Use those tools to publish.
-  - Local git is available for READ-ONLY inspection and for preparing changes: \`git fetch\`, \`git status\`, \`git diff\`, \`git log\`, \`git merge-base\`, \`git rev-list\`, and a LOCAL \`git rebase\` to resolve conflicts. None of that reaches GitHub on its own — only the \`github\` MCP tools publish.
-  - To incorporate changes from ${baseBranch}, bring the base in as a TRUE MERGE so it becomes an ANCESTOR of the PR branch — prefer GitHub's "update branch" / merge-base-into-head operation via the \`github\` MCP server (the same machinery as GitHub's "Update branch" button). Do NOT fabricate a single-parent imitation of a merge (no \`git merge --squash\`, no \`git checkout ${baseBranch} -- .\`, no \`git read-tree\`, no "apply the base's diff"): that makes the base look like your work and leaks every file the base changed into the PR's diff (hundreds of unrelated files). Naming a single-parent commit "Merge branch '${baseBranch}'" does not make it a merge.
-  - If GitHub can't auto-update the branch because of CONFLICTS, resolve them LOCALLY (\`git fetch origin ${baseBranch}\` then \`git rebase origin/${baseBranch}\`, resolving each conflict), then publish the resolved branch by pushing it through the \`github\` MCP server. Rebase is ONLY for conflict resolution onto the PR's own base — never rebase for any other reason or onto any other branch.
-  - If a \`github\` MCP tool rejects an operation, its error is authoritative — read it and follow the recovery path it describes rather than retrying the same call or working around it.`;
+  - This environment has NO signing key and NO outbound \`git push\`. A push is REJECTED on any repository that requires verified signatures, and that is by design — do not try to work around it. Changes reach the remote ONLY through:
+      - \`fleet-publish --branch <branch> --message "<headline>" [--body "<longer text>"]\` — publishes your working tree as ONE commit that GitHub signs server-side. Use this for all ordinary work: review fixes, CI fixes, etc. It diffs against the merge-base with the default branch, so commit locally or not as you prefer — only the final file contents matter.
+      - \`fleet-publish --move-branch <branch> --oid <sha>\` — repoints a branch at a commit you already published. This is the only sanctioned force-update, and the conflict flow below is its only sanctioned use here. It REWRITES the branch and discards its previous commits, so never reach for it while a server-side update would have worked.
+  - Local git is fully available for inspection and for preparing changes: \`git fetch\`, \`git status\`, \`git diff\`, \`git log\`, \`git merge-base\`, \`git rev-list\`, and a LOCAL \`git rebase\` to resolve conflicts. None of it reaches the remote on its own — only \`fleet-publish\` and the GitHub API publish.
+  - To incorporate changes from ${baseBranch}, make GITHUB perform the merge so the result is signed and the base becomes a true ANCESTOR of the PR branch — see the base-update flow below. NEVER fabricate a single-parent imitation of a merge (no \`git merge --squash\`, no \`git checkout ${baseBranch} -- .\`, no \`git read-tree\`, no "apply the base's diff"): that makes the base look like your work and leaks every file the base changed into the PR's diff (hundreds of unrelated files). Naming a single-parent commit "Merge branch '${baseBranch}'" does not make it a merge.
+  - Never move the repository's default branch. The fleet will refuse it.
+  - git and the GitHub API are ALREADY authenticated — there are no credentials here and you do not need any. Some API endpoints are deliberately unreachable; a refusal is a policy decision, not an obstacle to route around. Do not probe for alternatives, and never use a request that creates state (a review, a comment, a ref) to test whether something is permitted.`;
 }
 
 /**
@@ -404,21 +415,32 @@ export function postHogCodeResignRule(baseBranch: string): string {
 }
 
 /**
- * Re-sign instructions for the Claude Code sandbox: commits published through
- * the `github` MCP server are signed by GitHub automatically, so re-creating the
- * branch's commits through it makes them Verified.
+ * Re-sign instructions for the Talyn Fleet microVM: `fleet-publish` commits are
+ * created through GitHub's API and signed server-side, so republishing the
+ * branch's contents through it makes the branch Verified.
+ *
+ * Publishing collapses the working tree into ONE commit, which is what makes
+ * this simple: there is no per-commit re-signing to do, because the branch ends
+ * up carrying a single signed commit.
  */
-export function claudeCodeResignRule(baseBranch: string): string {
+export function fleetResignRule(baseBranch: string): string {
   return `COMMIT SIGNING — REQUIRED FOR THIS MERGE (do this before anything else can land):
   - The base branch (${baseBranch}) enforces "require signed commits": GitHub REFUSES the merge while ANY commit on this PR branch is unsigned, and some commits here currently ARE unsigned. A signed merge/squash result is not enough — every commit on the branch must be Verified.
-  - Commits you publish through the \`github\` MCP server are signed by GitHub automatically. Re-create the branch's commits through it: rebase locally to linearize/prepare if needed (\`git fetch origin ${baseBranch}\`, \`git rebase origin/${baseBranch}\`), then publish the branch through the \`github\` MCP tools so every commit becomes a Verified GitHub commit.
-  - VERIFY before you finish: every commit in \`origin/${baseBranch}..HEAD\` must show as Verified on GitHub. Do not stop until all of them are signed.`;
+  - \`fleet-publish\` creates its commit through GitHub's API, which signs it. Republish the branch's whole contents through it: bring the branch up to date with ${baseBranch} per the base-update flow, make sure the working tree holds exactly the final file contents you want, then publish to a NEW scratch branch and repoint the PR branch at it with \`fleet-publish --move-branch <the PR head branch> --oid <the sha you just published>\`. The branch then carries one Verified commit.
+  - VERIFY before you finish: every commit in \`origin/${baseBranch}..HEAD\` must show as Verified on GitHub. Do not stop until all of them are.`;
 }
 
-export function githubToolsHint(provider: CloudProviderType): string {
-  return provider === 'claude_code'
-    ? "the `github` MCP server's tools (there is no `gh` CLI here)"
-    : '`gh` (or the GitHub API)';
+/**
+ * How this provider's sandbox reaches GitHub's API.
+ *
+ * One answer for every provider now that Claude Code (whose sandbox had no `gh`
+ * and reached GitHub only through the `github` MCP server) is gone: PostHog Code
+ * ships `gh`, and the fleet golden ships a `gh` shim that names the way through
+ * the host credential proxy. Kept as a function rather than inlined because the
+ * next provider may well answer differently again.
+ */
+export function githubToolsHint(_provider: CloudProviderType): string {
+  return '`gh` (or the GitHub API)';
 }
 
 export function postHogCodeBaseUpdateFlow(baseBranch: string, number: number): string {
@@ -445,28 +467,40 @@ export function postHogCodeBaseUpdateFlow(baseBranch: string, number: number): s
    - Do not publish until the "before" and "after" file sets match and every remaining hunk is intentional. Then re-run the build/tests locally where feasible and publish (\`git_signed_rewrite\` for a rebase; a server-side \`git_signed_merge\` needs no publish step). Updating the branch re-triggers CI and can reopen review threads, so re-check conditions (1) and (2) afterwards.`;
 }
 
-export function claudeCodeBaseUpdateFlow(baseBranch: string): string {
-  return `   - Check mergeability via the \`github\` MCP server's pull-request tools (mergeable / mergeStateStatus).
+/**
+ * The fleet's base-update ladder — three rungs, stop at the first that works.
+ *
+ * Rungs 1 and 2 make GITHUB perform the merge, so the result is signed and the
+ * base genuinely becomes an ancestor; both refuse a merge that is not clean, and
+ * a refusal means a real conflict rather than a misuse. Rung 3 rewrites the PR
+ * branch and discards its previous commits, which is why it is last and why the
+ * wording says so out loud.
+ */
+export function fleetBaseUpdateFlow(baseBranch: string, number: number): string {
+  return `   - Check mergeability via \`gh pr view ${number} --json mergeable,mergeStateStatus\` (or the equivalent GitHub API read).
    - BEFORE updating anything, record the exact set of files this PR owns (local read, safe):
        git fetch origin ${baseBranch}
        git diff --name-only origin/${baseBranch}...HEAD   # save this "before" list
-   - If the branch is BEHIND or CONFLICTING, first try to update it from ${baseBranch} through the \`github\` MCP server (a real merge of the base into the head branch). If that succeeds, the base is now an ancestor of your branch — \`git fetch\` and continue to the verification step.
-   - ONLY if GitHub reports the update can't be done automatically because of a CONFLICT, resolve it with a local rebase:
+   - If the branch is BEHIND or CONFLICTING, try these IN ORDER and stop at the first that works:
+       1. \`PUT /repos/{owner}/{repo}/pulls/${number}/update-branch\`
+       2. \`POST /repos/{owner}/{repo}/merges\`, merging ${baseBranch} into the head branch
+     Both make GitHub perform the merge server-side, so the result is signed, and both REFUSE when the merge is not clean. A refusal means there is a real conflict — not that you used them wrongly. If one succeeds, \`git fetch\` and continue to the verification step.
+   - ONLY if both refuse, resolve the conflict locally:
        git fetch origin ${baseBranch}
        git rebase origin/${baseBranch}
-     For each conflicted file, resolve ONLY the genuine conflict: preserve the intent of BOTH sides; never blindly discard the PR's changes or the base's. Then \`git add\` the resolutions and \`git rebase --continue\`, repeating until the rebase completes. Publish the rebased branch by pushing it through the \`github\` MCP server. Only ever rebase onto the PR's own base branch (\`origin/${baseBranch}\`). If the rebase goes sideways, \`git rebase --abort\` and start over — never leave it half-finished.
-   - VERIFY THE UPDATE ACTUALLY JOINED THE BASE, whichever path ran (this is the #1 cause of mass file leaks — the base never truly becomes an ancestor). Both of these must hold (local reads):
+     For each conflicted file, resolve ONLY the genuine conflict: preserve the intent of BOTH sides; never blindly discard the PR's changes or the base's. Then \`git add\` the resolutions and \`git rebase --continue\` (NOT \`git commit\`), repeating until the rebase completes. Publish the resolved tree to a NEW scratch branch with \`fleet-publish --branch <scratch>\`, then repoint the PR branch with \`fleet-publish --move-branch <the PR head branch> --oid <the sha you just published>\`. Only ever rebase onto the PR's own base branch (\`origin/${baseBranch}\`) — never any other branch. If the rebase goes sideways, \`git rebase --abort\` and start over; never leave it half-finished.
+   - VERIFY THE UPDATE ACTUALLY JOINED THE BASE, whichever rung ran (this is the #1 cause of mass file leaks — the base never truly becomes an ancestor). Both of these must hold (local reads):
        git fetch origin ${baseBranch}
        git merge-base --is-ancestor origin/${baseBranch} HEAD   # must exit 0 — the base tip is now an ancestor of your branch
        git rev-list --count HEAD..origin/${baseBranch}          # must print 0 — your branch is NOT behind the base anymore
-     If either fails, the update did not take — redo it; do not proceed.
+     If either fails, the update did not take — re-read the refusal (it explains its recovery path) and redo it; do not proceed.
    - GUARD AGAINST BASE-BRANCH FILES LEAKING INTO THE PR. This is a real, recurring failure: a botched base update or conflict resolution drags files that only changed on ${baseBranch} into the PR's diff. Catch it explicitly:
        a. AFTER the update, record the file set again:
             git diff --name-only origin/${baseBranch}...HEAD   # the "after" list
        b. Compare with the "before" list you saved. The two MUST be identical. A clean base update adds NOTHING to the PR's own diff — files that already live on ${baseBranch} must never appear as PR changes. Any file in "after" that wasn't in "before" is a leak.
        c. For every file still in the diff, eyeball it: \`git diff origin/${baseBranch}...HEAD -- <file>\`. Each hunk must be either this PR's intended work or a genuine conflict resolution. A hunk that just restates what's already on ${baseBranch} is a leak.
-   - If you find ANY leaked file or hunk, do not publish. Reset to the remote branch state (the remote is untouched until you push through the \`github\` MCP server) and redo the update, taking the base side for files this PR never meant to touch.
-   - Do not publish until the "before" and "after" file sets match and every remaining hunk is intentional. Updating the branch re-triggers CI and can reopen review threads, so re-check conditions (1) and (2) afterwards.`;
+   - If you find ANY leaked file or hunk, do not publish. \`git rebase --abort\` (or reset to the remote branch state — the remote is untouched until you publish) and redo the update, taking the base side for files this PR never meant to touch.
+   - Do not publish until the "before" and "after" file sets match and every remaining hunk is intentional. Then re-run the build/tests locally where feasible and publish. A server-side update (rung 1 or 2) needs no publish step. Updating the branch re-triggers CI and can reopen review threads, so re-check conditions (1) and (2) afterwards.`;
 }
 
 export function postHogCodeLoopRules(ref: string): string {
@@ -478,16 +512,6 @@ export function postHogCodeLoopRules(ref: string): string {
 Start by checking out the PR branch (${ref}), fetching the current state of review threads and CI, and then work the loop until done.`;
 }
 
-export function claudeCodeLoopRules(ref: string): string {
-  return `Efficiency — this run is metered, so be decisive and do not idle:
-  - Investigate ONCE, then batch. Gather every unresolved review thread, the failing required checks, and the mergeability state up front, then make all the fixes you can determine and publish them TOGETHER. Each push re-triggers CI and can reopen threads, so don't publish a separate commit per comment.
-  - Don't babysit CI. After publishing, check the required checks once; if they're still queued/running, do at most ONE short re-check — never sit polling a slow pipeline. Talyn re-checks this PR continuously and starts a fresh run if CI later regresses, so you do NOT need to wait out a full CI cycle.
-  - Bound your effort to about TWO fix → publish → verify cycles. If required checks are still failing for reasons you can't fix, or you're blocked (missing credentials/secrets, a product decision, or domain knowledge you don't have), post ONE concise PR comment listing exactly what remains and why, then stop — do not keep looping.
-  - Make the smallest change that resolves each item — no refactors or edits to unrelated code. If a condition already holds when you fetch state, leave it alone.
-
-Stop as soon as the PR is clean, or after your bounded attempts with a short summary comment. Start by checking out the PR branch (${ref}) and fetching review threads + CI in a single pass.`;
-}
-
 export type MergeablePromptVariables = Record<string, string>;
 
 export function mergeablePromptVariables(
@@ -495,7 +519,13 @@ export function mergeablePromptVariables(
 ): MergeablePromptVariables {
   const { owner, repo, number, summary: s, provider } = input;
   const ref = `${owner}/${repo}#${number}`;
-  const claude = provider === 'claude_code';
+  // Which PUBLISHING DIALECT this provider's sandbox speaks. It is not a label:
+  // each variant names the concrete tools the agent must reach for, and an
+  // agent handed the wrong ones spends its run discovering they do not exist.
+  // The fleet used to fall into the PostHog branch and was told to call
+  // `git_signed_commit` / `git_signed_merge` / `git_signed_rewrite`, which are
+  // PostHog sandbox tools — its own mechanism is `fleet-publish`.
+  const fleet = provider === 'selfhosted';
   const issues =
     buildIssuesSummary(s, input.failingChecks) +
     (input.resignCommits
@@ -516,15 +546,15 @@ export function mergeablePromptVariables(
     'pr.baseBranch': s.baseBranch,
     repo: `${owner}/${repo}`,
     issues,
-    gitRules: claude ? claudeCodeGitRules(s.baseBranch) : postHogCodeGitRules(s.baseBranch),
+    gitRules: fleet ? fleetGitRules(s.baseBranch) : postHogCodeGitRules(s.baseBranch),
     githubTools: githubToolsHint(provider),
     taglineRule: talynTaglineRule(),
-    baseUpdateFlow: claude
-      ? claudeCodeBaseUpdateFlow(s.baseBranch)
+    baseUpdateFlow: fleet
+      ? fleetBaseUpdateFlow(s.baseBranch, number)
       : postHogCodeBaseUpdateFlow(s.baseBranch, number),
     resignRule: input.resignCommits
-      ? claude
-        ? claudeCodeResignRule(s.baseBranch)
+      ? fleet
+        ? fleetResignRule(s.baseBranch)
         : postHogCodeResignRule(s.baseBranch)
       : '',
     queueFailureRule: input.queueFailure
@@ -534,7 +564,7 @@ export function mergeablePromptVariables(
     // behaviour, where human feedback takes priority. Only an explicit `false`
     // injects the rule.
     humanCommentRule: input.respondToHumanComments === false ? humanCommentRule() : '',
-    loopRules: claude ? claudeCodeLoopRules(ref) : postHogCodeLoopRules(ref),
+    loopRules: postHogCodeLoopRules(ref),
   };
 }
 

@@ -2,6 +2,7 @@
 /* eslint no-unused-vars: off */
 import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 import type { UpdaterEvent, UpdaterCheckResult, UpdateChannel } from './updaterEvents';
+import type { CodexSignInResult } from './codexAuth';
 
 /** A SKILL.md found under ~/.claude/skills/<dirName>/. */
 export interface LocalSkillFile {
@@ -96,6 +97,20 @@ const electronHandler = {
     /** True for a local dev build — the renderer flags the UI with a DEV badge. */
     isDev(): Promise<boolean> {
       return ipcRenderer.invoke('app:is-dev');
+    },
+  },
+  codex: {
+    /**
+     * Connect a ChatGPT subscription for Talyn Fleet.
+     *
+     * Runs the whole OAuth flow in the MAIN process, because OpenAI's Codex
+     * client redirects to `http://localhost:1455/auth/callback` and only a
+     * process on this machine can answer a loopback address. Resolves with the
+     * token pair, which the renderer forwards to the backend through the normal
+     * cloud-providers route. Desktop-only: `apps/web` pastes instead.
+     */
+    signIn(): Promise<CodexSignInResult> {
+      return ipcRenderer.invoke('codex:sign-in');
     },
   },
   skills: {

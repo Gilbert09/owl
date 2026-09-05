@@ -99,7 +99,7 @@ export async function resolveRunCredentials(
   if (!row) return { ok: false, reason: 'unknown_run' };
 
   const cloud = readCloudTaskMeta({ metadata: row.metadata as Record<string, unknown> | null });
-  const extra = (cloud?.extra ?? {}) as { host?: string; repo?: string };
+  const extra = (cloud?.extra ?? {}) as { host?: string; repo?: string; llm?: string };
 
   // The host must be the one this run was dispatched to. A run with no recorded
   // host is refused rather than allowed: an unknown host is not a match, and
@@ -119,17 +119,32 @@ export async function resolveRunCredentials(
   // failure — worse than either waiting or failing honestly.
   if (!githubToken) return { ok: false, reason: 'credentials_unavailable' };
 
-  // Both LLM keys, when the workspace has both. Which one is spent is decided
-  // host-side by the run's own route table — it carries exactly one upstream —
-  // so scoping the answer by provider here would mean this endpoint had to
-  // re-derive the run's provider from its metadata to tell the host something
-  // the host already knows.
+  // THE KEY FOR THE VENDOR THIS RUN WAS DISPATCHED ON, and only that one.
+  //
+  // This used to answer with both keys when the workspace held both, on the
+  // argument that the host's own route table decides which is spent so scoping
+  // here would only re-derive something the host already knows. That was true
+  // of the spending and wrong about everything else: it hands a host a
+  // credential the run has no route to use, on a pull authorized by a
+  // deployment-wide token — the smallest answer is the right one when the
+  // question is "give me back what I was holding".
+  //
+  // It also matters now that a Codex credential is REFRESHED on our side.
+  // `getSelfHostedCredentials` returns a token that is fresh as of this call,
+  // which is exactly what a host that has been restarted needs; serving the
+  // other vendor's alongside it would just widen what a stale answer leaks.
+  //
+  // A row with no `llm` predates the field and is an Anthropic run — nothing
+  // could dispatch an OpenAI model before it existed. Answering with the Claude
+  // key is therefore the fact, not a fallback.
+  const openai = extra.llm === 'openai';
+  const agentKey = openai ? creds?.openaiKey : creds?.claudeToken;
+
   return {
     ok: true,
     credentials: {
       githubToken,
-      ...(creds?.claudeToken ? { anthropicKey: creds.claudeToken } : {}),
-      ...(creds?.openaiKey ? { openaiKey: creds.openaiKey } : {}),
+      ...(agentKey ? (openai ? { openaiKey: agentKey } : { anthropicKey: agentKey }) : {}),
       ...(extra.repo ? { repo: extra.repo } : {}),
     },
   };

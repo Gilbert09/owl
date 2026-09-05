@@ -6,17 +6,39 @@ import {
   getSelfHostedClient,
   storeSelfHostedCredentials,
   removeSelfHostedCredentials,
+  type CodexOAuthCredential,
   fleetApiToken,
   fleetGatewayToken,
   fleetPinnedEndpoint,
   FleetNotDeployedError,
 } from '../../selfHosted/credentials.js';
+import { codexCredentialFrom } from '../../selfHosted/codexOauth.js';
 import { dispatchTaskToFleet } from '../../selfHosted/executor.js';
 import { selfHostedPoller } from '../../selfHosted/poller.js';
 import type { CloudTaskProvider, CloudTaskRow, DispatchResult } from '../types.js';
 
+/**
+ * What the settings card and the onboarding step send.
+ *
+ * Every field is optional and a request must carry at least one action, because
+ * the card now has TWO independently connectable agents behind one provider:
+ * saving Codex must not require re-pasting Claude, and disconnecting one must
+ * not disconnect the other. `clearClaude`/`clearCodex` are the explicit
+ * disconnects — an absent field means "leave it alone", which is a different
+ * thing and cannot be spelled with the same key.
+ */
 interface SelfHostedCredInput {
   claudeToken?: string;
+  /** A completed ChatGPT-subscription sign-in (desktop loopback flow, or pasted). */
+  codexAccessToken?: string;
+  codexRefreshToken?: string;
+  /** Optional — read off the access token's claims when absent. */
+  codexAccountId?: string;
+  codexExpiresIn?: number;
+  /** An OpenAI PLATFORM key (`sk-…`), for metered billing instead of a subscription. */
+  openaiKey?: string;
+  clearClaude?: boolean;
+  clearCodex?: boolean;
 }
 
 /**
@@ -37,20 +59,58 @@ export const selfHostedProvider: CloudTaskProvider = {
   capabilities: { model: true },
 
   async validateCredentials(workspaceId, input) {
-    const { claudeToken } = (input ?? {}) as SelfHostedCredInput;
-    if (!claudeToken) {
-      return { ok: false, error: 'A Claude OAuth token is required.' };
+    const body = (input ?? {}) as SelfHostedCredInput;
+    const { claudeToken, codexAccessToken, openaiKey, clearClaude, clearCodex } = body;
+
+    const acting =
+      claudeToken || codexAccessToken || openaiKey || clearClaude || clearCodex;
+    if (!acting) {
+      return { ok: false, error: 'Connect a Claude or Codex subscription, or disconnect one.' };
     }
-    // Checked here rather than left to the fleet, because the fleet only finds
-    // out when the agent's first request 401s — twenty minutes into a run, as a
-    // task failure. A pasted GitHub PAT or a truncated copy is caught in the
-    // form instead, where the fix is obvious.
-    if (!/^sk-ant-\S+$/.test(claudeToken)) {
+
+    // Shapes are checked HERE rather than left to the fleet, because the fleet
+    // only finds out when the agent's first request 401s — twenty minutes into
+    // a run, as a task failure with nothing in it naming the cause. A pasted
+    // GitHub PAT or a truncated copy is caught in the form instead, where the
+    // fix is obvious.
+    if (claudeToken && !/^sk-ant-\S+$/.test(claudeToken)) {
       return {
         ok: false,
         error:
           'That does not look like a Claude credential. Expected an OAuth token ' +
           '(sk-ant-oat…) from a Claude subscription, or a Console API key (sk-ant-api…).',
+      };
+    }
+
+    // A Codex sign-in needs BOTH tokens. The access token alone works for an
+    // hour and then strands the workspace with no way to renew it, which
+    // surfaces as runs that worked this morning and do not this afternoon.
+    let codex: CodexOAuthCredential | undefined;
+    if (codexAccessToken) {
+      if (!body.codexRefreshToken) {
+        return {
+          ok: false,
+          error:
+            'That sign-in carried no refresh token, so it would stop working within the hour. ' +
+            'Sign in again and include the refresh token.',
+        };
+      }
+      try {
+        codex = codexCredentialFrom({
+          accessToken: codexAccessToken,
+          refreshToken: body.codexRefreshToken,
+          accountId: body.codexAccountId,
+          expiresIn: body.codexExpiresIn,
+        });
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    if (openaiKey && !/^sk-\S+$/.test(openaiKey)) {
+      return {
+        ok: false,
+        error: 'That does not look like an OpenAI platform key. Expected sk-….',
       };
     }
 
@@ -100,7 +160,20 @@ export const selfHostedProvider: CloudTaskProvider = {
       };
     }
 
-    await storeSelfHostedCredentials(workspaceId, { claudeToken });
+    // `null` clears, `undefined` leaves alone — see SelfHostedCredentialPatch.
+    // Connecting Codex as a subscription clears any platform key beside it and
+    // vice versa: a leftover credential the user believes they replaced is one
+    // the dispatch path could silently fall back to.
+    await storeSelfHostedCredentials(workspaceId, {
+      ...(clearClaude ? { claudeToken: null } : claudeToken ? { claudeToken } : {}),
+      ...(clearCodex
+        ? { codex: null, openaiKey: null }
+        : codex
+          ? { codex, openaiKey: null }
+          : openaiKey
+            ? { openaiKey, codex: null }
+            : {}),
+    });
     return { ok: true };
   },
 

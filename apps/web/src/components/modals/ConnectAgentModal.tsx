@@ -35,10 +35,11 @@ export function ConnectAgentModal() {
     void (async () => {
       try {
         if (pending.kind === 'fix') {
-          await createPostHogTask(pending.row, pending.providerType);
+          await createPostHogTask(pending.row, pending.providerType, pending.model);
         } else {
           await runSkillTask(pending.row, pending.skill, {
             providerType: pending.providerType,
+          model: pending.model,
             localContent: pending.localContent,
           });
         }

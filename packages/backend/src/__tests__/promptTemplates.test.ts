@@ -168,7 +168,7 @@ describe('promptTemplateFor / promptTemplateOverride', () => {
 });
 
 describe('buildMergeablePrompt with a workspace template', () => {
-  it.each<CloudProviderType>(['posthog_code', 'claude_code'])(
+  it.each<CloudProviderType>(['posthog_code', 'selfhosted'])(
     'renders the override with provider-aware variables (%s)',
     (provider) => {
       const prompt = buildMergeablePrompt({
@@ -179,8 +179,8 @@ describe('buildMergeablePrompt with a workspace template', () => {
       expect(prompt).toContain('Fix acme/widgets#7 (https://github.com/acme/widgets/pull/7) on feature/x -> main');
       expect(prompt).toContain('- Unresolved review threads: 2');
       expect(prompt).toContain('- Failing CI checks: 1/3');
-      if (provider === 'claude_code') {
-        expect(prompt).toContain('`github` MCP server');
+      if (provider === 'selfhosted') {
+        expect(prompt).toContain('fleet-publish');
         expect(prompt).not.toContain('git_signed_commit');
       } else {
         expect(prompt).toContain('git_signed_commit');
@@ -206,7 +206,7 @@ describe('buildMergeablePrompt with a workspace template', () => {
 });
 
 describe('default mergeable prompt: reviewer comments need judgement', () => {
-  it.each<CloudProviderType>(['posthog_code', 'claude_code'])('treats bot comments as advisory (%s)', (provider) => {
+  it.each<CloudProviderType>(['posthog_code', 'selfhosted'])('treats bot comments as advisory (%s)', (provider) => {
     const prompt = buildMergeablePrompt({ ...mergeableInput, provider });
     expect(prompt).toContain('BOTS and automated reviewers');
     expect(prompt).toContain('ADVISORY');
@@ -227,12 +227,12 @@ describe('buildSkillPrompt with a workspace template', () => {
   it('renders the override with the fenced skill and provider rules', () => {
     const prompt = buildSkillPrompt({
       ...skillInput,
-      provider: 'claude_code',
+      provider: 'selfhosted',
       template: 'Run {{skill.name}} on {{pr.url}}\n{{gitRules}}\n{{skill.content}}\n{{skill.location}}END',
     });
     expect(prompt).toContain('Run pr-review on https://github.com/acme/widgets/pull/42');
     expect(prompt).toContain('~~~~\n# Review\n\nBe careful.\n~~~~');
-    expect(prompt).toContain('`github` MCP server');
+    expect(prompt).toContain('fleet-publish');
     expect(prompt).toMatch(/~~~~\nEND$/);
   });
 

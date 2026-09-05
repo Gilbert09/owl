@@ -7,7 +7,7 @@
 // workspace override serves both providers.
 
 import type { CloudProviderType } from './index.js';
-import { claudeCodeGitRules, githubToolsHint, postHogCodeGitRules, talynTaglineRule } from './prMergeable.js';
+import { fleetGitRules, githubToolsHint, postHogCodeGitRules, talynTaglineRule } from './prMergeable.js';
 import { DEFAULT_SKILL_TEMPLATE, renderPromptTemplate } from './promptTemplates.js';
 import type { SkillSource } from './skills.js';
 
@@ -48,7 +48,9 @@ function fenceSkill(content: string): string {
 
 export function skillPromptVariables(input: SkillPromptInput): Record<string, string> {
   const { owner, repo, number, pr, skill, provider } = input;
-  const isClaude = provider === 'claude_code';
+  // Same publishing-dialect switch as mergeablePromptVariables — see the note
+  // there on why the fleet cannot inherit PostHog's signed-git tool names.
+  const fleet = provider === 'selfhosted';
   return {
     'pr.url': pr.url,
     'pr.number': String(number),
@@ -63,7 +65,7 @@ export function skillPromptVariables(input: SkillPromptInput): Record<string, st
     'skill.location': skill.repoPath
       ? `This skill also lives in your checkout at \`${skill.repoPath}\`; any supporting files the skill references are siblings of that file — read them from the checkout as needed.`
       : '',
-    gitRules: isClaude ? claudeCodeGitRules(pr.baseBranch) : postHogCodeGitRules(pr.baseBranch),
+    gitRules: fleet ? fleetGitRules(pr.baseBranch) : postHogCodeGitRules(pr.baseBranch),
     githubTools: githubToolsHint(provider),
     taglineRule: talynTaglineRule(),
   };

@@ -19,16 +19,20 @@ import type {
 /**
  * A task the user tried to start with no cloud provider connected. Stashed when
  * the "connect an agent" modal opens so it can auto-run the instant a provider
- * connects. `providerType` preserves an explicit picker choice, if any.
+ * connects. `providerType` and `model` preserve an explicit picker choice: the
+ * menu lists AGENTS, and the fleet's agent is carried by the model, so dropping
+ * `model` would re-run the task on the workspace default instead of on what was
+ * actually picked.
  */
 export type PendingCloudTask =
-  | { kind: 'fix'; row: PRRow; providerType?: string }
+  | { kind: 'fix'; row: PRRow; providerType?: string; model?: string }
   | {
       kind: 'skill';
       row: PRRow;
       skill: SkillSummary;
       localContent?: string;
       providerType?: string;
+      model?: string;
     };
 
 /**

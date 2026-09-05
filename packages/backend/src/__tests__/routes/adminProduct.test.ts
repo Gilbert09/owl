@@ -144,7 +144,7 @@ beforeEach(async () => {
       priority: 'medium',
       title: 'Bob task',
       description: '',
-      metadata: { cloudTask: { provider: 'claude_code', remoteTaskId: 'cc-b' } },
+      metadata: { cloudTask: { provider: 'posthog_code', remoteTaskId: 'cc-b' } },
     },
   ]);
 
@@ -304,7 +304,7 @@ describe('filters', () => {
   });
 
   it('filters tasks by provider', async () => {
-    const { body } = await get<TaskPage>('/api/v1/admin/tasks?provider=claude_code');
+    const { body } = await get<TaskPage>('/api/v1/admin/tasks?provider=posthog_code');
     expect(body.data.items.map((t) => t.id)).toEqual(['task-bob']);
   });
 

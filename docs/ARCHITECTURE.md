@@ -91,7 +91,7 @@ The provider opens a normal PR; GitHub review IS the approval gate.
 Reference: https://github.com/PostHog/code — informed session persistence, permission modes, and store/service layering; today PostHog Code is a live provider rather than a pattern source.
 
 ### 9. Pluggable cloud providers — 2026-06
-One `CloudTaskProvider` interface (registry + per-provider `dispatch`/`reconcile`/credentials/`cancel`), so a new vendor lands as a self-contained module with no core changes. PostHog Code and Claude Code (Anthropic Managed Agents) are live; Codex Cloud is deferred until OpenAI ships a server-to-server API.
+One `CloudTaskProvider` interface (registry + per-provider `dispatch`/`reconcile`/credentials/`cancel`), so a new vendor lands as a self-contained module with no core changes. **Talyn Fleet (`selfhosted`) is the default** and PostHog Code is the fall-back; Codex Cloud stays deferred until OpenAI ships a server-to-server API. Claude Code (Anthropic Managed Agents) was removed in September 2026 — it billed metered API credits with no subscription option, which is the opposite of what the fleet offers, and the fleet runs Claude on the workspace's own subscription instead.
 
 ### 10. GitHub App over OAuth — 2026-06/07
 A single shared GitHub App with per-user installations replaced the classic OAuth app: webhook-first updates, per-installation rate budgets, installation tokens for bot-attributed actions with user-to-server tokens for user-attributed ones (and a documented constraint: GitHub treats both as "the integration" for merge gating).

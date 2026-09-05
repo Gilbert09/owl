@@ -114,8 +114,8 @@ describe('InstructionsSettings', () => {
     openEditor();
     fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
     expect(screen.getByText(/git_signed_commit/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('Preview provider'), { target: { value: 'claude_code' } });
-    expect(screen.getByText(/`github` MCP server/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('Preview provider'), { target: { value: 'selfhosted' } });
+    expect(screen.getByText(/fleet-publish/)).toBeTruthy();
     expect(screen.queryByText(/git_signed_commit/)).toBeNull();
   });
 

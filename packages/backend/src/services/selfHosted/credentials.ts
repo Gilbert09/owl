@@ -9,22 +9,53 @@ import {
   type EncryptedEnvelope,
 } from '../tokenCrypto.js';
 import { FleetCapacityError, FleetClient } from './client.js';
+import { resolveCodexAccessToken } from './codexOauth.js';
 import { pickFleetHost } from '../fleetHosts.js';
 
 const INTEGRATION_TYPE = 'selfhosted';
 
+/**
+ * A ChatGPT-subscription credential, as `codex login` mints it.
+ *
+ * Three fields rather than one because a subscription access token is short
+ * lived — it is refreshed on our side, so we must hold the refresh token too —
+ * and because the Codex backend wants the account id as a SECOND header
+ * alongside the bearer. The account id is not a secret (it is a claim inside
+ * the access token, which the fleet's proxy also reads) so it is stored in the
+ * clear; both tokens are envelopes.
+ */
+export interface CodexOAuthCredential {
+  accessTokenEnc: EncryptedEnvelope;
+  refreshTokenEnc: EncryptedEnvelope;
+  /** `chatgpt_account_id`, read off the access token's claims at connect time. */
+  accountId: string;
+  /** ISO expiry of the access token, so a refresh happens before a run, not during. */
+  expiresAt: string;
+  /**
+   * Set when a refresh came back `invalid_grant` — the grant is gone and no
+   * amount of retrying brings it back. Nothing refreshes while this is set; the
+   * user has to reconnect. Same shape as PostHog Code's `oauth.reauthRequiredAt`.
+   */
+  reauthRequiredAt?: string;
+}
+
 interface SelfHostedIntegrationConfig {
   /** The workspace's own Claude credential — an OAuth token from a Claude
-   *  subscription, or a Console API key. This is the ONE secret a user supplies,
-   *  and the only key this config carries. */
+   *  subscription (`sk-ant-oat…`), or a Console API key (`sk-ant-api…`). */
   anthropicKeyEnc?: EncryptedEnvelope;
   /**
-   * The workspace's OpenAI credential, for runs dispatched at an OpenAI model.
+   * The workspace's ChatGPT-subscription credential, for runs dispatched at a
+   * Codex model. Refreshed in place — see `codexOauth.ts`.
+   */
+  codexOAuth?: CodexOAuthCredential;
+  /**
+   * An OpenAI PLATFORM key (`sk-…`), the metered alternative to a subscription.
    *
-   * Absent on every workspace today: no OpenAI model is in FLEET_MODELS yet, so
-   * nothing can select one, and there is no settings field to put a key in. It
-   * is carried here so the dispatch and credential-pull paths are complete when
-   * the first one lands — see docs in talyn-fleet's HARNESS_PLAN.
+   * A different credential from `codexOAuth` and not interchangeable with it:
+   * the fleet's proxy classifies by shape and routes a platform key to
+   * api.openai.com while a subscription token goes to the Codex backend. A
+   * workspace may hold either; `codexOAuth` wins when it holds both, because
+   * that is the one the user pays a subscription for.
    */
   openaiKeyEnc?: EncryptedEnvelope;
 
@@ -38,12 +69,33 @@ interface SelfHostedIntegrationConfig {
   fleetEndpoint?: string;
 }
 
+/**
+ * A workspace's fleet credentials, resolved and ready to send.
+ *
+ * BOTH are optional and at least one is always set — a workspace may connect
+ * Claude, Codex, or both. That is a change from when `claudeToken` was
+ * mandatory: a Codex-only workspace used to read as "the fleet is not
+ * configured", which is the wrong answer to a different question.
+ *
+ * Neither field is ever an empty string. The dispatch path sends exactly one of
+ * them and REFUSES when the one its model needs is absent, because the sandbox
+ * gateway fills an absent or blank key from its own tenant's sealed custody —
+ * so a blank here would silently spend somebody else's subscription.
+ */
 export interface SelfHostedCredentials {
   /** `sk-ant-oat…` (OAuth) or `sk-ant-api…` (Console key) — the fleet's
    *  credential proxy accepts either and picks the right auth header. */
-  claudeToken: string;
-  /** Set only once a workspace can select an OpenAI model. See the config
-   *  field's note. */
+  claudeToken?: string;
+  /**
+   * A ChatGPT-subscription access token (already refreshed if it was due), or an
+   * OpenAI platform key. Same story: the proxy classifies it by shape.
+   *
+   * The ChatGPT ACCOUNT ID is deliberately not carried beside it. The Codex
+   * backend does want it as a second header, but it is a claim inside the token
+   * and the fleet's proxy reads it there (`proxy.authCodex`) — a copy here would
+   * be a second source for something the credential already contains. We decode
+   * it once, at connect time, only to refuse a token that has none.
+   */
   openaiKey?: string;
 }
 
@@ -158,23 +210,35 @@ export async function getSelfHostedCredentials(
   if (!row || !row.enabled) return null;
 
   const config = (row.config as SelfHostedIntegrationConfig | null) ?? {};
-  // The CLAUDE TOKEN is what makes a workspace configured, and it is now the
-  // only thing this config holds. Nothing else could play that role: the fleet
-  // bearer is identical for every workspace so it distinguishes nothing, and
-  // the endpoint answers "which host", which the registry answers better.
+
+  // AN AGENT CREDENTIAL is what makes a workspace configured — EITHER vendor's.
   //
-  // A row written before this change carries `fleetTokenEnc`/`fleetEndpoint`
-  // and no Claude token; it reads as unconfigured, which is accurate — the user
-  // still has to supply the one secret that is now actually theirs.
+  // It used to be the Claude token specifically, because every fleet model was
+  // Anthropic's, so a workspace holding only an OpenAI key could not dispatch
+  // anything. Codex models moved that gate: a Codex-only workspace is fully
+  // configured and must not read as "the fleet is not set up", which would send
+  // the user back to a form they have already filled in.
+  //
+  // Nothing else in this config could play that role. The fleet bearer is
+  // identical for every workspace so it distinguishes nothing, and the endpoint
+  // answers "which host", which the registry answers better. A row written
+  // before either existed carries only `fleetTokenEnc`/`fleetEndpoint` and
+  // still reads as unconfigured, which is accurate.
   const claudeToken = readEnc(config.anthropicKeyEnc, 'Claude token');
-  if (!claudeToken) return null;
 
-  // The Claude token still gates "is this workspace configured": every fleet
-  // model is Anthropic's, so a workspace with only an OpenAI key could not
-  // dispatch anything. That gate moves when the first OpenAI model lands.
-  const openaiKey = readEnc(config.openaiKeyEnc, 'OpenAI key');
+  // A SUBSCRIPTION WINS OVER A PLATFORM KEY when a workspace holds both: the
+  // subscription is the thing the user is already paying for, and the platform
+  // key would bill them a second time for the same work.
+  const codex = await resolveCodexAccessToken(workspaceId, config.codexOAuth);
+  const platformKey = readEnc(config.openaiKeyEnc, 'OpenAI key');
+  const openaiKey = codex?.accessToken ?? platformKey ?? undefined;
 
-  return { claudeToken, ...(openaiKey ? { openaiKey } : {}) };
+  if (!claudeToken && !openaiKey) return null;
+
+  return {
+    ...(claudeToken ? { claudeToken } : {}),
+    ...(openaiKey ? { openaiKey } : {}),
+  };
 }
 
 /** Build a client for a workspace, or null if it isn't configured. */
@@ -260,14 +324,44 @@ export async function resolveFleetTarget(workspaceId: string): Promise<FleetTarg
   return { endpoint: host.apiEndpoint, token, host: host.name };
 }
 
-/** Upsert a workspace's fleet credentials (secrets encrypted at rest). */
+/**
+ * What a save may change. Every field is optional and `null` means "clear this
+ * vendor" — a workspace may connect Claude, connect Codex, or drop one without
+ * touching the other.
+ */
+export interface SelfHostedCredentialPatch {
+  /** `sk-ant-oat…` or `sk-ant-api…`. */
+  claudeToken?: string | null;
+  /** A completed ChatGPT-subscription sign-in. */
+  codex?: CodexOAuthCredential | null;
+  /** An OpenAI PLATFORM key (`sk-…`) — the metered alternative to a subscription. */
+  openaiKey?: string | null;
+}
+
+/**
+ * Upsert a workspace's fleet credentials (secrets encrypted at rest).
+ *
+ * MERGES, but by enumerating the fields it knows rather than by spreading the
+ * stored object. That distinction is the whole function.
+ *
+ * It used to write the config WHOLE, deliberately: a workspace configured
+ * before the fleet bearer and endpoint left the card still has
+ * `fleetTokenEnc`/`fleetEndpoint` on disk, and carrying them forward would keep
+ * a dead per-workspace endpoint alive as a silent routing override. A blind
+ * `{...existing, ...patch}` would resurrect exactly that.
+ *
+ * A whole-write cannot survive two vendors, though — saving Codex would wipe
+ * Claude. So this reads the row, picks out ONLY the credential fields, and
+ * writes those: the legacy keys are still dropped because nothing here copies
+ * them, and each vendor survives a save of the other.
+ */
 export async function storeSelfHostedCredentials(
   workspaceId: string,
-  input: { claudeToken: string },
+  patch: SelfHostedCredentialPatch,
 ): Promise<void> {
   const db = getDbClient();
   const existing = await db
-    .select({ id: integrationsTable.id })
+    .select({ id: integrationsTable.id, config: integrationsTable.config })
     .from(integrationsTable)
     .where(
       and(
@@ -277,12 +371,26 @@ export async function storeSelfHostedCredentials(
     )
     .limit(1);
 
-  // Written whole, not merged into what was there. A workspace configured
-  // before the fleet bearer and endpoint left the card still has them on disk;
-  // carrying them forward would keep a dead per-workspace endpoint alive as a
-  // silent routing override long after the field that set it was removed.
+  const prior = (existing[0]?.config as SelfHostedIntegrationConfig | null) ?? {};
+
+  const claudeEnc =
+    patch.claudeToken === undefined
+      ? prior.anthropicKeyEnc
+      : patch.claudeToken === null
+        ? undefined
+        : encryptString(patch.claudeToken);
+  const codex = patch.codex === undefined ? prior.codexOAuth : (patch.codex ?? undefined);
+  const openaiEnc =
+    patch.openaiKey === undefined
+      ? prior.openaiKeyEnc
+      : patch.openaiKey === null
+        ? undefined
+        : encryptString(patch.openaiKey);
+
   const config: SelfHostedIntegrationConfig = {
-    anthropicKeyEnc: encryptString(input.claudeToken),
+    ...(claudeEnc ? { anthropicKeyEnc: claudeEnc } : {}),
+    ...(codex ? { codexOAuth: codex } : {}),
+    ...(openaiEnc ? { openaiKeyEnc: openaiEnc } : {}),
   };
 
   const now = new Date();
@@ -302,6 +410,42 @@ export async function storeSelfHostedCredentials(
       updatedAt: now,
     });
   }
+}
+
+/**
+ * Which agent vendors a workspace has connected, and which of them need
+ * reconnecting. Presence only — never the values.
+ *
+ * A dead Codex grant is reported as CONNECTED AND needing reauth, not as
+ * disconnected: the settings card has to render the agent to offer a
+ * "Reconnect" button, and dropping it from the list would tell the user they
+ * never set it up.
+ */
+export async function fleetAgentStatus(
+  workspaceId: string,
+): Promise<{ connectedAgents: ('claude' | 'codex')[]; reauthAgents: ('claude' | 'codex')[] }> {
+  const db = getDbClient();
+  const rows = await db
+    .select({ config: integrationsTable.config, enabled: integrationsTable.enabled })
+    .from(integrationsTable)
+    .where(
+      and(
+        eq(integrationsTable.workspaceId, workspaceId),
+        eq(integrationsTable.type, INTEGRATION_TYPE),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row || !row.enabled) return { connectedAgents: [], reauthAgents: [] };
+  const config = (row.config as SelfHostedIntegrationConfig | null) ?? {};
+  const connectedAgents: ('claude' | 'codex')[] = [];
+  const reauthAgents: ('claude' | 'codex')[] = [];
+  if (config.anthropicKeyEnc) connectedAgents.push('claude');
+  if (config.codexOAuth || config.openaiKeyEnc) {
+    connectedAgents.push('codex');
+    if (config.codexOAuth?.reauthRequiredAt) reauthAgents.push('codex');
+  }
+  return { connectedAgents, reauthAgents };
 }
 
 /** Remove a workspace's fleet credentials. */

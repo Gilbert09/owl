@@ -486,6 +486,18 @@ export interface CloudProviderInfo {
   displayName: string;
   capabilities?: { model?: boolean; runtimeAdapter?: boolean };
   connected: boolean;
+  /**
+   * Which agent vendors are connected behind this provider — Talyn Fleet only,
+   * which runs on the workspace's own Claude or Codex subscription.
+   *
+   * `string[]`, not the shared union, for the same reason `type` is a bare
+   * string: this is a released desktop binary reading a newer backend, and an
+   * agent it has never heard of must degrade rather than break the picker.
+   * Absent from a provider that has one agent, and from an older backend.
+   */
+  connectedAgents?: string[];
+  /** Connected agents whose sign-in was rejected and needs redoing. */
+  reauthAgents?: string[];
 }
 
 export const cloudProviders = {

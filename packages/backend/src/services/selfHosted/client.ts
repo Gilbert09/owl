@@ -267,6 +267,22 @@ export interface CreateSandboxInput {
    */
   anthropicKey?: string;
   openaiKey?: string;
+  /**
+   * The sandbox's privacy posture. Talyn sets exactly one thing on it:
+   * `credentials.<the other vendor> = 'none'`.
+   *
+   * That is not decoration. The gateway fills an absent credential from its
+   * tenant's sealed custody, and the fleet applies this policy at every door a
+   * credential can enter the run's proxy — including the adoption re-pull after
+   * a fleetd restart, which happens with nobody watching. Suppressing the
+   * vendor this run is not using makes "spend somebody else's subscription"
+   * impossible rather than merely unlikely.
+   *
+   * Never suppress `github`, and never suppress both LLM vendors: the fleet
+   * nulls its whole refresh hook when everything is suppressed, which would
+   * strip the key this dispatch supplied.
+   */
+  policy?: { credentials?: { github?: 'none'; anthropic?: 'none'; openai?: 'none' } };
 }
 
 /**
@@ -845,7 +861,7 @@ export class FleetClient {
    */
   async setSandboxCredentials(
     id: string,
-    creds: { githubToken: string; anthropicKey?: string; repo?: string },
+    creds: { githubToken: string; anthropicKey?: string; openaiKey?: string; repo?: string },
   ): Promise<void> {
     await this.request(`/v1/sandboxes/${encodeURIComponent(id)}/credentials`, {
       method: 'POST',
