@@ -5,11 +5,11 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { ChevronDown, ChevronRight, Check, X, Shield, Wrench, Brain } from 'lucide-react';
+import { ChevronDown, ChevronRight, Shield } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { renderMarkdownish } from '../../lib/markdown';
-import type { AgentEvent, Block } from '@talyn/shared';
-import { buildBlocks, blockSignature } from '@talyn/shared';
+import type { AgentEvent, MergedBlock } from '@talyn/shared';
+import { buildBlocks, describeTool, mergeToolBlocks, mergedBlockSignature } from '@talyn/shared';
 
 interface AgentConversationProps {
   transcript: AgentEvent[] | undefined;
@@ -62,7 +62,12 @@ export function AgentConversation({
     if (wasAtBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [transcript?.length]);
 
-  const blocks = useMemo(() => buildBlocks(transcript ?? []), [transcript]);
+  // Merged, so a tool call and its result are ONE row rather than two
+  // sibling boxes. See mergeToolBlocks for why that mattered.
+  const blocks = useMemo(
+    () => mergeToolBlocks(buildBlocks(transcript ?? [])),
+    [transcript]
+  );
 
   if (blocks.length === 0) {
     // Task may have events but none render as blocks yet (the very
@@ -83,7 +88,7 @@ export function AgentConversation({
     <div
       ref={scrollRef}
       onScroll={handleScroll}
-      className="h-full overflow-auto px-4 py-3 text-sm text-zinc-100 bg-[#1a1a1a] space-y-2 min-w-0"
+      className="h-full overflow-auto px-4 py-4 text-sm text-zinc-100 bg-[#151517] space-y-3 min-w-0"
     >
       {blocks.map((block) => (
         <BlockView
@@ -111,14 +116,14 @@ const BlockView = React.memo(
   (prev, next) =>
     prev.envName === next.envName &&
     prev.scopeId === next.scopeId &&
-    blockSignature(prev.block) === blockSignature(next.block)
+    mergedBlockSignature(prev.block) === mergedBlockSignature(next.block)
 );
 
 function BlockViewImpl({
   block,
   envName,
 }: {
-  block: Block;
+  block: MergedBlock;
   envName?: string;
   /** Whose transcript this block belongs to; see blockSignature. */
   scopeId?: string;
@@ -128,15 +133,14 @@ function BlockViewImpl({
       return <TextBlock text={block.text} />;
     case 'thinking':
       return <ThinkingBlock text={block.text} />;
-    case 'tool_use':
-      return <ToolUseBlock name={block.name} input={block.input} />;
-    case 'tool_result':
+    case 'tool':
       return (
-        <ToolResultBlock
-          content={block.content}
+        <ToolBlockView
+          name={block.name}
+          input={block.input}
+          output={block.output}
           isError={block.isError}
-          toolName={block.toolName}
-          toolInput={block.toolInput}
+          settled={block.settled}
         />
       );
     case 'permission':
@@ -167,137 +171,147 @@ function BlockViewImpl({
 
 function TextBlock({ text }: { text: string }) {
   return (
-    <div className="whitespace-pre-wrap leading-relaxed min-w-0 [overflow-wrap:anywhere]">
+    // Paragraph spacing is renderMarkdownish's own (`my-1 leading-relaxed` on
+    // its `p`), so this sets size and colour only. Overriding it from here
+    // would be two single-class rules at equal specificity fighting over
+    // stylesheet order.
+    <div className="text-[13px] text-zinc-200 min-w-0 [overflow-wrap:anywhere]">
       {renderMarkdownish(text)}
     </div>
   );
 }
 
+/**
+ * Reasoning, folded down to one dim line.
+ *
+ * It used to be a full-width bordered row reading only "Thinking" — a box with
+ * no information in it, repeated between every pair of tool calls, which is
+ * most of what made the transcript hard to scan. The first line of the thought
+ * is almost always the useful part, so it is what shows.
+ */
 function ThinkingBlock({ text }: { text: string }) {
   const [open, setOpen] = useState(false);
+  const firstLine = text.split('\n').find((l) => l.trim()) ?? 'Thinking';
   return (
-    <Collapsible
-      open={open}
-      onToggle={() => setOpen((v) => !v)}
-      icon={<Brain className="w-3.5 h-3.5 text-purple-300" />}
-      title="Thinking"
-      dim
-    >
-      <div className="whitespace-pre-wrap text-xs text-zinc-400 leading-relaxed">{text}</div>
-    </Collapsible>
-  );
-}
-
-function ToolUseBlock({ name, input }: { name: string; input: unknown }) {
-  const [open, setOpen] = useState(false);
-  const summary = summariseToolUse(name, input);
-  return (
-    <Collapsible
-      open={open}
-      onToggle={() => setOpen((v) => !v)}
-      icon={<Wrench className="w-3.5 h-3.5 text-blue-300" />}
-      title={
-        <span className="block [overflow-wrap:anywhere]">
-          <span className="text-blue-300">{name}</span>
-          {summary && (
-            <span className="ml-2 text-zinc-400 font-normal font-mono">
-              {summary}
-            </span>
-          )}
+    <div className="text-[12px] text-zinc-500">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline gap-2 text-left hover:text-zinc-400 min-w-0"
+      >
+        <span className="flex-none text-zinc-600 select-none">✻</span>
+        <span className={cn('italic min-w-0 flex-1', !open && 'truncate')}>
+          {open ? 'Thinking' : firstLine}
         </span>
-      }
-    >
-      <PrettyJson value={input} />
-    </Collapsible>
+      </button>
+      {open && (
+        <div className="mt-1 ml-[13px] whitespace-pre-wrap italic leading-relaxed text-zinc-500 [overflow-wrap:anywhere]">
+          {text}
+        </div>
+      )}
+    </div>
   );
 }
 
-function ToolResultBlock({
-  content,
+/** How many output lines show before the row asks to be expanded. Errors get
+ *  more, because the failing part is the reason anyone is reading. */
+const OUTPUT_CLAMP = 6;
+const OUTPUT_CLAMP_ERROR = 14;
+
+/**
+ * One tool call: what ran, and what it returned, as a single row.
+ *
+ * The call and its result used to be sibling boxes, each with its own chevron,
+ * border and status icon — so a `git fetch` writing "From <url>" to stderr got
+ * its own bordered row with a red ✗ against it, which reads as a failure and is
+ * not one. The verdict belongs to the CALL and appears once, on the left rail;
+ * the output is just output.
+ */
+function ToolBlockView({
+  name,
+  input,
+  output,
   isError,
-  toolName,
-  toolInput,
+  settled,
 }: {
-  content: unknown;
+  name: string;
+  input: unknown;
+  output?: unknown;
   isError: boolean;
-  toolName?: string;
-  toolInput?: unknown;
+  settled: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const extracted = extractTextContent(content);
-  const text = extracted ?? JSON.stringify(content, null, 2);
-  const lineCount = text ? text.split('\n').length : 0;
+  const [expanded, setExpanded] = useState(false);
+  const described = describeTool(name, input);
+  const { label, isCommand } = described;
+  const detail = isCommand ? described.detail : shortenPath(described.detail);
 
-  // Result-aware collapsed row. For known tools we can say *what*
-  // landed ("Read N lines from <file>") instead of dumping the first
-  // line of output as a mystery preview.
-  const title = ((): React.ReactNode => {
-    if (isError) {
-      const preview = text.split('\n')[0]?.slice(0, 160) || 'error';
-      return <span className="text-red-300 font-normal">{preview}</span>;
-    }
-    if (toolName === 'Read' && toolInput && typeof toolInput === 'object') {
-      const p = (toolInput as { file_path?: unknown }).file_path;
-      if (typeof p === 'string') {
-        return (
-          <span className="font-normal text-zinc-300">
-            Read {lineCount} lines from{' '}
-            <span className="font-mono text-zinc-200">{shortenPath(p)}</span>
-          </span>
-        );
-      }
-    }
-    if (toolName === 'Grep' && toolInput && typeof toolInput === 'object') {
-      const matches = text.match(/^Found (\d+)/)?.[1];
-      if (matches) {
-        return (
-          <span className="font-normal text-zinc-300">
-            Grep · {matches} matches
-          </span>
-        );
-      }
-    }
-    if (toolName === 'Glob') {
-      return (
-        <span className="font-normal text-zinc-300">
-          Glob · {lineCount} {lineCount === 1 ? 'path' : 'paths'}
-        </span>
-      );
-    }
-    if (toolName === 'Bash') {
-      const preview = text.split('\n')[0]?.slice(0, 160) ?? '';
-      return (
-        <span className="font-normal text-zinc-300 font-mono">
-          {preview || `${lineCount} lines`}
-        </span>
-      );
-    }
-    const preview = text.split('\n')[0]?.slice(0, 160) || 'ok';
-    return <span className="font-normal">{preview}</span>;
-  })();
+  const text = useMemo(() => {
+    if (output === undefined) return '';
+    const extracted = extractTextContent(output);
+    return (extracted ?? JSON.stringify(output, null, 2) ?? '').replace(/\s+$/, '');
+  }, [output]);
+
+  const lines = text ? text.split('\n') : [];
+  const clamp = isError ? OUTPUT_CLAMP_ERROR : OUTPUT_CLAMP;
+  const hidden = Math.max(0, lines.length - clamp);
+  const shown = expanded ? lines : lines.slice(0, clamp);
 
   return (
-    <Collapsible
-      open={open}
-      onToggle={() => setOpen((v) => !v)}
-      icon={
-        isError ? (
-          <X className="w-3.5 h-3.5 text-red-400" />
-        ) : (
-          <Check className="w-3.5 h-3.5 text-green-400" />
-        )
-      }
-      title={
-        <span className={cn('block [overflow-wrap:anywhere]', isError && 'text-red-300')}>
-          {title}
+    <div className="font-mono text-[12px] min-w-0">
+      <div className="flex items-baseline gap-2 min-w-0">
+        <span
+          aria-hidden
+          className={cn(
+            'flex-none w-1.5 h-1.5 rounded-full translate-y-[-1px]',
+            !settled && 'bg-amber-400 animate-pulse',
+            settled && isError && 'bg-red-400',
+            settled && !isError && 'bg-zinc-600'
+          )}
+        />
+        <span className={cn('flex-none font-medium', isError ? 'text-red-300' : 'text-zinc-300')}>
+          {label}
         </span>
-      }
-      dim
-    >
-      <pre className="text-xs font-mono whitespace-pre-wrap [overflow-wrap:anywhere] text-zinc-200 bg-black/30 rounded p-2 overflow-x-auto">
-        {text}
-      </pre>
-    </Collapsible>
+        {detail && (
+          // One line, ellipsised, whole thing in the tooltip. Truncating the
+          // string itself is what produced `git clone --depth` with the rest
+          // of the command simply gone.
+          <span
+            className={cn('min-w-0 flex-1 truncate', isCommand ? 'text-zinc-400' : 'text-zinc-500')}
+            title={detail}
+          >
+            {detail}
+          </span>
+        )}
+        {!settled && <span className="flex-none text-[11px] text-zinc-600">running…</span>}
+      </div>
+
+      {shown.length > 0 && (
+        <div
+          className={cn(
+            'mt-1 ml-[2px] border-l pl-3 py-0.5',
+            isError ? 'border-red-500/40' : 'border-white/10'
+          )}
+        >
+          <pre
+            className={cn(
+              'whitespace-pre-wrap [overflow-wrap:anywhere] leading-[1.55]',
+              isError ? 'text-red-300/90' : 'text-zinc-400'
+            )}
+          >
+            {shown.join('\n')}
+          </pre>
+          {hidden > 0 && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="mt-1 text-[11px] text-zinc-500 hover:text-zinc-300"
+            >
+              {expanded ? 'show less' : `+${hidden} more ${hidden === 1 ? 'line' : 'lines'}`}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -420,43 +434,6 @@ function ResultBlock({
 // Small bits
 // ---------------------------------------------------------------------------
 
-function Collapsible({
-  open,
-  onToggle,
-  icon,
-  title,
-  children,
-  dim,
-}: {
-  open: boolean;
-  onToggle: () => void;
-  icon: React.ReactNode;
-  title: React.ReactNode;
-  children: React.ReactNode;
-  dim?: boolean;
-}) {
-  return (
-    <div className={cn('rounded border border-white/5 overflow-hidden', dim && 'bg-black/20')}>
-      <button
-        type="button"
-        onClick={onToggle}
-        className="w-full flex items-start gap-2 px-2.5 py-1.5 text-xs text-left hover:bg-white/5 rounded-t"
-      >
-        {open ? (
-          <ChevronDown className="w-3 h-3 flex-none text-zinc-400 mt-0.5" />
-        ) : (
-          <ChevronRight className="w-3 h-3 flex-none text-zinc-400 mt-0.5" />
-        )}
-        <span className="flex-none mt-0.5">{icon}</span>
-        <span className="font-medium min-w-0 flex-1 break-words">
-          {title}
-        </span>
-      </button>
-      {open && <div className="px-2.5 pb-2.5">{children}</div>}
-    </div>
-  );
-}
-
 /**
  * Collapsed-by-default auto-allowed row: shows tool name + env, click
  * the chevron to see the same tool-aware input preview as an
@@ -473,7 +450,7 @@ function AutoAllowedPermission({
   envName?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const summary = summariseToolUse(toolName, toolInput);
+  const summary = describeTool(toolName, toolInput).detail;
   return (
     <div className="rounded border border-green-500/20 bg-green-500/5 overflow-hidden">
       <button
@@ -708,60 +685,6 @@ function PrettyJson({ value }: { value: unknown }) {
  * Goal: answer "what did Claude just do?" at a glance without forcing
  * a click. Unknown tools fall back to the old generic arg dump.
  */
-function summariseToolUse(toolName: string, input: unknown): string {
-  if (!input || typeof input !== 'object') return '';
-  const i = input as Record<string, unknown>;
-
-  const asString = (v: unknown): string | null =>
-    typeof v === 'string' && v.length > 0 ? v : null;
-
-  switch (toolName) {
-    case 'Read': {
-      const p = asString(i.file_path);
-      if (!p) break;
-      return shortenPath(p);
-    }
-    case 'Edit':
-    case 'Write':
-    case 'NotebookEdit': {
-      const p = asString(i.file_path);
-      if (!p) break;
-      return shortenPath(p);
-    }
-    case 'Bash': {
-      const cmd = asString(i.command);
-      if (!cmd) break;
-      return truncateInline(cmd, 120);
-    }
-    case 'Grep': {
-      const pattern = asString(i.pattern);
-      const path = asString(i.path);
-      if (!pattern) break;
-      return path ? `${pattern}  in  ${shortenPath(path)}` : pattern;
-    }
-    case 'Glob': {
-      const pattern = asString(i.pattern);
-      const path = asString(i.path);
-      if (!pattern) break;
-      return path ? `${pattern}  in  ${shortenPath(path)}` : pattern;
-    }
-    case 'WebFetch': {
-      return asString(i.url) ?? '';
-    }
-    case 'WebSearch': {
-      return asString(i.query) ?? '';
-    }
-    case 'Task':
-    case 'Agent': {
-      return asString(i.description) ?? '';
-    }
-    case 'TodoWrite':
-      return '';
-  }
-
-  return summariseArgs(input);
-}
-
 /**
  * Strip the absolute prefix off a path so the user sees the
  * repo-relative bit. We don't know the repo root from the renderer,
@@ -770,6 +693,11 @@ function summariseToolUse(toolName: string, input: unknown): string {
  * the noisy /Users/<me>/dev/<org>/<repo>/ prefix 99% of the time.
  */
 function shortenPath(p: string): string {
+  // The fleet checks every repo out under /work/<repo>/, so that prefix is on
+  // every path a fleet run mentions and carries no information at all. Stripped
+  // first because a monorepo path would otherwise keep it.
+  const work = p.match(/^\/work\/[^/]+\/(.+)$/);
+  if (work) return work[1];
   for (const marker of ['/packages/', '/apps/']) {
     const idx = p.indexOf(marker);
     if (idx !== -1) return p.slice(idx + 1);
@@ -785,22 +713,6 @@ function shortenPath(p: string): string {
     if (after !== -1) return '~' + p.slice(after);
   }
   return p;
-}
-
-function truncateInline(s: string, max: number): string {
-  const single = s.replace(/\s+/g, ' ').trim();
-  return single.length <= max ? single : single.slice(0, max - 1) + '…';
-}
-
-function summariseArgs(input: unknown): string {
-  if (!input || typeof input !== 'object') return '';
-  const entries = Object.entries(input as Record<string, unknown>).slice(0, 2);
-  return entries
-    .map(([k, v]) => {
-      const s = typeof v === 'string' ? v : JSON.stringify(v);
-      return `${k}=${(s ?? '').toString().slice(0, 48)}`;
-    })
-    .join(', ');
 }
 
 /**

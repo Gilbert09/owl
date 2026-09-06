@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Square, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '../ui/button';
-import { Badge } from '../ui/badge';
+import { cn } from '../../lib/utils';
 import { AgentConversation } from '../terminal/AgentConversation';
 import { useTaskActions, mergeTaskTranscript } from '../../hooks/useApi';
 import { useOnReconnect } from '../../hooks/useOnReconnect';
@@ -17,6 +17,31 @@ interface TaskTerminalProps {
 // Re-announce well inside the backend's 90s watch TTL so two missed
 // beats (sleep blip, slow request) don't drop the stream.
 const WATCH_HEARTBEAT_MS = 30_000;
+
+/**
+ * What the header says, from the task's ACTUAL status.
+ *
+ * It used to be hardcoded: a pulsing blue dot and a spinning "Working" badge,
+ * on every task forever. A run that finished an hour ago read as still running,
+ * which is the one thing a status indicator must not do.
+ */
+function runStateFor(status: Task['status']): { label: string; dot: string; live: boolean } {
+  switch (status) {
+    case 'in_progress':
+      return { label: 'Working', dot: 'bg-amber-400', live: true };
+    case 'pending':
+    case 'queued':
+      return { label: 'Queued', dot: 'bg-zinc-400', live: true };
+    case 'completed':
+      return { label: 'Completed', dot: 'bg-green-500', live: false };
+    case 'failed':
+      return { label: 'Failed', dot: 'bg-red-500', live: false };
+    case 'cancelled':
+      return { label: 'Stopped', dot: 'bg-zinc-500', live: false };
+    default:
+      return { label: status, dot: 'bg-zinc-500', live: false };
+  }
+}
 
 export function TaskTerminal({ task }: TaskTerminalProps) {
   const { stopTask } = useTaskActions();
@@ -94,6 +119,8 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
     return () => window.clearInterval(timer);
   }, [task.id, task.status, hasCloudRun]);
 
+  const runState = runStateFor(task.status);
+
   const handleStopTask = useCallback(async () => {
     setIsStopping(true);
     try {
@@ -108,14 +135,14 @@ export function TaskTerminal({ task }: TaskTerminalProps) {
   return (
     <div className="flex flex-col h-full min-w-0 border-l-4 border-transparent">
       {/* Terminal Header */}
-      <div className="flex items-center justify-between p-3 border-b bg-card">
-        <div className="flex items-center gap-3">
-          <div className="w-3 h-3 rounded-full bg-blue-400 animate-pulse" />
-          <span className="font-medium text-sm">Task Terminal</span>
-          <Badge variant="outline" className="text-xs">
-            <Loader2 className="w-3 h-3 mr-1 animate-spin" />
-            Working
-          </Badge>
+      <div className="flex items-center justify-between px-3 py-2 border-b bg-card">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span
+            aria-hidden
+            className={cn('w-2 h-2 rounded-full flex-none', runState.dot, runState.live && 'animate-pulse')}
+          />
+          <span className="font-medium text-sm">Run</span>
+          <span className="text-xs text-muted-foreground">{runState.label}</span>
         </div>
         <div className="flex items-center gap-1">
           {/* Abort only makes sense while the cloud run is alive
