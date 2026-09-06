@@ -8,8 +8,15 @@ import React, {
 import { ChevronDown, ChevronRight, Shield } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { renderMarkdownish } from '../../lib/markdown';
-import type { AgentEvent, MergedBlock } from '@talyn/shared';
-import { buildBlocks, describeTool, mergeToolBlocks, mergedBlockSignature } from '@talyn/shared';
+import type { AgentEvent, GroupedBlock, ToolBlock } from '@talyn/shared';
+import {
+  buildBlocks,
+  describeTool,
+  formatToolOutput,
+  groupToolRuns,
+  groupedBlockSignature,
+  mergeToolBlocks,
+} from '@talyn/shared';
 
 interface AgentConversationProps {
   transcript: AgentEvent[] | undefined;
@@ -62,10 +69,12 @@ export function AgentConversation({
     if (wasAtBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [transcript?.length]);
 
-  // Merged, so a tool call and its result are ONE row rather than two
-  // sibling boxes. See mergeToolBlocks for why that mattered.
+  // Three passes, each one a thing the reader wanted and the event stream
+  // does not give: a tool call and its result as ONE row (mergeToolBlocks),
+  // then consecutive calls folded into an openable run (groupToolRuns) so the
+  // prose between them is what you see first.
   const blocks = useMemo(
-    () => mergeToolBlocks(buildBlocks(transcript ?? [])),
+    () => groupToolRuns(mergeToolBlocks(buildBlocks(transcript ?? []))),
     [transcript]
   );
 
@@ -116,14 +125,14 @@ const BlockView = React.memo(
   (prev, next) =>
     prev.envName === next.envName &&
     prev.scopeId === next.scopeId &&
-    mergedBlockSignature(prev.block) === mergedBlockSignature(next.block)
+    groupedBlockSignature(prev.block) === groupedBlockSignature(next.block)
 );
 
 function BlockViewImpl({
   block,
   envName,
 }: {
-  block: MergedBlock;
+  block: GroupedBlock;
   envName?: string;
   /** Whose transcript this block belongs to; see blockSignature. */
   scopeId?: string;
@@ -141,6 +150,15 @@ function BlockViewImpl({
           output={block.output}
           isError={block.isError}
           settled={block.settled}
+        />
+      );
+    case 'tool_group':
+      return (
+        <ToolGroupView
+          tools={block.tools}
+          summary={block.summary}
+          running={block.running}
+          isError={block.isError}
         />
       );
     case 'permission':
@@ -213,10 +231,20 @@ function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-/** How many output lines show before the row asks to be expanded. Errors get
- *  more, because the failing part is the reason anyone is reading. */
-const OUTPUT_CLAMP = 6;
-const OUTPUT_CLAMP_ERROR = 14;
+/**
+ * How much output shows without being asked for.
+ *
+ * BOTH bounds matter, and the character one is the bug fix. The clamp used to
+ * be six LINES, so a 4 KB GitHub API response — one enormous minified line —
+ * sailed straight through it and wrapped to twenty rows on screen. A tool
+ * result is small enough to show inline only when it is short by both measures.
+ *
+ * Errors get more room: the failing part is the reason anyone is reading.
+ */
+const PREVIEW_LINES = 6;
+const PREVIEW_CHARS = 500;
+const PREVIEW_LINES_ERROR = 14;
+const PREVIEW_CHARS_ERROR = 1200;
 
 /**
  * One tool call: what ran, and what it returned, as a single row.
@@ -226,6 +254,13 @@ const OUTPUT_CLAMP_ERROR = 14;
  * its own bordered row with a red ✗ against it, which reads as a failure and is
  * not one. The verdict belongs to the CALL and appears once, on the left rail;
  * the output is just output.
+ *
+ * # Disclosure is by SIZE, not by a fixed rule
+ *
+ * Small output shows inline, because hiding two lines of `git log` behind a
+ * click is worse than showing them. Large output collapses to a summary you
+ * can open — and opens into a BOUNDED, scrollable box, so a 200-line JSON
+ * document is a panel you scroll rather than a page you scroll past.
  */
 function ToolBlockView({
   name,
@@ -240,25 +275,39 @@ function ToolBlockView({
   isError: boolean;
   settled: boolean;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const described = describeTool(name, input);
   const { label, isCommand } = described;
   const detail = isCommand ? described.detail : shortenPath(described.detail);
 
-  const text = useMemo(() => {
-    if (output === undefined) return '';
-    const extracted = extractTextContent(output);
-    return (extracted ?? JSON.stringify(output, null, 2) ?? '').replace(/\s+$/, '');
-  }, [output]);
+  const out = useMemo(() => formatToolOutput(output), [output]);
 
-  const lines = text ? text.split('\n') : [];
-  const clamp = isError ? OUTPUT_CLAMP_ERROR : OUTPUT_CLAMP;
-  const hidden = Math.max(0, lines.length - clamp);
-  const shown = expanded ? lines : lines.slice(0, clamp);
+  const maxLines = isError ? PREVIEW_LINES_ERROR : PREVIEW_LINES;
+  const maxChars = isError ? PREVIEW_CHARS_ERROR : PREVIEW_CHARS;
+  const fitsInline = out.text.length > 0 && out.lines <= maxLines && out.chars <= maxChars;
+
+  // Anything that does not fit starts closed. Errors are the exception: a run
+  // that failed should say why without being asked.
+  const [open, setOpen] = useState(false);
+  const showBody = out.text.length > 0 && (fitsInline || open);
+  const canToggle = out.text.length > 0 && !fitsInline;
+
+  const Row = canToggle ? 'button' : 'div';
 
   return (
     <div className="font-mono text-[12px] min-w-0">
-      <div className="flex items-baseline gap-2 min-w-0">
+      <Row
+        {...(canToggle
+          ? {
+              type: 'button' as const,
+              'aria-expanded': open,
+              onClick: () => setOpen((v) => !v),
+            }
+          : {})}
+        className={cn(
+          'flex w-full items-baseline gap-2 min-w-0 text-left',
+          canToggle && 'group hover:text-zinc-200'
+        )}
+      >
         <span
           aria-hidden
           className={cn(
@@ -283,9 +332,19 @@ function ToolBlockView({
           </span>
         )}
         {!settled && <span className="flex-none text-[11px] text-zinc-600">running…</span>}
-      </div>
+        {canToggle && (
+          <span className="flex-none flex items-center gap-1 text-[11px] text-zinc-600">
+            <span>{out.summary}</span>
+            {open ? (
+              <ChevronDown className="w-3 h-3" />
+            ) : (
+              <ChevronRight className="w-3 h-3" />
+            )}
+          </span>
+        )}
+      </Row>
 
-      {shown.length > 0 && (
+      {showBody && (
         <div
           className={cn(
             'mt-1 ml-[2px] border-l pl-3 py-0.5',
@@ -295,20 +354,88 @@ function ToolBlockView({
           <pre
             className={cn(
               'whitespace-pre-wrap [overflow-wrap:anywhere] leading-[1.55]',
+              // Bounded and scrollable once it is open. Without the cap, opening
+              // one JSON response pushes the rest of the run off the screen.
+              !fitsInline && 'max-h-72 overflow-auto pr-2',
               isError ? 'text-red-300/90' : 'text-zinc-400'
             )}
           >
-            {shown.join('\n')}
+            {out.text}
           </pre>
-          {hidden > 0 && (
-            <button
-              type="button"
-              onClick={() => setExpanded((v) => !v)}
-              className="mt-1 text-[11px] text-zinc-500 hover:text-zinc-300"
-            >
-              {expanded ? 'show less' : `+${hidden} more ${hidden === 1 ? 'line' : 'lines'}`}
-            </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A run of consecutive tool calls, folded into one openable section.
+ *
+ * This is the shape the reference clients converge on — PostHog desktop's
+ * "Ran 3 commands, read a file", Codex's "Explored 4 reads" — and the reason
+ * is the same in all of them: an agent does several things to answer one
+ * sentence, and rendering each as a top-level row buries the sentences.
+ * Closed, this is one line. Open, every call inside keeps its own disclosure.
+ *
+ * A FAILED call opens the group by default. The alternative is a red dot on a
+ * closed section, which tells you something went wrong and then makes you hunt
+ * for it. A RUNNING group opens for the same reason: while the agent is working
+ * this is the only place progress is visible.
+ */
+function ToolGroupView({
+  tools,
+  summary,
+  running,
+  isError,
+}: {
+  tools: ToolBlock[];
+  summary: string;
+  running: boolean;
+  isError: boolean;
+}) {
+  // Open when there is something to see: a failure to read, or work still
+  // happening. `useState` takes this once, at mount, so a group that finishes
+  // while open STAYS open — content is never yanked away mid-read.
+  const [open, setOpen] = useState(isError || running);
+
+  return (
+    <div className="font-mono text-[12px] min-w-0">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-baseline gap-2 min-w-0 text-left text-zinc-500 hover:text-zinc-300"
+      >
+        <span
+          aria-hidden
+          className={cn(
+            'flex-none w-1.5 h-1.5 rounded-full translate-y-[-1px]',
+            running && 'bg-amber-400 animate-pulse',
+            !running && isError && 'bg-red-400',
+            !running && !isError && 'bg-zinc-700'
           )}
+        />
+        <span className={cn('min-w-0 truncate', isError && 'text-red-300/80')}>{summary}</span>
+        {running && <span className="flex-none text-[11px] text-zinc-600">running…</span>}
+        {open ? (
+          <ChevronDown className="w-3 h-3 flex-none" />
+        ) : (
+          <ChevronRight className="w-3 h-3 flex-none" />
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-1.5 ml-[2px] border-l border-white/10 pl-3 space-y-2">
+          {tools.map((t) => (
+            <ToolBlockView
+              key={t.key}
+              name={t.name}
+              input={t.input}
+              output={t.output}
+              isError={t.isError}
+              settled={t.settled}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -713,31 +840,4 @@ function shortenPath(p: string): string {
     if (after !== -1) return '~' + p.slice(after);
   }
   return p;
-}
-
-/**
- * Unwrap a `[{type: 'text', text: '…'}]`-shaped content array into a
- * plain string. Anthropic's message content is always that shape when
- * a subagent (Task/Agent tool) returns its answer — today we JSON.stringify
- * the whole array, which makes the transcript unreadable. If the array
- * is heterogeneous (has non-text items) we bail and let the caller
- * dump raw JSON as a safe fallback.
- */
-function extractTextContent(content: unknown): string | null {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content) || content.length === 0) return null;
-  const texts: string[] = [];
-  for (const item of content) {
-    if (
-      item &&
-      typeof item === 'object' &&
-      (item as { type?: unknown }).type === 'text' &&
-      typeof (item as { text?: unknown }).text === 'string'
-    ) {
-      texts.push((item as { text: string }).text);
-    } else {
-      return null;
-    }
-  }
-  return texts.join('\n\n');
 }

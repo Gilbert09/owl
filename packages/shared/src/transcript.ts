@@ -537,3 +537,256 @@ export function mergedBlockSignature(block: MergedBlock): string {
   }
   return blockSignature(block);
 }
+
+// ---------------------------------------------------------------------------
+// Tool output
+// ---------------------------------------------------------------------------
+
+/** Tool output, made readable, with enough about its size to decide how much
+ *  of it to show. */
+export interface ToolOutput {
+  /** Display text — pretty-printed when the raw output was JSON. */
+  text: string;
+  /** Newline count of `text`. */
+  lines: number;
+  /** Character count of `text`. */
+  chars: number;
+  /** The raw output parsed as JSON and re-printed. */
+  isJson: boolean;
+  /** One line naming what came back, for a collapsed row. */
+  summary: string;
+}
+
+/** Bytes, in the units a person reads. */
+function humanSize(chars: number): string {
+  if (chars < 1024) return `${chars} chars`;
+  if (chars < 1024 * 1024) return `${(chars / 1024).toFixed(1)} KB`;
+  return `${(chars / 1024 / 1024).toFixed(1)} MB`;
+}
+
+/**
+ * Turn whatever a tool returned into something worth putting on screen.
+ *
+ * # Two things this fixes, both visible in a real transcript
+ *
+ * **Minified JSON.** A GitHub API call returns ~4 KB of
+ * `{"url":"https://api.github.com/…","node_id":"…"}` as ONE string. Printed
+ * verbatim it is a wall of punctuation nobody can read; pretty-printed it is a
+ * document you can scan. So JSON is re-printed, and the fact that it IS JSON is
+ * reported so a caller can collapse it behind a size rather than a line count.
+ *
+ * **Size measured in the wrong unit.** The renderer clamped output at six
+ * LINES, and that single 4 KB JSON string is one line — so the clamp did
+ * nothing and it wrapped to twenty-odd rows on screen. Anything deciding how
+ * much to show needs the character count too, which is why both are here.
+ */
+export function formatToolOutput(output: unknown): ToolOutput {
+  const raw =
+    output === undefined || output === null
+      ? ''
+      : typeof output === 'string'
+        ? output
+        : (extractToolText(output) ?? safeStringify(output));
+
+  let text = raw.replace(/\s+$/, '');
+  let isJson = false;
+
+  // Only worth re-printing when it is a JSON OBJECT or ARRAY. A bare `"42"` or
+  // `"true"` is valid JSON and pretty-printing it changes nothing.
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (parsed && typeof parsed === 'object') {
+        text = JSON.stringify(parsed, null, 2);
+        isJson = true;
+      }
+    } catch {
+      // Not JSON, or truncated mid-document. Leave it exactly as it came —
+      // a half-parsed document is worse than the raw bytes.
+    }
+  }
+
+  const lines = text ? text.split('\n').length : 0;
+  const chars = text.length;
+
+  const summary = !text
+    ? ''
+    : isJson
+      ? `JSON · ${humanSize(chars)}`
+      : lines > 1
+        ? `${lines} lines · ${humanSize(chars)}`
+        : humanSize(chars);
+
+  return { text, lines, chars, isJson, summary };
+}
+
+/**
+ * Unwrap a `[{type:'text', text:'…'}]` content array into a plain string.
+ *
+ * Anthropic's message content is always that shape when a subagent returns its
+ * answer. A heterogeneous array bails out so the caller can dump raw JSON
+ * rather than silently lose the non-text parts.
+ */
+export function extractToolText(content: unknown): string | null {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const texts: string[] = [];
+  for (const item of content) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      (item as { type?: unknown }).type === 'text' &&
+      typeof (item as { text?: unknown }).text === 'string'
+    ) {
+      texts.push((item as { text: string }).text);
+    } else {
+      return null;
+    }
+  }
+  return texts.join('\n\n');
+}
+
+/** JSON.stringify that survives a cycle rather than throwing inside a render. */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? '';
+  } catch {
+    return String(value);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tool grouping
+// ---------------------------------------------------------------------------
+
+/**
+ * A run of consecutive tool calls with no prose between them.
+ *
+ * An agent typically does several things to answer one sentence — clone, fetch,
+ * log, read — and rendering each as a top-level row buries the sentences that
+ * explain them. Folding the run into one openable section is what makes a long
+ * transcript skimmable: you read the prose, and open the plumbing only where
+ * you care.
+ *
+ * Only ever built for TWO OR MORE calls. A lone tool call is not a "run", and
+ * hiding it behind a disclosure costs a click to learn one line.
+ */
+export interface ToolGroupBlock {
+  kind: 'tool_group';
+  key: string;
+  tools: ToolBlock[];
+  /** e.g. "Ran 3 commands, read a file". */
+  summary: string;
+  /** True while any call in the run is still in flight. */
+  running: boolean;
+  /** True when any call in the run failed — the group says so without opening. */
+  isError: boolean;
+}
+
+export type GroupedBlock = Exclude<MergedBlock, ToolBlock> | ToolBlock | ToolGroupBlock;
+
+/** `1 file` / `3 files`, without the caller assembling it each time. */
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+/**
+ * Name what a run of calls actually did, in the order a person would say it.
+ *
+ * Counts by CANONICAL verb, not by tool name, so `bash` and `Bash` and
+ * `run_command` are the same three commands rather than three different things.
+ */
+export function summariseToolRun(tools: ToolBlock[]): string {
+  const counts = new Map<string, number>();
+  for (const t of tools) {
+    const { label } = describeTool(t.name, t.input);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  const parts: string[] = [];
+  const take = (label: string, fn: (n: number) => string) => {
+    const n = counts.get(label);
+    if (n) {
+      parts.push(fn(n));
+      counts.delete(label);
+    }
+  };
+
+  take('bash', (n) => `Ran ${plural(n, 'command')}`);
+  take('read', (n) => (n === 1 ? 'read a file' : `read ${plural(n, 'file')}`));
+  take('edit', (n) => `edited ${plural(n, 'file')}`);
+  take('write', (n) => `wrote ${plural(n, 'file')}`);
+  take('grep', (n) => `${plural(n, 'search', 'searches')}`);
+  take('glob', (n) => `${plural(n, 'search', 'searches')}`);
+  take('list', (n) => `${plural(n, 'listing')}`);
+  take('fetch', (n) => `fetched ${plural(n, 'URL')}`);
+  take('websearch', (n) => `${plural(n, 'web search', 'web searches')}`);
+  take('publish', (n) => `${plural(n, 'publish', 'publishes')}`);
+
+  // Everything left over — MCP tools and anything this build has no verb for —
+  // collapses into one honest count rather than a list of names nobody reads.
+  const rest = [...counts.values()].reduce((a, b) => a + b, 0);
+  if (rest) parts.push(`${plural(rest, 'tool call')}`);
+
+  if (parts.length === 0) return `${plural(tools.length, 'tool call')}`;
+  // Capitalise only if the first part did not already start with a verb.
+  const [first, ...others] = parts;
+  const head = /^[a-z]/.test(first) ? first[0].toUpperCase() + first.slice(1) : first;
+  return [head, ...others].join(', ');
+}
+
+/**
+ * Fold consecutive tool calls into openable sections.
+ *
+ * Anything that is not a tool call BREAKS the run — prose, reasoning, a
+ * permission card — because those are exactly the boundaries a reader thinks
+ * in: "it said this, then it did these four things, then it said that".
+ */
+export function groupToolRuns(blocks: MergedBlock[]): GroupedBlock[] {
+  const out: GroupedBlock[] = [];
+  let run: ToolBlock[] = [];
+
+  const flush = () => {
+    if (run.length === 0) return;
+    if (run.length === 1) {
+      out.push(run[0]);
+    } else {
+      out.push({
+        kind: 'tool_group',
+        key: `group-${run[0].key}`,
+        tools: run,
+        summary: summariseToolRun(run),
+        running: run.some((t) => !t.settled),
+        isError: run.some((t) => t.isError),
+      });
+    }
+    run = [];
+  };
+
+  for (const block of blocks) {
+    if (block.kind === 'tool') {
+      run.push(block);
+      continue;
+    }
+    flush();
+    out.push(block);
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Render-affecting signature for a grouped block.
+ *
+ * A group mutates as its calls settle — the summary is stable but `running`
+ * and `isError` are not, and neither are the rows inside it. Folding every
+ * member's signature in is what keeps an open group live while its last call
+ * is still running.
+ */
+export function groupedBlockSignature(block: GroupedBlock): string {
+  if (block.kind === 'tool_group') {
+    return `${block.key}:${block.tools.map(mergedBlockSignature).join(',')}`;
+  }
+  return mergedBlockSignature(block);
+}

@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { AgentEvent } from '@talyn/shared';
 import { AgentConversation } from '../renderer/components/terminal/AgentConversation';
 
@@ -73,6 +73,13 @@ describe('switching transcripts in one AgentConversation instance', () => {
 
     const { rerender } = render(<AgentConversation scopeId="a" transcript={a} />);
     rerender(<AgentConversation scopeId="b" transcript={b} />);
+
+    // Consecutive calls fold into one section, so the individual rows sit
+    // behind a disclosure. Open it if it is closed — the guarantee under test
+    // is that the CONTENT swapped, not what the disclosure defaults to (which
+    // varies: a group auto-opens while its calls are still running).
+    const group = screen.getByRole('button', { name: /tool calls/i });
+    if (group.getAttribute('aria-expanded') !== 'true') fireEvent.click(group);
 
     expect(screen.queryByText(/111/)).toBeNull();
     expect(screen.queryByText(/aaa/)).toBeNull();

@@ -1,7 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect } from 'vitest';
 import {
   buildBlocks,
   describeTool,
+  formatToolOutput,
+  groupToolRuns,
+  groupedBlockSignature,
   mergeToolBlocks,
   mergedBlockSignature,
   type AgentEvent,
@@ -213,6 +216,179 @@ describe('mergeToolBlocks', () => {
     const after = mergedBlockSignature(
       mergeToolBlocks(buildBlocks([...events, toolResult('t1', 'done')]))[0]
     );
+    expect(before).not.toBe(after);
+  });
+});
+
+/**
+ * How much of a tool's output goes on screen.
+ *
+ * The bug: the renderer clamped at six LINES, and a GitHub API response is
+ * ~1.5 KB of minified JSON on ONE line. It sailed through the clamp and wrapped
+ * to twenty rows of unreadable punctuation.
+ */
+describe('formatToolOutput', () => {
+  const pr = JSON.stringify({
+    url: 'https://api.github.com/repos/PostHog/posthog/pulls/95755',
+    number: 95755,
+    user: { login: 'Gilbert09', id: 1459269 },
+  });
+
+  it('measures characters as well as lines', () => {
+    const out = formatToolOutput('x'.repeat(4000));
+    expect(out.lines).toBe(1);
+    // The measure the old clamp lacked, and the whole reason it did nothing.
+    expect(out.chars).toBe(4000);
+  });
+
+  it('pretty-prints a JSON object so it can be read at all', () => {
+    const out = formatToolOutput(pr);
+    expect(out.isJson).toBe(true);
+    expect(out.lines).toBeGreaterThan(1);
+    expect(out.text).toContain('"number": 95755');
+    expect(out.summary).toMatch(/^JSON · /);
+  });
+
+  it('leaves a scalar alone — pretty-printing it changes nothing', () => {
+    for (const v of ['42', 'true', '"hello"']) {
+      expect(formatToolOutput(v).isJson).toBe(false);
+    }
+  });
+
+  it('leaves truncated JSON exactly as it came', () => {
+    // A half-parsed document is worse than the raw bytes.
+    const broken = '{"url":"https://api.github.com/repos/PostHog/pos';
+    const out = formatToolOutput(broken);
+    expect(out.isJson).toBe(false);
+    expect(out.text).toBe(broken);
+  });
+
+  it('unwraps the [{type:text}] content shape a subagent returns', () => {
+    const out = formatToolOutput([{ type: 'text', text: 'line one\nline two' }]);
+    expect(out.text).toBe('line one\nline two');
+    expect(out.lines).toBe(2);
+  });
+
+  it('says nothing about output that is not there', () => {
+    expect(formatToolOutput(undefined).summary).toBe('');
+    expect(formatToolOutput('').text).toBe('');
+  });
+
+  it('survives a cyclic object rather than throwing inside a render', () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => formatToolOutput(cyclic)).not.toThrow();
+  });
+});
+
+/**
+ * An agent does several things to answer one sentence. Rendering each as a
+ * top-level row buries the sentences that explain them.
+ */
+describe('groupToolRuns', () => {
+  let s = 0;
+  const use = (id: string, name: string, input: Record<string, unknown>): AgentEvent =>
+    ({
+      seq: ++s,
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    }) as AgentEvent;
+  const res = (id: string, c: string, e = false): AgentEvent =>
+    ({
+      seq: ++s,
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: c, is_error: e }] },
+    }) as AgentEvent;
+  const say = (t: string): AgentEvent =>
+    ({ seq: ++s, type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: t }] } }) as AgentEvent;
+
+  const grouped = (events: AgentEvent[]) => groupToolRuns(mergeToolBlocks(buildBlocks(events)));
+
+  beforeEach(() => {
+    s = 0;
+  });
+
+  it('folds consecutive calls into one section', () => {
+    const out = grouped([
+      use('a', 'bash', { command: 'ls' }),
+      res('a', 'ok'),
+      use('b', 'bash', { command: 'pwd' }),
+      res('b', '/work'),
+      use('c', 'read', { file_path: '/a.ts' }),
+      res('c', 'x'),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('tool_group');
+    expect((out[0] as { summary: string }).summary).toBe('Ran 2 commands, read a file');
+  });
+
+  /** Prose is the boundary a reader thinks in: "it said this, did these, said that". */
+  it('breaks a run on prose', () => {
+    const out = grouped([
+      use('a', 'bash', { command: 'ls' }),
+      res('a', 'ok'),
+      say('Now the tests.'),
+      use('b', 'bash', { command: 'pytest' }),
+      res('b', 'ok'),
+    ]);
+    expect(out.map((b) => b.kind)).toEqual(['tool', 'text', 'tool']);
+  });
+
+  /** A lone call is not a "run"; hiding it costs a click to learn one line. */
+  it('leaves a single call ungrouped', () => {
+    const out = grouped([use('a', 'bash', { command: 'ls' }), res('a', 'ok')]);
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('tool');
+  });
+
+  it('reports a failure on the closed group, so it can open itself', () => {
+    const out = grouped([
+      use('a', 'bash', { command: 'ls' }),
+      res('a', 'ok'),
+      use('b', 'bash', { command: 'false' }),
+      res('b', 'boom', true),
+    ]);
+    expect((out[0] as { isError: boolean }).isError).toBe(true);
+  });
+
+  it('reports a run as running while any call is in flight', () => {
+    const out = grouped([
+      use('a', 'bash', { command: 'ls' }),
+      res('a', 'ok'),
+      use('b', 'bash', { command: 'sleep 60' }),
+    ]);
+    expect((out[0] as { running: boolean }).running).toBe(true);
+  });
+
+  it('counts by canonical verb, not by tool name', () => {
+    const out = grouped([
+      use('a', 'Bash', { command: 'ls' }),
+      res('a', 'ok'),
+      use('b', 'run_command', { cmd: 'pwd' }),
+      res('b', 'ok'),
+      use('c', 'shell', { script: 'id' }),
+      res('c', 'ok'),
+    ]);
+    expect((out[0] as { summary: string }).summary).toBe('Ran 3 commands');
+  });
+
+  it('collapses unknown tools into one honest count', () => {
+    const out = grouped([
+      use('a', 'mcp__fleet__get_pull_request', { number: 1 }),
+      res('a', '{}'),
+      use('b', 'mcp__linear__create_issue', { title: 'x' }),
+      res('b', '{}'),
+    ]);
+    expect((out[0] as { summary: string }).summary).toBe('2 tool calls');
+  });
+
+  /** A group mutates as its calls settle; memoising on the key alone would
+   *  leave an open group frozen mid-run. */
+  it('changes signature when a call inside settles', () => {
+    const events = [use('a', 'bash', { command: 'ls' }), use('b', 'bash', { command: 'pwd' })];
+    const before = groupedBlockSignature(grouped(events)[0]);
+    s = 0;
+    const after = groupedBlockSignature(grouped([...events, res('b', 'done')])[0]);
     expect(before).not.toBe(after);
   });
 });
